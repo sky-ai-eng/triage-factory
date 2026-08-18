@@ -15,7 +15,7 @@ import (
 // installs.
 type fakePrivilegedOps struct{ tag string }
 
-func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (NetworkState, error) {
+func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error) {
 	return NetworkState{}, nil
 }
 func (f fakePrivilegedOps) TeardownNetwork(ctx context.Context, state NetworkState) error {

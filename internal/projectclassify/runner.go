@@ -16,9 +16,8 @@ import (
 
 // stage1Func runs one broad-pass Haiku classification. It is the
 // classifier's unit-test seam — a per-instance field on the Runner,
-// defaulted in NewRunner to the real implementation, overridable in tests.
-// It replaces the package-level mutable var `runStage1Haiku`, mirroring the
-// repo-profiler's batchFn pattern.
+// defaulted in NewRunner to the real implementation, overridable in tests —
+// mirroring the repo-profiler's batchFn pattern.
 // orgID is carried explicitly (rather than read off the receiver inside the
 // seam) so a stub can assert the Runner's org threads through to the model
 // call; secrets/recorder/limiter are read off the receiver by the real impl.

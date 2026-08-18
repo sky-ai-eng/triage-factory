@@ -94,9 +94,10 @@ func (a *App) buildAI() {
 			//
 			// WithoutCancel, not Background: the cycle that scheduled this
 			// returns immediately (and its ctx dies with it), but the work
-			// this fires — deferred triggers, runs, claims — must finish,
-			// while the cycle's values stay attached so the re-derive is
-			// still recognizably part of the scoring that caused it.
+			// this fires — deferred triggers, conversations, claims — must
+			// finish, while the cycle's values stay attached so the
+			// re-derive is still recognizably part of the scoring that
+			// caused it.
 			if a.router != nil {
 				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
 			}
@@ -241,13 +242,13 @@ func (a *App) buildExecution() error {
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
 	// Dispatcher concurrency is a deployment decision: the default of 8 fits
 	// ordinary hardware, while a provisioned multi-mode host handles
-	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
+	// far more (memory-bound; see the TF_MAX_CONCURRENT_CLAIMS guidance in
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.
-	rawMaxConcurrentRuns := os.Getenv("TF_MAX_CONCURRENT_RUNS")
-	capRuns := delegate.DefaultMaxConcurrentRuns
-	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
-		appLog.Warn("max concurrent runs", "error", err)
+	rawMaxConcurrentClaims := os.Getenv("TF_MAX_CONCURRENT_CLAIMS")
+	capRuns := delegate.DefaultMaxConcurrentClaims
+	if n, clamped, err := delegate.ParseMaxConcurrentClaims(rawMaxConcurrentClaims); err != nil {
+		appLog.Warn("max concurrent claims", "error", err)
 	} else if clamped {
 		// Distinct from the effective-cap log below: an operator asked for more
 		// than the sandbox subnet allocator can ever honor, not just a value
@@ -255,19 +256,19 @@ func (a *App) buildExecution() error {
 		// set 256 would log identically and the operator sizing for a bigger
 		// host would never see their setting got capped.
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
-		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentRuns, "cap", n)
-	} else if n != delegate.DefaultMaxConcurrentRuns {
+		a.spawner.SetMaxConcurrentClaims(n)
+		appLog.Warn("max concurrent claims requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentClaims, "cap", n)
+	} else if n != delegate.DefaultMaxConcurrentClaims {
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
+		a.spawner.SetMaxConcurrentClaims(n)
 	}
 	// Always name the effective cap, default included and in both modes — a
 	// burst of delegations queues behind this number, and "runs sit queued"
 	// must trace back to it from the boot log alone (local mode skips the
 	// multi-only capacity advertisement below entirely).
-	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_RUNS")
+	appLog.Info("claim concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	// Memory guardrail companion to the cap above: the cap bounds how many
-	// runs may execute, the floor stops new claims when the host is out of
+	// engagements may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the
 	// probe can't read /proc/meminfo. Resolved before the capacity warning
 	// below so that warning can say whether the floor is actually armed,
@@ -303,13 +304,13 @@ func (a *App) buildExecution() error {
 				appLog.Warn("platform reserve", "error", rerr)
 			}
 			derived := delegate.DerivedRunCapacityWithReserve(total, reserve)
-			appLog.Info("host run capacity",
+			appLog.Info("host claim capacity",
 				"mem_total_mb", total,
-				"budget_per_run_mb", delegate.DefaultRunMemoryBudgetMB,
+				"budget_per_claim_mb", delegate.DefaultClaimMemoryBudgetMB,
 				"platform_reserve_mb", reserve,
 				"derived_capacity", derived)
 			if capRuns > derived {
-				msg := "max concurrent runs exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
+				msg := "max concurrent claims exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
 				if floor > 0 {
 					msg += " (the dispatch memory floor may throttle before the cap is reached, but is not guaranteed to be the first limiter)"
 				} else {
@@ -361,14 +362,14 @@ func (a *App) buildExecution() error {
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
 	// of conversation_signals writes — s.controller stays the plain
-	// inProcessController unless SetRunSignals is called, and it is only
+	// inProcessController unless SetConversationSignals is called, and it is only
 	// ever called here, behind this mode check. Wired for every role in
 	// multi mode (not just dispatcher-capable ones): a control pod's HTTP
 	// handlers need the cross-pod controller to reach a run living on an
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
-		a.spawner.SetRunSignals(a.stores.RunSignals, a.database)
+		a.spawner.SetConversationSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)
 		} else if ackTimeout != delegate.DefaultSignalAckTimeout {
@@ -461,7 +462,7 @@ func (a *App) buildCuratorRuntime() error {
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// Dead-letter cap for poisoned turns, resolved the same way the reaper's
-	// TF_RUN_MAX_ATTEMPTS is: parsed once at wiring, a malformed value fails
+	// TF_MAX_CLAIM_ATTEMPTS is: parsed once at wiring, a malformed value fails
 	// boot rather than silently running with a default.
 	turnMaxAttempts, err := curator.ParseTurnMaxAttempts(os.Getenv("TF_CURATOR_TURN_MAX_ATTEMPTS"))
 	if err != nil {
@@ -482,11 +483,12 @@ func (a *App) buildCuratorRuntime() error {
 	}
 
 	// One claim loop drives both surfaces: the dispatcher claims a curator
-	// conversation exactly as it claims a delegated run, then hands it here.
-	// Capacity comes with that — the loop holds its concurrency slot for the
-	// whole turn, so a curator turn passes the same memory guardrail and
-	// occupies the same semaphore (and the same heartbeat occupancy
-	// snapshot) a delegated run does, with no separate admission gate.
+	// conversation exactly as it claims a delegated conversation, then hands
+	// it here. Capacity comes with that — the loop holds its concurrency
+	// slot for the whole turn, so a curator turn passes the same memory
+	// guardrail and occupies the same semaphore (and the same heartbeat
+	// occupancy snapshot) a delegated run does, with no separate admission
+	// gate.
 	a.spawner.SetCuratorTurnDriver(a.curator.DriveClaimedTurn)
 	// And the local doorbell: an enqueued turn nudges this pod's claim loop
 	// instead of waiting out its backstop tick.
@@ -654,7 +656,7 @@ func (a *App) buildRouting() {
 	a.router.SetEventPublisher(a.bus)
 	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
 	// self-sweep needs the same persistent instance-registry identity the
-	// spawner's run-queue self-sweep already uses (registerInstance minted it
-	// at boot, above).
+	// spawner's conversation-queue self-sweep already uses (registerInstance
+	// minted it at boot, above).
 	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
 }

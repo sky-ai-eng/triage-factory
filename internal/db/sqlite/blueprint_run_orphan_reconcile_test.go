@@ -11,22 +11,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// childRunStatusDB reads a single conversations row's STORED status, with
+// childConversationStatusDB reads a single conversations row's STORED status, with
 // SQL NULL (the mid-flight state) as "".
-func childRunStatusDB(t *testing.T, conn *sql.DB, id string) string {
+func childConversationStatusDB(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	var s sql.NullString
 	if err := conn.QueryRow(`SELECT status FROM conversations WHERE id = ?`, id).Scan(&s); err != nil {
-		t.Fatalf("read run %s status: %v", id, err)
+		t.Fatalf("read conversation %s status: %v", id, err)
 	}
 	return s.String
 }
 
 // TestMarkRunStatus_ParksOrphanedChild_OnTerminal pins the atomic
 // guarantee: flipping a blueprint_run to a terminal status must park any
-// still-mid-flight child run in the same call, so a cancel that raced the
-// dispatcher can't strand a child mid-flight (which keeps the dispatcher on
-// phantom work and pins its feature branch in a worktree, requeuing forever).
+// still-mid-flight child conversation in the same call, so a cancel that
+// raced the dispatcher can't strand a child mid-flight (which keeps the
+// dispatcher on phantom work and pins its feature branch in a worktree,
+// requeuing forever).
 func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -72,15 +73,15 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 		t.Fatal("MarkRunStatus reported no change")
 	}
 
-	if got := childRunStatusDB(t, conn, "oa-child"); got != "open" {
-		t.Errorf("child run status = %q, want open (must not strand a child under a terminal parent)", got)
+	if got := childConversationStatusDB(t, conn, "oa-child"); got != "open" {
+		t.Errorf("child conversation status = %q, want open (must not strand a child under a terminal parent)", got)
 	}
 	var parkedAt any
 	if err := conn.QueryRow(`SELECT parked_at FROM conversations WHERE id = 'oa-child'`).Scan(&parkedAt); err != nil {
 		t.Fatalf("read parked_at: %v", err)
 	}
 	if parkedAt == nil {
-		t.Error("parked child run has NULL parked_at; the retention sweep keys off it")
+		t.Error("parked child conversation has NULL parked_at; the retention sweep keys off it")
 	}
 	var releasedAt any
 	var outcome string
@@ -128,8 +129,8 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 		t.Fatalf("MarkRunStatus: %v", err)
 	}
 
-	if got := childRunStatusDB(t, conn, "of-child"); got != "completed" {
-		t.Errorf("child run status = %q, want completed (a terminal child must not be re-cancelled)", got)
+	if got := childConversationStatusDB(t, conn, "of-child"); got != "completed" {
+		t.Errorf("child conversation status = %q, want completed (a terminal child must not be re-cancelled)", got)
 	}
 	var outcome string
 	if err := conn.QueryRow(`SELECT COALESCE(outcome,'') FROM conversations WHERE id = 'of-child'`).Scan(&outcome); err != nil {
@@ -140,10 +141,10 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedRuns heals the exact desync: a child run
+// TestReconcileOrphanedConversations heals the exact desync: a child conversation
 // left 'running' under an already-terminal blueprint_run. The boot sweep must
 // cancel it (and only it), leaving children under a still-running parent alone.
-func TestReconcileOrphanedRuns(t *testing.T) {
+func TestReconcileOrphanedConversations(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -219,7 +220,7 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	if _, err := conn.Exec(`UPDATE conversations SET status = NULL WHERE id = 'rb-child'`); err != nil {
 		t.Fatalf("set child B running: %v", err)
 	}
-	// A genuinely running child holds an active claim (ClaimNextRun mints
+	// A genuinely running child holds an active claim (ClaimNextConversation mints
 	// it); without one, the claim-desync requeue arm would rightly treat the
 	// row as stranded.
 	if _, err := conn.Exec(`
@@ -228,17 +229,17 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 		t.Fatalf("seed rb-child claim: %v", err)
 	}
 
-	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("reconciled count = %d, want 2 (both mid-flight orphans under the terminal parent)", n)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child"); got != "open" {
+	if got := childConversationStatusDB(t, conn, "ra-child"); got != "open" {
 		t.Errorf("orphan child status = %q, want open", got)
 	}
-	if got := childRunStatusDB(t, conn, "ra-child-queued"); got != "open" {
+	if got := childConversationStatusDB(t, conn, "ra-child-queued"); got != "open" {
 		t.Errorf("unclaimed orphan child status = %q, want open", got)
 	}
 	// The running orphan's streamed tokens still read through the ledger —
@@ -256,23 +257,23 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 			t.Errorf("orphan child ledger tokens = (%d,%d,%d,%d), want (150,25,1500,10)", in, out, cr, cc)
 		}
 	}
-	if got := childRunStatusDB(t, conn, "rb-child"); got != "" {
+	if got := childConversationStatusDB(t, conn, "rb-child"); got != "" {
 		t.Errorf("healthy child status = %q, want none (must not touch mid-flight children under a running parent)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
-		t.Errorf("second ReconcileOrphanedRuns = (%d, %v), want (0, nil)", n2, err)
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
+		t.Errorf("second ReconcileOrphanedConversations = (%d, %v), want (0, nil)", n2, err)
 	}
 }
 
-// TestReconcileOrphanedRuns_HealsClaimDesyncs pins the janitor arm on the
+// TestReconcileOrphanedConversations_HealsClaimDesyncs pins the janitor arm on the
 // SQLite side: a terminal conversation with a dangling active claim gets the
 // claim released with the status-mapped outcome, while every healthy shape
 // is untouched. A mid-flight conversation with no active claim is NOT a
 // desync any more — that shape IS the claimable state — so nothing heals it
 // and it stays exactly as it is.
-func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
+func TestReconcileOrphanedConversations_HealsClaimDesyncs(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -328,9 +329,9 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	activeClaim("ds-healthy-cl", "ds-healthy")
 	seedChild("ds-queued", "")
 
-	n, err := stores.RunQueue.ReconcileOrphanedRuns(ctx)
+	n, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx)
 	if err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if n != 2 {
 		t.Errorf("healed count = %d, want 2 (two released claims)", n)
@@ -350,21 +351,21 @@ func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
 	if rel, out := claimState("ds-failed-cl"); !rel || out != "failed" {
 		t.Errorf("failed row's claim = (released=%v, outcome=%q), want (true, failed)", rel, out)
 	}
-	if got := childRunStatusDB(t, conn, "ds-stranded"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-stranded"); got != "" {
 		t.Errorf("mid-flight claimless row status = %q, want no stored status (already claimable)", got)
 	}
 	if rel, _ := claimState("ds-healthy-cl"); rel {
 		t.Error("healthy engaged row's live claim was released")
 	}
-	if got := childRunStatusDB(t, conn, "ds-healthy"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-healthy"); got != "" {
 		t.Errorf("healthy engaged row status = %q, want no stored status", got)
 	}
-	if got := childRunStatusDB(t, conn, "ds-queued"); got != "" {
+	if got := childConversationStatusDB(t, conn, "ds-queued"); got != "" {
 		t.Errorf("claimless row status = %q, want no stored status (already claimable, nothing to heal)", got)
 	}
 
 	// Idempotent: a second sweep finds nothing.
-	if n2, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil || n2 != 0 {
+	if n2, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil || n2 != 0 {
 		t.Errorf("second sweep = (%d, %v), want (0, nil)", n2, err)
 	}
 }
@@ -390,7 +391,7 @@ func storedTimestampShape(t *testing.T, raw string) string {
 	return ""
 }
 
-// TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus pins that the
+// TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus pins that the
 // mint-crash arm writes completed_at in the SAME shape as MarkRunStatus, the
 // primary terminal writer of that column.
 //
@@ -403,7 +404,7 @@ func storedTimestampShape(t *testing.T, raw string) string {
 // datetime('now') would put a second shape into the column; this test is what
 // makes that show up here instead of in whatever later query reads the column
 // as text.
-func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) {
+func TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -447,8 +448,8 @@ func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) 
 	if _, err := conn.Exec(`UPDATE blueprint_runs SET started_at = datetime('now', '-1 hour') WHERE id = ?`, swept); err != nil {
 		t.Fatalf("backdate started_at: %v", err)
 	}
-	if _, err := stores.RunQueue.ReconcileOrphanedRuns(ctx); err != nil {
-		t.Fatalf("ReconcileOrphanedRuns: %v", err)
+	if _, err := stores.ConversationQueue.ReconcileOrphanedConversations(ctx); err != nil {
+		t.Fatalf("ReconcileOrphanedConversations: %v", err)
 	}
 	if got, _, _ := blueprintRunStatusDB(t, conn, swept); got != string(domain.BlueprintRunStatusFailed) {
 		t.Fatalf("swept run status = %q, want failed (fixture didn't reach the arm)", got)
@@ -457,7 +458,7 @@ func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) 
 	refRaw, sweptRaw := completedAtText(reference), completedAtText(swept)
 	if refShape, sweptShape := storedTimestampShape(t, refRaw), storedTimestampShape(t, sweptRaw); refShape != sweptShape {
 		t.Errorf("completed_at shapes disagree:\n  MarkRunStatus  %q (%s)\n  mint-crash arm %q (%s)\n"+
-			"both writers must serialize this column identically — see the arm's comment in run_queue.go",
+			"both writers must serialize this column identically — see the arm's comment in conversation_queue.go",
 			refRaw, refShape, sweptRaw, sweptShape)
 	}
 }

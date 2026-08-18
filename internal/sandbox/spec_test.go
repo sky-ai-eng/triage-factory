@@ -14,10 +14,10 @@ import (
 // agentproc.RunOptions.
 func canonicalConfig() Config {
 	return Config{
-		RunID:    "abc123def",
-		Worktree: "/data/worktrees/abc123def",
-		SDKDir:   "/home/tf/.triagefactory/sdk",
-		Argv:     []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
+		ConversationID: "abc123def",
+		Worktree:       "/data/worktrees/abc123def",
+		SDKDir:         "/home/tf/.triagefactory/sdk",
+		Argv:           []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",
 			"HOME=/work",
@@ -30,7 +30,7 @@ func TestBuildSpec_RequiredFields(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{"empty_runid", func(c *Config) { c.RunID = "" }},
+		{"empty_conversationid", func(c *Config) { c.ConversationID = "" }},
 		{"empty_worktree", func(c *Config) { c.Worktree = "" }},
 		{"empty_sdkdir", func(c *Config) { c.SDKDir = "" }},
 		{"empty_argv", func(c *Config) { c.Argv = nil }},

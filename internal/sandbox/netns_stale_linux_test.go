@@ -62,15 +62,15 @@ func requireNetnsCapableHost(t *testing.T, name string) {
 // fails the whole cell bring-up. The precondition here IS the bug: the test
 // creates the namespace first, exactly as a failed teardown would have left it.
 func TestSetupNetwork_OverStaleNetnsOfTheSameName(t *testing.T) {
-	const runID = "stale-netns-run"
-	name := NetnsNameForRun(runID, staleNetnsSubnetIdx)
+	const conversationID = "stale-netns-run"
+	name := NetnsNameForRun(conversationID, staleNetnsSubnetIdx)
 	// Creating the namespace up front is both the precondition and the
 	// capability probe — the cleanup covers the case where setupNetwork below
 	// never gets far enough to own it.
 	requireNetnsCapableHost(t, name)
 
 	ctx := context.Background()
-	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	state, err := setupNetwork(ctx, conversationID, staleNetnsSubnetIdx)
 	t.Cleanup(func() { _ = teardownNetwork(context.Background(), state) })
 	if err != nil {
 		t.Fatalf("setupNetwork over a stale netns of the same name: %v", err)
@@ -104,8 +104,8 @@ func TestSetupNetwork_OverStaleNetnsOfTheSameName(t *testing.T) {
 // somewhere else, and the victim's by-name teardown then unlinks the
 // successor's namespace instead.
 func TestSetupNetwork_RefusesToReclaimALiveNetns(t *testing.T) {
-	const runID = "live-netns-run"
-	name := NetnsNameForRun(runID, staleNetnsSubnetIdx)
+	const conversationID = "live-netns-run"
+	name := NetnsNameForRun(conversationID, staleNetnsSubnetIdx)
 	requireNetnsCapableHost(t, name)
 
 	// Stand in for the sibling cell that created it: same name, and this
@@ -114,7 +114,7 @@ func TestSetupNetwork_RefusesToReclaimALiveNetns(t *testing.T) {
 	t.Cleanup(func() { forgetNetns(name) })
 
 	ctx := context.Background()
-	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	state, err := setupNetwork(ctx, conversationID, staleNetnsSubnetIdx)
 	t.Cleanup(func() {
 		forgetNetns(name)
 		_ = teardownNetwork(context.Background(), state)
@@ -138,12 +138,12 @@ func TestSetupNetwork_RefusesToReclaimALiveNetns(t *testing.T) {
 // otherwise a failed teardown, which is precisely how one leaks, would wedge
 // its (run id, index) pair against every later reclaim.
 func TestSetupNetwork_LedgerTracksTheNamespaceLifecycle(t *testing.T) {
-	const runID = "ledger-netns-run"
-	name := NetnsNameForRun(runID, staleNetnsSubnetIdx)
+	const conversationID = "ledger-netns-run"
+	name := NetnsNameForRun(conversationID, staleNetnsSubnetIdx)
 	requireNetnsCapableHost(t, name)
 
 	ctx := context.Background()
-	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	state, err := setupNetwork(ctx, conversationID, staleNetnsSubnetIdx)
 	t.Cleanup(func() {
 		forgetNetns(name)
 		_ = teardownNetwork(context.Background(), state)
@@ -151,7 +151,7 @@ func TestSetupNetwork_LedgerTracksTheNamespaceLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupNetwork: %v", err)
 	}
-	if owner, live := netnsLiveRun(name); !live || owner != runID {
+	if owner, live := netnsLiveRun(name); !live || owner != conversationID {
 		t.Errorf("after setup, ledger has (%q, live=%v); want this run's namespace recorded as live", owner, live)
 	}
 
@@ -175,16 +175,16 @@ func netnsExists(t *testing.T, name string) bool {
 // so the delete-if-exists cannot have made bring-up depend on there being
 // something to delete.
 func TestSetupNetwork_CleanHost(t *testing.T) {
-	const runID = "clean-netns-run"
+	const conversationID = "clean-netns-run"
 	requireNetnsCapableHost(t, "tf-probe-clean-netns")
 
 	ctx := context.Background()
-	state, err := setupNetwork(ctx, runID, staleNetnsSubnetIdx)
+	state, err := setupNetwork(ctx, conversationID, staleNetnsSubnetIdx)
 	t.Cleanup(func() { _ = teardownNetwork(context.Background(), state) })
 	if err != nil {
 		t.Fatalf("setupNetwork on a clean host: %v", err)
 	}
-	if got := NetnsNameForRun(runID, staleNetnsSubnetIdx); state.netnsName != got {
+	if got := NetnsNameForRun(conversationID, staleNetnsSubnetIdx); state.netnsName != got {
 		t.Errorf("netns name = %q, want %q", state.netnsName, got)
 	}
 }

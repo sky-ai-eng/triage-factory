@@ -209,14 +209,14 @@ const (
 // Result is the engagement's terminal report, returned to the in-process
 // caller that drove the engagement (the delegate layer's recordNativeResult).
 // It deliberately lives here and not in domain: the shared vocabulary it
-// carries (RunOutcome, RunFailureKind) is already domain's, and the rest is
+// carries (ConversationOutcome, ConversationFailureKind) is already domain's, and the rest is
 // the shape of one function's return value.
 type Result struct {
 	Kind          ResultKind
-	Outcome       domain.RunOutcome
+	Outcome       domain.ConversationOutcome
 	OutcomeReason string
 	ResultSummary string
-	FailureKind   domain.RunFailureKind
+	FailureKind   domain.ConversationFailureKind
 	NumTurns      int
 	DurationMs    int
 	// ParkNotice is the user-visible reason a guard parked the engagement.
@@ -740,14 +740,14 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// there is no JSON envelope to parse on this path.
 		//
 		// The outcome is `continue`, not `finish`, on every step: stopping
-		// means "my part is done", and only decideBlueprintStep knows whether
-		// a part being done ends the task. On a final or single step it
+		// means "my part is done", and only blueprintDecisionForStepConversation knows
+		// whether a part being done ends the task. On a final or single step it
 		// resolves `continue` to a structural finish, so the common case is
 		// unchanged; on a non-final step it hands off. Ending the whole task
 		// early is the deliberate act, and it goes through stop_blueprint.
 		return Result{
 			Kind:          ResultConcluded,
-			Outcome:       domain.RunOutcomeContinue,
+			Outcome:       domain.ConversationOutcomeContinue,
 			ResultSummary: lastText,
 			NumTurns:      turn,
 			DurationMs:    msSince(started),
@@ -970,7 +970,7 @@ func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err er
 	}
 	return Result{
 		Kind:        ResultFailed,
-		FailureKind: domain.RunFailureAgentError,
+		FailureKind: domain.ConversationFailureAgentError,
 		NumTurns:    turn,
 		DurationMs:  msSince(started),
 		Err:         err,

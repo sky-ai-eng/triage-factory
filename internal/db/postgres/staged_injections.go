@@ -43,19 +43,19 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES ($1::uuid, $2::uuid, 'user', $3, $4, $5::jsonb, false)
 		RETURNING id
-	`, orgID, n.RunID, n.Body, stagedInjectionSubtype, string(meta)).Scan(&id); err != nil {
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(&id); err != nil {
 		return err
 	}
 	n.ID = strconv.FormatInt(id, 10)
 	return nil
 }
 
-func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, runID string) ([]domain.StagedInjection, error) {
+func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
 	// The shared flush primitive, narrowed to this store's subtype: one
 	// definition of "consume a conversation's pending rows" serves every
 	// producer, so a note is delivered exactly once even under a resume race
 	// and withdrawn rows stay out by the same rule the claim predicate uses.
-	flushed, err := flushPendingInput(ctx, s.admin, orgID, runID, stagedInjectionSubtype)
+	flushed, err := flushPendingInput(ctx, s.admin, orgID, conversationID, stagedInjectionSubtype)
 	if err != nil {
 		return nil, err
 	}
@@ -90,11 +90,11 @@ func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection 
 	var out []domain.StagedInjection
 	for _, r := range flushed {
 		n := domain.StagedInjection{
-			ID:        strconv.FormatInt(r.ID, 10),
-			RunID:     r.ConvID,
-			OrgID:     r.OrgID,
-			Body:      r.Content,
-			CreatedAt: r.CreatedAt,
+			ID:             strconv.FormatInt(r.ID, 10),
+			ConversationID: r.ConvID,
+			OrgID:          r.OrgID,
+			Body:           r.Content,
+			CreatedAt:      r.CreatedAt,
 		}
 		if r.Metadata != "" {
 			var meta struct {

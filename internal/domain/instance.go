@@ -32,7 +32,7 @@ type Instance struct {
 	// PubKey is this boot's ephemeral X25519 public key (base64), minted
 	// in-memory at process start and never persisted — a restart mints a
 	// fresh one (TFAC-614). Written only by Register, never the
-	// heartbeat; empty on a control/all row that never claims runs.
+	// heartbeat; empty on a control/all row that never claims conversations.
 	PubKey string
 }
 

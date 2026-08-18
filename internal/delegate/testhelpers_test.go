@@ -34,13 +34,13 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
-// seedRunBlueprint mints a blueprint + blueprint_run for taskID and returns
+// seedConversationBlueprint mints a blueprint + blueprint_run for taskID and returns
 // the blueprint_run id, so run fixtures can satisfy
 // conversations.blueprint_run_id NOT NULL. The suffix keeps ids unique +
 // deterministic per fixture; the ids are distinct from
-// makeRunBlueprintStep's ("bp-"/"bpr-") so a test can re-point a run onto a
-// specific blueprint_run without colliding with the one seedRun attached.
-func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
+// makeConversationBlueprintStep's ("bp-"/"bpr-") so a test can re-point a run onto a
+// specific blueprint_run without colliding with the one seedConversation attached.
+func seedConversationBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
 	t.Helper()
 	bpID := "seedbp-" + suffix
 	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
@@ -57,15 +57,15 @@ func seedRunBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) str
 	return brID
 }
 
-// seedRun inserts a run (plus its entity/event/task/blueprint fixtures)
+// seedConversation inserts a run (plus its entity/event/task/blueprint fixtures)
 // with the requested id, session id, and worktree path.
 // We bypass the spawner's Delegate flow because these tests don't need
 // a real goroutine — only a row in the conversations table. Every run is a
 // blueprint step now (conversations.blueprint_run_id NOT NULL), so it mints a 1-step
 // blueprint_run and links the run to it.
-func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
+func seedConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+runID, "pr", "T", "https://example.com/"+runID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+conversationID, "pr", "T", "https://example.com/"+conversationID)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -77,15 +77,15 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventGitHubPRCICheckFailed, conversationID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
-	brID := seedRunBlueprint(t, database, runID, task.ID)
+	brID := seedConversationBlueprint(t, database, conversationID, task.ID)
 	stepIdx := 0
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID:                 runID,
+		ID:                 conversationID,
 		TaskID:             task.ID,
 		PromptID:           "test-prompt",
 		Status:             "running",
@@ -97,24 +97,24 @@ func seedRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath stri
 	})
 }
 
-// settleRunBlueprint puts a seedRun fixture's blueprint into a terminal state —
+// settleConversationBlueprint puts a seedConversation fixture's blueprint into a terminal state —
 // what the reactor writes once it has read a step's terminal, and the missing
 // half of any fixture that stages a `completed` conversation by hand. Without
 // it the fixture has staged the hand-off window rather than concluded work, and
 // reads as unwakeable for exactly the right reason.
-func settleRunBlueprint(t *testing.T, database *sql.DB, runID, status string) {
+func settleConversationBlueprint(t *testing.T, database *sql.DB, conversationID, status string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, "seedbpr-"+runID); err != nil {
-		t.Fatalf("settle blueprint for %s: %v", runID, err)
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = ? WHERE id = ?`, status, "seedbpr-"+conversationID); err != nil {
+		t.Fatalf("settle blueprint for %s: %v", conversationID, err)
 	}
 }
 
-// seedJiraRun is the Jira variant of seedRun: the task's entity is
+// seedJiraConversation is the Jira variant of seedConversation: the task's entity is
 // jira-sourced so source-gated paths see a Jira run rather than a
 // GitHub PR run.
-func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath string) {
+func seedJiraConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-"+runID, "issue", "T-"+runID, "https://x/"+runID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-"+conversationID, "issue", "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}
@@ -126,15 +126,15 @@ func seedJiraRun(t *testing.T, database *sql.DB, runID, sessionID, worktreePath 
 	if err != nil {
 		t.Fatalf("record event: %v", err)
 	}
-	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, eventID, 0.5)
+	task, _, err := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, conversationID, eventID, 0.5)
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "test-prompt", Name: "T", Body: "x", Source: "user"})
-	brID := seedRunBlueprint(t, database, runID, task.ID)
+	brID := seedConversationBlueprint(t, database, conversationID, task.ID)
 	stepIdx := 0
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: runID, TaskID: task.ID, PromptID: "test-prompt",
+		ID: conversationID, TaskID: task.ID, PromptID: "test-prompt",
 		Status: "running", Model: "claude-sonnet-4-6", SessionID: sessionID,
 		WorktreePath:   worktreePath,
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,

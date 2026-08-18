@@ -14,13 +14,13 @@ import (
 
 // RemoveAt removes a worktree directory by path and prunes the bare's
 // stale registration. Callers pass the actual path rather than
-// deriving it from a runID — every previous "Remove(runID)" caller
-// had the path in scope already, and the runID-only convenience was
-// a footgun: it silently targeted runDir(runID) regardless of where
+// deriving it from a rootKey — every previous "Remove(rootKey)" caller
+// had the path in scope already, and the rootKey-only convenience was
+// a footgun: it silently targeted runDir(rootKey) regardless of where
 // the worktree actually lived.
 //
-// runID is used only for the log line; pass "" if not available.
-func RemoveAt(path, runID string) error {
+// rootKey is used only for the log line; pass "" if not available.
+func RemoveAt(path, rootKey string) error {
 	if path == "" {
 		return nil
 	}
@@ -41,8 +41,8 @@ func RemoveAt(path, runID string) error {
 	}
 	pruneAll(paths.BareCacheRoot(runmode.LocalDefaultOrgID))
 
-	if runID != "" {
-		worktreeLog.Info("removed", "run_id", runID, "path", path)
+	if rootKey != "" {
+		worktreeLog.Info("removed", "root_key", rootKey, "path", path)
 	} else {
 		worktreeLog.Info("removed", "path", path)
 	}
@@ -74,7 +74,7 @@ type CleanupOptions struct {
 	// the worktree dir), a matching entry here skips removal of both.
 	//
 	// Keys are worktree directory names — i.e. filepath.Base(worktree_path),
-	// which is the run_id for a standalone run and the blueprint_run_id for a
+	// which is the conversation id for a standalone conversation and the blueprint_run_id for a
 	// blueprint's shared worktree. A swept (un-preserved) parked workspace
 	// still resumes via snapshot rehydrate, so this is the fast path, not a
 	// correctness gate. Ignored for any dir not present here.
@@ -96,12 +96,12 @@ func CleanupWithOptions(opts CleanupOptions) {
 		for _, e := range entries {
 			if e.IsDir() {
 				fullPath := filepath.Join(runsBase, e.Name())
-				runID := strings.TrimSuffix(e.Name(), "-nocwd")
+				rootKey := strings.TrimSuffix(e.Name(), "-nocwd")
 				// Parked runs keep their worktree WHOLE — the dir and its
 				// session JSONL — as the warm resume cache, so skip them
 				// entirely (no project-dir delete, no dir removal). A swept one
 				// still resumes via snapshot rehydrate.
-				if opts.PreserveWorktreeFor[runID] {
+				if opts.PreserveWorktreeFor[rootKey] {
 					continue
 				}
 				// Project-dir deletion has one opt-out: a global SkipAll
@@ -158,7 +158,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 // entire point of staging outside the run tree.
 //
 // preserve is the caller's warm-worktree keep set, keyed by worktree directory
-// name (a run id for a standalone run, the blueprint_run_id for a blueprint's
+// name (a conversation id for a standalone conversation, the blueprint_run_id for a blueprint's
 // shared tree). Staging dirs are keyed by the step's own conversation id, so
 // only the standalone shape ever matches — enough to keep the sweep from
 // fighting a preserved run, and moot for the blueprint shape today because the
@@ -211,7 +211,7 @@ func pruneAll(baseDir string) {
 // "initializing" marker; plain `git worktree prune` skips locked entries
 // so the branch stays pinned. git names that admin dir after the
 // basename of the worktree path, and our worktree paths are
-// runDir(runID) (basename == runID, globally unique), so the entry is
+// runDir(rootKey) (basename == rootKey, globally unique), so the entry is
 // deterministically worktrees/<basename(wtDir)>.
 //
 // Targeting by path — rather than sweeping every locked=initializing
@@ -247,7 +247,7 @@ func recordedWorktreePath(adminDir string) string {
 
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
 // worktrees — i.e. a child of the triagefactory-runs temp namespace
-// (runDir = <tmp>/triagefactory-runs/<runID>). Matched on the runsDir
+// (runDir = <tmp>/triagefactory-runs/<rootKey>). Matched on the runsDir
 // path segment rather than the full os.TempDir() prefix because $TMPDIR
 // can differ between the run that created the worktree and this restart;
 // the namespace itself is constant.

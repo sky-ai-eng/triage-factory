@@ -201,7 +201,7 @@ type CuratorStore interface {
 	// --- Boot sweeps (admin pool) ---
 	//
 	// Finding a claimable curator turn is NOT here: one claim loop scans
-	// every surface (RunQueueStore.ClaimNextRun), and a curator conversation
+	// every surface (ConversationQueueStore.ClaimNextConversation), and a curator conversation
 	// holding an undelivered user message is simply one of the shapes its
 	// needs-driving predicate matches.
 
@@ -247,7 +247,7 @@ type CuratorStore interface {
 
 	// PublishTurnCredPubKeySystem parks the conversation's ACTIVE claim in
 	// phase='awaiting_credentials' with the per-turn credential sidecar's
-	// pubkey — the same park RunQueueStore.MarkAwaitingCredentials writes for
+	// pubkey — the same park ConversationQueueStore.MarkAwaitingCredentials writes for
 	// a delegated run, which is what lets ONE brain-side scan
 	// (ListAwaitingCredentials) serve both surfaces. Postgres also fires the
 	// tf_ctl curator_cred_request doorbell (payload keyed by the conversation

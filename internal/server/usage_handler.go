@@ -37,11 +37,11 @@ import (
 type usageHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
-	// runQueue backs the org-scoped operations subset (TFAC-589): an org
+	// conversationQueue backs the org-scoped operations subset (TFAC-589): an org
 	// admin's own queue waits + run durations. Admin-pool reads with orgID
 	// bound by argument, gated by the HTTP org-admin check — SaaS-safe, no
 	// cross-tenant machine truth.
-	runQueue db.RunQueueStore
+	conversationQueue db.ConversationQueueStore
 }
 
 // --- response shapes ---

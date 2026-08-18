@@ -118,8 +118,8 @@ type emptyArgs struct{}
 type emptyResult struct{}
 
 type setupNetworkArgs struct {
-	RunID     string `json:"run_id"`
-	SubnetIdx uint8  `json:"subnet_idx"`
+	ConversationID string `json:"conversation_id"`
+	SubnetIdx      uint8  `json:"subnet_idx"`
 }
 
 type setupNetworkResult struct {
@@ -147,7 +147,7 @@ type ensureRootfsResult struct {
 // anything — so a compromised orchestrator can supply data the sandbox sees
 // but cannot make the broker exec arbitrary code with capabilities.
 // Params.ContainerID is the run's unique lifecycle key — the broker
-// registers, waits, and kills by it, never by the non-unique RunID.
+// registers, waits, and kills by it, never by the non-unique ConversationID.
 type launchRunArgs struct {
 	Params sandbox.LaunchParams `json:"params"`
 }

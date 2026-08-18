@@ -87,19 +87,19 @@ type StartProxiesBody struct {
 	// into this capless per-run jail. It carries the run's non-secret identity
 	// (what the socket server reports to the agent); every DB effect the verbs
 	// perform relays back to the orchestrator, which binds identity from its
-	// OWN RunInfo, so nothing here is security-load-bearing.
+	// OWN ConversationInfo, so nothing here is security-load-bearing.
 	AgentHost *AgentHostInfo `json:"agent_host,omitempty"`
 }
 
 // AgentHostInfo is the run's non-secret identity the sidecar-hosted agenthost
-// reports to the agent (LookupRun) and stamps on the verbs' relay calls. It is
+// reports to the agent (LookupConversation) and stamps on the verbs' relay calls. It is
 // NOT the authority for org-scoping — the orchestrator binds that from its own
-// RunInfo on every relayed op — so a sidecar cannot escalate by lying here.
+// ConversationInfo on every relayed op — so a sidecar cannot escalate by lying here.
 type AgentHostInfo struct {
 	OrgID          string `json:"org_id"`
 	UserID         string `json:"user_id,omitempty"`
 	TeamID         string `json:"team_id"`
-	RunID          string `json:"run_id"`
+	ConversationID string `json:"conversation_id"`
 	EventTriggered bool   `json:"event_triggered,omitempty"`
 
 	// PinnedRepos carries a curator turn's authorized GitHub set ("owner/repo")
@@ -184,7 +184,7 @@ type StartProxiesResult struct {
 // the op's marshaled result carried in the Frame body; a Notify awaits none.
 //
 // The envelope deliberately carries NO org id — the orchestrator binds
-// identity from the supervised run's RunInfo, so a sidecar cannot steer an op
+// identity from the supervised run's ConversationInfo, so a sidecar cannot steer an op
 // at another org's data. This is the same property the retired per-op Kinds
 // had, now expressed once for every op instead of per message type.
 type RelayCallBody struct {

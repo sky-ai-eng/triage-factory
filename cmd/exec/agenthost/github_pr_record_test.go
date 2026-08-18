@@ -55,7 +55,7 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				t.Fatalf("create result mismatch: number=%d url=%q node=%q", number, htmlURL, nodeID)
 			}
 
-			arts := listRunArtifacts(t, stores, info.RunID)
+			arts := listConversationArtifacts(t, stores, info.ConversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 			}
@@ -66,7 +66,7 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 				a.State != domain.ArtifactStatePRDraft || a.DedupKey != "github:pull_request:octo/repo#42" {
 				t.Errorf("PR artifact mismatch: %+v", a)
 			}
-			if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
+			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
 				t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
 			}
 

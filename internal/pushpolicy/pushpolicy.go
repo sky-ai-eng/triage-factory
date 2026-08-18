@@ -75,7 +75,7 @@ func ProtectedBranches(ctx context.Context, stores db.Stores, orgID string, ref 
 
 // Allows reports whether the team's base-branch push policy permits a run to
 // push a protected ref. eventTriggered is the run's dispatch shape
-// (agenthost.RunInfo.IsEventTriggered): "manual_only" turns on exactly the
+// (agenthost.ConversationInfo.IsEventTriggered): "manual_only" turns on exactly the
 // runs a human kicked off, because an event-triggered run's task text comes
 // from PR bodies, issue comments and labels — externally authored input that
 // must never be able to talk its way past the team's gate.

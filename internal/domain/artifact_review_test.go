@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 func TestNewReviewArtifact_Shape(t *testing.T) {
-	a := NewReviewArtifact("octo/repo", 42, "headsha42", "run_7")
+	a := NewReviewArtifact("octo/repo", 42, "headsha42", "conv_7")
 
 	if a.Provider != ArtifactProviderGitHub {
 		t.Errorf("Provider = %q, want %q", a.Provider, ArtifactProviderGitHub)
@@ -21,9 +21,9 @@ func TestNewReviewArtifact_Shape(t *testing.T) {
 	if a.State != ArtifactStateReviewPending {
 		t.Errorf("State = %q, want %q", a.State, ArtifactStateReviewPending)
 	}
-	// Run-scoped dedup key: two runs reviewing the same PR get distinct rows.
-	if a.DedupKey != "github:review:octo/repo#42:run_7" {
-		t.Errorf("DedupKey = %q, want github:review:octo/repo#42:run_7", a.DedupKey)
+	// Conversation-scoped dedup key: two conversations reviewing the same PR get distinct rows.
+	if a.DedupKey != "github:review:octo/repo#42:conv_7" {
+		t.Errorf("DedupKey = %q, want github:review:octo/repo#42:conv_7", a.DedupKey)
 	}
 
 	d, err := ParseReviewArtifactDetails(a.DetailsJSON)
@@ -48,13 +48,13 @@ func TestNewReviewArtifact_Shape(t *testing.T) {
 	}
 }
 
-func TestReviewDedupKey_RunScoped(t *testing.T) {
-	// The same PR reviewed by two runs yields two distinct dedup keys, so the
+func TestReviewDedupKey_ConversationScoped(t *testing.T) {
+	// The same PR reviewed by two conversations yields two distinct dedup keys, so the
 	// upsert never collapses them onto one row.
-	a := ReviewDedupKey("octo/repo", 7, "run_a")
-	b := ReviewDedupKey("octo/repo", 7, "run_b")
+	a := ReviewDedupKey("octo/repo", 7, "conv_a")
+	b := ReviewDedupKey("octo/repo", 7, "conv_b")
 	if a == b {
-		t.Errorf("two runs on one PR must have distinct dedup keys, both = %q", a)
+		t.Errorf("two conversations on one PR must have distinct dedup keys, both = %q", a)
 	}
 }
 

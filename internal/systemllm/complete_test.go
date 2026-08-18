@@ -79,7 +79,7 @@ func TestComplete_LocalMode_ErrorIncludesStderr(t *testing.T) {
 
 	orig := runLocal
 	runLocal = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
-		return &agentproc.Outcome{Stderr: "boom: node crashed"}, agentproc.ErrRunMemoryLimit
+		return &agentproc.Outcome{Stderr: "boom: node crashed"}, agentproc.ErrClaimMemoryLimit
 	}
 	t.Cleanup(func() { runLocal = orig })
 

@@ -6,7 +6,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 // "delegate" covers the spawner/run lifecycle; "jira/delegate" covers the
 // board → Jira lifecycle mirror; "blueprint" covers the blueprint
 // orchestrator's finalize/cancel/resume paths; "dispatch" covers the
-// run-queue dispatcher and the blueprint state-machine reactor.
+// conversation-queue dispatcher and the blueprint state-machine reactor.
 var (
 	delegateLog  = logging.Component("delegate")
 	jiraLog      = logging.Component("jira/delegate")

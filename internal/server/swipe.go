@@ -125,7 +125,7 @@ func (s *Server) handleSwipe(w http.ResponseWriter, r *http.Request) {
 	// active delegated run (if the frozen actor is somehow still running
 	// against a now-reassigned task) keeps executing untouched.
 	if req.Action == "dismiss" || req.Action == "complete" || req.Action == "claim" || req.Action == "delegate" {
-		s.swipeTeardownRuns(r, orgID, userID, id, req.Action)
+		s.swipeTeardownConversations(r, orgID, userID, id, req.Action)
 	}
 
 	response := map[string]any{"status": newStatus}
@@ -630,14 +630,14 @@ func (s *Server) swipeLifecycle(w http.ResponseWriter, r *http.Request, orgID, u
 	return newStatus, true
 }
 
-// swipeTeardownRuns stops any run a task is handed off from. It resolves every
+// swipeTeardownConversations stops any run a task is handed off from. It resolves every
 // unresolved artifact the task holds (teardownTaskArtifacts — closes all draft
 // PRs, dismisses all pending reviews, a no-op when none exist) and cancels
 // in-flight runs. The discard memory note differs per action so the next agent
 // reading conversation_memory can tell apart "human walked away" (dismiss) from "human
 // resolved it" (complete) from "human took over" (claim) from "re-delegate".
 // Best-effort.
-func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action string) {
+func (s *Server) swipeTeardownConversations(r *http.Request, orgID, userID, id, action string) {
 	outcome := discardOutcomeDismissed
 	switch action {
 	case "complete":
@@ -661,15 +661,15 @@ func (s *Server) swipeTeardownRuns(r *http.Request, orgID, userID, id, action st
 		ids, e = tx.Conversations.ActiveIDsForTask(cleanupCtx, orgID, id)
 		return e
 	}); err != nil {
-		swipeLog.Error("active-run lookup failed", "task", id, "error", err)
+		swipeLog.Error("active-conversation lookup failed", "task", id, "error", err)
 		return
 	}
 	// A swipe is the task's own disposition, so the blueprints behind these
 	// runs go terminal with them rather than freezing 'running' — the plain
 	// conversation stop is for a user pausing work they mean to come back to.
-	for _, runID := range ids {
-		if err := s.spawner.StopAndCancelBlueprint(orgID, runID, userID, delegate.StopCauseTaskDispositioned); err != nil {
-			swipeLog.Warn("stop run failed", "run", runID, "action", action, "task", id, "error", err)
+	for _, conversationID := range ids {
+		if err := s.spawner.StopAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
+			swipeLog.Warn("stop conversation failed", "conversation", conversationID, "action", action, "task", id, "error", err)
 		}
 	}
 }
@@ -759,7 +759,7 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 	// The actor is the agent this swipe just claimed the task with (swipeDelegate
 	// stamped claimed_by_agent_id before this re-read, and Tasks.Get hydrates it).
 	// Pass it so the run's frozen blueprint_run actor matches the task claim.
-	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	blueprintRunID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -770,7 +770,10 @@ func (s *Server) swipeTriggerDelegation(w http.ResponseWriter, r *http.Request, 
 		writeDelegateSpawnError(w, err)
 		return false
 	}
-	response["conversation_id"] = runID
+	// TODO(TFAC-840): the field says conversation_id but Delegate returns the
+	// blueprint_run id, so following this into /api/agent/conversations/{id}
+	// 404s. Kept as-is here because the field name is a wire contract.
+	response["conversation_id"] = blueprintRunID
 	return true
 }
 

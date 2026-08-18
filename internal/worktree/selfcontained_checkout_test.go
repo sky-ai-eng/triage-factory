@@ -31,9 +31,9 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 	_, content := seedBloblessUpstream(t, reposRoot, "repo")
 	cloneURL := startAuthedGitServer(t, reposRoot, "x-access-token", token) + "/repo.git"
 
-	const runID = "checkout-run-multi"
+	const rootKey = "checkout-run-multi"
 	runRoot := t.TempDir()
-	wtPath, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", cloneURL, "", runID, runRoot,
+	wtPath, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", cloneURL, "", rootKey, runRoot,
 		WithCloneAuth(CloneAuthFor(cloneURL, token)))
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot (multi mode, self-contained): %v", err)
@@ -86,7 +86,7 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 	}
 
 	// The transient staging branch is gone from the clone AND the shared bare.
-	staging := "triagefactory/" + runID + "/checkout"
+	staging := "triagefactory/" + rootKey + "/checkout"
 	if exec.Command("git", "-C", wtPath, "show-ref", "--verify", "--quiet", "refs/heads/"+staging).Run() == nil {
 		t.Errorf("run clone still has staging branch refs/heads/%s", staging)
 	}

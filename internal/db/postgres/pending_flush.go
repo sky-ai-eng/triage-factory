@@ -88,7 +88,7 @@ func consumePendingInput(ctx context.Context, q queryer, orgID, convID string) (
 // Consume both go through it, which is what keeps the routing decision and
 // the delivery from disagreeing about what is pending.
 //
-// The userID is the NEWEST row's — see db.RunPendingInputStore for why a
+// The userID is the NEWEST row's — see db.ConversationPendingInputStore for why a
 // queue with several authors reports one, and why it is that one.
 func joinPendingRows(rows []pendingRow) (message, userID string, ok bool) {
 	if len(rows) == 0 {

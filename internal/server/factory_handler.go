@@ -224,7 +224,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// factory should still render for a user who's only set up Jira.
 	var ghUsername string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
-	var activeRuns []domain.FactoryActiveRun
+	var activeConversations []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
 	var recentByEntity map[string][]domain.FactoryRecentEvent
 	var pendingTasks []domain.PendingTaskRef
@@ -250,7 +250,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		}
 
 		// --- Active runs ----------------------------------------------
-		activeRuns, e = tx.Factory.ActiveRuns(r.Context(), orgID)
+		activeConversations, e = tx.Factory.ActiveConversations(r.Context(), orgID)
 		if e != nil {
 			return e
 		}
@@ -258,7 +258,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		// Join active runs onto stations. Each active run also needs to
 		// know the entity's author so "mine" tint is accurate — pre-fetch
 		// those entities.
-		for _, ar := range activeRuns {
+		for _, ar := range activeConversations {
 			if _, seen := runAuthors[ar.Task.EntityID]; seen {
 				continue
 			}
@@ -290,7 +290,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			return e
 		}
 
-		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
+		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenConversations(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
 		internalError(w, "factory", err)
@@ -324,11 +324,11 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		stations[eventType] = st
 	}
 
-	for _, ar := range activeRuns {
+	for _, ar := range activeConversations {
 		st := ensureStation(ar.Task.EventType)
 		st.ActiveRuns++
 		st.Runs = append(st.Runs, factoryRunJSON{
-			Run:  toFactoryRunSummary(ar.Run),
+			Run:  toFactoryRunSummary(ar.Conversation),
 			Task: taskToJSON(ar.Task),
 			Mine: ghUsername != "" && runAuthors[ar.Task.EntityID] == ghUsername,
 		})

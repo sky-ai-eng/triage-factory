@@ -43,7 +43,7 @@ type Server struct {
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	agentRuns        db.ConversationStore    // agent run lifecycle + transcript
+	conversations    db.ConversationStore    // conversation lifecycle + transcript
 	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers and curator pinned-repo materialization
 	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
@@ -91,7 +91,7 @@ type Server struct {
 	// handlers gate on runmode.ModeMulti, so a nil here in local mode is never
 	// dereferenced.
 	kb *kbstore.Store
-	// reconciler backs the Tier-2 run-scoped artifact refresh endpoint
+	// reconciler backs the Tier-2 conversation-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
 	// endpoint 503s rather than panicking if a request races startup.
@@ -107,8 +107,8 @@ type Server struct {
 	// via SetPlacementResolver after construction; nil until then so the
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
-	// fleetQueue backs the GET /api/fleet/queue view: per-org run-queue shares
-	// (active/queued + cap). Satisfied by the RunQueue store; a narrow
+	// fleetQueue backs the GET /api/fleet/queue view: per-org conversation-queue shares
+	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
 	// interface so the handler test can inject canned shares.
 	fleetQueue fleetQueueReader
 	// ghResolver picks the right GitHub credential (org App installation
@@ -485,7 +485,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		users:            stores.Users,
 		blueprints:       stores.Blueprints,
 		tasks:            stores.Tasks,
-		agentRuns:        stores.Conversations,
+		conversations:    stores.Conversations,
 		repos:            stores.Repos,
 		projects:         stores.Projects,
 		events:           stores.Events,
@@ -502,7 +502,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		authEvents:       stores.AuthEvents,
 		tx:               stores.Tx,
 		az:               authz.New(database, stores.Tx),
-		fleetQueue:       stores.RunQueue,
+		fleetQueue:       stores.ConversationQueue,
 		allStores:        stores,
 		mux:              http.NewServeMux(),
 		ws:               websocket.NewHub(),
@@ -647,7 +647,7 @@ func (s *Server) routes() {
 	//        consult the DB (see handleHealth).
 	//   GET  /readyz                    — readiness probe (TFAC-573): DB +
 	//        migrations + poller liveness (hard checks, 503 on failure)
-	//        plus poll-staleness + active-run count (soft signals). Bare
+	//        plus poll-staleness + active-claim count (soft signals). Bare
 	//        path (not /api/readyz) by convention — the universal k8s/ALB
 	//        probe target — so it's outside /api/* and the preAuthAllowlist
 	//        below / routes_coverage_test entirely; noted here only for
@@ -797,7 +797,7 @@ func (s *Server) routes() {
 	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
 	// Archive soft-deletes + force-stops the team's in-flight delegations and
 	// curator sessions and blocks further writes; restore flips it back (dead
-	// runs stay dead). The preview + archived-list back the confirm modal and the
+	// conversations stay dead). The preview + archived-list back the confirm modal and the
 	// org-admin restore surface.
 	// The team's settings row and its Jira project rules, under the team
 	// resource so the path segment the caller asserts is the one the
@@ -866,7 +866,7 @@ func (s *Server) routes() {
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
 	// org-admin, /org is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.RunQueue}
+	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
 	s.api("GET /api/usage/me", uh.handleUsageMe)
 	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
 	s.api("GET /api/usage/org", uh.handleUsageOrg)
@@ -979,11 +979,11 @@ func (s *Server) routes() {
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
-	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
-	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
+	// Conversation-scoped artifact read (A·6, TFAC-465): the conversation's artifacts across
+	// every kind, team-scoped via the conversation. Backs the conversation detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
-	// Run-scoped external-action read — the audit log filtered to this run.
-	// Its sibling above answers "what objects does this run own"; this answers
+	// Conversation-scoped external-action read — the audit log filtered to this conversation.
+	// Its sibling above answers "what objects does this conversation own"; this answers
 	// "what did it do", including the writes that produce no object at all (a
 	// review-thread reply, a refused merge, a denied push).
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
@@ -997,8 +997,8 @@ func (s *Server) routes() {
 	// here, so a refresh / second tab / cold load reconstructs it.
 	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
-	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
-	// while open to refresh that run's non-terminal artifacts against GitHub.
+	// Tier-2 conversation-scoped artifact reconcile (TFAC-464): the conversation view polls this
+	// while open to refresh that conversation's non-terminal artifacts against GitHub.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
@@ -1113,7 +1113,7 @@ func (s *Server) routes() {
 	// edit/delete inline comments on the live pending review, approve submits it,
 	// and dismiss resolves a single artifact (per-item). The task-level
 	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
 	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
@@ -1455,7 +1455,7 @@ func (s *Server) SetStatic(f fs.FS) {
 	s.inlineScriptHashes = hashes
 }
 
-// SetSpawner sets the delegation spawner for agent runs.
+// SetSpawner sets the delegation spawner for agent conversations.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
 }
@@ -1575,7 +1575,7 @@ func (s *Server) kickReachRefresh(orgID string, force bool) {
 }
 
 // SetReconciler registers the shared artifact Reconciler that backs the Tier-2
-// run-scoped refresh endpoint (TFAC-464). The same instance the background
+// conversation-scoped refresh endpoint (TFAC-464). The same instance the background
 // Tier-1 Manager runs, so a foreground refresh and a background cycle apply the
 // identical reconcile path. Nil until wired — the endpoint 503s until then.
 func (s *Server) SetReconciler(rc *reconcile.Reconciler) {

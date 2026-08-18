@@ -1,5 +1,5 @@
 // Package reaper is the leader-elected fleet reaper (TFAC-586, spec §4.3):
-// requeue-or-terminal-fail runs whose owning executor's registry heartbeat
+// requeue-or-terminal-fail conversations whose owning executor's registry heartbeat
 // has gone stale, and tombstone registry rows abandoned long enough that
 // they can never come back. Postgres only — mirrors internal/lease's
 // independence from db.Stores (a raw admin *sql.DB, no SQLite twin): a
@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// Counts is the outcome of one ReapDeadExecutors sweep — how many runs the
+// Counts is the outcome of one ReapDeadExecutors sweep — how many conversations the
 // reaper requeued, terminal-failed, or cancel-finalized. Logged by
 // RunReaper on every non-empty tick.
 type Counts struct {
@@ -29,13 +29,13 @@ type Counts struct {
 
 // Store is the reaper's persistence seam.
 type Store interface {
-	// ReapDeadExecutors sweeps every run claimed/running under an executor
+	// ReapDeadExecutors sweeps every conversation claimed/running under an executor
 	// whose registry heartbeat is missing or older than staleThreshold (own
 	// DB time — now() - make_interval, never Go's wall clock, matching
-	// internal/lease's discipline), restricted to runs whose owning
+	// internal/lease's discipline), restricted to conversations whose owning
 	// blueprint_run is still 'running' (spec §4.3's candidate predicate — a
 	// row under an already-terminal blueprint_run belongs to
-	// RunQueueStore.ReconcileOrphanedRuns, not here). A draining-but-
+	// ConversationQueueStore.ReconcileOrphanedConversations, not here). A draining-but-
 	// heartbeating executor is never touched: draining is not death, and
 	// the predicate only looks at heartbeat staleness.
 	//
@@ -48,15 +48,15 @@ type Store interface {
 	// shares rather than re-derives).
 	//
 	// Three disjoint outcomes per candidate:
-	//   - blueprint_run.cancel_requested: finalize cancelled (run +
+	//   - blueprint_run.cancel_requested: finalize cancelled (conversation +
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
 	//   - not cancel-requested, episode below maxAttempts: requeue with the
-	//     same status/summary semantics as RunQueueStore.RequeueRun. The
+	//     same status/summary semantics as ConversationQueueStore.RequeueConversation. The
 	//     'reaped' release below is what carries this attempt into the next
 	//     claim's count.
 	//   - not cancel-requested, episode at maxAttempts: terminal-fail the
-	//     run with failure_kind='executor_lost' and finalize the owning
+	//     conversation with failure_kind='executor_lost' and finalize the owning
 	//     blueprint_run failed.
 	ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error)
 
@@ -85,7 +85,7 @@ type Store interface {
 	// flip and claim release commit independently): a terminal conversation
 	// with a dangling active claim gets the claim released, outcome mapped
 	// from the status. The same arm runs at boot inside
-	// RunQueueStore.ReconcileOrphanedRuns; the periodic repeat here bounds
+	// ConversationQueueStore.ReconcileOrphanedConversations; the periodic repeat here bounds
 	// the desync's lifetime to a reaper tick instead of the next restart.
 	// Idempotent and safe against in-flight healthy writes.
 	//
@@ -109,8 +109,8 @@ type Store interface {
 	// ReapDeadExecutors. Failing rather than re-minting the step is what makes
 	// it self-healing: the terminal write frees the index, and the firing
 	// intent already queued for the task drains into a fresh, fully-minted
-	// run. The same arm runs at boot inside
-	// RunQueueStore.ReconcileOrphanedRuns (both dialects — local mode has the
+	// blueprint run. The same arm runs at boot inside
+	// ConversationQueueStore.ReconcileOrphanedConversations (both dialects — local mode has the
 	// same crash window and no reaper); the periodic repeat here bounds an
 	// orphan's lifetime to a reaper tick instead of the next restart.
 	FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace time.Duration) (int, error)
@@ -184,7 +184,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// terminal, so the claim gate refuses the row. What it buys is the
 	// workspace, which the retention TTL collects on its own schedule instead
 	// of a reaper throwing it away the instant a host went quiet.
-	parkedBlueprintIDs, parkedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, nil, `
+	parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
 		UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
 			result_summary = 'Stopped: owning blueprint run was cancel-requested under a dead executor (reaper)'
 		WHERE id IN (
@@ -212,12 +212,12 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// 2. Not cancel-requested, this loss episode exhausted: terminal-fail. The
 	// episode is what makes this a crash loop rather than a conversation with
 	// a long life behind it — see ReapDeadExecutors' contract.
-	failedBlueprintIDs, failedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
+	failedBlueprintIDs, failedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
 		-- No park_reason: this arm does not park, it fails. failure_kind is
 		-- where a failure's cause is recorded, and stamping the same word into
 		-- the park column would put a value on a row that was never parked.
 		UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
-			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_RUN_MAX_ATTEMPTS) for this loss episode is exhausted (reaper)'
+			result_summary = 'Failed: executor lost repeatedly and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 		WHERE id IN (
 			SELECT r.id `+reapCandidateJoin+`
 			  AND br.cancel_requested = false
@@ -242,7 +242,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	}
 
 	// 3. Not cancel-requested, this loss episode has room left: requeue. Same
-	// semantics as RunQueueStore.RequeueRun — releasing the claim (below) IS
+	// semantics as ConversationQueueStore.RequeueConversation — releasing the claim (below) IS
 	// the requeue, since the conversation is mid-flight and re-enters the
 	// needs-driving predicate the moment it has no claim. That release is also
 	// what keeps the episode open, so the next death counts this one.
@@ -253,7 +253,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	// live executor now" (no aging delay), which is the correct advisory
 	// answer here. Affinity is re-earned on the next enqueue, never carried
 	// toward a corpse.
-	_, requeuedIDs, err := reapUpdateRuns(ctx, tx, staleSecs, &maxAttempts, `
+	_, requeuedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, &maxAttempts, `
 		UPDATE conversations SET
 			preferred_executor_id = NULL,
 			result_summary = 'Requeued: executor heartbeat stale (reaper)'
@@ -280,11 +280,11 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 	return out, nil
 }
 
-// reapUpdateRuns runs one of the RETURNING blueprint_run_id updates above
+// reapUpdateConversations runs one of the RETURNING blueprint_run_id updates above
 // and collects the affected blueprint_run ids, binding staleSecs as $1 and,
 // when maxAttempts is non-nil, the attempts threshold as $2 — factored out
 // since two of the three sweep queries share this exact shape.
-func reapUpdateRuns(ctx context.Context, tx *sql.Tx, staleSecs float64, maxAttempts *int, query string) (blueprintIDs, conversationIDs []string, err error) {
+func reapUpdateConversations(ctx context.Context, tx *sql.Tx, staleSecs float64, maxAttempts *int, query string) (blueprintIDs, conversationIDs []string, err error) {
 	var rows *sql.Rows
 	if maxAttempts != nil {
 		rows, err = tx.QueryContext(ctx, query, staleSecs, *maxAttempts)
@@ -371,10 +371,10 @@ func (s *pgStore) FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace tim
 func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
 	// A home is dead when its instances row is missing (GC'd or never
 	// registered) or its heartbeat is older than the threshold — the same
-	// missing-or-stale predicate ReapDeadExecutors uses for a run's executor.
-	// An outcome/error release only: the messages ledger already holds
-	// whatever the stranded turn streamed, and a turn whose home died never
-	// reported a cost lump to settle.
+	// missing-or-stale predicate ReapDeadExecutors uses for a conversation's
+	// executor. An outcome/error release only: the messages ledger already
+	// holds whatever the stranded turn streamed, and a turn whose home died
+	// never reported a cost lump to settle.
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE claims
 		SET released_at = now(),

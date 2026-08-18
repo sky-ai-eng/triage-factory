@@ -14,8 +14,8 @@ import (
 var reaperLog = logging.Component("reaper")
 
 // Default knobs (spec's "Pre-made decisions — do not re-derive"): heartbeat
-// 4s < self-fence 15s < reaper staleness 30s. TF_RUN_MAX_ATTEMPTS defaults
-// to 2 (decision log #4) — distinct from delegate.maxRunAttempts (5), which
+// 4s < self-fence 15s < reaper staleness 30s. TF_MAX_CLAIM_ATTEMPTS defaults
+// to 2 (decision log #4) — distinct from delegate.maxClaimAttempts (5), which
 // caps in-process workspace-setup retries on the SAME executor; this knob
 // caps executor-loss retries across a re-claim on a DIFFERENT executor. Two
 // budgets, two values, one unit: both count the current episode of
@@ -53,7 +53,7 @@ func ParseStaleThreshold(raw string) (time.Duration, error) {
 	return time.Duration(n) * time.Second, nil
 }
 
-// ParseMaxAttempts parses TF_RUN_MAX_ATTEMPTS. Empty maps to
+// ParseMaxAttempts parses TF_MAX_CLAIM_ATTEMPTS. Empty maps to
 // DefaultMaxAttempts; anything else must parse as a positive integer.
 func ParseMaxAttempts(raw string) (int, error) {
 	s := strings.TrimSpace(raw)
@@ -62,20 +62,20 @@ func ParseMaxAttempts(raw string) (int, error) {
 	}
 	n, err := strconv.Atoi(s)
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid TF_RUN_MAX_ATTEMPTS=%q (want a positive integer)", raw)
+		return 0, fmt.Errorf("invalid TF_MAX_CLAIM_ATTEMPTS=%q (want a positive integer)", raw)
 	}
 	return n, nil
 }
 
-// RunReaper is the leader reaper's tick loop: every interval, sweep runs
-// whose owning executor's heartbeat has gone stale past staleThreshold,
-// requeuing or terminal-failing them (attempts-capped at maxAttempts) or
-// finalizing them cancelled (blueprint already cancel-requested) — see
-// Store.ReapDeadExecutors. Brain-gated: callers start this only while
-// holding the background-brain lease (internal/app's startBrain/stopBrain),
-// and stop it on ctx cancellation the same way every other brain component
-// does. A nil store makes this a logged no-op, mirroring
-// Spawner.RunInstanceHeartbeat's nil-seam contract.
+// RunReaper is the leader reaper's tick loop: every interval, sweep
+// conversations whose owning executor's heartbeat has gone stale past
+// staleThreshold, requeuing or terminal-failing them (attempts-capped at
+// maxAttempts) or finalizing them cancelled (blueprint already
+// cancel-requested) — see Store.ReapDeadExecutors. Brain-gated: callers
+// start this only while holding the background-brain lease (internal/app's
+// startBrain/stopBrain), and stop it on ctx cancellation the same way every
+// other brain component does. A nil store makes this a logged no-op,
+// mirroring Spawner.RunInstanceHeartbeat's nil-seam contract.
 func RunReaper(ctx context.Context, store Store, interval time.Duration, staleThreshold time.Duration, maxAttempts int) {
 	if store == nil {
 		reaperLog.Warn("leader reaper not started: no Store wired")
@@ -97,13 +97,14 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				continue
 			}
 			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 {
-				reaperLog.Info("reaped dead-executor runs",
+				reaperLog.Info("reaped dead-executor conversations",
 					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
 			}
 			// Curator homing (spec §6.3): retire turns stranded on a dead home so
 			// they stop showing in-flight — the user's next turn re-homes.
-			// Separate from ReapDeadExecutors: curator turns are curator_requests
-			// rows, not runs, and the recovery is retire-only (no requeue).
+			// Separate from ReapDeadExecutors: a stranded curator turn re-homes
+			// on the user's next message, so the recovery is retire-only (no
+			// requeue).
 			if n, cerr := store.CancelStrandedCuratorTurns(ctx, staleThreshold); cerr != nil {
 				reaperLog.Warn("curator stranded-home sweep failed; retrying next tick", "error", cerr)
 			} else if n > 0 {
@@ -115,7 +116,7 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 			if released, herr := store.HealClaimDesyncs(ctx); herr != nil {
 				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
 			} else if released > 0 {
-				reaperLog.Info("healed run↔claim desyncs", "released_claims", released)
+				reaperLog.Info("healed conversation↔claim desyncs", "released_claims", released)
 			}
 			// Mint-crash orphans: a 'running' blueprint with no child
 			// conversation, which every arm above looks past because they all

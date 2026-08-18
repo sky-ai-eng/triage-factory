@@ -134,7 +134,7 @@ func (a *App) handleReconcilerPoll(evt domain.Event) {
 // completion for backward compatibility.
 func (a *App) broadcastEvent(evt domain.Event) {
 	// system:conversation:* sentinels (TFAC-592) are EE-observable bus mirrors of
-	// the agent_run_update/agent_message websocket events the spawner's
+	// the conversation_update/message websocket events the spawner's
 	// two broadcast choke points already emit — forwarding them here
 	// would double every tool call on the wire in a second shape. This
 	// is also defense-in-depth for tenant isolation: broadcastEvent fans

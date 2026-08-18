@@ -9,7 +9,7 @@ import { jsonBody } from '../../test/apiResponse'
 // offered (and what stands in its place when it isn't), and how the approval
 // affordance routes over the unresolved artifact set.
 function station(over: Partial<Conversation>, actions: Partial<StationActions> = {}) {
-  const run = {
+  const conversation = {
     ID: 'r1',
     TaskID: '',
     Status: 'open',
@@ -22,7 +22,7 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
   return render(
     <MemoryRouter>
       <RunStation
-        run={run}
+        conversation={conversation}
         task={null}
         messages={[]}
         now={new Date('2026-07-30T00:01:00Z').getTime()}
@@ -45,7 +45,7 @@ describe('RunStation composer gate', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('offers the input on a parked run the server says is resumable', () => {
+  it('offers the input on a parked conversation the server says is resumable', () => {
     station({ Status: 'open', resumable: true })
     expect(composer()).toBeInTheDocument()
   })
@@ -75,7 +75,7 @@ describe('RunStation composer gate', () => {
     expect(screen.getByText(/blueprint/i)).toBeInTheDocument()
   })
 
-  it('says nothing about resuming a failed run', () => {
+  it('says nothing about resuming a failed conversation', () => {
     // Not a resumable status to begin with, so there is no offer to withdraw
     // and no explanation to give.
     station({ Status: 'failed' })

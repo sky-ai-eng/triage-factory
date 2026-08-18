@@ -76,7 +76,7 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 
 	// And it MUST start exactly the sandbox-worker set.
 	if !p.dispatcher {
-		t.Error("executor must start the run-queue dispatcher")
+		t.Error("executor must start the conversation-queue dispatcher")
 	}
 	if !p.executorHealthz {
 		t.Error("executor must start the localhost healthz listener")
@@ -88,7 +88,7 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 func TestControlPlan_NoDispatcher(t *testing.T) {
 	p := planForRole(runmode.RoleControl)
 	if p.dispatcher {
-		t.Error("control must NOT run the delegated-run dispatcher")
+		t.Error("control must NOT run the conversation-queue dispatcher")
 	}
 	if p.executorHealthz {
 		t.Error("control exposes /api/health + /readyz on the main port; no separate executor healthz")

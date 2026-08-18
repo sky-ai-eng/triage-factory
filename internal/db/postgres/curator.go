@@ -349,8 +349,8 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	// failures, and a withdrawn turn (message deleted → message_id NULLed)
 	// matches nothing. The zero-message NOT EXISTS stays load-bearing: a
 	// claim that delivered the turn also carries its message_id, and
-	// counting a post-delivery run crash would cap the turn for a failure
-	// that is not the input's fault.
+	// counting a post-delivery engagement crash would cap the turn for a
+	// failure that is not the input's fault.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT COALESCE(cl.error, '')
 		FROM claims cl
@@ -652,7 +652,7 @@ func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, c
 		// Best-effort doorbell so the brain provisions this turn without
 		// waiting for the backstop sweep; the payload carries the
 		// conversation id — the claim-credentials channel's key.
-		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, RunID: conversationID})
+		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, ConversationID: conversationID})
 	}
 	return n > 0, nil
 }
@@ -713,7 +713,7 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			}
 		}
 		for i := range msgs {
-			if _, err := insertRunMessage(ctx, q, orgID, &msgs[i]); err != nil {
+			if _, err := insertConversationMessage(ctx, q, orgID, &msgs[i]); err != nil {
 				return fmt.Errorf("import curator message: %w", err)
 			}
 		}

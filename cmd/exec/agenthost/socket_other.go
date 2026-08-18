@@ -18,7 +18,7 @@ type HostDaemon struct{}
 // Start always returns an "unsupported platform" error off Linux.
 // Callers wire it under the same Linux build tag the sandbox runner
 // requires.
-func Start(_ db.Stores, _ RunInfo, _ *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
+func Start(_ db.Stores, _ ConversationInfo, _ *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 

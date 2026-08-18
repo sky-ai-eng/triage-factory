@@ -3,7 +3,7 @@ package domain
 import "fmt"
 
 // PRNewCommitsInjection is the agent-facing copy for the new-commits freshness injection
-// (TFAC-501): a PR a run is reviewing advanced under it while the agent was
+// (TFAC-501): a PR a conversation is reviewing advanced under it while the agent was
 // in-progress or parked. The injection names the PR and the old→new head so the agent
 // knows exactly what moved, and tells it to re-pull and reconcile its pending
 // review comments against the new diff before finalizing — the agent-facing half

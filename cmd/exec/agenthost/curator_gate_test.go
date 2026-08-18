@@ -14,7 +14,7 @@ import (
 type gateRuntime struct {
 	Runtime
 	tracks    bool
-	worktrees []domain.RunWorktree
+	worktrees []domain.ConversationWorktree
 	denied    []string // audit targets recorded via RecordGitDenied
 }
 
@@ -22,7 +22,7 @@ func (r *gateRuntime) TeamTracksRepo(context.Context, string, string) (bool, err
 	return r.tracks, nil
 }
 
-func (r *gateRuntime) ListRunWorktrees(context.Context) ([]domain.RunWorktree, error) {
+func (r *gateRuntime) ListConversationWorktrees(context.Context) ([]domain.ConversationWorktree, error) {
 	return r.worktrees, nil
 }
 
@@ -32,7 +32,7 @@ func (r *gateRuntime) Record(_ context.Context, _ *domain.Artifact, act *domain.
 
 func newGateClient(pinnedRepos []string, rt *gateRuntime) *LocalClient {
 	return &LocalClient{
-		info:      RunInfo{OrgID: "org-1", RunID: "run-1", TeamID: "team-1", PinnedRepos: pinnedRepos},
+		info:      ConversationInfo{OrgID: "org-1", ConversationID: "conv-1", TeamID: "team-1", PinnedRepos: pinnedRepos},
 		rt:        rt,
 		gateWired: true,
 	}
@@ -97,7 +97,7 @@ func TestAuthorizeRepo_DelegatedRunUnchanged(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("tracked_and_in_ledger_is_authorized", func(t *testing.T) {
-		rt := &gateRuntime{tracks: true, worktrees: []domain.RunWorktree{{RepoID: "acme/widgets"}}}
+		rt := &gateRuntime{tracks: true, worktrees: []domain.ConversationWorktree{{RepoID: "acme/widgets"}}}
 		c := newGateClient(nil, rt) // delegated run: empty pinned set
 		if err := c.authorizeRepo(ctx, "acme", "widgets"); err != nil {
 			t.Fatalf("authorizeRepo = %v, want nil (tracked + in ledger)", err)

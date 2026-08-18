@@ -759,7 +759,7 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 // blueprintRunsOneActivePerTaskConstraint is the partial unique index name
 // backing "at most one active (trigger_type='event', status='running')
 // blueprint_run per task" — the DB-enforced twin of the router's in-process
-// task gate (HasActiveAutoRunForTaskSystem), which is check-then-act: two
+// task gate (HasActiveAutoConversationForTaskSystem), which is check-then-act: two
 // processes (or a leader-failover overlap within one) could both pass the
 // check and each mint an active auto run on the same task via different
 // triggers. See the migration for the full index definition.
@@ -781,7 +781,7 @@ const blueprintRunsOneActivePerTaskConstraint = "blueprint_runs_one_active_auto_
 //     contract: a replay is permanently satisfied, task-busy is a
 //     deferral — the caller must queue the intent, not drop it.
 //
-// The run row and the task's agent claim commit together — see
+// The blueprint run row and the task's agent claim commit together — see
 // db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
 // error and leaves the run committed; a stamp *failure* rolls the run back,
 // so the firing path retries the pair rather than committing half of it.
@@ -992,19 +992,19 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, runID)
+func (s *blueprintStore) GetRunForConversation(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.app, s.GetRun, orgID, stepConversationID)
 }
 
-func (s *blueprintStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, runID)
+func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return getRunForBlueprintRun(ctx, s.admin, s.GetRunSystem, orgID, stepConversationID)
 }
 
-func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	if !isValidUUID(runID) {
+func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.Context, string, string) (*domain.BlueprintRun, error), orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	if !isValidUUID(stepConversationID) {
 		return nil, nil, nil
 	}
-	blueprintRunID, stepIndex, err := readRunBlueprintPointer(ctx, q, orgID, runID)
+	blueprintRunID, stepIndex, err := readConversationBlueprintPointer(ctx, q, orgID, stepConversationID)
 	if err != nil || blueprintRunID == "" {
 		return nil, nil, err
 	}
@@ -1015,16 +1015,16 @@ func getRunForBlueprintRun(ctx context.Context, q queryer, getRun func(context.C
 	return br, stepIndex, nil
 }
 
-// readRunBlueprintPointer reads conversations.blueprint_run_id +
-// blueprint_step_index for a single run.
-func readRunBlueprintPointer(ctx context.Context, q queryer, orgID, runID string) (string, *int, error) {
+// readConversationBlueprintPointer reads conversations.blueprint_run_id +
+// blueprint_step_index for a single conversation.
+func readConversationBlueprintPointer(ctx context.Context, q queryer, orgID, conversationID string) (string, *int, error) {
 	var (
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
 	err := q.QueryRowContext(ctx,
 		`SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE org_id = $1 AND id = $2`,
-		orgID, runID).Scan(&blueprintRunID, &stepIndex)
+		orgID, conversationID).Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -1070,11 +1070,12 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	if abortedAtStep != nil {
 		stepArg = *abortedAtStep
 	}
-	// Flip the blueprint_run terminal AND cancel any still-active child run in
-	// one transaction, so the two writes commit together — a terminal parent is
-	// never committed alongside a live child. inTx composes with the caller's tx
-	// when markBlueprintRunStatus runs inside a SyntheticClaims tx (manual/app
-	// path) and opens a fresh one on the bare admin handle (event/system path).
+	// Flip the blueprint_run terminal AND cancel any still-active child
+	// conversation in one transaction, so the two writes commit together — a
+	// terminal parent is never committed alongside a live child. inTx composes
+	// with the caller's tx when markBlueprintRunStatus runs inside a
+	// SyntheticClaims tx (manual/app path) and opens a fresh one on the bare
+	// admin handle (event/system path).
 	//
 	// RLS scope: the admin pool bypasses RLS; on the app pool the child-cancel
 	// runs under the caller's claims, but a blueprint's child steps share its
@@ -1107,9 +1108,9 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 		// Only on a real transition to a terminal target.
 		if changed && status.Terminal() {
 			if adjacentClaims == nil {
-				return parkOrphanedChildRunsWithClaims(ctx, tx, orgID, id)
+				return parkOrphanedChildConversationsWithClaims(ctx, tx, orgID, id)
 			}
-			parkedChildIDs, err = parkOrphanedChildRuns(ctx, tx, orgID, id)
+			parkedChildIDs, err = parkOrphanedChildConversations(ctx, tx, orgID, id)
 			return err
 		}
 		return nil
@@ -1128,10 +1129,10 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 	return changed, nil
 }
 
-// parkOrphanedChildRunsWithClaims parks every still-mid-flight child run of
+// parkOrphanedChildConversationsWithClaims parks every still-mid-flight child run of
 // blueprintRunID `open` and releases those children's active claims in the
 // same statement — q must hold claims-write privilege. Called by
-// markBlueprintRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns
+// markBlueprintRunStatus's atomic flip; ConversationQueueStore.ReconcileOrphanedConversations
 // applies the same predicate in its own boot sweep (it can't share this body —
 // different store, different scope).
 //
@@ -1141,7 +1142,7 @@ func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgI
 // refuses it. Scoped to status IS NULL: a child that already parked itself
 // keeps its own parked_at and park_reason, and one that already reached a
 // terminal is left alone.
-func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
+func parkOrphanedChildConversationsWithClaims(ctx context.Context, q queryer, orgID, blueprintRunID string) error {
 	_, err := q.ExecContext(ctx, `
 		WITH parked AS (
 			UPDATE conversations
@@ -1159,10 +1160,10 @@ func parkOrphanedChildRunsWithClaims(ctx context.Context, q queryer, orgID, blue
 	return err
 }
 
-// parkOrphanedChildRuns is the app-pool (claims-SELECT-only) variant of the
+// parkOrphanedChildConversations is the app-pool (claims-SELECT-only) variant of the
 // same child park: it returns the parked ids so the caller can release their
 // claims on an admin-backed queryer.
-func parkOrphanedChildRuns(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
+func parkOrphanedChildConversations(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		UPDATE conversations
 		SET status = 'open',
@@ -1246,20 +1247,20 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return runsForBlueprint(ctx, s.app, orgID, blueprintRunID)
+func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+	return conversationsForBlueprint(ctx, s.app, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return runsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
+func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+	return conversationsForBlueprint(ctx, s.admin, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepRunIDs(ctx, s.app, orgID, blueprintRunID)
+func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+	return blueprintActiveStepConversationIDs(ctx, s.app, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return blueprintActiveStepRunIDs(ctx, s.admin, orgID, blueprintRunID)
+func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+	return blueprintActiveStepConversationIDs(ctx, s.admin, orgID, blueprintRunID)
 }
 
 func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
@@ -1292,7 +1293,7 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	return out, rows.Err()
 }
 
-func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
+func blueprintActiveStepConversationIDs(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]string, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}
@@ -1300,7 +1301,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err
@@ -1317,7 +1318,7 @@ func blueprintActiveStepRunIDs(ctx context.Context, q queryer, orgID, blueprintR
 	return out, rows.Err()
 }
 
-func runsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func conversationsForBlueprint(ctx context.Context, q queryer, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if !isValidUUID(blueprintRunID) {
 		return nil, nil
 	}

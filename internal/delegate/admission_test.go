@@ -15,7 +15,7 @@ import (
 // reports as active_runs.
 func TestAcquireTurnSlot_SharesDispatcherSemaphore(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetMaxConcurrentRuns(1)
+	s.SetMaxConcurrentClaims(1)
 
 	release, err := s.AcquireTurnSlot(context.Background())
 	if err != nil {
@@ -51,7 +51,7 @@ func TestAcquireTurnSlot_SharesDispatcherSemaphore(t *testing.T) {
 // actually exercised on both arms.
 func TestAcquireTurnSlot_CancelledCtxNeverHoldsSlot(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetMaxConcurrentRuns(1)
+	s.SetMaxConcurrentClaims(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -71,7 +71,7 @@ func TestAcquireTurnSlot_CancelledCtxNeverHoldsSlot(t *testing.T) {
 // re-probe sees the guardrail clear.
 func TestAcquireTurnSlot_WaitsOutMemoryGate(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetMaxConcurrentRuns(1)
+	s.SetMaxConcurrentClaims(1)
 
 	recovered := make(chan struct{})
 	s.mu.Lock()

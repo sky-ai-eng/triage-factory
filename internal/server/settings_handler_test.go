@@ -1072,16 +1072,16 @@ func TestOrgSettingsPatch_ConcurrentRuns_NegativeRejected(t *testing.T) {
 func TestOrgSettingsPatch_ConcurrentRuns_OversizedRejected(t *testing.T) {
 	s := newTestServer(t)
 	rec := patchOrgSettings(t, s,
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling + 1})
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling + 1})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("oversized limit should 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
 	// The ceiling itself is accepted.
 	patchOrgSettingsOK(t, s,
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling})
-	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentRunsCeiling {
-		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentRunsCeiling)
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
+	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentClaimsCeiling {
+		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentClaimsCeiling)
 	}
 }
 

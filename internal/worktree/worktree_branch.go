@@ -14,16 +14,16 @@ import (
 )
 
 // CreateForBranch sets up a worktree on a new feature branch based off
-// a given base, at the run's default location runDir(runID). If
+// a given base, at the run's default location runDir(rootKey). If
 // baseBranch is empty, the repo's default branch is detected from
 // origin/HEAD. Used by the eager GitHub PR delegation path where the
 // run has exactly one repo.
-func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID string, opts ...CloneOption) (string, error) {
-	wtDir, err := makeWorktreeDir(runID)
+func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey string, opts ...CloneOption) (string, error) {
+	wtDir, err := makeWorktreeDir(rootKey)
 	if err != nil {
 		return "", err
 	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, resolveCloneOptions(opts).auth)
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, resolveCloneOptions(opts).auth)
 }
 
 // CreateForBranchInRoot is the lazy-Jira-delegation variant: the worktree
@@ -41,7 +41,7 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 // prescribed-feature-branch variant — exercised by curator_test — for a future
 // caller that needs a named branch checked out up front rather than a detached
 // checkout the agent branches from itself.
-func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string) (string, error) {
+func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
 	}
@@ -54,7 +54,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	// concern, not the host-side clone path. The shared body is already
 	// auth-capable, so a credential can be threaded through when it wires
 	// the in-sandbox path.
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, CloneAuth{})
 }
 
 // CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
@@ -118,7 +118,7 @@ func CheckoutRefSlug(ref string) string {
 // multi mode materializes a SELF-CONTAINED clone — the run root is bind-mounted
 // into a sandbox that can't see the shared bare, so a worktree's .git pointer
 // would dangle there (mirrors CreateForPR's mode split).
-func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string, opts ...CloneOption) (string, error) {
+func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
 	}
@@ -136,9 +136,9 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ru
 	}
 	auth := resolveCloneOptions(opts).auth
 	if runmode.Current() == runmode.ModeMulti {
-		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 	}
-	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 }
 
 // checkoutRefPattern restricts a checkout ref to a conservative refname
@@ -186,7 +186,7 @@ func ValidateCheckoutRef(ref string) error {
 // per-repo lock, bare-clone reuse, and exclude-or-rollback with the other
 // Create* helpers; differs in that it never creates or reattaches a local
 // branch — the checkout is detached.
-func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -223,7 +223,7 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 		return "", fmt.Errorf("worktree add (detached %s): %w", ref, err)
 	}
 
-	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
 		return "", err
 	}
 
@@ -242,9 +242,9 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 // The clone ends DETACHED at the fetched tip, preserving the checkout-path
 // invariant: no live branch → the push gate authorizes nothing until the agent
 // creates its own branch. git can only clone a local branch, so a transient
-// run-namespaced branch (triagefactory/<runID>/checkout) carries the tip
+// run-namespaced branch (triagefactory/<rootKey>/checkout) carries the tip
 // through the clone and is deleted from both the clone and the bare afterwards.
-func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -274,7 +274,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 	// concurrent runs sharing this bare never collide on it. -f overwrites a
 	// stray leftover from a crashed prior create (nothing checks it out — the
 	// clone below copies it and both copies are deleted before the lock drops).
-	tmpBranch := fmt.Sprintf("triagefactory/%s/checkout", runID)
+	tmpBranch := fmt.Sprintf("triagefactory/%s/checkout", rootKey)
 	if err := gitRunCtx(ctx, bareDir, "branch", "-f", tmpBranch, remoteRef); err != nil {
 		return "", fmt.Errorf("stage checkout branch %s: %w", tmpBranch, err)
 	}
@@ -411,7 +411,7 @@ func worktreeGitPaths(root string) (gitDir, commonDir string, ok bool) {
 // This is what the push-authorization gate (internal/delegate) must compare
 // receive-pack commands against: the command block carries the REMOTE ref, and
 // for a PR worktree that differs from the local checkout by construction — the
-// checkout is the run-namespaced triagefactory/<runID>/pr-<n> while
+// checkout is the run-namespaced triagefactory/<rootKey>/pr-<n> while
 // configurePRPushTracking maps it to the PR's real head branch. Authorizing the
 // local name (the old CurrentBranch rule) both broke every PR push (the pushed
 // head ref was never in the allowlist) and authorized a stray run-namespaced
@@ -544,7 +544,7 @@ func gitConfigReadEnv() []string {
 // variants — bare-clone setup, base-branch fetch, `git worktree add`
 // (with branchExists reattach), and exclude-or-rollback. The two
 // public callers differ only in where wtDir lives on disk.
-func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir string, auth CloneAuth) (string, error) {
+func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -592,7 +592,7 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 		}
 	}
 
-	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
 		return "", err
 	}
 	plantSandboxSkillsLink(wtDir)
@@ -607,9 +607,9 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 // it before returning. Without rollback the caller sees an error but
 // has no handle to clean up with, leaking a half-configured worktree
 // and its bare-repo registration.
-func addExcludesOrRollback(runID, wtDir string) error {
+func addExcludesOrRollback(rootKey, wtDir string) error {
 	if err := writeLocalExcludes(wtDir); err != nil {
-		if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
+		if rmErr := RemoveAt(wtDir, rootKey); rmErr != nil {
 			worktreeLog.Warn("rollback after exclude-write failure", "error", rmErr)
 		}
 		return fmt.Errorf("write local git excludes: %w", err)

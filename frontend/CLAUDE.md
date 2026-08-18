@@ -73,7 +73,7 @@ rather than a convenience.
 suppressing the 401 funnel is the point. Otherwise **prefer branching in a
 `catch` on `HttpError.status`**, which keeps `apiJSON`'s parse for the success
 path — a 404 → not-found state has no funnel to suppress, so it wants the catch,
-not `allow`. `contexts/AuthContext.tsx`, `hooks/useRunDetail.ts`,
+not `allow`. `contexts/AuthContext.tsx`, `hooks/useConversationDetail.ts`,
 `pages/ProjectDetail.tsx` and `hooks/useInvites.ts` are the reference shape.
 
 ### Error strings
@@ -135,6 +135,6 @@ test file and registered in `eslint.config.js`:
   literal `/api` path, `opaqueFetch` says the URL isn't visible to the lint. A
   genuinely-external fetch built from a variable needs an inline disable naming
   where it points; none exists today.
-- `run-status/no-ghost-run-status` — fails the lint when component code compares
+- `conversation-status/no-ghost-conversation-status` — fails the lint when component code compares
   a conversation status against a name outside the vocabulary in `src/types.ts`
-  (mirrored from `internal/domain/run_status.go`).
+  (mirrored from `internal/domain/conversation_status.go`).

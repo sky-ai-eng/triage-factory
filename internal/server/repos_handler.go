@@ -1021,9 +1021,10 @@ func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
 // addressed by the registry row id.
 //
 // GET /api/repos lists the registry, which is a superset of the tracked set:
-// a repository the last team untracked keeps its row (a run's worktree ledger
-// or a pinned project may still name it), so an org admin can still see it and
-// re-track it. Non-admins see only what their own teams track.
+// a repository the last team untracked keeps its row (a conversation's
+// worktree ledger or a pinned project may still name it), so an org admin can
+// still see it and re-track it. Non-admins see only what their own teams
+// track.
 //
 // Reads (isOrgAdmin / repoVisible) go by membership: an org admin
 // sees every repo, a member only the repos their own team(s) track. The

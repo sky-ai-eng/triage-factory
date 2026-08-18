@@ -20,8 +20,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// agentHandler serves the agent-run endpoints (status / messages / cancel /
-// message / interrupt / permissions / runs / artifact refresh). spawner and
+// agentHandler serves the agent-conversation endpoints (status / messages / cancel /
+// message / interrupt / permissions / conversation list / artifact refresh). spawner and
 // reconciler are read through getters so the handler always sees the current
 // instance, (re)wired onto the server after construction.
 type agentHandler struct {
@@ -34,7 +34,7 @@ type agentHandler struct {
 // conversationIDOr404 guards the {conversationID} path value — conversations.id
 // is a uuid column on Postgres. See uuidPathOr404.
 func conversationIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
-	return uuidPathOr404(w, r, "conversationID", "run")
+	return uuidPathOr404(w, r, "conversationID", "conversation")
 }
 
 // writeDelegationUnavailable answers the routes that need a wired spawner on a
@@ -55,108 +55,108 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var resp map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
-		counts, e := tx.Artifacts.CountByRun(r.Context(), orgID, []string{run.ID})
+		counts, e := tx.Artifacts.CountByConversation(r.Context(), orgID, []string{conv.ID})
 		if e != nil {
 			return e
 		}
-		// Derive has_unresolved_artifacts (+ per-kind counts) from the run's
-		// artifact set. Only read the artifacts when the run has any —
+		// Derive has_unresolved_artifacts (+ per-kind counts) from the conversation's
+		// artifact set. Only read the artifacts when the conversation has any —
 		// counts==0 means there's nothing unresolved, so skip the list. A list
 		// failure is best-effort BY DESIGN — this is display enrichment on top
 		// of an authoritative row, so it omits the derived flags (logged) but
 		// must not fail the status fetch or touch the count above. The
 		// swallowed-error sweep leaves it swallowed deliberately.
 		var arts []domain.Artifact
-		if counts[run.ID] > 0 {
-			if a, lerr := tx.Artifacts.ListByRun(r.Context(), orgID, run.ID); lerr != nil {
-				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "run", run.ID, "error", lerr)
+		if counts[conv.ID] > 0 {
+			if a, lerr := tx.Artifacts.ListByConversation(r.Context(), orgID, conv.ID); lerr != nil {
+				serverLog.Warn("artifact lookup for has_unresolved_artifacts failed; omitting it (artifact_count unaffected)", "conversation", conv.ID, "error", lerr)
 			} else {
 				arts = a
 			}
 		}
-		// The owning blueprint's plan length, so the run page can tell a
+		// The owning blueprint's plan length, so the conversation page can tell a
 		// handed-off step from the one that ended the task. Best-effort like
 		// the artifact list above: a failure (or a blueprint row RLS hides)
 		// leaves the count at 0 and the projection unqualified, never a failed
 		// status fetch.
 		var stepCount int
-		if run.BlueprintRunID != "" {
-			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{run.BlueprintRunID}); lerr != nil {
-				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "run", run.ID, "blueprint_run", run.BlueprintRunID, "error", lerr)
+		if conv.BlueprintRunID != "" {
+			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{conv.BlueprintRunID}); lerr != nil {
+				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", lerr)
 			} else {
-				stepCount = lens[run.BlueprintRunID]
+				stepCount = lens[conv.BlueprintRunID]
 			}
 		}
-		resp = runResponse(run, counts[run.ID], arts, stepCount)
+		resp = conversationResponse(conv, counts[conv.ID], arts, stepCount)
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
-		notFound(w, "run")
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
-	addResumability(r.Context(), resp, orgID, run, ag.spawner())
+	addResumability(r.Context(), resp, orgID, conv, ag.spawner())
 	writeJSON(w, http.StatusOK, resp)
 }
 
 // addResumability puts the server's answer to "can a follow-up land on this
-// conversation?" on the run's detail read: `resumable`, plus
+// conversation?" on the conversation's detail read: `resumable`, plus
 // `resume_blocked_reason` naming the rung that refused when it can't. It is the
 // same walk SendMessage refuses on (Spawner.ResumabilityFor), so the composer
 // the client renders and the send the server accepts cannot disagree — the
-// client can see only one of the three inputs (status), and a stopped run whose
+// client can see only one of the three inputs (status), and a stopped conversation whose
 // workspace never made it looks identical from there to one that is warm.
 //
 // Detail read only, and deliberately: the board never shows a composer, and the
 // workspace half of the answer is a blob existence check the batched list would
 // pay per row for nothing.
 //
-// Two shapes of run are skipped, and their absence from the payload is the
-// answer. An ACTIVE run is steered through its live process, a route this gate
+// Two shapes of conversation are skipped, and their absence from the payload is the
+// answer. An ACTIVE conversation is steered through its live process, a route this gate
 // doesn't model — and the client's own `active` arm already opens the composer,
 // so the check would be a blob read to confirm what the status said. A FAILED
-// run has no coherent workspace by construction. In both cases the keys are
+// conversation has no coherent workspace by construction. In both cases the keys are
 // omitted rather than guessed, and the client falls back to the status-only
 // reading, which is right for both.
 //
 // Runs outside the tx that read the row: the workspace probe stats the disk and
 // may reach blob storage, and no read should hold a transaction open across
 // that. A spawner that isn't wired (delegation disabled) omits the keys too.
-func addResumability(ctx context.Context, resp map[string]any, orgID string, run *domain.Conversation, spawner *delegate.Spawner) {
-	if spawner == nil || run == nil {
+func addResumability(ctx context.Context, resp map[string]any, orgID string, conv *domain.Conversation, spawner *delegate.Spawner) {
+	if spawner == nil || conv == nil {
 		return
 	}
-	if domain.IsActiveRunStatus(run.Status) || run.Status == domain.StatusFailed {
+	if domain.IsActiveConversationStatus(conv.Status) || conv.Status == domain.StatusFailed {
 		return
 	}
-	ok, reason := spawner.ResumabilityFor(ctx, orgID, run)
+	ok, reason := spawner.ResumabilityFor(ctx, orgID, conv)
 	resp["resumable"] = ok
 	if !ok {
 		resp["resume_blocked_reason"] = reason
 	}
 }
 
-// handleArtifactRefresh is the Tier-2, run-scoped half of artifact
-// reconciliation (TFAC-464): the run view polls it (~5s while open) to pull a
-// run's non-terminal artifacts fresh against GitHub without waiting for the
+// handleArtifactRefresh is the Tier-2, conversation-scoped half of artifact
+// reconciliation (TFAC-464): the conversation view polls it (~5s while open) to pull a
+// conversation's non-terminal artifacts fresh against GitHub without waiting for the
 // background per-org cycle. It runs the SAME reconcile path as Tier 1, bounded
-// to this one run's artifacts, and pushes any transition over the WS hub.
+// to this one conversation's artifacts, and pushes any transition over the WS hub.
 //
-// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByRun
-// are RLS-scoped, so a user can only refresh a run their team can see. The GitHub
+// Authorization rides the request-claims read: Conversations.Get + Artifacts.ListByConversation
+// are RLS-scoped, so a user can only refresh a conversation their team can see. The GitHub
 // calls and the artifact/memory writes happen OUTSIDE that read tx (no network
 // I/O under a held transaction) — the reconciler writes via its admin-pool path.
 func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Request) {
@@ -178,18 +178,18 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Read the run + its reconcilable non-terminal artifacts under request
+	// Read the conversation + its reconcilable non-terminal artifacts under request
 	// claims (authorization + RLS scoping). Filter to the same working set the
 	// org-wide Tier-1 query selects so the two tiers reconcile identically.
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
-		if e != nil || run == nil {
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		if e != nil || conv == nil {
 			return e
 		}
-		all, e := tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
+		all, e := tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
@@ -203,8 +203,8 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
-		notFound(w, "run")
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
 
@@ -216,9 +216,9 @@ func (ag *agentHandler) handleArtifactRefresh(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"updated": len(updated)})
 }
 
-// artifactJSON is the wire shape of one run artifact for
-// GET /api/agent/conversations/{conversationID}/artifacts — the run's artifacts as the board /
-// run-detail UI (TFAC-470) consumes them, across every kind (branch /
+// artifactJSON is the wire shape of one conversation artifact for
+// GET /api/agent/conversations/{conversationID}/artifacts — the conversation's artifacts as the board /
+// RunDetail UI (TFAC-470) consumes them, across every kind (branch /
 // pull_request / review / issue / comment). details is the PARSED details_json
 // (the kind-specific payload as a JSON object, or null when absent/unparseable)
 // so the client gets structured data, not a string to re-parse. The mutable
@@ -266,11 +266,11 @@ func toArtifactJSON(a domain.Artifact) artifactJSON {
 	}
 }
 
-// handleAgentArtifacts returns every artifact a run produced — branch, PR,
+// handleAgentArtifacts returns every artifact a conversation produced — branch, PR,
 // review, issue, comment — newest first (A·6, TFAC-465). It reuses
-// Artifacts.ListByRun and reads the run first under request claims, so a run
-// the caller's team can't see is a 404 (RLS scopes both reads), never a leak;
-// a member of the owning team gets the list. Backs the run-detail surface
+// Artifacts.ListByConversation and reads the conversation first under request claims, so a
+// conversation the caller's team can't see is a 404 (RLS scopes both reads), never a leak;
+// a member of the owning team gets the list. Backs the conversation detail surface
 // (TFAC-470); team-level aggregation is TFAC-449 C2, not here.
 func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
@@ -283,25 +283,25 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var run *domain.Conversation
+	var conv *domain.Conversation
 	var arts []domain.Artifact
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
-		arts, e = tx.Artifacts.ListByRun(r.Context(), orgID, conversationID)
+		arts, e = tx.Artifacts.ListByConversation(r.Context(), orgID, conversationID)
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
-		notFound(w, "run")
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
 
@@ -312,20 +312,21 @@ func (ag *agentHandler) handleAgentArtifacts(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, out)
 }
 
-// runActionListRequest is the body of
-// POST /api/agent/conversations/{conversationID}/actions/list. The run is the
-// path id and the read has no filters of its own, so the body is paging alone.
-type runActionListRequest struct {
+// conversationActionListRequest is the body of POST
+// /api/agent/conversations/{conversationID}/actions/list. The conversation is
+// the path id and the read has no filters of its own, so the body is paging
+// alone.
+type conversationActionListRequest struct {
 	httpx.PageRequest
 }
 
-// handleAgentActions returns the external actions this run performed — the
+// handleAgentActions returns the external actions this conversation performed — the
 // audit log of record, filtered to one conversation and newest first. The
-// sibling of handleAgentArtifacts, and gated identically: the run is read first
-// under request claims, so a run the caller's team can't see is a 404 rather
+// sibling of handleAgentArtifacts, and gated identically: the conversation is read first
+// under request claims, so a conversation the caller's team can't see is a 404 rather
 // than an empty list.
 //
-// A run's actions are bounded by nothing — an agent in a retry loop can append
+// A conversation's actions are bounded by nothing — an agent in a retry loop can append
 // hundreds of rows — which is why this used to read a hardcoded 200 and the
 // frontend held a copy of that number to know whether it had the whole answer.
 // Both are gone: the page is the caller's to ask for and total_count says how
@@ -334,10 +335,10 @@ type runActionListRequest struct {
 //
 // Deliberately NOT behind the governance entitlement the /usage feeds sit
 // behind. That gate is about reading across teams; this read is scoped to a
-// single run whose transcript and artifacts the caller can already see, and the
-// actions are the part of that run's record which has no artifact to appear as
+// single conversation whose transcript and artifacts the caller can already see, and the
+// actions are the part of that conversation's record which has no artifact to appear as
 // — a review-thread reply, a refused merge, a denied push. Withholding them
-// here would leave the incomplete answer the run view has today.
+// here would leave the incomplete answer the conversation view has today.
 //
 // POST /api/agent/conversations/{conversationID}/actions/list
 func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +352,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var req runActionListRequest
+	var req conversationActionListRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
@@ -362,28 +363,28 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	}
 
 	var (
-		run     *domain.Conversation
+		conv    *domain.Conversation
 		actions []domain.ExternalAction
 		total   int
 	)
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		run, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e = tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
-		actions, total, e = tx.ExternalActions.ListByRun(r.Context(), orgID, conversationID,
+		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
 			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
 		return
 	}
-	if run == nil {
-		notFound(w, "run")
+	if conv == nil {
+		notFound(w, "conversation")
 		return
 	}
 
@@ -394,24 +395,25 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 	httpx.WriteList(w, page, out, total)
 }
 
-// runResponse projects a Conversation into the wire shape the frontend consumes,
+// conversationResponse projects a Conversation into the wire shape the frontend consumes,
 // augmented with `artifact_count` (so the Board card can show how many artifacts
-// a run produced without a per-card fetch) and the derived approval signal:
+// a conversation produced without a per-card fetch) and the derived approval signal:
 // `has_unresolved_artifacts` (bool), `unresolved_pr_count` /
 // `unresolved_review_count`, and `pending_artifact_ids` (the set of unresolved
 // approvable artifact ids — all draft PRs + all ready reviews — for the per-item
 // resolve UI). These replace the legacy `pending_kind` /
 // `pending_artifact_id` overlay discriminators — approval is no longer a stored
-// run status but a view over the unresolved-artifact set.
+// conversation status but a view over the unresolved-artifact set.
 //
 // Pure projection — it does no I/O. The caller supplies every input, which is
-// what lets the run-list path batch its reads instead of issuing them per run:
-//   - artifactCount from Artifacts.CountByRun (the single-run path counts one
-//     run; the list path batches every run in one query — N+1 avoidance).
-//   - arts is the run's artifact set, which the caller reads best-effort (only
-//     for runs that have any artifact, so a run with none costs no list).
+// what lets the conversation-list path batch its reads instead of issuing them
+// per conversation:
+//   - artifactCount from Artifacts.CountByConversation (the single-conversation path counts one
+//     conversation; the list path batches every conversation in one query — N+1 avoidance).
+//   - arts is the conversation's artifact set, which the caller reads best-effort (only
+//     for conversations that have any artifact, so a conversation with none costs no list).
 //   - stepCount is the length of the owning blueprint run's frozen plan, from
-//     Blueprints.StepPlanLengths (batched the same way). 0 when the run has no
+//     Blueprints.StepPlanLengths (batched the same way). 0 when the conversation has no
 //     blueprint, and when the caller could not resolve one — a manual blueprint
 //     run belongs to its creator under RLS, so a teammate reads 0 here and gets
 //     the unqualified projection, which is what they already get for the chain
@@ -424,59 +426,59 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // OWN ending, and what a given value implies for the chain depends on the
 // runtime: under the SDK a terminal step reports `finish`, while the native
 // loop stamps `continue` on every ordinary completion, final and single-step
-// runs included (internal/agentloop, internal/delegate/blueprint.go's
-// decideBlueprintStep is what resolves it against position).
+// conversations included (internal/agentloop, internal/delegate/blueprint.go's
+// blueprintDecisionForStepConversation is what resolves it against position).
 //
 // The derived approval keys are emitted only when the answer is definitive: when
-// the run has no artifacts (artifactCount == 0, so nothing can be unresolved) or
+// the conversation has no artifacts (artifactCount == 0, so nothing can be unresolved) or
 // when the artifact set is actually in hand (len(arts) > 0). When artifactCount
 // is positive but arts is empty — a best-effort read failed — the keys are
 // OMITTED rather than reported as a misleading false, so a transient DB/RLS hiccup
 // can't hide approval-required work; the client treats their absence as "unknown"
 // and re-derives on the next refresh.
-func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
+func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int) map[string]any {
 	out := map[string]any{
-		"ID":            run.ID,
-		"TaskID":        run.TaskID,
-		"PromptID":      run.PromptID,
-		"Status":        run.Status,
-		"Model":         run.Model,
-		"StartedAt":     run.StartedAt,
-		"QueuedAt":      run.QueuedAt,
-		"ClaimedAt":     run.ClaimedAt,
-		"CompletedAt":   run.CompletedAt,
-		"TotalCostUSD":  run.TotalCostUSD,
-		"DurationMs":    run.DurationMs,
-		"NumTurns":      run.NumTurns,
-		"ParkReason":    string(run.ParkReason),
-		"WorktreePath":  run.WorktreePath,
-		"ResultSummary": run.ResultSummary,
+		"ID":            conv.ID,
+		"TaskID":        conv.TaskID,
+		"PromptID":      conv.PromptID,
+		"Status":        conv.Status,
+		"Model":         conv.Model,
+		"StartedAt":     conv.StartedAt,
+		"QueuedAt":      conv.QueuedAt,
+		"ClaimedAt":     conv.ClaimedAt,
+		"CompletedAt":   conv.CompletedAt,
+		"TotalCostUSD":  conv.TotalCostUSD,
+		"DurationMs":    conv.DurationMs,
+		"NumTurns":      conv.NumTurns,
+		"ParkReason":    string(conv.ParkReason),
+		"WorktreePath":  conv.WorktreePath,
+		"ResultSummary": conv.ResultSummary,
 		// The terminal envelope's parsed outcome and its abort note. PascalCase
-		// with the legacy set they belong to; empty string when the run holds
+		// with the legacy set they belong to; empty string when the conversation holds
 		// none (still executing, an infra failure, or an outcome gate that
 		// exhausted its retries).
-		"Outcome":              run.Outcome,
-		"OutcomeReason":        run.OutcomeReason,
-		"FailureKind":          string(run.FailureKind),
-		"SessionID":            run.SessionID,
-		"MemoryMissing":        run.MemoryMissing,
-		"TriggerType":          run.TriggerType,
-		"TriggerID":            run.TriggerID,
-		"actor_agent_id":       run.ActorAgentID,
-		"actor_agent_name":     run.ActorAgentName,
-		"blueprint_run_id":     run.BlueprintRunID,
-		"blueprint_step_index": run.BlueprintStepIndex,
+		"Outcome":              conv.Outcome,
+		"OutcomeReason":        conv.OutcomeReason,
+		"FailureKind":          string(conv.FailureKind),
+		"SessionID":            conv.SessionID,
+		"MemoryMissing":        conv.MemoryMissing,
+		"TriggerType":          conv.TriggerType,
+		"TriggerID":            conv.TriggerID,
+		"actor_agent_id":       conv.ActorAgentID,
+		"actor_agent_name":     conv.ActorAgentName,
+		"blueprint_run_id":     conv.BlueprintRunID,
+		"blueprint_step_index": conv.BlueprintStepIndex,
 		"blueprint_step_count": stepCount,
 		"artifact_count":       artifactCount,
-		// The token rollups the run read already SUMs, alongside the cost /
+		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
-		// the legacy PascalCase set froze. Plain ints — 0 for a run that never
+		// the legacy PascalCase set froze. Plain ints — 0 for a conversation that never
 		// streamed a usage-bearing message — so a consumer never has to
 		// distinguish absent from none.
-		"input_tokens":          run.InputTokens,
-		"output_tokens":         run.OutputTokens,
-		"cache_read_tokens":     run.CacheReadTokens,
-		"cache_creation_tokens": run.CacheCreationTokens,
+		"input_tokens":          conv.InputTokens,
+		"output_tokens":         conv.OutputTokens,
+		"cache_read_tokens":     conv.CacheReadTokens,
+		"cache_creation_tokens": conv.CacheCreationTokens,
 	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
@@ -498,7 +500,7 @@ func runResponse(run *domain.Conversation, artifactCount int, arts []domain.Arti
 // "as much recent history as is worth one request".
 //
 // 500 rows is far past any transcript a person scrolls in one sitting and far
-// short of a run that streamed for hours.
+// short of a conversation that streamed for hours.
 const transcriptPageSize = 500
 
 // transcriptResponse is the transcript's wire shape: the rows plus the token
@@ -619,10 +621,10 @@ func nonNegativeIntParam(v *httpx.Validation, r *http.Request, name string) int 
 // CAN see that has already concluded is 409 ALREADY_TERMINAL, the same answer
 // its sibling /message gives for the same state: the two verbs used to
 // disagree (404 here, 409 there) about one condition on one resource.
-// Anything else Stop returns is an internal fault on the way to stopping a run
+// Anything else Stop returns is an internal fault on the way to stopping a conversation
 // that really was active — a failed read, a failed park — and goes through
 // internalError, which logs it and redacts the detail in multi mode. Reporting
-// those as 404 would tell the user their run is gone when it is still running.
+// those as 404 would tell the user their conversation is gone when it is still running.
 func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -638,17 +640,17 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		writeDelegationUnavailable(w)
 		return
 	}
-	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
 	}
 	if !visible {
-		notFound(w, "run")
+		notFound(w, "conversation")
 		return
 	}
 	if err := spawner.Stop(orgID, conversationID, userID); err != nil {
-		if errors.Is(err, delegate.ErrNoActiveRun) {
+		if errors.Is(err, delegate.ErrNoActiveConversation) {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason:  httpx.ReasonAlreadyTerminal,
 				Message: "this conversation has already concluded; there is nothing to stop",
@@ -662,33 +664,33 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
 }
 
-// runVisible reports whether conversationID exists and is visible to the caller's org
-// (and team, under RLS). The steering control ops resolve a run by id against
+// conversationVisible reports whether conversationID exists and is visible to the caller's org
+// (and team, under RLS). The steering control ops resolve a conversation by id against
 // in-memory state (the process registry, the permission broker), so this is the
-// authorization gate that stops a known run id from one tenant being acted on by
-// another: a non-existent or not-visible run reads as false → the caller 404s.
-func (ag *agentHandler) runVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
+// authorization gate that stops a known conversation id from one tenant being acted on by
+// another: a non-existent or not-visible conversation reads as false → the caller 404s.
+func (ag *agentHandler) conversationVisible(ctx context.Context, orgID, userID, conversationID string) (bool, error) {
 	var exists bool
 	err := ag.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.Conversations.Get(ctx, orgID, conversationID)
+		conv, e := tx.Conversations.Get(ctx, orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		exists = run != nil
+		exists = conv != nil
 		return nil
 	})
 	return exists, err
 }
 
-// handleMessage routes a free-form user message to a run: a live run is
-// steered in place, a parked run is woken via resume. The run is read under
-// the caller's org first, so a run not visible to this org is 404 — the authz
+// handleMessage routes a free-form user message to a conversation: a live conversation is
+// steered in place, a parked conversation is woken via resume. The conversation is read under
+// the caller's org first, so a conversation not visible to this org is 404 — the authz
 // gate before any control op.
 //
 // Recording belongs to the delegate layer, and it happens only when the
 // message actually goes somewhere: a live steer records and broadcasts the
 // row after the process takes the text, a follow-up queues it as the
-// undelivered row a claim will drain. A run that can take no message
+// undelivered row a claim will drain. A conversation that can take no message
 // (terminal / no live process) is 409 with nothing recorded and nothing
 // broadcast — an optimistic write here used to leave a refused send painted
 // onto every watcher's transcript as a message the agent never received,
@@ -723,23 +725,23 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	visible, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	visible, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
 	}
 	if !visible {
-		notFound(w, "run")
+		notFound(w, "conversation")
 		return
 	}
 
 	if err := spawner.SendMessage(r.Context(), orgID, conversationID, userID, body.Text); err != nil {
-		// A run deleted between the visibility read above and the routing read
-		// is a 404 like any other absent run — same body as the gate's own 404,
+		// A conversation deleted between the visibility read above and the routing read
+		// is a 404 like any other absent conversation — same body as the gate's own 404,
 		// not a 409 that would send the client re-reading state that no longer
-		// exists. Mirrors handleAgentStop's ErrNoActiveRun mapping.
-		if errors.Is(err, delegate.ErrRunNotFound) {
-			notFound(w, "run")
+		// exists. Mirrors handleAgentStop's ErrNoActiveConversation mapping.
+		if errors.Is(err, delegate.ErrConversationNotFound) {
+			notFound(w, "conversation")
 			return
 		}
 		status, reason := steerErrorStatus(err)
@@ -760,15 +762,15 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // steerErrorStatus maps a SendMessage error to an HTTP status. A
-// run that can't take the op right now — no live process (ErrNoLiveProcess),
-// not steerable (ErrRunNotSteerable), or moved out of a resumable state
-// (ErrRunNotResumable) — is 409 Conflict so the client refreshes and re-reads
-// the run's state. Two wakes racing is NOT among them: the loser's message is
+// conversation that can't take the op right now — no live process (ErrNoLiveProcess),
+// not steerable (ErrConversationNotSteerable), or moved out of a resumable state
+// (ErrConversationNotResumable) — is 409 Conflict so the client refreshes and re-reads
+// the conversation's state. Two wakes racing is NOT among them: the loser's message is
 // queued alongside the winner's and delivered by the winner's claim, so it
 // returns nil and the client is told "sent", which is what happened. A wake
 // that loses to a conversation going terminal still 409s — nothing will claim
 // it, so nothing delivers the message. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
-// run's saved state was reaped after the retention window, so retrying won't
+// conversation's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
 // A concluded conversation (ErrConversationConcluded) is 409 as well, but it
 // carries its own message: this conversation's blueprint will never drive it
@@ -779,8 +781,8 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // reacted yet, so the answer genuinely does change a beat later and a refresh
 // is exactly what resolves it.
 // A cross-pod signal whose owning executor never acked (ErrSignalAckTimeout,
-// TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "run owner did
-// not acknowledge; the run may be mid-teardown" case; the UI already
+// TFAC-585) is 504 Gateway Timeout — the reply-leg contract's "conversation owner did
+// not acknowledge; the conversation may be mid-teardown" case; the UI already
 // tolerates a failed steer. Everything else is a server-side 500.
 //
 // The reason travels with the status because two of these conflicts are not
@@ -796,8 +798,8 @@ func steerErrorStatus(err error) (int, string) {
 	case errors.Is(err, delegate.ErrConversationConcluded):
 		return http.StatusConflict, httpx.ReasonAlreadyTerminal
 	case errors.Is(err, delegate.ErrNoLiveProcess),
-		errors.Is(err, delegate.ErrRunNotSteerable),
-		errors.Is(err, delegate.ErrRunNotResumable),
+		errors.Is(err, delegate.ErrConversationNotSteerable),
+		errors.Is(err, delegate.ErrConversationNotResumable),
 		errors.Is(err, delegate.ErrStepHandedOff):
 		return http.StatusConflict, httpx.ReasonConflict
 	default:
@@ -805,11 +807,11 @@ func steerErrorStatus(err error) (int, string) {
 	}
 }
 
-// handleAgentPermission answers a pending tool-permission prompt a run surfaced
+// handleAgentPermission answers a pending tool-permission prompt a conversation surfaced
 // via a `permission_request` WS event. Body: {"behavior":"allow"|"deny",
 // "message"?:string,"updated_input"?:object}. The path's tool call id is the
-// tool_use id the prompt was raised for. The run is authorized under the
-// caller's org (RLS) first — like the message/interrupt endpoints — so a run not
+// tool_use id the prompt was raised for. The conversation is authorized under the
+// caller's org (RLS) first — like the message/interrupt endpoints — so a conversation not
 // visible to this org is 404; a prompt that isn't pending (already answered,
 // timed out, or never existed) is also 404.
 func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
@@ -845,15 +847,15 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Authorize the run under the caller's org before touching the broker — the
+	// Authorize the conversation under the caller's org before touching the broker — the
 	// broker's own org check is a backstop, not a team-level RLS gate.
-	exists, err := ag.runVisible(r.Context(), orgID, userID, conversationID)
+	exists, err := ag.conversationVisible(r.Context(), orgID, userID, conversationID)
 	if err != nil {
 		internalError(w, "agent", err)
 		return
 	}
 	if !exists {
-		notFound(w, "run")
+		notFound(w, "conversation")
 		return
 	}
 
@@ -886,7 +888,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 // Pending only. A history read is for the audit UI, which doesn't exist yet;
 // an ?include=all now would be a filter with no caller.
 //
-// Authorized exactly like handleAgentPermission: runVisible under the caller's
+// Authorized exactly like handleAgentPermission: conversationVisible under the caller's
 // org before touching anything, so a conversation this org can't see is 404
 // rather than an empty list (which would confirm the id exists).
 func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Request) {
@@ -903,11 +905,11 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 	var pending []domain.ConversationPermission
 	var exists bool
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		run, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
+		conv, e := tx.Conversations.Get(r.Context(), orgID, conversationID)
 		if e != nil {
 			return e
 		}
-		if run == nil {
+		if conv == nil {
 			return nil
 		}
 		exists = true
@@ -918,54 +920,54 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !exists {
-		notFound(w, "run")
+		notFound(w, "conversation")
 		return
 	}
 	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC()))
 }
 
-// enrichRuns projects runs onto the wire shape, augmenting each with a batched
+// enrichConversations projects conversations onto the wire shape, augmenting each with a batched
 // artifact_count and the derived has_unresolved_artifacts (+ per-kind counts).
-// Both artifact reads stay O(1) in queries regardless of how many runs the set
-// has. Board's useWebSocket re-fetches on every status transition, so a per-run
-// read would scale with the task's run history.
+// Both artifact reads stay O(1) in queries regardless of how many conversations the set
+// has. Board's useWebSocket re-fetches on every status transition, so a per-conversation
+// read would scale with the task's conversation history.
 //
-//   - artifact_count for every run: one CountByRun (conversationID→count; a run with no
+//   - artifact_count for every conversation: one CountByConversation (conversationID→count; a conversation with no
 //     artifacts is absent → 0).
-//   - has_unresolved_artifacts for the runs that have artifacts: one ListByRuns
-//     over just those run ids (count>0), grouped per run. The derivation needs
-//     the actual artifacts, but a run with none can't have an unresolved one, so
+//   - has_unresolved_artifacts for the conversations that have artifacts: one ListByConversations
+//     over just those conversation ids (count>0), grouped per conversation. The derivation needs
+//     the actual artifacts, but a conversation with none can't have an unresolved one, so
 //     it costs no list.
-//   - blueprint_step_count for the runs that belong to a blueprint: one
+//   - blueprint_step_count for the conversations that belong to a blueprint: one
 //     StepPlanLengths over the deduped blueprint_run ids.
 //
-// Deliberately best-effort: a ListByRuns or StepPlanLengths failure drops what
+// Deliberately best-effort: a ListByConversations or StepPlanLengths failure drops what
 // that read contributes (logged) but leaves counts and the rest intact. These
 // are display annotations on rows the caller can already see, so surfacing the
 // failure would fail a whole board refresh over a badge. Shared by the
-// single-task and batched (task_ids) run-list paths.
-func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) ([]map[string]any, error) {
-	runIDs := make([]string, len(runs))
-	for i := range runs {
-		runIDs[i] = runs[i].ID
+// single-task and batched (task_ids) conversation-list paths.
+func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) ([]map[string]any, error) {
+	conversationIDs := make([]string, len(convs))
+	for i := range convs {
+		conversationIDs[i] = convs[i].ID
 	}
-	counts, err := tx.Artifacts.CountByRun(ctx, orgID, runIDs)
+	counts, err := tx.Artifacts.CountByConversation(ctx, orgID, conversationIDs)
 	if err != nil {
 		return nil, err
 	}
 	var withArtifacts []string
-	for i := range runs {
-		if counts[runs[i].ID] > 0 {
-			withArtifacts = append(withArtifacts, runs[i].ID)
+	for i := range convs {
+		if counts[convs[i].ID] > 0 {
+			withArtifacts = append(withArtifacts, convs[i].ID)
 		}
 	}
-	artsByRun := map[string][]domain.Artifact{}
+	artsByConv := map[string][]domain.Artifact{}
 	if len(withArtifacts) > 0 {
-		if arts, lerr := tx.Artifacts.ListByRuns(ctx, orgID, withArtifacts); lerr != nil {
+		if arts, lerr := tx.Artifacts.ListByConversations(ctx, orgID, withArtifacts); lerr != nil {
 			serverLog.Warn("artifact batch lookup failed; omitting has_unresolved_artifacts (artifact_count unaffected)", "error", lerr)
 		} else {
 			for _, a := range arts {
-				artsByRun[a.ConversationID] = append(artsByRun[a.ConversationID], a)
+				artsByConv[a.ConversationID] = append(artsByConv[a.ConversationID], a)
 			}
 		}
 	}
@@ -975,8 +977,8 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 	// unknown" and costs the qualifier, not the row.
 	var blueprintRunIDs []string
 	seenBlueprints := map[string]bool{}
-	for i := range runs {
-		id := runs[i].BlueprintRunID
+	for i := range convs {
+		id := convs[i].BlueprintRunID
 		if id == "" || seenBlueprints[id] {
 			continue
 		}
@@ -991,9 +993,9 @@ func enrichRuns(ctx context.Context, tx db.TxStores, orgID string, runs []domain
 			stepCounts = lens
 		}
 	}
-	out := make([]map[string]any, len(runs))
-	for i := range runs {
-		out[i] = runResponse(&runs[i], counts[runs[i].ID], artsByRun[runs[i].ID], stepCounts[runs[i].BlueprintRunID])
+	out := make([]map[string]any, len(convs))
+	for i := range convs {
+		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID], stepCounts[convs[i].BlueprintRunID])
 	}
 	return out, nil
 }
@@ -1015,8 +1017,8 @@ type conversationListRequest struct {
 	// TaskIDs selects the tasks whose conversations to return. At least one,
 	// at most maxBatchTaskIDs.
 	TaskIDs []string `json:"task_ids"`
-	// IncludeMessages adds each task's PRIMARY (newest-started) run's
-	// transcript, keyed by that run's id — what the Board seeds onto a card.
+	// IncludeMessages adds each task's PRIMARY (newest-started) conversation's
+	// transcript, keyed by that conversation's id — what the Board seeds onto a card.
 	IncludeMessages bool `json:"include_messages"`
 
 	httpx.PageRequest
@@ -1027,14 +1029,14 @@ type conversationListFilterKey struct {
 	IncludeMessages bool     `json:"include_messages"`
 }
 
-// conversationListResponse is the list envelope with the run rows grouped by
+// conversationListResponse is the list envelope with the conversation rows grouped by
 // task id rather than as a flat `items` array.
 //
 // The grouping is the shape callers actually consume, and it is why this route
 // spells its own envelope instead of using httpx.WriteList: a map cannot be a
 // slice. The paging keys mean exactly what they mean everywhere else — the
 // window is over the CONVERSATIONS, ordered (task_id, started_at DESC, id), so
-// a task's runs stay contiguous and total_count counts conversations, not
+// a task's conversations stay contiguous and total_count counts conversations, not
 // tasks.
 //
 // Runs carry the frozen run projection byte-for-byte, PascalCase legacy keys
@@ -1090,36 +1092,36 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		resp.Messages = map[string][]domain.MessageDTO{}
 	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		runs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
+		convs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
 			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
 		}
 		resp.TotalCount = total
-		// One enrichRuns over the whole page keeps the artifact reads O(1)
-		// regardless of task/run count; the index alignment lets us group the
+		// One enrichConversations over the whole page keeps the artifact reads O(1)
+		// regardless of task/conversation count; the index alignment lets us group the
 		// projected responses by task without re-projecting.
-		enriched, e := enrichRuns(r.Context(), tx, orgID, runs)
+		enriched, e := enrichConversations(r.Context(), tx, orgID, convs)
 		if e != nil {
 			return e
 		}
-		var primaryRunIDs []string
+		var primaryConversationIDs []string
 		seenTask := map[string]bool{}
-		for i := range runs {
-			tid := runs[i].TaskID
+		for i := range convs {
+			tid := convs[i].TaskID
 			resp.Runs[tid] = append(resp.Runs[tid], enriched[i])
-			// Runs come back started_at DESC within a task, so the first seen
-			// per task is its primary (newest) run — the one whose transcript
-			// the card shows. "First seen in this page": a task whose runs
+			// Conversations come back started_at DESC within a task, so the first seen
+			// per task is its primary (newest) conversation — the one whose transcript
+			// the card shows. "First seen in this page": a task whose conversations
 			// began on an earlier page has no primary here, which is the same
 			// thing as having no rows here.
 			if !seenTask[tid] {
 				seenTask[tid] = true
-				primaryRunIDs = append(primaryRunIDs, runs[i].ID)
+				primaryConversationIDs = append(primaryConversationIDs, convs[i].ID)
 			}
 		}
-		if req.IncludeMessages && len(primaryRunIDs) > 0 {
-			msgs, e := tx.Conversations.MessagesForRuns(r.Context(), orgID, primaryRunIDs)
+		if req.IncludeMessages && len(primaryConversationIDs) > 0 {
+			msgs, e := tx.Conversations.MessagesForConversations(r.Context(), orgID, primaryConversationIDs)
 			if e != nil {
 				return e
 			}
@@ -1132,13 +1134,13 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 		internalError(w, "agent", err)
 		return
 	}
-	resp.NextPageToken = httpx.NextPageToken(page, len(flattenRunGroups(resp.Runs)), resp.TotalCount)
+	resp.NextPageToken = httpx.NextPageToken(page, len(flattenConversationGroups(resp.Runs)), resp.TotalCount)
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// flattenRunGroups counts the rows a grouped page carries, so the next-token
+// flattenConversationGroups counts the rows a grouped page carries, so the next-token
 // arithmetic sees the same number a flat `items` array would have.
-func flattenRunGroups(groups map[string][]map[string]any) []map[string]any {
+func flattenConversationGroups(groups map[string][]map[string]any) []map[string]any {
 	var out []map[string]any
 	for _, rows := range groups {
 		out = append(out, rows...)

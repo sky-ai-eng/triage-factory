@@ -42,11 +42,11 @@ func (noopChannelCloser) Close() error { return nil }
 // owner is the run's primary repo owner, used to resolve which credential the
 // injector injects. Empty (a Jira run with no repo yet) still resolves the org's
 // account-level credential, which is what a PAT org has anyway.
-func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner string, info agenthost.RunInfo) (*agentproc.GHChannelParams, io.Closer) {
+func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID, owner string, info agenthost.ConversationInfo) (*agentproc.GHChannelParams, io.Closer) {
 	if runmode.Current() != runmode.ModeLocal {
 		return nil, noopChannelCloser{}
 	}
-	if runID == "" {
+	if conversationID == "" {
 		return nil, noopChannelCloser{}
 	}
 
@@ -63,9 +63,9 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 		// Expected on an unpinned platform and on any host that can't reach
 		// the release; both are ordinary, so say what was lost and move on.
 		if errors.Is(err, ghbin.ErrUnsupportedPlatform) {
-			delegateLog.Info("no pinned gh for this platform; run continues on the scoped exec verbs", "run", runID)
+			delegateLog.Info("no pinned gh for this platform; the agent continues on the scoped exec verbs", "conversation", conversationID)
 		} else {
-			delegateLog.Warn("provision pinned gh failed; run continues on the scoped exec verbs", "run", runID, "error", err)
+			delegateLog.Warn("provision pinned gh failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
 		}
 		return nil, noopChannelCloser{}
 	}
@@ -83,9 +83,9 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 	}
 
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:    runID,
-		Upstream: s.githubAPIUpstreamFor(ctx, orgID),
-		BinDir:   filepath.Dir(ghPath),
+		ConversationID: conversationID,
+		Upstream:       s.githubAPIUpstreamFor(ctx, orgID),
+		BinDir:         filepath.Dir(ghPath),
 		// Resolved per request against the live secret store — no caching in
 		// front of it — so a credential rotated mid-run is picked up on the
 		// next call. Local mode has no executor split and no sealed bundle,
@@ -132,11 +132,11 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 		},
 	})
 	if err != nil {
-		delegateLog.Warn("start local gh channel failed; run continues on the scoped exec verbs", "run", runID, "error", err)
+		delegateLog.Warn("start local gh channel failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)
 		return nil, noopChannelCloser{}
 	}
 
-	delegateLog.Info("local gh channel up", "run", runID, "host", ch.Host)
+	delegateLog.Info("local gh channel up", "conversation", conversationID, "host", ch.Host)
 	return &agentproc.GHChannelParams{
 		Host:           ch.Host,
 		Token:          ch.Token,
@@ -150,7 +150,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, runID, owner s
 // The mutation already landed on GitHub, so this is best-effort by construction:
 // the same mapping and the same recording funnel the relayed (multi) path uses,
 // minus the relay — local mode holds the DB in this very process.
-func recordLocalObservation(ctx context.Context, stores db.Stores, info agenthost.RunInfo, m ghinjector.ObservedMutation) {
+func recordLocalObservation(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, m ghinjector.ObservedMutation) {
 	art, ok := agenthost.ObservationArtifact(agentproc.RecordObservationArgs{
 		Kind:        m.Kind,
 		Owner:       m.Owner,
@@ -165,7 +165,7 @@ func recordLocalObservation(ctx context.Context, stores db.Stores, info agenthos
 		Draft:       m.Draft,
 		ReviewID:    m.ReviewID,
 		ReviewState: m.ReviewState,
-	}, info.RunID)
+	}, info.ConversationID)
 	if !ok {
 		return
 	}

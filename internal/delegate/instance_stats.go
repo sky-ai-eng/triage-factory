@@ -159,8 +159,8 @@ func (s *Spawner) sampleInstanceStatsOnce(ctx context.Context, id string, lastOO
 		stat.ActiveRuns = &active
 		claims := s.TakeClaims()
 		stat.Claims = &claims
-		if s.runQueue != nil {
-			if q, err := s.runQueue.CountQueuedSystem(ctx); err != nil {
+		if s.conversationQueue != nil {
+			if q, err := s.conversationQueue.CountQueuedSystem(ctx); err != nil {
 				dispatchLog.Warn("instance stat queue-depth read failed", "error", err)
 			} else {
 				stat.QueuedVisible = &q

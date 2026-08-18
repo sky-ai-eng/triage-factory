@@ -194,12 +194,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// Bot-claimed status='queued' tasks (just-delegated, run
+	// Bot-claimed status='queued' tasks (just-delegated, conversation
 	// not yet advanced) also belong in the Claimed projection so the
 	// board's Claimed column surfaces them and the delegate-spawn-
 	// failure retry UI can render. Without this they'd disappear
 	// between the delegate stamp and the first non-initializing
-	// run-status transition.
+	// conversation-status transition.
 	t.Run("List_claimed_includes_bot_claimed_queued", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "bs-claimed-bot")
@@ -540,10 +540,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// Folding an event into a live run is the bot committing to the task, so
-	// the 'injected' mark and the claim are one durable step: either both land
-	// or neither does, and the board can never show the task free under the
-	// run the event was folded into.
+	// Folding an event into a live conversation is the bot committing to the
+	// task, so the 'injected' mark and the claim are one durable step: either
+	// both land or neither does, and the board can never show the task free
+	// under the conversation the event was folded into.
 	t.Run("MarkEventInjectedSystem_stamps_the_claim_with_the_mark", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, eventID, taskID := seed(t, "inject-claim")
@@ -690,7 +690,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Fatalf("AdvanceStatusForUser: %v", err)
 		}
 		if ok {
-			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by run lifecycle)")
+			t.Error("AdvanceStatusForUser landed on bot-claimed task; should refuse (status owned by the conversation lifecycle)")
 		}
 		got, _ := s.Get(ctx, orgID, taskID)
 		if got.Status != "queued" {

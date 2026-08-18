@@ -36,7 +36,7 @@ func TestFlowControl_IsOneToolGatedOnHavingABlueprint(t *testing.T) {
 		t.Fatalf("type enum = %v, want exactly finish and abort", enum)
 	}
 	for _, v := range enum {
-		if v == string(domain.RunOutcomeContinue) {
+		if v == string(domain.ConversationOutcomeContinue) {
 			t.Error("continue must not be callable: it is what stopping already means")
 		}
 	}
@@ -73,7 +73,7 @@ func TestStopBlueprint_Handler(t *testing.T) {
 	tests := []struct {
 		name         string
 		args         map[string]any
-		wantTerminal domain.RunOutcome
+		wantTerminal domain.ConversationOutcome
 		wantReason   string
 		wantSummary  string
 		wantError    bool
@@ -82,14 +82,14 @@ func TestStopBlueprint_Handler(t *testing.T) {
 		{
 			name:         "finish",
 			args:         map[string]any{"type": "finish", "reason": "nothing to review", "summary": "checked the diff; no reviewable changes"},
-			wantTerminal: domain.RunOutcomeFinish, wantReason: "nothing to review",
+			wantTerminal: domain.ConversationOutcomeFinish, wantReason: "nothing to review",
 			wantSummary: "checked the diff; no reviewable changes",
 			wantContent: "nothing to review",
 		},
 		{
 			name:         "abort",
 			args:         map[string]any{"type": "abort", "reason": "the branch is gone", "summary": "tried to rebase; upstream deleted the branch"},
-			wantTerminal: domain.RunOutcomeAbort, wantReason: "the branch is gone",
+			wantTerminal: domain.ConversationOutcomeAbort, wantReason: "the branch is gone",
 			wantSummary: "tried to rebase; upstream deleted the branch",
 			wantContent: "the branch is gone",
 		},

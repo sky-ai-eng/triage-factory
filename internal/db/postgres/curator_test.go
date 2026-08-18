@@ -69,7 +69,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("alice seed: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != convID {
 		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, convID)
 	}

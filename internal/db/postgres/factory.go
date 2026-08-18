@@ -31,8 +31,8 @@ var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	// Scoped to the viewer's teams by the same tracked-set semi-join the
 	// entity belt uses (factoryEventTrackedExists). The station header's
-	// other counters — Triggered24h (tasks) and ActiveRuns (runs) — are
-	// team-scoped because tasks/runs RLS is team-bound; events RLS is
+	// other counters — Triggered24h (tasks) and ActiveConversations — are
+	// team-scoped because tasks/conversations RLS is team-bound; events RLS is
 	// org-wide (events_all keys on org_id only), so without this an event
 	// on a PR outside the viewer's tracked set would inflate this team's
 	// "items at station" count even though that PR never appears on the
@@ -126,11 +126,11 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 	return out, rows.Err()
 }
 
-// ActiveRuns lists the conversations the factory view treats as in flight:
+// ActiveConversations lists the conversations the factory view treats as in flight:
 // exactly those an engagement is actually driving (an unreleased claim — the
 // setup sub-states ride that claim's phase). Mirrors the X-button window in
 // AgentCard. Duplicated in sqlite/factory.go; intentional per-backend copy.
-func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
+func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	// memory_missing derivation: the agent has not produced
 	// its memory file iff no conversation_memory row exists, OR the row's
 	// agent_content is NULL/whitespace. BTRIM with the whitespace set
@@ -168,7 +168,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	}
 	defer rows.Close()
 
-	var out []domain.FactoryActiveRun
+	var out []domain.FactoryActiveConversation
 	for rows.Next() {
 		var r domain.Conversation
 		var t domain.Task
@@ -177,7 +177,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 		var durationMs, numTurns sql.NullInt64
 		var failureKind, parkReason string
 
-		runTargets := []any{
+		convTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
 			&r.Status, &r.Model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns,
@@ -188,7 +188,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			&failureKind,
 		}
 		var ts taskScanState
-		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {
+		if err := rows.Scan(append(convTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
 		ts.finalize(&t)
@@ -206,9 +206,9 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			v := int(numTurns.Int64)
 			r.NumTurns = &v
 		}
-		r.FailureKind = domain.RunFailureKind(failureKind)
+		r.FailureKind = domain.ConversationFailureKind(failureKind)
 		r.ParkReason = domain.ParkReason(parkReason)
-		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
+		out = append(out, domain.FactoryActiveConversation{Conversation: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()
 }

@@ -247,7 +247,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// jail holds only a placeholder — and, when the broker handed one down, the
 	// shared origin the sandbox's git was just routed at (see ghChannelWanted).
 	if ghChannelWanted(req) {
-		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.RunID, handle.GitHandler())
+		host, token, gerr := r.startGHInjector(req.HostVethIP, req.GHChannelUpstream, req.AgentHost.ConversationID, handle.GitHandler())
 		if gerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -295,17 +295,17 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 // per-request LocalClient runs over a relay runtime (every DB effect relays to
 // the orchestrator) and whose gh/jira verbs route through the REST proxies this
 // sidecar just bound (holding only per-run placeholders). It creates the
-// /run/tf/<runID>.sock the broker bind-mounts into the jail and grants it to the
+// /run/tf/<conversationID>.sock the broker bind-mounts into the jail and grants it to the
 // sandbox group — the same grant the orchestrator used to do, now owned by this
 // process (a member of that group by launch). Identity comes from the
 // orchestrator's AgentHostInfo but is never trusted for org-scoping: every
-// relayed op is re-bound to the orchestrator's own RunInfo.
+// relayed op is re-bound to the orchestrator's own ConversationInfo.
 func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sidecarproto.StartProxiesResult) error {
-	info := agenthost.RunInfo{
+	info := agenthost.ConversationInfo{
 		OrgID:            ai.OrgID,
 		UserID:           ai.UserID,
 		TeamID:           ai.TeamID,
-		RunID:            ai.RunID,
+		ConversationID:   ai.ConversationID,
 		IsEventTriggered: ai.EventTriggered,
 		PinnedRepos:      ai.PinnedRepos,
 	}
@@ -330,7 +330,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		return b.ProviderCreds(namespace)
 	}
 	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, providerCreds), proxyCreds)
-	hd, _, err := startAgentHostSocket(srv, info.RunID)
+	hd, _, err := startAgentHostSocket(srv, info.ConversationID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
 	}
@@ -361,7 +361,7 @@ var (
 // be decided before it. Splitting them would let the sandbox's git be pointed at
 // a shared origin no injector ever serves.
 func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
-	return req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.RunID != ""
+	return req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.ConversationID != ""
 }
 
 // startGHInjector stands up the real-gh credential-injector proxy: generates the
@@ -382,7 +382,7 @@ func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
 // shared origin it binds an ephemeral port of its own and reports host:port —
 // the channel still works for `gh api` and explicitly-scoped commands, and
 // inference stays broken exactly as it was.
-func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHandler http.Handler) (string, string, error) {
+func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID string, gitHandler http.Handler) (string, string, error) {
 	if upstream == "" {
 		upstream = "https://api.github.com"
 	}
@@ -395,14 +395,14 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 	// before that launch, so writing here is early enough. It carries the host's
 	// system roots plus this run's leaf, because SSL_CERT_FILE is process-global
 	// in the jail — see ghinjector.TrustBundlePEM for why that widens nothing.
-	if err := writeInjectorCert(runID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
+	if err := writeInjectorCert(conversationID, ghinjector.TrustBundlePEM(certPEM)); err != nil {
 		return "", "", fmt.Errorf("runsidecar: write gh-injector cert: %w", err)
 	}
 	token, err := randomToken()
 	if err != nil {
 		return "", "", err
 	}
-	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, runID, gitHandler))
+	srv, err := ghinjector.New(r.ghInjectorConfig(upstream, cert, token, conversationID, gitHandler))
 	if err != nil {
 		return "", "", fmt.Errorf("runsidecar: construct gh injector: %w", err)
 	}
@@ -429,12 +429,12 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, runID string, gitHan
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
-func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token, runID string, gitHandler http.Handler) ghinjector.Config {
+func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, token, conversationID string, gitHandler http.Handler) ghinjector.Config {
 	return ghinjector.Config{
 		Upstream:         upstream,
 		IncomingToken:    token,
 		Cert:             cert,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		AllowNonLoopback: true,
 		// The run's git proxy, re-homed behind this listener so the API and git
 		// share one origin. Same handler as the standalone git-proxy listener:

@@ -22,7 +22,7 @@ import (
 const ExitCodeIdentitySuperseded = 3
 
 // buildReaper resolves the fleet-reaper knobs (TF_SELF_FENCE_SEC,
-// TF_REAPER_STALE_SEC, TF_RUN_MAX_ATTEMPTS), wires the spawner's partition
+// TF_REAPER_STALE_SEC, TF_MAX_CLAIM_ATTEMPTS), wires the spawner's partition
 // self-fence deadline and supersession exit hook (every role, every mode —
 // supersession is structurally unreachable outside a shared multi-mode
 // registry, so this is a safe no-op elsewhere), and — for brain-capable
@@ -45,9 +45,9 @@ func (a *App) buildReaper() error {
 	if selfFence >= staleThreshold {
 		return fmt.Errorf("self-fence deadline (%s) must be strictly less than the reaper staleness threshold (%s)", selfFence, staleThreshold)
 	}
-	maxAttempts, err := reaper.ParseMaxAttempts(os.Getenv("TF_RUN_MAX_ATTEMPTS"))
+	maxAttempts, err := reaper.ParseMaxAttempts(os.Getenv("TF_MAX_CLAIM_ATTEMPTS"))
 	if err != nil {
-		return fmt.Errorf("run max attempts: %w", err)
+		return fmt.Errorf("claim max attempts: %w", err)
 	}
 
 	a.spawner.SetSelfFenceDeadline(selfFence)

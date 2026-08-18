@@ -161,7 +161,7 @@ func TestAuditDrop_RelayDecodeFailureIsCounted(t *testing.T) {
 // so it is counted under the clamp rather than verbatim.
 func TestAuditDrop_UnsupportedNotifyOpIsCounted(t *testing.T) {
 	reader := installTestAuditDrops(t)
-	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, "record_something_invented", json.RawMessage(`{}`))
 
@@ -176,7 +176,7 @@ func TestAuditDrop_UnsupportedNotifyOpIsCounted(t *testing.T) {
 // frame carrying the report arrived fine; the record it describes did not.
 func TestAuditDrop_SidecarSendReportIsCounted(t *testing.T) {
 	reader := installTestAuditDrops(t)
-	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
 	args, _ := json.Marshal(agentproc.RecordRelayDropArgs{
 		Namespace: agentproc.RelayNamespaceCore,
@@ -200,7 +200,7 @@ func TestAuditDrop_SidecarSendReportIsCounted(t *testing.T) {
 // be an unbounded-cardinality write into the orchestrator's exporter.
 func TestAuditDrop_WireOpNamesAreClamped(t *testing.T) {
 	reader := installTestAuditDrops(t)
-	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
 	for _, a := range []agentproc.RecordRelayDropArgs{
 		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_one"},
@@ -228,10 +228,10 @@ func TestAuditDrop_RegisteredProviderOpIsNamed(t *testing.T) {
 	reader := installTestAuditDrops(t)
 	t.Cleanup(ResetProviders)
 	RegisterProviderOp("acmeprov", "record_thing",
-		func(context.Context, db.Stores, RunInfo, json.RawMessage) (any, error) {
+		func(context.Context, db.Stores, ConversationInfo, json.RawMessage) (any, error) {
 			return nil, errors.New("handler blew up")
 		})
-	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
 	// The send stage: the sidecar reporting it could not relay that provider's
 	// record.

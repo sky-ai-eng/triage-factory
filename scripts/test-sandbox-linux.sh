@@ -185,7 +185,7 @@ fi
 # The exec-verb socket server relocated INTO the credential sidecar: this runs
 # the relocated host exactly the way the sidecar does (NewServerWithRuntime over
 # a relay runtime on the real /run/tf socket) and drives a real IPCClient
-# through it — LookupRun + a DB verb that relays to the orchestrator's
+# through it — LookupConversation + a DB verb that relays to the orchestrator's
 # RelayServer. Root-gated (the socket lives under /run/tf); needs no runsc, so
 # it complements the gVisor connect-mechanism check in Stage 4's
 # TestIntegration_AgentHostIPC_RoundTrip.

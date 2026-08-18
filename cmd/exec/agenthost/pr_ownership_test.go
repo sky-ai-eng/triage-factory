@@ -13,7 +13,7 @@ import (
 // prOwnershipFixture is the shared setup for the stamp tests: capture stores
 // wired to an in-memory DB, plus a second team to play the part of an owner
 // this path must not be able to displace.
-func prOwnershipFixture(t *testing.T) (*sql.DB, db.Stores, RunInfo, string) {
+func prOwnershipFixture(t *testing.T) (*sql.DB, db.Stores, ConversationInfo, string) {
 	t.Helper()
 	conn, stores, info := newCaptureStoresConn(t, true)
 	const otherTeam = "22222222-2222-2222-2222-222222222222"
@@ -130,11 +130,11 @@ func TestStampPROwnership_DoesNotOverwriteExistingOwner(t *testing.T) {
 	}
 }
 
-// TestStampPROwnership_NoTeamOnRun is the defensive case. Auto-delegation is
+// TestStampPROwnership_NoTeamOnConversation is the defensive case. Auto-delegation is
 // gated on an owned task, so a teamless run should not reach the funnel — but
 // if one does there is no owner to record, and it must leave the column NULL
 // for a later writer rather than erroring or stamping something empty.
-func TestStampPROwnership_NoTeamOnRun(t *testing.T) {
+func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 	ctx := context.Background()
 	_, stores, info, _ := prOwnershipFixture(t)
 
@@ -182,7 +182,7 @@ func TestStampPROwnership_WithAction(t *testing.T) {
 	var touches int
 	if err := conn.QueryRow(
 		`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ? AND role = 'touched'`,
-		info.RunID, ent.ID,
+		info.ConversationID, ent.ID,
 	).Scan(&touches); err != nil {
 		t.Fatalf("count touches: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership(t *testing.T) {
 
 	a := domain.NewSubmittedReviewArtifact(
 		"octo/repo", 42, 9001, "APPROVE",
-		"https://github.com/octo/repo/pull/42#pullrequestreview-9001", info.RunID)
+		"https://github.com/octo/repo/pull/42#pullrequestreview-9001", info.ConversationID)
 	// Same owner/repo#N target the PR artifact carries — the kind is the only
 	// thing separating them, which is exactly what this asserts.
 	if a.Target != "octo/repo#42" {

@@ -36,7 +36,7 @@ func TestSetExecutorID_OverridesConstructorDefault(t *testing.T) {
 		t.Fatalf("executorIdentity() = (%q, %d), want (%q, %d)", gotID, gotEpoch, "persistent-instance-id", 7)
 	}
 
-	seedRun(t, database, "run-stamp", "sess-1", "/tmp/wt-run-stamp")
+	seedConversation(t, database, "run-stamp", "sess-1", "/tmp/wt-run-stamp")
 	s.stampExecutor(runmode.LocalDefaultOrgID, "run-stamp", "")
 
 	var stored string
@@ -56,7 +56,7 @@ func TestHeartbeatOnce_WritesLiveCapacitySnapshot(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
 	s := NewSpawner(database, stores, nil, nil, "")
-	s.SetMaxConcurrentRuns(3)
+	s.SetMaxConcurrentClaims(3)
 
 	ctx := context.Background()
 	const id = "hb-instance"
@@ -82,7 +82,7 @@ func TestHeartbeatOnce_WritesLiveCapacitySnapshot(t *testing.T) {
 		t.Fatal("expected a registered row")
 	}
 	if got.MaxRuns == nil || *got.MaxRuns != 3 {
-		t.Errorf("MaxRuns = %v, want 3 (SetMaxConcurrentRuns)", got.MaxRuns)
+		t.Errorf("MaxRuns = %v, want 3 (SetMaxConcurrentClaims)", got.MaxRuns)
 	}
 	if got.ActiveRuns == nil || *got.ActiveRuns != 1 {
 		t.Errorf("ActiveRuns = %v, want 1 (one held semaphore slot)", got.ActiveRuns)

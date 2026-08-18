@@ -6,7 +6,7 @@
 // rebuilds from the snapshot — never a brick.
 //
 // Two snapshot triggers are wired today: idle hibernation to `open`
-// (markRunOpen, live.go) and every non-failed terminal — which after the
+// (markConversationOpen, live.go) and every non-failed terminal — which after the
 // terminal vocabulary shrank to completed|failed is `completed`, whatever the
 // outcome (processCompletion). A third — an executor-drain/scale-down trigger —
 // is a forward seam for the execution-plane split: there are no executors to
@@ -104,16 +104,16 @@ func snapshotKey(orgID, keyID string) string {
 //
 // runtime is the conversation's engine (domain.ConversationRuntimeSDK |
 // ConversationRuntimeNative), carried onto the span family because the blob's
-// members are not runtime-agnostic: only a delegated SDK run snapshots a
-// session transcript, so transcript sizes read without the attribute would
-// look like a property of all snapshots. Empty is a caller that doesn't know
+// members are not runtime-agnostic: only a delegated SDK-runtime conversation
+// snapshots a session transcript, so transcript sizes read without the
+// attribute would look like a property of all snapshots. Empty is a caller that doesn't know
 // (a fixture), and simply omits the attribute.
 //
 // Best-effort by contract: callers log and proceed on error, because the warm
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wtPath, sessionID, runtime string) (err error) {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, wtPath, sessionID, runtime string) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
@@ -130,7 +130,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wt
 	if runtime != "" {
 		attrs = append(attrs, telemetry.Runtime(runtime))
 	}
-	ctx, span := s.startPunctual(ctx, runID, "workspace.snapshot", attrs...)
+	ctx, span := s.startPunctual(ctx, conversationID, "workspace.snapshot", attrs...)
 	defer func() {
 		recordSpanError(span, err)
 		span.End()
@@ -315,7 +315,7 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 			// resume from it will hit the transcript-missing guard and fail.
 			// Surface it: this is otherwise silent, and it's exactly the shape that
 			// produced a resume-fails-with-no-reason report.
-			delegateLog.Warn("snapshot omits session transcript; a resume of this run will not be able to continue the conversation", "session", sessionID, "worktree", wtPath)
+			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", sessionID, "worktree", wtPath)
 		}
 	}
 	manBytes, err := json.Marshal(man)
@@ -415,12 +415,12 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
 //
-// run.ClaimID is read, not just carried: a cold rebuild re-stamps
+// conv.ClaimID is read, not just carried: a cold rebuild re-stamps
 // worktree_path, and that write is this engagement's to make only while it
 // still holds the conversation. Every caller is a claimed dispatch, so it is
 // populated at both — including the config the step builder synthesizes, which
 // copies it across for exactly this reason.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
 	// The provenance IS the interesting part of this span: a warm reuse is a
 	// stat call and a cold rehydrate is a blob fetch plus a git rebuild, and
 	// nothing downstream can tell them apart afterwards — past here they are
@@ -435,37 +435,37 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		span.End()
 	}()
 
-	if run.WorktreePath != "" {
-		if _, err := os.Stat(run.WorktreePath); err == nil {
-			return run.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
+	if conv.WorktreePath != "" {
+		if _, err := os.Stat(conv.WorktreePath); err == nil {
+			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
 		}
 	}
 
 	blobs := s.Storage()
 	if blobs == nil {
-		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", run.WorktreePath)
+		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
-	keyID := memoryNamespace(run.BlueprintRunID, run.ID)
+	keyID := memoryNamespace(conv.BlueprintRunID)
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", run.WorktreePath, keyID)
+			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", conv.WorktreePath, keyID)
 		}
 		return "", "", fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
-	// run.WorktreePath on the same host; a fresh path after landing elsewhere).
+	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
 	if rErr := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); rErr != nil {
 		return "", "", rErr
 	}
-	if wtDir != run.WorktreePath {
+	if wtDir != conv.WorktreePath {
 		// Point the run (and the cleanup paths that key off it) at the rebuilt
 		// worktree. System write — resume goroutines hold no JWT claims.
 		// Non-fatal: the rebuilt path is returned and this resume proceeds. But
-		// run.WorktreePath stays stale, so the NEXT resume won't find the
+		// conv.WorktreePath stays stale, so the NEXT resume won't find the
 		// warm copy and will cold-rehydrate again (correct, just slower) — log
 		// it distinctly so unexpected repeat rehydrates are diagnosable.
 		//
@@ -475,8 +475,8 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, run *domain
 		// has already logged the fact that actually happened — this executor
 		// lost the conversation — and saying anything further here would file
 		// a lost claim under slow rehydrates.
-		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, run.ID, run.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
-			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "run", run.ID, "error", wErr)
+		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
+			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "conversation", conv.ID, "error", wErr)
 		}
 	}
 	return wtDir, domain.WorkspaceProvenanceRehydrated, nil
@@ -619,19 +619,20 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	return nil
 }
 
-// DiscardWorkspaceSnapshot deletes the durable workspace snapshot for a
-// standalone (non-blueprint) run that has reached a terminal state via the
-// approval path: the artifact-approve handler calls it for a standalone run
-// whose approval is its terminal — the single-run mirror of terminateBlueprint's
-// snapshot cleanup. Keyed by run_id (a standalone run's snapshot key).
-// Idempotent and nil-safe.
-func (s *Spawner) DiscardWorkspaceSnapshot(orgID, runID string) {
-	s.discardWorkspaceSnapshot(context.Background(), orgID, runID)
+// DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
+// a caller outside the package that terminates a blueprint's work by a route of
+// its own rather than through terminateBlueprint. Idempotent and nil-safe.
+//
+// It takes the blueprint run id, not a conversation id: the snapshot key is the
+// memory namespace (see snapshotKey), so a conversation id names a blob that
+// was never written and the discard silently does nothing.
+func (s *Spawner) DiscardWorkspaceSnapshot(orgID, blueprintRunID string) {
+	s.discardWorkspaceSnapshot(context.Background(), orgID, blueprintRunID)
 }
 
 // discardWorkspaceSnapshot deletes a parked workspace's snapshot blob once the
 // run/blueprint it belonged to reaches a terminal state, so durable storage
-// doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID, runID).
+// doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID).
 // Idempotent — Delete on a missing key is a no-op — so terminal paths call it
 // unconditionally without first checking whether a snapshot was ever written.
 func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID string) {

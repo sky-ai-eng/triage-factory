@@ -85,7 +85,7 @@ func TestRun_EndTurnStopStillConcludesExactlyAsBefore(t *testing.T) {
 	if got.Kind != ResultConcluded {
 		t.Fatalf("disposition = %v (err: %v), want concluded", got.Kind, got.Err)
 	}
-	if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "All done." {
+	if got.Outcome != domain.ConversationOutcomeContinue || got.ResultSummary != "All done." {
 		t.Errorf("result = %+v, want outcome continue with the final text as the summary", got)
 	}
 	if calls := host.calls(); len(calls) != 1 || calls[0] != "bash" {

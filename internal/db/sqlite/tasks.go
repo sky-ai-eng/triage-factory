@@ -293,8 +293,8 @@ func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventI
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return s.CountConsecutiveFailedRuns(ctx, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return s.CountConsecutiveFailedConversations(ctx, orgID, entityID, promptID)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -546,13 +546,13 @@ func closeTaskRows(ctx context.Context, q queryer, taskID, closeReason, closeEve
 	return res.RowsAffected()
 }
 
-// scanActiveRunIDs drains the task's non-terminal conversation ids and closes
+// scanActiveConversationIDs drains the task's non-terminal conversation ids and closes
 // the cursor before returning.
-func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+func scanActiveConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE task_id = ?
-		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -569,13 +569,13 @@ func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, 
 	return out, rows.Err()
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, nil, err
 	}
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.q, func(q queryer) error {
 		n, err := closeTaskRows(ctx, q, taskID, closeReason, closeEventType)
@@ -599,8 +599,8 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		// Drained and closed before the UPDATE below rather than on a defer:
 		// both ride the one connection this tx holds, and an open cursor is
 		// the kind of thing a driver is entitled to refuse to write around.
-		if runIDs, err = scanActiveRunIDs(ctx, q, taskID); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+		if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// `status = 'running' AND cancel_requested = 0` is
@@ -616,7 +616,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 			      SELECT c.blueprint_run_id FROM conversations c
 			      WHERE c.task_id = ?
 			        AND c.blueprint_run_id IS NOT NULL
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)
@@ -626,7 +626,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
@@ -1044,7 +1044,7 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}

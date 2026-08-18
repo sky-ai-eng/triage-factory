@@ -36,9 +36,9 @@ var hostToolHostBinaryPath = sandboxToolHostBinary
 // much narrower than RunOptions: the jail runs a tool server, not an agent,
 // so there is no model, no prompt, no allowlist, and no stream to parse.
 type ToolHostOptions struct {
-	// RunID is the conversation id — the sandbox container id, the run-tree
+	// ConversationID is the conversation id — the sandbox container id, the run-tree
 	// key, and what the socket directory is named after.
-	RunID string
+	ConversationID string
 	// MemoryNamespace is the blueprint run id, the run tree's second
 	// legitimate key (a cold rehydrate rebuilds under it).
 	MemoryNamespace string
@@ -256,8 +256,8 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 		launchSpan.End()
 	}()
 
-	if opts.RunID == "" {
-		return nil, fmt.Errorf("agentproc: tool host launch requires a run id")
+	if opts.ConversationID == "" {
+		return nil, fmt.Errorf("agentproc: tool host launch requires a conversation id")
 	}
 	if opts.Worktree == "" {
 		return nil, fmt.Errorf("agentproc: tool host launch requires a worktree")
@@ -269,7 +269,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 		return nil, fmt.Errorf("agentproc: tool host launch requires the agenthost socket mount — without it every exec verb inside the jail is stranded")
 	}
 
-	sockDir, listener, err := prepareToolHostSocket(opts.RunID)
+	sockDir, listener, err := prepareToolHostSocket(opts.ConversationID)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func LaunchToolHost(ctx context.Context, opts ToolHostOptions) (_ *ToolHostJail,
 	}
 
 	run, sb, err := sandbox.Wrap(ctx, sandbox.Config{
-		RunID:           opts.RunID,
+		ConversationID:  opts.ConversationID,
 		MemoryNamespace: opts.MemoryNamespace,
 		Worktree:        opts.Worktree,
 		SDKDir:          opts.SDKDir,
@@ -347,7 +347,7 @@ func memoryLimitOrDefault(mb int) int {
 	if mb > 0 {
 		return mb
 	}
-	return RunMemoryLimitMB()
+	return ClaimMemoryLimitMB()
 }
 
 // prepareToolHostSocket creates the per-run directory, binds the tool host's
@@ -366,8 +366,8 @@ func memoryLimitOrDefault(mb int) int {
 // sandbox identity (or group-granted when this process is not root) and
 // chmodded 0660. The directory is setgid so anything created inside it later
 // carries the same group.
-func prepareToolHostSocket(runID string) (string, net.Listener, error) {
-	dir := sandbox.TrustedToolHostSocketDir(runID)
+func prepareToolHostSocket(conversationID string) (string, net.Listener, error) {
+	dir := sandbox.TrustedToolHostSocketDir(conversationID)
 	// A stale directory from a crashed predecessor would carry a dead socket
 	// that would make bind fail with EADDRINUSE, and its mode may not have
 	// survived either; recreate from scratch.

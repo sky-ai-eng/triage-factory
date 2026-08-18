@@ -72,7 +72,7 @@ func TestRegisterExtension_PanicsOnDuplicate(t *testing.T) {
 func TestLocalClient_CallExtension_UnknownNamespace(t *testing.T) {
 	t.Cleanup(ResetExtensions)
 	stores, _ := newTestDB(t)
-	c := NewLocal(stores, RunInfo{OrgID: "org-1", RunID: "run-1"})
+	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	if _, err := c.CallExtension(context.Background(), "nope", "do", nil); err == nil {
 		t.Fatal("expected an error for an unregistered namespace")
@@ -94,7 +94,7 @@ func TestLocalClient_CallExtension_NoProvider_NotEnabled(t *testing.T) {
 	})
 
 	stores, _ := newTestDB(t)
-	c := NewLocal(stores, RunInfo{OrgID: "org-1", RunID: "run-1"})
+	c := NewLocal(stores, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	_, err := c.CallExtension(context.Background(), "fake", "do", nil)
 	if err == nil {
@@ -105,17 +105,17 @@ func TestLocalClient_CallExtension_NoProvider_NotEnabled(t *testing.T) {
 	}
 }
 
-// TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo pins the
+// TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo pins the
 // success path: a Provider that grants the feature lets the call through,
 // the run's identity threads to the handler unmodified, and args/result
 // round-trip.
-func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing.T) {
+func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithConversationInfo(t *testing.T) {
 	t.Cleanup(ResetExtensions)
 	t.Cleanup(entitlements.Reset)
 	entitlements.RegisterProvider(entitlements.Static(fakeExtensionFeature))
 
-	info := RunInfo{OrgID: "org-1", UserID: "user-1", RunID: "run-1", TeamID: "team-1"}
-	var gotInfo RunInfo
+	info := ConversationInfo{OrgID: "org-1", UserID: "user-1", ConversationID: "conv-1", TeamID: "team-1"}
+	var gotInfo ConversationInfo
 	var gotMethod string
 	var gotArgs json.RawMessage
 	RegisterExtension("fake", fakeExtensionFeature, func(_ context.Context, rt ExtensionRuntime, method string, args json.RawMessage) (json.RawMessage, error) {
@@ -133,7 +133,7 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing
 		t.Fatalf("CallExtension: %v", err)
 	}
 	if !reflect.DeepEqual(gotInfo, info) {
-		t.Errorf("handler saw RunInfo %+v, want %+v", gotInfo, info)
+		t.Errorf("handler saw ConversationInfo %+v, want %+v", gotInfo, info)
 	}
 	if gotMethod != "post" {
 		t.Errorf("handler saw method %q, want %q", gotMethod, "post")
@@ -147,9 +147,9 @@ func TestLocalClient_CallExtension_Entitled_InvokesHandlerWithRunInfo(t *testing
 }
 
 // startExtensionTestDaemon spins up a real Server + unix listener for info,
-// mirroring the harness in agenthost_test.go (TestServer_LookupRun_RoundTrip
+// mirroring the harness in agenthost_test.go (TestServer_LookupConversation_RoundTrip
 // et al.). Returns a connected IPCClient; cleanup is registered via t.Cleanup.
-func startExtensionTestDaemon(t *testing.T, info RunInfo) *IPCClient {
+func startExtensionTestDaemon(t *testing.T, info ConversationInfo) *IPCClient {
 	t.Helper()
 	stores, _ := newTestDB(t)
 	sockPath := tempSocket(t)
@@ -180,7 +180,7 @@ func TestIPCClient_CallExtension_EntitledRoundTrip(t *testing.T) {
 		return json.RawMessage(fmt.Sprintf(`{"echo":%q}`, method)), nil
 	})
 
-	client := startExtensionTestDaemon(t, RunInfo{OrgID: "org-1", RunID: "run-1"})
+	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	result, err := client.CallExtension(context.Background(), "fake", "post", json.RawMessage(`{"a":1}`))
 	if err != nil {
@@ -203,7 +203,7 @@ func TestIPCClient_CallExtension_DaemonRefusal_SurfacesErrorString(t *testing.T)
 		return nil, nil
 	})
 
-	client := startExtensionTestDaemon(t, RunInfo{OrgID: "org-1", RunID: "run-1"})
+	client := startExtensionTestDaemon(t, ConversationInfo{OrgID: "org-1", ConversationID: "conv-1"})
 
 	_, err := client.CallExtension(context.Background(), "fake", "post", nil)
 	if err == nil {

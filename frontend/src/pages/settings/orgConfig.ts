@@ -237,7 +237,7 @@ export function dailyCapError(raw: string): string | null {
   return null
 }
 
-// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentRunsCeiling — a sanity
+// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentClaimsCeiling — a sanity
 // bound far beyond any real fleet that keeps a validated value inside the
 // backend's int4 column. Kept in sync with the Go constant by hand (there's no
 // shared source), like the `>= 0` guard below mirrors the handler.

@@ -384,7 +384,7 @@ fields.
   passes `limit=0` which the store rewrites to `LIMIT 5000` —
   percentiles computed over a silently truncated set
   (`usage_ops_handler.go:58`,
-  `internal/db/postgres/run_queue.go:981-983`).
+  `internal/db/postgres/conversation_queue.go:984-986`).
 - `POST /api/settings/team/{id}` — grace seconds silently clamped;
   `ai_reprioritize_threshold`/interval unvalidated; `ai_model`
   any-string while sibling enums 400; present-but-empty
@@ -536,8 +536,8 @@ kinds (`artifacts_handler.go:144-146` — nonexistence conflated with
 unsupported-representation); `GET …/github/app` returns 200 `app:null`
 where install-url and cutover-preflight 404 the same absent-App state;
 `connect_available` lives on the *jira app* status but the *github
-identity* status; the run projection mixes PascalCase legacy keys with
-snake_case additions in one object (`agent.go:388-430`), and the
+identity* status; the conversation projection mixes PascalCase legacy keys
+with snake_case additions in one object (`agent.go:388-430`), and the
 factory snapshot deliberately clones that accident into a second route
 (`factory_handler.go:62-82`).
 

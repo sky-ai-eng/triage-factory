@@ -536,12 +536,12 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 }
 
-// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step runs
+// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step conversations
 // minted while enqueueBlueprintStep dropped the firing trigger (trigger_type =
 // 'event' with a NULL trigger_id — the shape every autonomous run carried
 // after the blueprint orchestrator unification) are healed from their parent
 // blueprint_run's frozen trigger_id, so historical autonomous spend regains
-// its by-rule attribution in llm_spend. Manual step runs (parent carries no
+// its by-rule attribution in llm_spend. Manual step conversations (parent carries no
 // trigger) stay NULL.
 func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 	database, err := sql.Open("sqlite", TestDSNMemory)
@@ -568,7 +568,7 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 		t.Fatalf("seed event types: %v", err)
 	}
 
-	// Minimal FK chain for two step runs: one under an event-fired
+	// Minimal FK chain for two step conversations: one under an event-fired
 	// blueprint_run (trigger frozen on the parent only — the bug shape), one
 	// under a manual blueprint_run. The sentinel user satisfies
 	// conversations.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
@@ -743,10 +743,10 @@ func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
 	if err := database.QueryRow(
 		`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-cost' AND cost_usd IS NOT NULL`,
 	).Scan(&n); err != nil {
-		t.Fatalf("count stamped run rows: %v", err)
+		t.Fatalf("count stamped conversation rows: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("stamped run rows = %d, want 1 (one lump, no proration)", n)
+		t.Errorf("stamped conversation rows = %d, want 1 (one lump, no proration)", n)
 	}
 	assertCost("run total via SUM",
 		`SELECT SUM(cost_usd) FROM messages WHERE conversation_id = 'r-cost'`, 1.5)

@@ -176,7 +176,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			return id
 		},
-		Run: func(t *testing.T, taskID, status string) string {
+		Conversation: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			// conversations.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
 			// the task first (the firing unit), then link the run to it.
@@ -209,7 +209,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'team', $4, $5, 'manual', $6, $7)
 			`, id, orgID, userID, taskID, promptID, stored, brID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
@@ -230,14 +230,14 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 					VALUES ($1, $2, $3, $4, NULL)
-				`, memID, orgID, runID, entityID); err != nil {
+				`, memID, orgID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -245,7 +245,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 				VALUES ($1, $2, $3, $4, $5)
-			`, memID, orgID, runID, entityID, content); err != nil {
+			`, memID, orgID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},

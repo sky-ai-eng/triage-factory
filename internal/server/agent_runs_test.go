@@ -15,35 +15,35 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// TestHandleConversations_Batched pins the aggregated run-list path the Board
+// TestHandleConversations_Batched pins the aggregated conversation-list path the Board
 // uses to collapse its per-refresh fan-out (TFAC-98): one
-// POST /api/agent/conversations/list {task_ids, include_messages} returns runs
-// grouped per task (newest-first) plus each task's PRIMARY-run transcript keyed
-// by run id.
+// POST /api/agent/conversations/list {task_ids, include_messages} returns the
+// `runs` map grouped per task (newest-first) plus each task's PRIMARY
+// conversation's transcript keyed by conversation id.
 func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
-	// Task A: a primary (newest) run plus an older run on the same task.
-	primaryA := seedSteerRun(t, s.db, "ba", "completed") // run r_ba on task t_ba, started_at≈now
+	// Task A: a primary (newest) conversation plus an older one on the same task.
+	primaryA := seedSteerConversation(t, s.db, "ba", "completed") // conversation r_ba on task t_ba, started_at≈now
 	taskA := fixtureUUID("t_ba")
 	olderA := fixtureUUID("r_ba_old")
 	brOld := seedBlueprintRunSQLite(t, s.db, taskA)
 	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, ?, 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, fixtureUUID("p_ba"), brOld)
 
-	// Task B: a single run.
-	primaryB := seedSteerRun(t, s.db, "bb", "running") // run r_bb on task t_bb
+	// Task B: a single conversation.
+	primaryB := seedSteerConversation(t, s.db, "bb", "running") // run r_bb on task t_bb
 	taskB := fixtureUUID("t_bb")
 
 	store := sqlitestore.New(s.db)
-	seedMsg := func(runID, content string) {
+	seedMsg := func(conversationID, content string) {
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content,
+			ConversationID: conversationID, Role: "assistant", Content: content,
 		}); err != nil {
-			t.Fatalf("InsertMessage(%s): %v", runID, err)
+			t.Fatalf("InsertMessage(%s): %v", conversationID, err)
 		}
 	}
 	seedMsg(primaryA, "primary-a")
-	seedMsg(olderA, "older-a") // must NOT appear — only the primary run's transcript is returned
+	seedMsg(olderA, "older-a") // must NOT appear — only the primary conversation's transcript is returned
 	seedMsg(primaryB, "primary-b")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
@@ -60,27 +60,27 @@ func TestHandleConversations_Batched(t *testing.T) {
 		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 	}
 
-	// Runs grouped per task; task A has both runs, newest first.
+	// Runs grouped per task; task A has both conversations, newest first.
 	if len(resp.Runs[taskA]) != 2 {
-		t.Fatalf("task A runs = %d, want 2", len(resp.Runs[taskA]))
+		t.Fatalf("task A conversations = %d, want 2", len(resp.Runs[taskA]))
 	}
 	if got, _ := resp.Runs[taskA][0]["ID"].(string); got != primaryA {
 		t.Errorf("task A primary (runs[0]) = %q, want %q (newest first)", got, primaryA)
 	}
 	if len(resp.Runs[taskB]) != 1 {
-		t.Fatalf("task B runs = %d, want 1", len(resp.Runs[taskB]))
+		t.Fatalf("task B conversations = %d, want 1", len(resp.Runs[taskB]))
 	}
 
-	// Messages: only the primary run per task, keyed by run id (the older run's
-	// transcript is deliberately excluded — bounded payload, matches the
-	// single-task path's latestRun).
+	// Messages: only the primary conversation per task, keyed by conversation id
+	// (the older conversation's transcript is deliberately excluded — bounded
+	// payload, matches the single-task path's latestConversation in Board.tsx).
 	if _, ok := resp.Messages[olderA]; ok {
-		t.Errorf("messages included older run %s; want only primary runs", olderA)
+		t.Errorf("messages included older conversation %s; want only primary conversations", olderA)
 	}
-	assertMsg := func(runID, want string) {
-		ms := resp.Messages[runID]
+	assertMsg := func(conversationID, want string) {
+		ms := resp.Messages[conversationID]
 		if len(ms) != 1 || ms[0]["content"] != want {
-			t.Errorf("messages[%s] = %v, want one %q", runID, ms, want)
+			t.Errorf("messages[%s] = %v, want one %q", conversationID, ms, want)
 		}
 	}
 	assertMsg(primaryA, "primary-a")
@@ -103,7 +103,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 	}
 }
 
-// TestHandleConversations_MissingParams pins that the run-list endpoint still
+// TestHandleConversations_MissingParams pins that the conversation-list endpoint still
 // requires a task selector — an absent task_ids is a 400, and so is one whose
 // entries are all blank.
 func TestHandleConversations_MissingParams(t *testing.T) {
@@ -121,11 +121,11 @@ func TestHandleConversations_MissingParams(t *testing.T) {
 // TestHandleConversations_BatchedCap pins the task_ids cap: a request beyond
 // maxBatchTaskIDs is REJECTED, not truncated. Truncation answered an oversized
 // board with a board-shaped payload silently missing its tail — the caller had
-// no way to tell the difference between "that task has no runs" and "we
+// no way to tell the difference between "that task has no conversations" and "we
 // stopped reading at 500".
 func TestHandleConversations_BatchedCap(t *testing.T) {
 	s := newTestServer(t)
-	_ = seedSteerRun(t, s.db, "cap", "running") // run on task t_cap
+	_ = seedSteerConversation(t, s.db, "cap", "running") // run on task t_cap
 	taskID := fixtureUUID("t_cap")
 
 	pad := func(n int) []string {
@@ -149,7 +149,7 @@ func TestHandleConversations_BatchedCap(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(resp.Runs[taskID]) != 1 {
-		t.Errorf("at cap: task runs = %d, want 1", len(resp.Runs[taskID]))
+		t.Errorf("at cap: task conversations = %d, want 1", len(resp.Runs[taskID]))
 	}
 
 	// One past the cap: 400 OUT_OF_RANGE naming the field, nothing served.
@@ -191,20 +191,20 @@ func TestHandleConversations_RejectsUnknownField(t *testing.T) {
 }
 
 // TestHandleMessages_SinceID pins the transcript read's optional watermark: the
-// run station polls with it to repair rows whose websocket frame was dropped,
+// RunStation polls with it to repair rows whose websocket frame was dropped,
 // and every other caller — which passes nothing — must keep getting the whole
 // transcript. An unparseable or negative value is a 400: answering "give me
 // what I'm missing" with the whole transcript is the silent widening a corrupt
 // param must never buy.
 func TestHandleMessages_SinceID(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "since", "running")
+	conversationID := seedSteerConversation(t, s.db, "since", "running")
 
 	store := sqlitestore.New(s.db)
 	ids := map[string]int{}
 	for _, content := range []string{"first", "second", "third"} {
 		id, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: content,
+			ConversationID: conversationID, Role: "assistant", Content: content,
 		})
 		if err != nil {
 			t.Fatalf("InsertMessage(%s): %v", content, err)
@@ -214,7 +214,7 @@ func TestHandleMessages_SinceID(t *testing.T) {
 
 	contents := func(query string) []string {
 		t.Helper()
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+query, nil)
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+query, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("GET messages%s = %d; body=%s", query, rec.Code, rec.Body.String())
 		}
@@ -251,27 +251,27 @@ func TestHandleMessages_SinceID(t *testing.T) {
 	// A watermark that isn't one fails the read rather than silently widening
 	// it back to the whole transcript.
 	for _, bad := range []string{"?since_id=nonsense", "?since_id=-5"} {
-		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/messages"+bad, nil)
+		rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/messages"+bad, nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("GET messages%s = %d, want 400; body=%s", bad, rec.Code, rec.Body.String())
 		}
 	}
 }
 
-// TestRunResponse_TokenSums pins the four token rollups onto the run wire
-// shape: the read already SUMs them per conversation, so the run station's
+// TestConversationResponse_TokenSums pins the four token rollups onto the run
+// wire shape: the read already SUMs them per conversation, so the RunStation's
 // telemetry rail reads the same authoritative numbers the usage dashboard
 // does instead of re-summing the transcript client-side. Emitted as plain
-// snake_case ints — a run with no usage-bearing message reads 0, never absent.
-func TestRunResponse_TokenSums(t *testing.T) {
+// snake_case ints — a conversation with no usage-bearing message reads 0, never absent.
+func TestConversationResponse_TokenSums(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "tok", "running")
+	conversationID := seedSteerConversation(t, s.db, "tok", "running")
 
 	store := sqlitestore.New(s.db)
 	usage := func(in, out, cacheRead, cacheWrite int) {
 		t.Helper()
 		if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-			ConversationID: runID, Role: "assistant", Content: "working",
+			ConversationID: conversationID, Role: "assistant", Content: "working",
 			InputTokens: &in, OutputTokens: &out, CacheReadTokens: &cacheRead, CacheCreationTokens: &cacheWrite,
 		}); err != nil {
 			t.Fatalf("InsertMessage: %v", err)
@@ -282,12 +282,12 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	// A row with no usage at all (a user message / tool result) contributes
 	// nothing rather than breaking the SUM.
 	if _, err := store.Conversations.InsertMessage(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: runID, Role: "user", Content: "carry on",
+		ConversationID: conversationID, Role: "user", Content: "carry on",
 	}); err != nil {
 		t.Fatalf("InsertMessage(no usage): %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -303,7 +303,7 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	} {
 		v, ok := got[key]
 		if !ok {
-			t.Errorf("run response missing %q", key)
+			t.Errorf("conversation response missing %q", key)
 			continue
 		}
 		if n, isNum := v.(float64); !isNum || n != want {
@@ -311,8 +311,8 @@ func TestRunResponse_TokenSums(t *testing.T) {
 		}
 	}
 
-	// A run that never streamed a usage-bearing message reads 0 on all four.
-	bare := seedSteerRun(t, s.db, "tokbare", "queued")
+	// A conversation that never streamed a usage-bearing message reads 0 on all four.
+	bare := seedSteerConversation(t, s.db, "tokbare", "queued")
 	rec = doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+bare, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET bare conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -324,39 +324,39 @@ func TestRunResponse_TokenSums(t *testing.T) {
 	for _, key := range []string{"input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"} {
 		v, ok := got[key]
 		if !ok {
-			t.Errorf("bare run missing %q", key)
+			t.Errorf("bare conversation missing %q", key)
 			continue
 		}
 		if n, isNum := v.(float64); !isNum || n != 0 {
-			t.Errorf("bare run %s = %v, want 0", key, v)
+			t.Errorf("bare conversation %s = %v, want 0", key, v)
 		}
 	}
 }
 
-// TestRunResponse_CarriesOutcomeAndChainPosition pins the three fields a
+// TestConversationResponse_CarriesOutcomeAndChainPosition pins the three fields a
 // surface needs to tell a handed-off step from the one that ended the task:
 // the terminal outcome, its abort note, and the owning blueprint's plan
 // length beside the step's own index. Position is what disambiguates —
 // `continue` is what an ordinary completion records, so the outcome alone
 // cannot say whether the chain moves on.
-func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
+func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "chainpos", "running")
+	conversationID := seedSteerConversation(t, s.db, "chainpos", "running")
 
 	// Step 0 of a three-step plan, concluded the way processCompletion does.
 	var blueprintRunID string
-	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, runID).Scan(&blueprintRunID); err != nil {
+	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&blueprintRunID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 	execSQL(t, s.db, `UPDATE blueprint_runs SET step_plan = ? WHERE id = ?`,
 		`[{"step_index":0},{"step_index":1},{"step_index":2}]`, blueprintRunID)
-	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, runID)
+	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, conversationID)
 	if err := sqlitestore.New(s.db).Conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID,
-		runID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
-		t.Fatalf("complete run: %v", err)
+		conversationID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
+		t.Fatalf("complete conversation: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -368,7 +368,7 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 		t.Errorf("Outcome = %v, want continue", got["Outcome"])
 	}
 	if _, ok := got["OutcomeReason"]; !ok {
-		t.Error("run response omits OutcomeReason")
+		t.Error("conversation response omits OutcomeReason")
 	}
 	if n, isNum := got["blueprint_step_count"].(float64); !isNum || n != 3 {
 		t.Errorf("blueprint_step_count = %v, want 3", got["blueprint_step_count"])
@@ -382,7 +382,7 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
 		map[string]any{"task_ids": []string{fixtureUUID("t_chainpos")}})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("run list = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("conversation list = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var list struct {
 		Runs map[string][]map[string]any `json:"runs"`
@@ -390,20 +390,20 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list: %v; body=%s", err, rec.Body.String())
 	}
-	runs := list.Runs[fixtureUUID("t_chainpos")]
-	if len(runs) != 1 {
-		t.Fatalf("listed runs = %d, want 1", len(runs))
+	convs := list.Runs[fixtureUUID("t_chainpos")]
+	if len(convs) != 1 {
+		t.Fatalf("listed conversations = %d, want 1", len(convs))
 	}
-	if n, isNum := runs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
-		t.Errorf("listed blueprint_step_count = %v, want 3", runs[0]["blueprint_step_count"])
+	if n, isNum := convs[0]["blueprint_step_count"].(float64); !isNum || n != 3 {
+		t.Errorf("listed blueprint_step_count = %v, want 3", convs[0]["blueprint_step_count"])
 	}
-	if runs[0]["Outcome"] != "continue" {
-		t.Errorf("listed Outcome = %v, want continue", runs[0]["Outcome"])
+	if convs[0]["Outcome"] != "continue" {
+		t.Errorf("listed Outcome = %v, want continue", convs[0]["Outcome"])
 	}
 
 	// The single-prompt shape — every delegated run is a blueprint step, and a
 	// plain one is a plan of exactly one, which is what says "no chain here".
-	single := seedSteerRun(t, s.db, "chainless", "queued")
+	single := seedSteerConversation(t, s.db, "chainless", "queued")
 	var singleBlueprintRunID string
 	if err := s.db.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, single).Scan(&singleBlueprintRunID); err != nil {
 		t.Fatalf("read single blueprint_run_id: %v", err)
@@ -422,9 +422,9 @@ func TestRunResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 	}
 }
 
-// listConversations reads one task's runs off the batched list route and
-// unwraps the task-keyed map, so a test asserting on run rows doesn't restate
-// the grouping every time.
+// listConversations reads one task's conversations off the batched list route
+// and unwraps the task-keyed map, so a test asserting on conversation rows
+// doesn't restate the grouping every time.
 func listConversations(t *testing.T, s *Server, taskID string) []map[string]any {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",

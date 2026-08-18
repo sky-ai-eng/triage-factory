@@ -88,9 +88,9 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 		t.Fatalf("stored org = %q, want %q (bound orchestrator-side)", stored.OrgID, info.OrgID)
 	}
 
-	arts, err := rt.ListRunArtifacts(ctx)
+	arts, err := rt.ListConversationArtifacts(ctx)
 	if err != nil {
-		t.Fatalf("ListRunArtifacts over wire: %v", err)
+		t.Fatalf("ListConversationArtifacts over wire: %v", err)
 	}
 	found := false
 	for _, a := range arts {

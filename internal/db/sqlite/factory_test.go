@@ -112,10 +112,10 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, taskID, status string) string {
+		Conversation: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			id := uuid.New().String()
-			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+			blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 			// "running" is an engagement, not a stored value — mint the
 			// claim the real claim path would and leave the column NULL.
 			stored := any(status)
@@ -126,7 +126,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
 				VALUES (?, ?, ?, ?, 'manual', ?)
 			`, id, taskID, factoryTestPromptID, stored, blueprintRunID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
@@ -147,14 +147,14 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 					VALUES (?, ?, ?, NULL)
-				`, memID, runID, entityID); err != nil {
+				`, memID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -162,7 +162,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 				VALUES (?, ?, ?, ?)
-			`, memID, runID, entityID, content); err != nil {
+			`, memID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},

@@ -150,7 +150,7 @@ residual; it does not make a shared executor equivalent to a dedicated one.
 - **TFAC-614 (sealed bundles)** is the substrate. This epic changes the
   recipient key (per-instance → per-run) and the unseal location
   (orchestrator → sidecar); the bundle format and the delivery table
-  (`run_credentials`) are unchanged.
+  (`claim_credentials`) are unchanged.
 - **TFAC-609 (control-plane App-token minting)** and **TFAC-616 (Bedrock STS
   session creds)** govern what goes *into* the bundle. They are orthogonal to
   where it is unsealed — the sidecar consumes whatever the bundle carries.
@@ -197,10 +197,11 @@ proxy surface. (L)
 **Phase 3 — Agenthost relocation + DB-scope narrowing.** Move the (now
 bundle-fed, Phase 0) agenthost into the sidecar and replace its full `db.Stores`
 handle with an **org-scoped** handle pinned to `info.OrgID` covering only the
-verbs' real reach — reads: `runs`, `tasks`, `repo_profiles`,
-`team_github_repos`, `run_worktrees`, `org_settings`, `artifacts`; writes:
-`run_worktrees`, `artifacts`, `external_actions`, `entities` (plus the
-`SyntheticClaimsWithTx` app-pool runner for manual-run writes). FS access is the
+verbs' real reach — reads: `conversations`, `tasks`, `repo_profiles`,
+`team_github_repos`, `conversation_worktrees`, `org_settings`, `artifacts`;
+writes: `conversation_worktrees`, `artifacts`, `external_actions`, `entities`
+(plus the `SyntheticClaimsWithTx` app-pool runner for manual-conversation
+writes). FS access is the
 run's own root only. **`CallExtension`** is the exception: it dispatches into a
 process-global EE registry whose handlers close over all-orgs `db.Stores` and
 can reach the network, so it must be re-scoped (handlers take a per-run

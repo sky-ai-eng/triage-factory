@@ -33,7 +33,7 @@ import (
 //
 // Security scope: host-uds is sandbox-wide, so the reachable set is exactly
 // the host sockets in the jail's mount tree — today the single per-run
-// daemon socket (a single-file bind of /run/tf/<run_id>.sock; the /run/tf
+// daemon socket (a single-file bind of /run/tf/<conversationID>.sock; the /run/tf
 // dir is not mounted, so runs can't reach each other), and nothing else
 // mounted is a socket. The flag is permissive-but-inert without a mount, so
 // it grants nothing a run wasn't already handed a socket for. Standing
@@ -169,7 +169,7 @@ func runscStateRoot() string {
 var runtimeStateExtensions = []string{".state", ".lock", ".json"}
 
 // tfContainerIDRE matches exactly the container ids this package mints:
-// tf-<run id fragment>-<subnet index>, where the fragment is a RunID cut to
+// tf-<run id fragment>-<subnet index>, where the fragment is a ConversationID cut to
 // containerIDRunFragmentMax and the index is one byte in decimal. Strict for
 // the same reason the netns reaper's regex is — the sweep deletes what it
 // matches, and the state root is shared with whatever else on the host runs

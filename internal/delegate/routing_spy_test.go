@@ -2,13 +2,13 @@ package delegate
 
 // Tests that pin the trigger-type-driven pool routing introduced to
 // close the PR #193 review-bot P2 findings (resolvePrompt visibility,
-// Cancel preflight, Delegate.agentRuns.Create wrap). The
+// Cancel preflight, Delegate.conversations.Create wrap). The
 // behavior changes only become load-bearing under Postgres + RLS;
 // these unit tests use recording wrappers around real SQLite stores
 // to lock the routing contract so the manual-vs-event branch can't
 // silently regress to "everything goes through GetSystem."
 //
-// The Delegate.agentRuns.Create wrap isn't tested in isolation here
+// The Delegate.conversations.Create wrap isn't tested in isolation here
 // because Delegate spawns an async goroutine — testing the full
 // synchronous path would require fixturing a GH client or
 // restructuring the spawner. The wrap follows the same pattern as
@@ -148,19 +148,19 @@ func TestResolvePrompt_EventStaysOnAdminPool(t *testing.T) {
 
 // TestStop_UserInitiated_PreflightUsesSyntheticClaims pins the
 // active-goroutine gate for user-initiated cancels. The cancels map
-// inside Spawner is keyed only by runID, so without an org-scoped
-// preflight a cross-org caller who learns an active runID could fire
+// inside Spawner is keyed only by conversationID, so without an org-scoped
+// preflight a cross-org caller who learns an active conversationID could fire
 // the goroutine's cancel() and tear down a live run — the goroutine
 // would then write the terminal row under its own captured cfg.orgID
 // and the attacker would be invisible to the audit trail. This test
 // proves the user-initiated path goes through SyntheticClaimsWithTx
 // before any cancels-map access, with the caller's userID for RLS.
 func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
-	const runID = "run-cancel-spy"
+	const conversationID = "run-cancel-spy"
 	const callerID = "00000000-0000-0000-0000-000000000ddd"
 
 	database := newDelegateTestDB(t)
-	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
+	seedConversation(t, database, conversationID, "session-x", "/tmp/some-wt")
 
 	stores := sqlitestore.New(database)
 	tx := &recordingTxRunner{TxRunner: stores.Tx}
@@ -170,7 +170,7 @@ func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 	// No goroutine registered in s.cancels — Stop will fall through
 	// to the DB path. The preflight runs first; the assertion is the
 	// synth call.
-	_ = s.Stop(runmode.LocalDefaultOrgID, runID, callerID)
+	_ = s.Stop(runmode.LocalDefaultOrgID, conversationID, callerID)
 
 	if len(tx.synthCalls) < 1 {
 		t.Fatalf("SyntheticClaimsWithTx called %d times; want at least 1 (preflight must route through synth claims)", len(tx.synthCalls))
@@ -187,17 +187,17 @@ func TestStop_UserInitiated_PreflightUsesSyntheticClaims(t *testing.T) {
 // but go through the admin pool, not synth claims — otherwise the
 // router's no-user-context path would FK-fail in multi-mode.
 func TestStop_SystemInitiated_PreflightSkipsSynthClaims(t *testing.T) {
-	const runID = "run-cancel-system-spy"
+	const conversationID = "run-cancel-system-spy"
 
 	database := newDelegateTestDB(t)
-	seedRun(t, database, runID, "session-x", "/tmp/some-wt")
+	seedConversation(t, database, conversationID, "session-x", "/tmp/some-wt")
 
 	stores := sqlitestore.New(database)
 	tx := &recordingTxRunner{TxRunner: stores.Tx}
 	stores.Tx = tx
 	s := NewSpawner(database, stores, nil, nil, "")
 
-	_ = s.Stop(runmode.LocalDefaultOrgID, runID, "")
+	_ = s.Stop(runmode.LocalDefaultOrgID, conversationID, "")
 
 	if len(tx.synthCalls) != 0 {
 		t.Errorf("SyntheticClaimsWithTx called %d times; want 0 for a system-initiated stop (must use admin pool, not synth claims)", len(tx.synthCalls))
@@ -214,5 +214,5 @@ var (
 )
 
 // avoid unused-import warning when runmode isn't referenced directly
-// (the constants are used implicitly via seedRun helpers).
+// (the constants are used implicitly via seedConversation helpers).
 var _ = runmode.LocalDefaultOrgID

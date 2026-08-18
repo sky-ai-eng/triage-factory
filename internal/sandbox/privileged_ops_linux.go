@@ -30,7 +30,7 @@ type PrivilegedOps interface {
 	// needs to reverse it; on error the returned state carries
 	// whatever prefix of setup succeeded, so a caller that stores it
 	// unconditionally (even on error) can still clean up partial state.
-	SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (NetworkState, error)
+	SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error)
 
 	// TeardownNetwork reverses SetupNetwork: removes the iptables
 	// rules, deletes the veth pair + netns. Idempotent and best-effort
@@ -232,25 +232,25 @@ type EnvVar struct {
 // steer the broker into running arbitrary code with capabilities — it can
 // only supply data the already-unprivileged sandbox sees.
 type LaunchParams struct {
-	// RunID is the caller's (possibly non-unique) run identifier, used only
+	// ConversationID is the caller's (possibly non-unique) run identifier, used only
 	// for the bundle dir's grep-friendly prefix. ContainerID is the unique
-	// key; RunID is descriptive.
-	RunID string
+	// key; ConversationID is descriptive.
+	ConversationID string
 
 	// MemoryNamespace is the run's blueprint run id — the second run-tree key
 	// worktreeScope accepts, so a cold-rehydrated worktree (rebuilt at
 	// RunTreeRoot(memoryNamespace)) passes the launch-time pin. Empty for a
-	// no-blueprint run. Descriptive of the run like RunID, not a lifecycle key.
+	// no-blueprint run. Descriptive of the run like ConversationID, not a lifecycle key.
 	MemoryNamespace string
 
 	// ContainerID is the runsc container id — unique among LIVE wraps (a
 	// fresh subnet index is folded into it), and grep-friendly (it embeds a
-	// RunID fragment). It is the per-run lifecycle key: the runsc container
+	// ConversationID fragment). It is the per-run lifecycle key: the runsc container
 	// id, the per-run cgroup name, and the broker's wait/kill key. The
-	// (non-unique) RunID deliberately is NOT that key.
+	// (non-unique) ConversationID deliberately is NOT that key.
 	//
 	// Sequential engagements of one run DO recur on the same id — same
-	// RunID, and the allocator hands back the lowest free index — which is
+	// ConversationID, and the allocator hands back the lowest free index — which is
 	// safe because the launch clears any state left under it first
 	// (DeleteRuntimeState). Deterministic ids are what keep an engagement's
 	// retries grep-able as one thing; uniquifying them per attempt would

@@ -19,7 +19,7 @@ import (
 // actor is refused before any of them.
 func TestFollowUp_EmptyUserID(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-anon", "sess", t.TempDir())
+	seedConversation(t, database, "r-anon", "sess", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-anon'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			seedRun(t, database, "r-guard", "sess", "/tmp/wt")
+			seedConversation(t, database, "r-guard", "sess", "/tmp/wt")
 			if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-guard'`); err != nil {
 				t.Fatalf("open: %v", err)
 			}
@@ -75,7 +75,7 @@ func TestFollowUp_SDKOnlyValidationGuards(t *testing.T) {
 		database := newDelegateTestDB(t)
 		// No session id, and the worktree it does carry is gone: a native
 		// conversation resumes off its transcript, not off either of those.
-		seedRun(t, database, "r-native-guard", "", "")
+		seedConversation(t, database, "r-native-guard", "", "")
 		if _, err := database.Exec(`UPDATE conversations SET status='open', model=NULL WHERE id='r-native-guard'`); err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -98,7 +98,7 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 	for _, runtime := range []string{"sdk", "native"} {
 		t.Run(runtime, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			seedRun(t, database, "r-term", "sess", "/tmp/wt")
+			seedConversation(t, database, "r-term", "sess", "/tmp/wt")
 			if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-term'`); err != nil {
 				t.Fatalf("fail: %v", err)
 			}
@@ -108,8 +108,8 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 			}
 
 			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "msg")
-			if !errors.Is(err, ErrRunNotSteerable) {
-				t.Errorf("err = %v, want ErrRunNotSteerable", err)
+			if !errors.Is(err, ErrConversationNotSteerable) {
+				t.Errorf("err = %v, want ErrConversationNotSteerable", err)
 			}
 			if got := pendingRows(t, s, "r-term"); len(got) != 0 {
 				t.Errorf("a refused message must not leave a row behind: %+v", got)
@@ -146,7 +146,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 		if keepWorkspace {
 			wt = t.TempDir() // a warm worktree on disk === recoverable
 		}
-		seedRun(t, database, id, "sess-"+id, wt)
+		seedConversation(t, database, id, "sess-"+id, wt)
 		if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id=?`, id); err != nil {
 			t.Fatalf("park: %v", err)
 		}
@@ -237,7 +237,7 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 // the row.
 func TestFollowUp_EnqueuesRatherThanSpawning(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
+	seedConversation(t, database, "r-wake", "sess-wake", "/tmp/does-not-exist-wake")
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-wake'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -285,13 +285,13 @@ func staleOpenOnce(inner db.ConversationStore) staleOpenConversations {
 	return staleOpenConversations{ConversationStore: inner, reads: new(int)}
 }
 
-func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, runID string) (*domain.Conversation, error) {
-	run, err := c.ConversationStore.GetSystem(ctx, orgID, runID)
+func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
+	conv, err := c.ConversationStore.GetSystem(ctx, orgID, conversationID)
 	*c.reads++
-	if run != nil && *c.reads == 1 {
-		run.Status, run.Outcome = "open", ""
+	if conv != nil && *c.reads == 1 {
+		conv.Status, conv.Outcome = "open", ""
 	}
-	return run, err
+	return conv, err
 }
 
 // TestFollowUp_LostWakeRaceStillDelivers pins what append buys: a wake
@@ -309,7 +309,7 @@ func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 	// A real worktree, so the claim gets far enough to deliver: a missing one
 	// is a runtime failure and hands the claim back with both messages still
 	// queued, which is a different test.
-	seedRun(t, database, "r-race", "sess-race", t.TempDir())
+	seedConversation(t, database, "r-race", "sess-race", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-race'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-died", "sess-died", "/tmp/does-not-exist-died")
+	seedConversation(t, database, "r-died", "sess-died", "/tmp/does-not-exist-died")
 	// The conversation failed while this wake was mid-flight; the wake still
 	// holds the read it validated against.
 	if _, err := database.Exec(`UPDATE conversations SET status='failed' WHERE id='r-died'`); err != nil {
@@ -364,8 +364,8 @@ func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-died", runmode.LocalDefaultUserID, "one more thing")
-	if !errors.Is(err, ErrRunNotResumable) {
-		t.Fatalf("err = %v, want ErrRunNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
+	if !errors.Is(err, ErrConversationNotResumable) {
+		t.Fatalf("err = %v, want ErrConversationNotResumable — nothing claims a terminal conversation, so the message is not delivered", err)
 	}
 	if st := storedStatus(t, database, "r-died"); st != "failed" {
 		t.Errorf("stored status = %q, want failed — a lost flip must not move the row", st)
@@ -375,15 +375,15 @@ func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 // TestFollowUp_CompletedAbortReopensBlueprintAtomically: a
 // completed+abort run's blueprint (already terminal 'aborted') is reopened
 // to 'running' in the SAME tx as the requeue flip — required for
-// ClaimNextRun to ever claim the row (it only claims under a 'running'
+// ClaimNextConversation to ever claim the row (it only claims under a 'running'
 // blueprint_run).
 func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
+	seedConversation(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
-	bpr := blueprintRunIDForRun(t, database, "r-ab")
+	bpr := blueprintRunIDForConversation(t, database, "r-ab")
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status='aborted' WHERE id=?`, bpr); err != nil {
 		t.Fatalf("abort blueprint_run: %v", err)
 	}
@@ -398,27 +398,27 @@ func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 		t.Fatalf("read blueprint_run status: %v", err)
 	}
 	if bpStatus != "running" {
-		t.Errorf("blueprint_run status = %q, want running (reopened so ClaimNextRun can claim the resumed row)", bpStatus)
+		t.Errorf("blueprint_run status = %q, want running (reopened so ClaimNextConversation can claim the resumed row)", bpStatus)
 	}
 }
 
 // claimAndDispatch claims the globally-oldest queued run (mirroring the
-// dispatcher's own ClaimNextRun call) and drives it synchronously through
-// dispatchClaimedRun — the same entry a real drainRunQueue goroutine would
+// dispatcher's own ClaimNextConversation call) and drives it synchronously through
+// dispatchClaimedConversation — the same entry a real drainConversationQueue goroutine would
 // call, minus the goroutine wrapper, so resume-claim tests don't need to
 // poll for completion.
 func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
-	run, err := s.runQueue.ClaimNextRun(ctx, "test-executor", 1, db.ClaimPlacement{})
+	conv, err := s.conversationQueue.ClaimNextConversation(ctx, "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim next run: %v", err)
 	}
-	if run == nil {
+	if conv == nil {
 		t.Fatal("claim next run: nothing claimable (is the row queued under a running blueprint_run?)")
 	}
-	run.OrgID = runmode.LocalDefaultOrgID
-	s.dispatchClaimedRun(ctx, run)
+	conv.OrgID = runmode.LocalDefaultOrgID
+	s.dispatchClaimedConversation(ctx, conv)
 }
 
 // TestDispatchResumeClaim_DeliversRecordedInput proves the delivery half of
@@ -435,7 +435,7 @@ func claimAndDispatch(t *testing.T, s *Spawner, database *sql.DB) {
 func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-deliver", "sess-deliver", t.TempDir())
+	seedConversation(t, database, "r-deliver", "sess-deliver", t.TempDir())
 	if _, err := database.Exec(`UPDATE conversations SET status='open' WHERE id='r-deliver'`); err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -483,20 +483,20 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // TTL rather than orphaned behind a blueprint stranded 'running' forever.
 func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, run, _ := setupAdvanceFixture(t, "open-strand")
-	bpr := blueprintRunIDForRun(t, database, run)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "open-strand")
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s)
 	putTestSnapshot(t, s, bpr) // garbage blob: passes Exists, fails rehydrate
-	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 
 	// The dispatcher's whole budget, one claim at a time.
-	for i := 0; i < maxRunAttempts; i++ {
+	for i := 0; i < maxClaimAttempts; i++ {
 		claimAndDispatch(t, s, database)
 		var bpStatus string
 		if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id=?`, bpr).Scan(&bpStatus); err != nil {
@@ -508,14 +508,14 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 		assertSnapshotPresent(t, s, bpr, true)
 	}
 
-	if st := storedStatus(t, database, run); st != domain.StatusOpen {
+	if st := storedStatus(t, database, conversationID); st != domain.StatusOpen {
 		t.Errorf("stored status = %q after the budget ran out, want open", st)
 	}
 	// Nothing is claimable any more: the queued follow-up was settled on the
 	// way down, so the retries stop rather than spinning forever.
-	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
 	if err != nil || claimed != nil {
-		t.Fatalf("ClaimNextRun after the park = (%v, %v), want nothing claimable", claimed, err)
+		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", claimed, err)
 	}
 }
 
@@ -524,31 +524,31 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 // durable snapshot) is refused with ErrWorkspaceExpired at enqueue, with NO
 // side effect — the run stays resumable, no pending-input row is recorded, and
 // the blueprint is left running. Without the pre-flight the flip succeeds and
-// the run is destroyed at claim time (a generic failRun) instead of the caller
+// the run is destroyed at claim time (a generic failConversation) instead of the caller
 // seeing a clean 410.
 func TestFollowUp_ExpiredWorkspaceRefusedAtEnqueue(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	s, database, run, _ := setupAdvanceFixture(t, "expired")
-	bpr := blueprintRunIDForRun(t, database, run)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "expired")
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s) // storage present but empty: no snapshot to recover from
-	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, run); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-expired' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}
 
-	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, run, runmode.LocalDefaultUserID, "carry on")
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on")
 	if !errors.Is(err, ErrWorkspaceExpired) {
 		t.Fatalf("SendMessage err = %v, want ErrWorkspaceExpired", err)
 	}
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id=?`, run).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&status); err != nil {
 		t.Fatalf("read run status: %v", err)
 	}
 	if status != "open" {
 		t.Errorf("run status = %q after refused wake; want unchanged 'open'", status)
 	}
 	var pending int
-	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=? AND delivered=0`, run).Scan(&pending); err != nil {
+	if err := database.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=? AND delivered=0`, conversationID).Scan(&pending); err != nil {
 		t.Fatalf("count pending input: %v", err)
 	}
 	if pending != 0 {

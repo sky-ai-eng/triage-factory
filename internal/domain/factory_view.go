@@ -2,15 +2,15 @@ package domain
 
 import "time"
 
-// FactoryActiveRun is one in-flight agent run as displayed in the
-// Factory overlay: the run row joined with its task + a couple of
+// FactoryActiveConversation is one in-flight agent conversation as displayed in
+// the Factory overlay: the conversation row joined with its task + a couple of
 // pre-extracted entity fields the renderer needs for keyed lookups.
 //
 // The embedded Conversation + Task carry the full state; EntityAuthor
 // and EntityEventTyp are pre-copied so the renderer doesn't have to
 // re-derive them per row.
-type FactoryActiveRun struct {
-	Run            Conversation
+type FactoryActiveConversation struct {
+	Conversation   Conversation
 	Task           Task
 	EntityAuthor   string // PR author login (github) or assignee (jira); "" if unknown
 	EntityEventTyp string // task.event_type; pre-copied for keyed lookup

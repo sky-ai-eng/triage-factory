@@ -9,9 +9,9 @@
 //   - Tier 1 — a per-org background Manager/Runner (this package), kicked off
 //     the system:poll: GitHub sentinel, mirroring scorer/profiler/classifier.
 //     Each cycle reconciles the org's whole non-terminal artifact set.
-//   - Tier 2 — a run-scoped refresh the frontend polls while a run view is
-//     open, reconciling just that run's non-terminal artifacts (wired in
-//     internal/server).
+//   - Tier 2 — a conversation-scoped refresh the frontend polls while a
+//     conversation view is open, reconciling just that conversation's
+//     non-terminal artifacts (wired in internal/server).
 package reconcile
 
 import (
@@ -35,9 +35,9 @@ type clientResolver interface {
 
 // Reconciler mirrors artifacts against live GitHub state. One instance is
 // shared between Tier 1 (the background Manager/Runner) and Tier 2 (the
-// run-scoped refresh endpoint): both call Reconcile with a set of non-terminal
-// artifacts. Writes route through the admin pool (UpsertSystem /
-// UpdateRunMemoryHumanContentSystem) — the reconciler has no JWT-claims context
+// conversation-scoped refresh endpoint): both call Reconcile with a set of
+// non-terminal artifacts. Writes route through the admin pool (UpsertSystem /
+// UpdateConversationMemoryHumanContentSystem) — the reconciler has no JWT-claims context
 // in either tier.
 type Reconciler struct {
 	resolver  clientResolver
@@ -63,9 +63,9 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 	if _, err := rc.Reconcile(ctx, orgID, arts); err != nil {
 		return err
 	}
-	// gh-channel backstop: record PRs a run created via the real gh whose
-	// injector observation was lost (channel severed, or the create raced a
-	// crash). Best-effort — a failure here never aborts the reconcile cycle.
+	// gh-channel backstop: record PRs a conversation created via the real gh
+	// whose injector observation was lost (channel severed, or the create raced
+	// a crash). Best-effort — a failure here never aborts the reconcile cycle.
 	if err := rc.BackfillPRArtifactsForBranches(ctx, orgID, arts); err != nil {
 		reconcileLog.Warn("gh-channel PR backstop failed", "org", orgID, "error", err)
 	}
@@ -104,7 +104,7 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 			continue
 		}
 		if a.ConversationID == "" || a.Target == "" {
-			continue // detached from its run, or malformed — can't attribute a PR
+			continue // detached from its conversation, or malformed — can't attribute a PR
 		}
 		branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
 		if !ok {
@@ -164,9 +164,10 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 // Reconcile refreshes each artifact in arts against live GitHub and applies any
 // state transition: PR draft/open/merged/closed, review submitted/dismissed,
 // branch deleted. On a TERMINAL transition it appends a final-outcome note to
-// the producing run's memory (β) and broadcasts the change over the WS hub (as
-// agent_run_update on the owning run, so the run view's artifact-derived surface
-// refreshes). Returns the artifacts that transitioned, carrying their new state.
+// the producing conversation's memory (β) and broadcasts the change over the WS
+// hub (as artifact_updated on the owning conversation, so the conversation
+// view's artifact-derived surface refreshes). Returns the artifacts that
+// transitioned, carrying their new state.
 //
 // Best-effort per artifact: a single GitHub or write failure is logged and
 // skipped, never aborting the rest. GitHub work is grouped by repo OWNER —
@@ -240,12 +241,13 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 	}
 
-	// Pass 3 — apply each transition, then recompute run-memory once per run
-	// that had a TERMINAL transition this cycle. The memory recompute is
-	// deferred out of the per-artifact loop and composed over the run's whole
-	// artifact set (recordRunOutcome) so a run that produced several artifacts —
-	// commonly a branch AND a PR — accumulates one outcome rather than each
-	// terminal write clobbering the last.
+	// Pass 3 — apply each transition, then recompute conversation memory once
+	// per conversation that had a TERMINAL transition this cycle. The memory
+	// recompute is deferred out of the per-artifact loop and composed over the
+	// conversation's whole artifact set (recordConversationOutcome) so a
+	// conversation that produced several artifacts — commonly a branch AND a
+	// PR — accumulates one outcome rather than each terminal write clobbering
+	// the last.
 	//
 	// The write-back runs on a detached ctx (the fetches above stayed
 	// cancellable). A terminal artifact drops out of BOTH tiers' non-terminal
@@ -258,7 +260,7 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 	// bounds each call.
 	writeCtx := context.WithoutCancel(ctx)
 	var transitioned []domain.Artifact
-	terminalRuns := map[string]bool{}
+	terminalConversations := map[string]bool{}
 	for _, a := range arts {
 		newState, ok := nextState(a, snapshots, branchExists)
 		if !ok || newState == a.State {
@@ -272,19 +274,20 @@ func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain
 		}
 		transitioned = append(transitioned, updated)
 		if a.ConversationID != "" && isTerminalState(a.Kind, newState) {
-			terminalRuns[a.ConversationID] = true
+			terminalConversations[a.ConversationID] = true
 		}
 	}
-	for runID := range terminalRuns {
-		rc.recordRunOutcome(writeCtx, orgID, runID)
+	for conversationID := range terminalConversations {
+		rc.recordConversationOutcome(writeCtx, orgID, conversationID)
 	}
 	return transitioned, nil
 }
 
 // applyTransition writes the new state (admin pool) and broadcasts the change.
-// Memory capture is deferred to recordRunOutcome (a per-run recompute) so a run
-// with several artifacts gets one composed outcome, not one clobbering write per
-// artifact. Best-effort WS: a dropped broadcast must not undo the transition.
+// Memory capture is deferred to recordConversationOutcome (a per-conversation
+// recompute) so a conversation with several artifacts gets one composed outcome,
+// not one clobbering write per artifact. Best-effort WS: a dropped broadcast
+// must not undo the transition.
 func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domain.Artifact, newState string) (domain.Artifact, error) {
 	next := a
 	next.State = newState
@@ -298,34 +301,36 @@ func (rc *Reconciler) applyTransition(ctx context.Context, orgID string, a domai
 	return updated, nil
 }
 
-// recordRunOutcome recomputes a run's post-run memory note over its WHOLE
-// artifact set and OVERWRITES human_content with it. Called once per run that
-// had a terminal transition this cycle, after the artifact writes commit (so it
-// reads the fresh terminal states). Composing over the full set — not just this
-// cycle's transitions — is what lets a branch-then-PR run accumulate without an
-// append: every resolution recomputes the complete picture, which is also why a
-// repeated or concurrent cycle is idempotent (same set → same note). The
+// recordConversationOutcome recomputes a conversation's final-outcome memory
+// note over its WHOLE artifact set and OVERWRITES human_content with it. Called
+// once per conversation that had a terminal transition this cycle, after the
+// artifact writes commit (so it reads the fresh terminal states). Composing over
+// the full set — not just this cycle's transitions — is what lets a
+// branch-then-PR conversation accumulate without an append: every resolution
+// recomputes the complete picture, which is also why a repeated or concurrent
+// cycle is idempotent (same set → same note). The
 // overwrite supersedes any approval-time verdict by design; the terminal state
 // is the authoritative account of how reality diverged from the agent's draft.
 // Best-effort — the external state already moved, so a failed note must not
 // undo the transition.
-func (rc *Reconciler) recordRunOutcome(ctx context.Context, orgID, runID string) {
-	note := rc.composeRunOutcome(ctx, orgID, runID)
+func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conversationID string) {
+	note := rc.composeConversationOutcome(ctx, orgID, conversationID)
 	if note == "" {
 		return
 	}
-	if err := rc.memory.UpdateRunMemoryHumanContentSystem(ctx, orgID, runID, note); err != nil {
-		reconcileLog.Warn("record run outcome memory failed", "org", orgID, "run", runID, "error", err)
+	if err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
+		reconcileLog.Warn("record conversation outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
 	}
 }
 
 // broadcast pushes the transition to the frontend as a dedicated artifact_updated
-// event on the owning run. It deliberately does NOT reuse agent_run_update: that
-// event's consumers (the Board) optimistically write run.Status = data.status, so
-// a payload carrying no real status would blank the card until a refetch. The
-// run's own status is unchanged here — only its artifact-derived surface (pending
-// kind / approval card) is — so the FE handlers refetch the run on this event
-// without touching status. Skipped for a detached artifact (no run) or unset hub.
+// event on the owning conversation. It deliberately does NOT reuse conversation_update:
+// that event's consumers (the Board) optimistically write the conversation's
+// Status from data.status, so a payload carrying no real status would blank the
+// card until a refetch. The conversation's own status is unchanged here — only its
+// artifact-derived surface (pending kind / approval card) is — so the FE handlers
+// refetch the conversation on this event without touching status. Skipped for a
+// detached artifact (no conversation) or unset hub.
 func (rc *Reconciler) broadcast(orgID string, a domain.Artifact) {
 	if rc.ws == nil || a.ConversationID == "" {
 		return
@@ -434,20 +439,22 @@ func isTerminalState(kind, state string) bool {
 	return false
 }
 
-// runOutcomeHeader prefaces the composed post-run memory note — the framing the
-// next agent reads the per-artifact outcome blocks under.
-const runOutcomeHeader = "**Post-run outcome** — how your work resolved on GitHub versus what you drafted:\n\n"
+// outcomeNoteHeader prefaces the composed final-outcome memory note — the
+// framing the next agent reads the per-artifact outcome blocks under. The note
+// text itself says "run" deliberately: it is agent-facing prose, and "run" is
+// the legible word for the engagement whose work resolved.
+const outcomeNoteHeader = "**Post-run outcome** — how your work resolved on GitHub versus what you drafted:\n\n"
 
-// composeRunOutcome builds the run's post-run memory note from every TERMINAL
-// artifact it produced. It reads the run's whole artifact set (admin pool — the
-// reconciler has no claims), so the note is the complete picture regardless of
-// which cycle each artifact resolved in. Returns "" when nothing is terminal yet
-// (still in flight — no outcome to report), which recordRunOutcome treats as
-// "don't touch the row."
-func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, runID string) string {
-	arts, err := rc.artifacts.ListByRunSystem(ctx, orgID, runID)
+// composeConversationOutcome builds the conversation's final-outcome memory note
+// from every TERMINAL artifact it produced. It reads the conversation's whole
+// artifact set (admin pool — the reconciler has no claims), so the note is the
+// complete picture regardless of which cycle each artifact resolved in. Returns
+// "" when nothing is terminal yet (still in flight — no outcome to report),
+// which recordConversationOutcome treats as "don't touch the row."
+func (rc *Reconciler) composeConversationOutcome(ctx context.Context, orgID, conversationID string) string {
+	arts, err := rc.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
-		reconcileLog.Warn("list run artifacts for outcome note failed", "org", orgID, "run", runID, "error", err)
+		reconcileLog.Warn("list conversation artifacts for outcome note failed", "org", orgID, "conversation", conversationID, "error", err)
 		return ""
 	}
 	var blocks []string
@@ -459,7 +466,7 @@ func (rc *Reconciler) composeRunOutcome(ctx context.Context, orgID, runID string
 	if len(blocks) == 0 {
 		return ""
 	}
-	return runOutcomeHeader + strings.Join(blocks, "\n\n")
+	return outcomeNoteHeader + strings.Join(blocks, "\n\n")
 }
 
 // describeArtifactOutcome renders one terminal artifact's outcome block, or ""

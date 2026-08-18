@@ -13,10 +13,10 @@ import (
 )
 
 // seedPendingReview upserts a pending review artifact anchored to repo#pr for
-// runID, with the given start-review head and (optional) reconciled comment SHAs.
-func seedPendingReview(t *testing.T, s *Spawner, runID, repo string, pr int, headSHA string, commentSHAs ...string) {
+// conversationID, with the given start-review head and (optional) reconciled comment SHAs.
+func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr int, headSHA string, commentSHAs ...string) {
 	t.Helper()
-	a := domain.NewReviewArtifact(repo, pr, headSHA, runID)
+	a := domain.NewReviewArtifact(repo, pr, headSHA, conversationID)
 	if len(commentSHAs) > 0 {
 		d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
 		for _, sha := range commentSHAs {
@@ -24,7 +24,7 @@ func seedPendingReview(t *testing.T, s *Spawner, runID, repo string, pr int, hea
 		}
 		a.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
 	}
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
@@ -44,9 +44,9 @@ func newCommitsEvent(repo string, pr int, oldSHA, newSHA string) domain.Event {
 	}
 }
 
-func flushOne(t *testing.T, s *Spawner, runID string) []domain.StagedInjection {
+func flushOne(t *testing.T, s *Spawner, conversationID string) []domain.StagedInjection {
 	t.Helper()
-	injections, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	injections, err := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
 		t.Fatalf("flush: %v", err)
 	}
@@ -57,9 +57,9 @@ func flushOne(t *testing.T, s *Spawner, runID string) []domain.StagedInjection {
 // behind the new head gets the injection STAGED for its next resume.
 func TestHandlePRNewCommits_ParkedBehindStages(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-parked", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-parked", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-parked", "open") // resumable, no warm process
+	setConversationStatus(t, database, "run-parked", "open") // resumable, no warm process
 	seedPendingReview(t, s, "run-parked", "o/r", 7, "oldHead")
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 7, "oldHead", "newHead"))
@@ -80,7 +80,7 @@ func TestHandlePRNewCommits_ParkedBehindStages(t *testing.T) {
 // gets the injection STEERED in (not staged).
 func TestHandlePRNewCommits_LiveBehindSteers(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-live", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fc := &fakeController{}
 	s.controller = fc
@@ -105,9 +105,9 @@ func TestHandlePRNewCommits_LiveBehindSteers(t *testing.T) {
 // (start anchor) gets no injection.
 func TestHandlePRNewCommits_AtHeadSkips(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-current", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-current", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-current", "open")
+	setConversationStatus(t, database, "run-current", "open")
 	seedPendingReview(t, s, "run-current", "o/r", 7, "newHead") // anchor == the new head
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 7, "oldHead", "newHead"))
@@ -122,9 +122,9 @@ func TestHandlePRNewCommits_AtHeadSkips(t *testing.T) {
 // current — no injection.
 func TestHandlePRNewCommits_ReconciledCommentHeadSkips(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-reconciled", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-reconciled", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-reconciled", "open")
+	setConversationStatus(t, database, "run-reconciled", "open")
 	// Start head is old, but a staged comment already moved to newHead.
 	seedPendingReview(t, s, "run-reconciled", "o/r", 7, "oldHead", "newHead")
 
@@ -139,10 +139,10 @@ func TestHandlePRNewCommits_ReconciledCommentHeadSkips(t *testing.T) {
 // (completed+finish) can never read a staged injection, so none is staged.
 func TestHandlePRNewCommits_TerminalNonResumableSkips(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-finished", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-finished", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	// completed + outcome=finish → resumableState=false.
-	if err := s.agentRuns.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID, "run-finished", "completed", 0, 0, 0, "", string(domain.RunOutcomeFinish), "", ""); err != nil {
+	if err := s.conversations.CompleteSystem(context.Background(), runmode.LocalDefaultOrgID, "run-finished", "completed", 0, 0, 0, "", string(domain.ConversationOutcomeFinish), "", ""); err != nil {
 		t.Fatalf("complete run: %v", err)
 	}
 	seedPendingReview(t, s, "run-finished", "o/r", 7, "oldHead")
@@ -158,9 +158,9 @@ func TestHandlePRNewCommits_TerminalNonResumableSkips(t *testing.T) {
 // review artifact does nothing (and doesn't panic).
 func TestHandlePRNewCommits_NoReviewNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-noreview", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-noreview", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	setRunStatus(t, database, "run-noreview", "open")
+	setConversationStatus(t, database, "run-noreview", "open")
 
 	s.HandlePRNewCommits(newCommitsEvent("o/r", 99, "oldHead", "newHead"))
 

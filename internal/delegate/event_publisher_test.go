@@ -32,7 +32,7 @@ func (f *fakeEventPublisher) eventsCopy() []domain.Event {
 	return out
 }
 
-func decodeRunStatus(t *testing.T, raw string) events.SystemConversationStatusMetadata {
+func decodeConversationStatus(t *testing.T, raw string) events.SystemConversationStatusMetadata {
 	t.Helper()
 	var meta events.SystemConversationStatusMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
@@ -41,7 +41,7 @@ func decodeRunStatus(t *testing.T, raw string) events.SystemConversationStatusMe
 	return meta
 }
 
-func decodeRunActivity(t *testing.T, raw string) events.SystemConversationActivityMetadata {
+func decodeConversationActivity(t *testing.T, raw string) events.SystemConversationActivityMetadata {
 	t.Helper()
 	var meta events.SystemConversationActivityMetadata
 	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
@@ -51,7 +51,7 @@ func decodeRunActivity(t *testing.T, raw string) events.SystemConversationActivi
 }
 
 // TestBroadcastRunUpdate_PublishesRunStatus pins the status-flip choke
-// point: broadcastRunUpdate mirrors onto the bus alongside (not gated by)
+// point: broadcastConversationUpdate mirrors onto the bus alongside (not gated by)
 // the websocket broadcast — wsHub is nil here, matching most of this
 // package's test fixtures, and the publish must still fire.
 func TestBroadcastRunUpdate_PublishesRunStatus(t *testing.T) {
@@ -59,7 +59,7 @@ func TestBroadcastRunUpdate_PublishesRunStatus(t *testing.T) {
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
-	s.broadcastRunUpdate("org-a", "run-1", "running")
+	s.broadcastConversationUpdate("org-a", "run-1", "running")
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
@@ -72,16 +72,16 @@ func TestBroadcastRunUpdate_PublishesRunStatus(t *testing.T) {
 	if evt.OrgID != "org-a" {
 		t.Errorf("org_id = %q, want org-a", evt.OrgID)
 	}
-	meta := decodeRunStatus(t, evt.MetadataJSON)
+	meta := decodeConversationStatus(t, evt.MetadataJSON)
 	if meta.ConversationID != "run-1" || meta.Status != "running" {
-		t.Errorf("metadata = %+v, want RunID=run-1 Status=running", meta)
+		t.Errorf("metadata = %+v, want ConversationID=run-1 Status=running", meta)
 	}
 	if meta.FailureKind != "" {
 		t.Errorf("FailureKind = %q, want empty on a non-failure flip", meta.FailureKind)
 	}
 }
 
-// TestBroadcastRunFailed_PublishesFailureKind pins broadcastRunFailed's
+// TestBroadcastRunFailed_PublishesFailureKind pins broadcastConversationFailed's
 // failure arm: the published metadata carries FailureKind when the kind
 // is classified, and omits it (empty) for the unclassified default.
 func TestBroadcastRunFailed_PublishesFailureKind(t *testing.T) {
@@ -89,18 +89,18 @@ func TestBroadcastRunFailed_PublishesFailureKind(t *testing.T) {
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
-	s.broadcastRunFailed("org-a", "run-1", domain.RunFailureMemoryLimit)
+	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureMemoryLimit)
 
 	got := pub.eventsCopy()
 	if len(got) != 1 {
 		t.Fatalf("published %d events, want 1", len(got))
 	}
-	meta := decodeRunStatus(t, got[0].MetadataJSON)
+	meta := decodeConversationStatus(t, got[0].MetadataJSON)
 	if meta.Status != "failed" {
 		t.Errorf("Status = %q, want failed", meta.Status)
 	}
-	if meta.FailureKind != string(domain.RunFailureMemoryLimit) {
-		t.Errorf("FailureKind = %q, want %q", meta.FailureKind, domain.RunFailureMemoryLimit)
+	if meta.FailureKind != string(domain.ConversationFailureMemoryLimit) {
+		t.Errorf("FailureKind = %q, want %q", meta.FailureKind, domain.ConversationFailureMemoryLimit)
 	}
 }
 
@@ -111,10 +111,10 @@ func TestBroadcastRunFailed_UnclassifiedOmitsFailureKind(t *testing.T) {
 	pub := &fakeEventPublisher{}
 	s.SetEventPublisher(pub)
 
-	s.broadcastRunFailed("org-a", "run-1", domain.RunFailureUnclassified)
+	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureUnclassified)
 
 	got := pub.eventsCopy()
-	meta := decodeRunStatus(t, got[0].MetadataJSON)
+	meta := decodeConversationStatus(t, got[0].MetadataJSON)
 	if meta.FailureKind != "" {
 		t.Errorf("FailureKind = %q, want empty for unclassified", meta.FailureKind)
 	}
@@ -144,9 +144,9 @@ func TestBroadcastMessage_ToolUsePublishesActivity(t *testing.T) {
 	if evt.EventType != domain.EventSystemConversationActivity {
 		t.Errorf("event_type = %q, want %q", evt.EventType, domain.EventSystemConversationActivity)
 	}
-	meta := decodeRunActivity(t, evt.MetadataJSON)
+	meta := decodeConversationActivity(t, evt.MetadataJSON)
 	if meta.ConversationID != "run-1" {
-		t.Errorf("RunID = %q, want run-1", meta.ConversationID)
+		t.Errorf("ConversationID = %q, want run-1", meta.ConversationID)
 	}
 	if len(meta.Tools) != 2 {
 		t.Fatalf("Tools = %+v, want 2 entries", meta.Tools)
@@ -183,8 +183,8 @@ func TestBroadcastMessage_NonToolUseSubtypesPublishNothing(t *testing.T) {
 func TestBroadcast_NilPublisher_NoPanic(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 
-	s.broadcastRunUpdate("org-a", "run-1", "running")
-	s.broadcastRunFailed("org-a", "run-1", domain.RunFailureMemoryLimit)
+	s.broadcastConversationUpdate("org-a", "run-1", "running")
+	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureMemoryLimit)
 	s.broadcastMessage("org-a", "run-1", &domain.Message{
 		Subtype:   "tool_use",
 		ToolCalls: []domain.ToolCall{{ID: "1", Name: "Bash"}},

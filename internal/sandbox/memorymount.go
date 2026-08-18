@@ -35,7 +35,7 @@ import (
 const TrustedMemoryDestination = "/opt/tf/memory"
 
 // memoryStagingBasename is the directory per-launch memory staging dirs live
-// under inside os.TempDir(): os.TempDir()/triagefactory-memory/<runID>. Sibling
+// under inside os.TempDir(): os.TempDir()/triagefactory-memory/<conversationID>. Sibling
 // of skillStagingBasename, with the same ownership contract: never chowned to a
 // sandbox identity, never placed anywhere the agent can reach.
 const memoryStagingBasename = "triagefactory-memory"
@@ -46,7 +46,7 @@ func MemoryStagingBase() string {
 	return filepath.Join(os.TempDir(), memoryStagingBasename)
 }
 
-// TrustedMemorySourcePath returns the host path of runID's own memory staging
+// TrustedMemorySourcePath returns the host path of conversationID's own memory staging
 // dir — both what the orchestrator materializes into and what the broker
 // requires a TrustedMemoryDestination mount's source to resolve to. (The broker
 // re-derives it from the symlink-resolved MemoryStagingBase, so the per-run
@@ -57,6 +57,6 @@ func MemoryStagingBase() string {
 // each step mounts a tree materialized for IT, which is what lets step N read
 // step N-1's handoff while a stale tree from an earlier step can never be
 // mounted in its place.
-func TrustedMemorySourcePath(runID string) string {
-	return filepath.Join(MemoryStagingBase(), runID)
+func TrustedMemorySourcePath(conversationID string) string {
+	return filepath.Join(MemoryStagingBase(), conversationID)
 }

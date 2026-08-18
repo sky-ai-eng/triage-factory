@@ -81,8 +81,8 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 	}
 }
 
-// TestFrontendMirrorsRunStatusVocabulary asserts that the frontend's copy of
-// the conversation status vocabulary matches internal/domain/run_status.go
+// TestFrontendMirrorsConversationStatusVocabulary asserts that the frontend's copy of
+// the conversation status vocabulary matches internal/domain/conversation_status.go
 // EXACTLY, in both directions.
 //
 // The mirror is hand-maintained by choice — codegen buys a build step and a
@@ -96,10 +96,10 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 // What this test canNOT see is component code, which never reads the arrays it
 // pins — it compares a status against a bare literal, and two retired statuses
 // walked back in that way within days of this test landing. That half is
-// enforced on the frontend side, by the run-status/no-ghost-run-status ESLint
+// enforced on the frontend side, by the conversation-status/no-ghost-conversation-status ESLint
 // rule (frontend/eslint-rules/), which reads its vocabulary out of the very
 // declarations parsed below.
-func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
+func TestFrontendMirrorsConversationStatusVocabulary(t *testing.T) {
 	src, err := os.ReadFile("frontend/src/types.ts")
 	if err != nil {
 		t.Fatalf("read types.ts: %v", err)
@@ -109,28 +109,28 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	compare := func(decl string, want []string) {
 		got, _ := tsArrayDecl(t, content, decl)
 		if diff := vocabularyDiff(want, got); diff != "" {
-			t.Errorf("frontend %s has drifted from internal/domain/run_status.go:\n%s", decl, diff)
+			t.Errorf("frontend %s has drifted from internal/domain/conversation_status.go:\n%s", decl, diff)
 		}
 	}
 	compare("CLAIM_PHASES", domain.AllClaimPhases())
-	compare("TERMINAL_RUN_STATUSES", domain.AllTerminalRunStatuses())
+	compare("TERMINAL_CONVERSATION_STATUSES", domain.AllTerminalConversationStatuses())
 
-	// RUN_STATUSES is the full union, so it spells only the names that are
+	// CONVERSATION_STATUSES is the full union, so it spells only the names that are
 	// neither a phase nor a terminal and spreads the other two arrays — which
 	// is what keeps it from being a third place to forget a phase.
 	var base []string
-	for _, s := range domain.AllRunStatuses() {
-		if !domain.IsClaimPhase(s) && !domain.IsTerminalRunStatus(s) {
+	for _, s := range domain.AllConversationStatuses() {
+		if !domain.IsClaimPhase(s) && !domain.IsTerminalConversationStatus(s) {
 			base = append(base, s)
 		}
 	}
-	members, spreads := tsArrayDecl(t, content, "RUN_STATUSES")
+	members, spreads := tsArrayDecl(t, content, "CONVERSATION_STATUSES")
 	if diff := vocabularyDiff(base, members); diff != "" {
-		t.Errorf("frontend RUN_STATUSES spells the wrong non-phase non-terminal statuses:\n%s", diff)
+		t.Errorf("frontend CONVERSATION_STATUSES spells the wrong non-phase non-terminal statuses:\n%s", diff)
 	}
-	for _, want := range []string{"CLAIM_PHASES", "TERMINAL_RUN_STATUSES"} {
+	for _, want := range []string{"CLAIM_PHASES", "TERMINAL_CONVERSATION_STATUSES"} {
 		if !slices.Contains(spreads, want) {
-			t.Errorf("frontend RUN_STATUSES must spread ...%s rather than re-listing its members (spreads: %v)", want, spreads)
+			t.Errorf("frontend CONVERSATION_STATUSES must spread ...%s rather than re-listing its members (spreads: %v)", want, spreads)
 		}
 	}
 }
@@ -148,9 +148,9 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 // key the backend never writes is the opposite: a phrase that can never appear,
 // which is how a gloss outlives the reason it described.
 func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
-	src, err := os.ReadFile("frontend/src/lib/runStatus.ts")
+	src, err := os.ReadFile("frontend/src/lib/conversationStatus.ts")
 	if err != nil {
-		t.Fatalf("read runStatus.ts: %v", err)
+		t.Fatalf("read conversationStatus.ts: %v", err)
 	}
 	got := tsObjectKeys(t, string(src), "PARK_REASON_LABELS: Record<string, string>")
 
@@ -159,7 +159,7 @@ func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
 		want = append(want, string(r))
 	}
 	if diff := vocabularyDiff(want, got); diff != "" {
-		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/run_status.go:\n%s", diff)
+		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/conversation_status.go:\n%s", diff)
 	}
 }
 

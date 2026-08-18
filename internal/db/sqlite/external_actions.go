@@ -69,8 +69,8 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 
 // RecordSystem is identical to Record in SQLite: local mode is single-tenant
 // (N=1) with no RLS, so there is no admin/app pool split. The method exists for
-// parity with the Postgres store, where the event-triggered bot runs + the Jira
-// mirror (no JWT-claims context) need the admin pool.
+// parity with the Postgres store, where the event-triggered bot conversations +
+// the Jira mirror (no JWT-claims context) need the admin pool.
 func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e domain.ExternalAction) error {
 	return s.Record(ctx, orgID, e)
 }
@@ -113,11 +113,11 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return out, total, err
 }
 
-// ListByRun returns one conversation's actions, newest first. A detached row
-// (conversation_id NULL after the run was purged) never matches, so a purged
-// run's actions survive in the org feed but no longer answer for a run that is
-// gone.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+// ListByConversation returns one conversation's actions, newest first. A detached row
+// (conversation_id NULL after the conversation was purged) never matches, so a
+// purged conversation's actions survive in the org feed but no longer answer
+// for a conversation that is gone.
+func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}

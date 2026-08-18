@@ -448,7 +448,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 // handleRequeue is the state-driven counterpart to handleUndo: same
 // task-back-to-queue outcome, no swipe_events row. Used by Board's
 // drag-to-Queue gesture and the AgentCard's "Return to queue" button
-// on a run awaiting approval of its artifact. Both of those
+// on a conversation awaiting approval of its artifact. Both of those
 // are deliberate state changes, not "reverse my last swipe," so
 // audit-logging them as undo events would muddy the swipe-UX
 // analytics.
@@ -607,7 +607,7 @@ func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
 //     the entity manually rather than re-attempting agent work).
 //
 // The distinction is the load-bearing signal in post-run memory:
-// each shape implies a different recalibration for future runs.
+// each shape implies a different recalibration for future conversations.
 type discardOutcome int
 
 const (
@@ -619,20 +619,20 @@ const (
 	// if any, is being discarded — the user is signalling "the work
 	// is finished" without applying the agent's verdict to GitHub.
 	discardOutcomeCompleted
-	// discardOutcomeClaimed: user claimed the task while a run was
+	// discardOutcomeClaimed: user claimed the task while a conversation was
 	// awaiting approval (Board's drag-to-You from Agent/Done, or
 	// the Cards swipe-right against a delegated task). The agent's
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
-	// to close the race where a stale frontend agentRuns
+	// to close the race where a stale frontend conversations
 	// map could let /swipe claim slip past without /requeue's
 	// cleanup; the swipe handler now runs the cleanup on every
 	// claim regardless of frontend state.
 	discardOutcomeClaimed
 	// discardOutcomeRedelegated: user re-delegated the task while
-	// the prior run was still in flight (or had landed a pending
-	// review). The bot is still on the task — the prior run's
-	// artifacts are thrown away in favor of a fresh run with
+	// the prior conversation was still in flight (or had landed a pending
+	// review). The bot is still on the task — the prior conversation's
+	// artifacts are thrown away in favor of a fresh conversation with
 	// (typically) different instructions. Distinct from
 	// Requeued/Dismissed/Completed/Claimed: the agent still owns
 	// the task, but the verdict it just produced is no longer the
@@ -645,10 +645,11 @@ const (
 // /requeue need after the task status flips back to queued:
 //
 //   - artifact teardown: resolve every unresolved artifact the task's
-//     runs hold (close all draft PRs, dismiss all pending reviews) and
+//     conversations hold (close all draft PRs, dismiss all pending reviews) and
 //     write the discard verdict to conversation_memory.human_content, so a
 //     returned-to-queue task leaves no stranded GitHub draft / pending
-//     review. Decoupled from run lifecycle — it never flips conversations.status.
+//     review. Decoupled from conversation lifecycle — it never flips
+//     conversations.status.
 //
 //   - Jira reversal: if the task is Jira-backed and we have a
 //     SourceStatus snapshot (recorded at claim time), unassign and
@@ -685,8 +686,8 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
 	// keep showing the stale claim/status until the next refresh.
-	// teardownTaskArtifacts no longer broadcasts a run-status change
-	// (a resolve is decoupled from run lifecycle), so this is the sole
+	// teardownTaskArtifacts no longer broadcasts a conversation-status change
+	// (a resolve is decoupled from conversation lifecycle), so this is the sole
 	// board-update signal for a requeue.
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{
@@ -700,29 +701,29 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // teardownTaskArtifacts is the task-level "force-resolve-all" gesture: the user
 // dragged a card to Done / dismissed it / claimed it / returned it to the queue
 // while it still had unresolved artifacts (draft PRs, pending reviews — same or
-// different repos). It resolves EVERY unresolved artifact the task's runs hold so
+// different repos). It resolves EVERY unresolved artifact the task's conversations hold so
 // nothing strands: each draft PR is closed on GitHub + flipped to closed; each
 // pending review (finalized or not) has its GitHub pending review deleted +
 // flipped to dismissed. Pushed branches are kept (retention is separate).
 //
-// Decoupled from run lifecycle (TFAC-379): this never flips
-// conversations.status. A live run is cancelled by the caller
-// (swipeTeardownRuns' spawner.Cancel pass) — the process teardown owns that
-// transition; a terminal run simply stays terminal. Keyed on the task's
-// runs (ListForTask spans the blueprint's step runs and any standalone run)
-// rather than on a run status.
+// Decoupled from conversation lifecycle (TFAC-379): this never flips
+// conversations.status. A live conversation is cancelled by the caller
+// (swipeTeardownConversations' spawner.Cancel pass) — the process teardown owns
+// that transition; a terminal conversation simply stays terminal. Keyed on the
+// task's conversations (ListForTask spans the blueprint's step conversations and
+// any standalone conversation) rather than on a conversation status.
 //
 // outcome shapes the discard note baked into conversation_memory.human_content so the next
 // agent reading memory can distinguish "still on the docket, the human just
 // didn't like this verdict" (requeued) from "walked away from the entity"
 // (dismissed) from "resolved it themselves" (completed) from "took over"
-// (claimed). The note is written per run that held a resolved artifact, keyed on
-// that run's dominant kind (PR precedence, matching the legacy single-artifact
-// path).
+// (claimed). The note is written per conversation that held a resolved
+// artifact, keyed on that conversation's dominant kind (PR precedence, matching
+// the legacy single-artifact path).
 //
 // All-or-nothing per call: any DB error inside the closure rolls back the whole
 // batch (notes + flips + audit rows), leaving the artifacts unresolved for a
-// retry on the next /undo, /requeue, dismiss, or complete. UpdateRunMemoryHumanContent
+// retry on the next /undo, /requeue, dismiss, or complete. UpdateConversationMemoryHumanContent
 // is idempotent and the flips re-target the same predicate set, so retry is safe.
 // All failures are logged, not fatal: the calling handler has already flipped the
 // task to its new state.
@@ -740,15 +741,15 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 
 	var prArtifacts []domain.Artifact
 	err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if err != nil {
-			return fmt.Errorf("list runs for task: %w", err)
+			return fmt.Errorf("list conversations for task: %w", err)
 		}
-		for i := range runs {
-			runID := runs[i].ID
-			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runID)
+		for i := range convs {
+			conversationID := convs[i].ID
+			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, conversationID)
 			if artErr != nil {
-				return fmt.Errorf("artifacts.ListByRun(%s): %w", runID, artErr)
+				return fmt.Errorf("artifacts.ListByConversation(%s): %w", conversationID, artErr)
 			}
 			draftPRs := domain.AllDraftPullRequests(arts)
 			pendingReviews := domain.AllPendingReviewArtifacts(arts)
@@ -758,12 +759,12 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 
 			// Write the discard note BEFORE the flips so the next agent reading
 			// memory on this entity sees the human's verdict alongside the agent's
-			// self-report. Keyed on the run's dominant kind (PR precedence).
+			// self-report. Keyed on the conversation's dominant kind (PR precedence).
 			kind := "review"
 			if len(draftPRs) > 0 {
 				kind = "pr"
 			}
-			if err := tx.TaskMemory.UpdateRunMemoryHumanContent(ctx, orgID, runID, buildDiscardHumanContent(outcome, kind)); err != nil {
+			if err := tx.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, buildDiscardHumanContent(outcome, kind)); err != nil {
 				return fmt.Errorf("human_content write: %w", err)
 			}
 
@@ -829,12 +830,12 @@ func (s *Server) draftPRCredentials(ctx context.Context, orgID, userID, taskID s
 	type ownerRepo struct{ owner, repo string }
 	repos := map[string]ownerRepo{}
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		runs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		convs, err := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if err != nil {
 			return err
 		}
-		for i := range runs {
-			arts, artErr := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+		for i := range convs {
+			arts, artErr := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
 			if artErr != nil {
 				return artErr
 			}
@@ -874,10 +875,10 @@ func credentialForTarget(credentials map[string]string, target string) string {
 
 // closeDraftPRBestEffort closes the abandoned draft PR on GitHub. Best-effort:
 // every failure is logged, never returned — the artifact is already marked
-// closed and the run/task already resolved, so a GitHub hiccup mustn't unwind
-// that. owner/repo/number come from the artifact's target; the per-repo client
-// resolves App-installation-token → PAT like every other PR mutation. A free
-// function (taking the resolver) so both the task-level teardown and the
+// closed and the conversation/task already resolved, so a GitHub hiccup mustn't
+// unwind that. owner/repo/number come from the artifact's target; the per-repo
+// client resolves App-installation-token → PAT like every other PR mutation. A
+// free function (taking the resolver) so both the task-level teardown and the
 // per-artifact dismiss endpoint share one GitHub-resolution path. The pushed
 // branch is never touched (retention is a separate concern).
 func closeDraftPRBestEffort(ctx context.Context, resolver ghclient.Resolver, orgID string, art *domain.Artifact) {

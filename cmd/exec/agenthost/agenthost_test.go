@@ -45,7 +45,7 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
 // and returns the blueprint_run id. conversations.blueprint_run_id is NOT NULL,
-// so every seeded run needs a parent blueprint_run. SQLite
+// so every seeded conversation needs a parent blueprint_run. SQLite
 // blueprint_runs has no org_id/creator_user_id columns; org_id on
 // blueprints takes its local-sentinel DEFAULT.
 func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
@@ -67,18 +67,18 @@ func seedBlueprintRun(t *testing.T, conn *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedConversation inserts an entity → event → task → run chain through
-// the real store APIs so the FK constraints are honored. trigger is
+// seedConversation inserts an entity → event → task → conversation chain
+// through the real store APIs so the FK constraints are honored. trigger is
 // "manual" (creator set) or "event" (creator empty).
-func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, runID, creator, trigger string) {
+func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversationID, creator, trigger string) {
 	t.Helper()
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "jira", "TEST-"+runID, "issue", "T-"+runID, "https://x/"+runID)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "jira", "TEST-"+conversationID, "issue", "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, orgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + runID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if err := stores.Prompts.Create(ctx, orgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	evtID, err := stores.Events.Record(ctx, orgID, domain.Event{
@@ -89,12 +89,12 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, runID, creat
 	if err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	task, _, err := stores.Tasks.FindOrCreate(ctx, orgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, runID, evtID, 0.5)
+	task, _, err := stores.Tasks.FindOrCreate(ctx, orgID, runmode.LocalDefaultTeamID, entity.ID, domain.EventJiraIssueAssigned, conversationID, evtID, 0.5)
 	if err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 	dbtest.SeedConversation(t, conn, domain.Conversation{
-		ID: runID, TaskID: task.ID, PromptID: "p-" + runID,
+		ID: conversationID, TaskID: task.ID, PromptID: "p-" + conversationID,
 		Status: "running", Model: "claude-test",
 		TriggerType:    trigger,
 		CreatorUserID:  creator,
@@ -145,10 +145,10 @@ func TestProtocol_OversizedFrameRejected(t *testing.T) {
 // the second call would fail.
 func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	stores, _ := newTestDB(t)
-	info := RunInfo{
-		OrgID:  runmode.LocalDefaultOrgID,
-		UserID: "user-1",
-		RunID:  "run-multi",
+	info := ConversationInfo{
+		OrgID:          runmode.LocalDefaultOrgID,
+		UserID:         "user-1",
+		ConversationID: "conv-multi",
 	}
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
@@ -166,9 +166,9 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	defer client.Close()
 
 	for i := 0; i < 3; i++ {
-		got, err := client.LookupRun(context.Background())
+		got, err := client.LookupConversation(context.Background())
 		if err != nil {
-			t.Fatalf("LookupRun call %d: %v", i, err)
+			t.Fatalf("LookupConversation call %d: %v", i, err)
 		}
 		if !reflect.DeepEqual(got, info) {
 			t.Errorf("call %d: identity mismatch: got %+v, want %+v", i, got, info)
@@ -176,19 +176,19 @@ func TestIPCClient_MultiCall_PerCallDial(t *testing.T) {
 	}
 }
 
-// TestServer_LookupRun_RoundTrip exercises the full
-// Server.Serve → IPCClient.LookupRun loop over a real (temporary)
+// TestServer_LookupConversation_RoundTrip exercises the full
+// Server.Serve → IPCClient.LookupConversation loop over a real (temporary)
 // unix socket. The probe RPC matches what the integration test +
 // the test stub send. info carries a non-empty TeamID so the assertion
-// pins the multi-mode construction path (TFAC-458): the RunInfo the
-// spawner builds off the run row — TeamID included — survives the IPC
+// pins the multi-mode construction path (TFAC-458): the ConversationInfo the
+// spawner builds off the conversation row — TeamID included — survives the IPC
 // wire intact to the sandboxed agent, where the capture writers read it.
-func TestServer_LookupRun_RoundTrip(t *testing.T) {
+func TestServer_LookupConversation_RoundTrip(t *testing.T) {
 	stores, _ := newTestDB(t)
-	info := RunInfo{
+	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "user-1",
-		RunID:            "run-1",
+		ConversationID:   "conv-1",
 		TeamID:           runmode.LocalDefaultTeamID,
 		IsEventTriggered: false,
 	}
@@ -207,12 +207,12 @@ func TestServer_LookupRun_RoundTrip(t *testing.T) {
 	client := Dial(sockPath)
 	defer client.Close()
 
-	got, err := client.LookupRun(context.Background())
+	got, err := client.LookupConversation(context.Background())
 	if err != nil {
-		t.Fatalf("LookupRun: %v", err)
+		t.Fatalf("LookupConversation: %v", err)
 	}
 	if !reflect.DeepEqual(got, info) {
-		t.Errorf("LookupRun mismatch: got %+v, want %+v", got, info)
+		t.Errorf("LookupConversation mismatch: got %+v, want %+v", got, info)
 	}
 	if got.TeamID != info.TeamID {
 		t.Errorf("TeamID dropped over IPC: got %q, want %q", got.TeamID, info.TeamID)
@@ -231,7 +231,7 @@ func TestServer_VersionMismatch_RejectsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{RunID: "run-1"}, nil)
+	srv := NewServer(stores, ConversationInfo{ConversationID: "conv-1"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -245,7 +245,7 @@ func TestServer_VersionMismatch_RejectsCleanly(t *testing.T) {
 	defer conn.Close()
 
 	// Send a frame claiming version 999.
-	bogus := request{Version: 999, Method: "LookupRun", Args: json.RawMessage("{}")}
+	bogus := request{Version: 999, Method: "LookupConversation", Args: json.RawMessage("{}")}
 	if err := writeFrame(conn, bogus); err != nil {
 		t.Fatalf("writeFrame: %v", err)
 	}
@@ -268,7 +268,7 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{RunID: "run-1"}, nil)
+	srv := NewServer(stores, ConversationInfo{ConversationID: "conv-1"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -296,15 +296,15 @@ func TestServer_UnknownMethod_RejectsCleanly(t *testing.T) {
 
 // TestServer_ConcurrentSockets_NoCrossContamination pins the
 // per-run identity isolation: two daemons serving two different
-// RunInfos, two clients connecting in parallel — LookupRun on
+// ConversationInfos, two clients connecting in parallel — LookupConversation on
 // client A returns A's identity, not B's. The test simulates two
 // sandboxed runs operating in parallel.
 func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 	stores, _ := newTestDB(t)
-	infoA := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-A", UserID: "user-A"}
-	infoB := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-B", UserID: "user-B", IsEventTriggered: true}
+	infoA := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-A", UserID: "user-A"}
+	infoB := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-B", UserID: "user-B", IsEventTriggered: true}
 
-	startDaemon := func(info RunInfo) (string, func()) {
+	startDaemon := func(info ConversationInfo) (string, func()) {
 		sockPath := tempSocket(t)
 		l, err := net.Listen("unix", sockPath)
 		if err != nil {
@@ -325,13 +325,13 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	probe := func(path string, want RunInfo) {
+	probe := func(path string, want ConversationInfo) {
 		defer wg.Done()
 		c := Dial(path)
 		defer c.Close()
-		got, err := c.LookupRun(context.Background())
+		got, err := c.LookupConversation(context.Background())
 		if err != nil {
-			t.Errorf("LookupRun(%s): %v", path, err)
+			t.Errorf("LookupConversation(%s): %v", path, err)
 			return
 		}
 		if !reflect.DeepEqual(got, want) {
@@ -344,8 +344,8 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 }
 
 // TestLocalClient_RoutingByTriggerType_Manual pins the per-write
-// routing: a manual run's UpsertArtifact wraps in synthetic-claims
-// (so RLS sees the kicking-off user), an event-triggered run's
+// routing: a manual conversation's UpsertArtifact wraps in synthetic-claims
+// (so RLS sees the kicking-off user), an event-triggered conversation's
 // goes through the admin-pool ...System variant. We can't observe
 // the pool directly in SQLite (one connection) but we can confirm
 // the rows commit by reading them back, which is the regression
@@ -355,19 +355,19 @@ func TestServer_ConcurrentSockets_NoCrossContamination(t *testing.T) {
 // under test is what runs against Postgres.
 func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-1", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "conv-1", runmode.LocalDefaultUserID, "manual")
 
-	info := RunInfo{
+	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            "run-1",
+		ConversationID:   "conv-1",
 		IsEventTriggered: false,
 	}
 	client := NewLocal(stores, info)
 
 	// UpsertArtifact routes through the same withWrite branch the retired
-	// pending-PR writer used: a synthetic-claims tx for a manual run.
+	// pending-PR writer used: a synthetic-claims tx for a manual conversation.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
 		Kind:     domain.ArtifactKindPullRequest,
 		Target:   "octocat/hello#1",
@@ -376,7 +376,7 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertArtifact (manual): %v", err)
 	}
-	got := listRunArtifacts(t, stores, "run-1")
+	got := listConversationArtifacts(t, stores, "conv-1")
 	if len(got) != 1 || got[0].Target != "octocat/hello#1" {
 		t.Errorf("unexpected artifacts: %+v", got)
 	}
@@ -385,19 +385,19 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	stores, conn := newTestDB(t)
 	// Event-triggered: no creator_user_id.
-	seedConversation(t, stores, conn, "run-2", "", "event")
+	seedConversation(t, stores, conn, "conv-2", "", "event")
 
-	info := RunInfo{
+	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           "",
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            "run-2",
+		ConversationID:   "conv-2",
 		IsEventTriggered: true,
 	}
 	client := NewLocal(stores, info)
 
-	// Event-triggered runs have no user, so UpsertArtifact must route through
-	// the admin-pool ...System variant (the case Postgres RLS would reject under
+	// Event-triggered conversations have no user, so UpsertArtifact must route
+	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
 		Kind:     domain.ArtifactKindPullRequest,
@@ -407,7 +407,7 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertArtifact (event): %v", err)
 	}
-	got := listRunArtifacts(t, stores, "run-2")
+	got := listConversationArtifacts(t, stores, "conv-2")
 	if len(got) != 1 || got[0].Target != "octocat/hello#2" {
 		t.Errorf("unexpected artifacts: %+v", got)
 	}
@@ -420,7 +420,7 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 // successfully even though no new connections can be opened.
 func TestServer_GracefulShutdown_CompletesInFlight(t *testing.T) {
 	stores, _ := newTestDB(t)
-	info := RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-graceful"}
+	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-graceful"}
 	sockPath := tempSocket(t)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -432,8 +432,8 @@ func TestServer_GracefulShutdown_CompletesInFlight(t *testing.T) {
 	client := Dial(sockPath)
 	defer client.Close()
 	// Round-trip once to confirm baseline.
-	if _, err := client.LookupRun(context.Background()); err != nil {
-		t.Fatalf("baseline LookupRun: %v", err)
+	if _, err := client.LookupConversation(context.Background()); err != nil {
+		t.Fatalf("baseline LookupConversation: %v", err)
 	}
 
 	// Close listener; Shutdown should drain cleanly.

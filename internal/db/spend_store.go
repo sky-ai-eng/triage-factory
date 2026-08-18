@@ -8,14 +8,14 @@ import (
 )
 
 // SpendStore is a read-only aggregation over the llm_spend view (TFAC-472) —
-// the unified shape that UNION-ALLs runs + curator_requests + system_llm_runs
+// the unified shape that UNION-ALLs conversation messages + system_llm_runs
 // onto the category axis (autonomous / manual / curator / system_overhead) so
 // the team dashboard + safety cap read from one place and totals reconcile with
 // the Anthropic bill. It owns no table; the view is the abstraction boundary.
 //
 // Postgres / RLS: every method runs on the APP pool. The view is
 // security_invoker, so the base tables' existing RLS scopes the read under the
-// querying user's identity — a team member sees their team's runs but not
+// querying user's identity — a team member sees their team's spend but not
 // another team's, with system/curator rows visible at org scope. Wiring it to
 // the admin pool would bypass that and leak cross-team spend. SQLite is N=1 and
 // unscoped; both impls take orgID and filter on it as defense in depth.
@@ -37,7 +37,7 @@ type SpendStore interface {
 	// HTTP role gate is the authorization, this System read is the authorized
 	// path past RLS. Same opts contract as ListSpend (a non-nil TeamID narrows
 	// to one team; an empty filter is the whole org). Mirrors
-	// SpendByCategorySystem / artifactStore.ListByRunSystem. SQLite is N=1 / no
+	// SpendByCategorySystem / artifactStore.ListByConversationSystem. SQLite is N=1 / no
 	// RLS, so it delegates to ListSpend.
 	ListSpendSystem(ctx context.Context, orgID string, opts domain.SpendFilter) ([]domain.SpendRow, error)
 
@@ -59,7 +59,7 @@ type SpendStore interface {
 	// would see nothing and the cap would never trip, so it MUST use this
 	// variant. Returns spend summed across EVERY team + curator + system row in
 	// the org (the runaway-spend fuse counts all categories). Mirrors
-	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByRunSystem. SQLite is N=1
+	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByConversationSystem. SQLite is N=1
 	// / no RLS, so it delegates to SpendByCategory.
 	SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
 

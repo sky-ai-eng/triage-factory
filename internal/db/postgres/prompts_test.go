@@ -36,7 +36,7 @@ import (
 func TestPromptStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.ConversationSeederForStats) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForPrompts(t, h)
@@ -57,7 +57,7 @@ func TestPromptStore_Postgres(t *testing.T) {
 
 		seeder := func(t *testing.T, promptID string, statusByOffset []string) []string {
 			t.Helper()
-			return seedPgRunsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
+			return seedPgConversationsForStats(t, h.AdminDB, orgID, userID, promptID, statusByOffset)
 		}
 		_ = userID
 		return stores.Prompts, orgID, teamID, seeder
@@ -178,13 +178,13 @@ func seedPgOrgAndUserForPrompts(t *testing.T, h *pgtest.Harness) (orgID, userID 
 	return orgID, userID
 }
 
-// seedPgRunsForStats inserts entity + task + run rows so Stats has
+// seedPgConversationsForStats inserts entity + task + conversation rows so Stats has
 // data to aggregate. All rows hold the conformance org_id so RLS-aware
 // reads (when the test uses the app pool) see them.
 //
-// Mirrors seedSQLiteRunsForStats but with Postgres column shape and
+// Mirrors seedSQLiteConversationsForStats but with Postgres column shape and
 // org_id/creator_user_id columns populated.
-func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID string, statusByOffset []string) []string {
+func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID string, statusByOffset []string) []string {
 	t.Helper()
 	now := time.Now().UTC()
 	entityID := uuid.New().String()
@@ -232,12 +232,12 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
-		runID := uuid.New().String()
+		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
 			INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, blueprint_run_id)
 			VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1), 'team', $4, $5, $6, $7, $8)
-		`, runID, orgID, userID, taskID, promptID, status, startedAt, brID); err != nil {
+		`, conversationID, orgID, userID, taskID, promptID, status, startedAt, brID); err != nil {
 			t.Fatalf("seed run %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped
@@ -245,16 +245,16 @@ func seedPgRunsForStats(t *testing.T, conn *sql.DB, orgID, userID, promptID stri
 		if _, err := conn.Exec(`
 			INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
 			VALUES ($1, $2, 'assistant', '', 'work', 0.01, $3)
-		`, orgID, runID, startedAt); err != nil {
+		`, orgID, conversationID, startedAt); err != nil {
 			t.Fatalf("seed run message %d: %v", i, err)
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
 			VALUES ($1, $2, $3, 'exec-p', 1, $4, $4, 'completed', 100)
-		`, uuid.New().String(), orgID, runID, startedAt); err != nil {
+		`, uuid.New().String(), orgID, conversationID, startedAt); err != nil {
 			t.Fatalf("seed run claim %d: %v", i, err)
 		}
-		ids = append(ids, runID)
+		ids = append(ids, conversationID)
 	}
 	return ids
 }

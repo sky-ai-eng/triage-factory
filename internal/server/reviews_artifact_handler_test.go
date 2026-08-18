@@ -16,23 +16,24 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedReviewArtifactWithRun mints a completed (terminal) run chain and a
-// finalized review-draft artifact hung off it (TFAC-494): state=pending, ready
-// sentinel set, the head SHA pinned, one staged inline comment, and the agent's
-// draft snapshotted into proposed. The whole review is staged TF-side — no GitHub
-// object exists until approval. The run is completed because approval/dismiss are
-// decoupled sidecars that never flip run lifecycle (TFAC-379). Returns
-// (artifactID, runID, taskID).
-func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, runID, taskID string) {
+// seedReviewArtifactWithConversation mints a completed (terminal) conversation
+// chain and a finalized review-draft artifact hung off it (TFAC-494):
+// state=pending, ready sentinel set, the head SHA pinned, one staged inline
+// comment, and the agent's draft snapshotted into proposed. The whole review is
+// staged TF-side — no GitHub object exists until approval. The conversation is
+// completed because approval/dismiss are decoupled sidecars that never flip
+// conversation lifecycle (TFAC-379). Returns (artifactID, conversationID,
+// taskID).
+func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	runID = seedSteerRun(t, s.db, suffix, "completed")
+	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, runID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, runID)
-	a.ConversationID = runID
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, "headsha"+suffix, conversationID)
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	d, _ := domain.ParseReviewArtifactDetails(a.DetailsJSON)
@@ -50,7 +51,7 @@ func seedReviewArtifactWithRun(t *testing.T, s *Server, suffix, owner, repo stri
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
-	return stored.ID, runID, taskID
+	return stored.ID, conversationID, taskID
 }
 
 // TestReviewArtifactGet_SeverityRoundTrip pins the read: GET returns the artifact
@@ -60,7 +61,7 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rget", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rget", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -94,8 +95,9 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 
 // TestReviewArtifactApprove pins the atomic submit-on-approval flow: SubmitReview
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
-// pending → submitted and gains the submitted review's id + URL, the run
-// completes, and the human verdict lands in conversation_memory.
+// pending → submitted and gains the submitted review's id + URL, the
+// conversation stays completed (approval never flips it), and the human verdict
+// lands in conversation_memory.
 //
 // The POST asserted here is composed by review.SubmitStaged — the same function
 // the auto-post posture calls from the agent's finalize, whose test
@@ -115,7 +117,7 @@ func TestReviewArtifactApprove(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rappr", "acme", "api", 7, "COMMENT")
+	artID, conversationID, _ := seedReviewArtifactWithConversation(t, srv, "rappr", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -155,15 +157,15 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if !strings.HasPrefix(art.URL, stub.URL+"/") || strings.Contains(art.URL, "github.com") {
 		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
 	}
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
 	var human string
-	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, runID).Scan(&human); err != nil {
+	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
 		t.Fatalf("read conversation_memory: %v", err)
 	}
 	if !strings.Contains(human, "as drafted") {
@@ -186,7 +188,7 @@ func TestReviewArtifactApprove_NonPending_409(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "r409", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "r409", "acme", "api", 7, "COMMENT")
 	// Flip it to submitted out-of-band.
 	art := getArtifact(t, srv, artID)
 	art.State = domain.ArtifactStateReviewSubmitted
@@ -244,7 +246,7 @@ func TestReviewArtifactApprove_SubmitsPostClaimContent(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ = seedReviewArtifactWithRun(t, srv, "rrace", "acme", "api", 7, "COMMENT")
+	artID, _, _ = seedReviewArtifactWithConversation(t, srv, "rrace", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -280,7 +282,7 @@ func TestReviewArtifactApprove_GitHubFailure_ReleasesClaim(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rrel", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rrel", "acme", "api", 7, "COMMENT")
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
 	if rec.Code != http.StatusBadGateway {
@@ -320,7 +322,7 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rsurl", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rsurl", "acme", "api", 7, "COMMENT")
 	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil); rec.Code != http.StatusOK {
 		t.Fatalf("approve = %d; body=%s", rec.Code, rec.Body.String())
 	}
@@ -363,7 +365,7 @@ func TestReviewArtifactApprove_NilLineComment_422(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rnil", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rnil", "acme", "api", 7, "COMMENT")
 	// Null out the staged comment's line anchor.
 	art := getArtifact(t, srv, artID)
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -391,7 +393,7 @@ func TestReviewArtifactCommentUpdate_RebakesBadge(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcu", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rcu", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/c_1", map[string]any{"body": "rename to fooBar"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("comment update = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -417,7 +419,7 @@ func TestReviewArtifactCommentUpdate_NotFound_404(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcw", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rcw", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/c_missing", map[string]any{"body": "x"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("update = %d, want 404 for a comment not in the staged set; body=%s", rec.Code, rec.Body.String())
@@ -430,7 +432,7 @@ func TestReviewArtifactCommentDelete(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rcd", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rcd", "acme", "api", 7, "COMMENT")
 
 	rec := doJSON(t, srv, http.MethodDelete, "/api/artifacts/"+artID+"/comments/c_1", nil)
 	if rec.Code != http.StatusOK {
@@ -448,11 +450,12 @@ func TestReviewArtifactCommentDelete(t *testing.T) {
 
 // TestReviewArtifactUpdate_InvalidEvent_400 pins early validation of the staged
 // verdict: an invalid (or empty) review_event is rejected at PATCH time and the
-// stored sentinel is left unchanged (an empty event would otherwise un-park the run).
+// stored sentinel is left unchanged (an empty event would otherwise un-park the
+// conversation).
 func TestReviewArtifactUpdate_InvalidEvent_400(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rie", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rie", "acme", "api", 7, "COMMENT")
 	for _, bad := range []string{"", "approve", "LGTM"} {
 		rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_event": bad})
 		if rec.Code != http.StatusBadRequest {
@@ -471,7 +474,7 @@ func TestReviewArtifactUpdate_InvalidEvent_400(t *testing.T) {
 func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rnp", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rnp", "acme", "api", 7, "COMMENT")
 	// Flip to submitted out-of-band.
 	art := getArtifact(t, srv, artID)
 	art.State = domain.ArtifactStateReviewSubmitted
@@ -490,13 +493,13 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 
 // TestReviewArtifactDismiss pins the per-artifact dismiss for reviews: POST
 // /api/artifacts/{id}/dismiss flips the artifact pending → dismissed with NO
-// GitHub call (the review is staged TF-side, TFAC-494) and never touches the run
-// lifecycle (the decoupled sidecar, TFAC-379).
+// GitHub call (the review is staged TF-side, TFAC-494) and never touches the
+// conversation lifecycle (the decoupled sidecar, TFAC-379).
 func TestReviewArtifactDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, runID, _ := seedReviewArtifactWithRun(t, srv, "rdis", "acme", "api", 7, "COMMENT")
+	artID, conversationID, _ := seedReviewArtifactWithConversation(t, srv, "rdis", "acme", "api", 7, "COMMENT")
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -504,12 +507,12 @@ func TestReviewArtifactDismiss(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewDismissed {
 		t.Errorf("artifact state = %q, want dismissed", got)
 	}
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
 	}
 }
 
@@ -518,7 +521,7 @@ func TestReviewArtifactDismiss(t *testing.T) {
 func TestReviewArtifactDismiss_NonPending_409(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
 	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStateReviewSubmitted, artID)
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
 	if rec.Code != http.StatusConflict {
@@ -532,7 +535,7 @@ func TestReviewArtifactGet_MalformedDetails_500(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rbad", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rbad", "acme", "api", 7, "COMMENT")
 	// Corrupt the details_json out-of-band.
 	execSQL(t, srv.db, `UPDATE artifacts SET details_json = ? WHERE id = ?`, `{not valid json`, artID)
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
@@ -558,7 +561,7 @@ func TestReviewArtifactApprove_SharedCommitSHA_PinsToIt(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rshare", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rshare", "acme", "api", 7, "COMMENT")
 	// Two comments both anchored to commit_v2 — a different commit than the
 	// start-review head ("headsharshare"). The pin must follow the comments.
 	art := getArtifact(t, srv, artID)

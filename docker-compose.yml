@@ -76,7 +76,7 @@
 #   - seccomp: a tailored default-deny allowlist (TFAC-608), NOT unconfined —
 #     see docs/security/seccomp-profile.md.
 #   - cgroup: private — a private cgroup-v2 namespace so per-run memory
-#     ceilings (TF_RUN_MEMORY_LIMIT_MB) manage this container's own delegated
+#     ceilings (TF_CLAIM_MEMORY_LIMIT_MB) manage this container's own delegated
 #     subtree and can never reach host cgroups. Fails open without it.
 # Tightening the caps further is a hardening follow-up (SKY-336).
 x-tf-hardening: &tf-hardening
@@ -650,7 +650,7 @@ services:
       TF_AUTHENTICATOR_PASSWORD: ${TF_AUTHENTICATOR_PASSWORD:?missing TF_AUTHENTICATOR_PASSWORD (see .env.example)}
       # Deliberately NOT set here (TFAC-614): an executor never holds the
       # secret-decryption key. Per-run GitHub/LLM/Jira credentials arrive
-      # pre-resolved via sealed run_credentials bundles from the control
+      # pre-resolved via sealed claim_credentials bundles from the control
       # pod's brain instead — see internal/credprovision. openStores warns
       # and ignores this var if it's set on an executor anyway.
       # TF_SECRET_ENCRYPTION_KEY intentionally omitted.

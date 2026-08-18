@@ -253,7 +253,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 // recordMirrorAction appends one external_actions row for a board→Jira mirror
 // write (TFAC-483): a system/bot action under the org Jira service-account
 // credential, with no human actor (actor_user_id NULL). team_id scopes it to the
-// bot-owned task's team. The detached mirror holds no run handle, so run_id is
+// bot-owned task's team. The detached mirror holds no conversation handle, so conversation_id is
 // left NULL, and it doesn't resolve the issue's browse URL (the issue key is the
 // target). Admin pool (RecordSystem — no JWT claims). Best-effort: a recording
 // failure is logged and swallowed so it never unwinds the Jira move it observed,

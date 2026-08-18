@@ -14,17 +14,17 @@ import (
 
 // markNative stamps a seeded conversation as the native runtime, the ratchet
 // SendMessage routes on.
-func markNative(t *testing.T, database *sql.DB, runID string) {
+func markNative(t *testing.T, database *sql.DB, conversationID string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET runtime='native' WHERE id=?`, runID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET runtime='native' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("mark native: %v", err)
 	}
 }
 
 // pendingRows returns the conversation's undelivered user rows, oldest-first.
-func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
+func pendingRows(t *testing.T, s *Spawner, conversationID string) []domain.Message {
 	t.Helper()
-	rows, err := s.agentRuns.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, runID)
+	rows, err := s.conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
 		t.Fatalf("list for assembly: %v", err)
 	}
@@ -44,7 +44,7 @@ func pendingRows(t *testing.T, s *Spawner, runID string) []domain.Message {
 // call.
 func TestSendMessage_NativeRunningQueuesWithoutSteering(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-native", "", "/tmp/wt-native")
+	seedConversation(t, database, "r-native", "", "/tmp/wt-native")
 	markEngaged(t, database, "r-native")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	markNative(t, database, "r-native")
@@ -116,7 +116,7 @@ func (c *capturedEvents) messages() []domain.MessageDTO {
 // beside it.
 func TestSendMessage_NativeBroadcastCarriesTheStoredRow(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-bcast", "", "/tmp/wt-bcast")
+	seedConversation(t, database, "r-bcast", "", "/tmp/wt-bcast")
 	markEngaged(t, database, "r-bcast")
 	hub := websocket.NewHub()
 	captured := &capturedEvents{}
@@ -161,7 +161,7 @@ func TestSendMessage_NativeBroadcastCarriesTheStoredRow(t *testing.T) {
 // woken — the row is already claimable.
 func TestSendMessage_NativeQueuedAppendsWithoutWaking(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-nq", "", "/tmp/wt-nq")
+	seedConversation(t, database, "r-nq", "", "/tmp/wt-nq")
 	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id='r-nq'`); err != nil {
 		t.Fatalf("queued: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSendMessage_NativeQueuedAppendsWithoutWaking(t *testing.T) {
 // (TestFollowUp_TerminalRefused).
 func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-term", "", "/tmp/wt-term")
+	seedConversation(t, database, "r-term", "", "/tmp/wt-term")
 	if _, err := database.Exec(`UPDATE conversations SET status='cancelled' WHERE id='r-term'`); err != nil {
 		t.Fatalf("set terminal: %v", err)
 	}
@@ -197,8 +197,8 @@ func TestSendMessage_NativeCancelledNotSteerable(t *testing.T) {
 	markNative(t, database, "r-term")
 
 	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-term", runmode.LocalDefaultUserID, "hello?")
-	if !errors.Is(err, ErrRunNotSteerable) {
-		t.Fatalf("err = %v, want ErrRunNotSteerable", err)
+	if !errors.Is(err, ErrConversationNotSteerable) {
+		t.Fatalf("err = %v, want ErrConversationNotSteerable", err)
 	}
 	if got := pendingRows(t, s, "r-term"); len(got) != 0 {
 		t.Errorf("a refused message must not leave a row behind: %+v", got)
@@ -217,7 +217,7 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 	for _, outcome := range []string{"abort", "finish", "continue"} {
 		t.Run(outcome, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			seedRun(t, database, "r-done", "", t.TempDir())
+			seedConversation(t, database, "r-done", "", t.TempDir())
 			if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome=? WHERE id='r-done'`, outcome); err != nil {
 				t.Fatalf("complete: %v", err)
 			}
@@ -225,7 +225,7 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 			if outcome == "abort" {
 				blueprintTerminal = "aborted"
 			}
-			settleRunBlueprint(t, database, "r-done", blueprintTerminal)
+			settleConversationBlueprint(t, database, "r-done", blueprintTerminal)
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 			markNative(t, database, "r-done")
 

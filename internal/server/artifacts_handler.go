@@ -26,10 +26,10 @@ import (
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
 // dashboardHandler's deps.
 type artifactsHandler struct {
-	tx         db.TxRunner
-	ws         *websocket.Hub
-	agentRuns  db.ConversationStore
-	ghResolver ghclient.Resolver
+	tx            db.TxRunner
+	ws            *websocket.Hub
+	conversations db.ConversationStore
+	ghResolver    ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts (TFAC-493).
@@ -53,14 +53,15 @@ func writeUpstreamGitHub(w http.ResponseWriter, msg string, err error) {
 	})
 }
 
-// injectArtifactNote feeds the artifact's drafting run the agent-facing
-// <system-note> for a just-completed resolution. Fully decoupled from the
-// resolution itself: a live run is steered (the actual delivery runs on a
-// detached goroutine inside the spawner, so this returns immediately and never
-// blocks the response); a terminal/paused run gets nothing here and re-derives
-// the same note from the artifact row into its ledger on the next resume. Never
-// gates the blueprint (TFAC-379 #2). The artifact passed must carry its
-// post-resolution State so the right kind-specific copy is rendered.
+// injectArtifactNote feeds the artifact's drafting conversation the agent-
+// facing <system-note> for a just-completed resolution. Fully decoupled from
+// the resolution itself: a live conversation is steered (the actual delivery
+// runs on a detached goroutine inside the spawner, so this returns immediately
+// and never blocks the response); a terminal/paused conversation gets nothing
+// here and re-derives the same note from the artifact row into its ledger on
+// the next resume. Never gates the blueprint (TFAC-379 #2). The artifact
+// passed must carry its post-resolution State so the right kind-specific copy
+// is rendered.
 func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) {
 	if a.ConversationID == "" || ah.spawner == nil {
 		return
@@ -444,11 +445,11 @@ func diffTruncationNote(fileCount int) string {
 // handleArtifactApprove promotes the draft PR to ready-for-review: it appends the
 // agentmeta footer to the body (UpdatePR), marks the PR ready (MarkPRReady),
 // flips the artifact to state=open, and captures the human verdict into
-// conversation_memory. Approval is a decoupled sidecar — it does NOT flip run status or
-// resume/terminate a blueprint; the only lifecycle effect is the shared
-// terminal-on-last task-closure check (closeTaskIfTerminalAndResolved), which
-// closes the task iff this was the last unresolved artifact on a cleanly-completed
-// run.
+// conversation_memory. Approval is a decoupled sidecar — it does NOT flip
+// conversation status or resume/terminate a blueprint; the only lifecycle
+// effect is the shared terminal-on-last task-closure check
+// (closeTaskIfTerminalAndResolved), which closes the task iff this was the last
+// unresolved artifact on a cleanly-completed blueprint run.
 //
 // The content promoted is read LIVE from GitHub (never the cached snapshot), so a
 // stale or malformed snapshot can neither revert a direct GitHub edit nor write an
@@ -456,7 +457,7 @@ func diffTruncationNote(fileCount int) string {
 // stripped first), so a retry after a partial failure leaves exactly one. The two
 // GitHub mutations come first and are pessimistic (non-2xx on failure); everything
 // after is detached best-effort bookkeeping — the PR is already ready, so a client
-// disconnect must not strand the run/task half-flipped.
+// disconnect must not strand the conversation/task half-flipped.
 func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -524,7 +525,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Append the footer idempotently: strip any footer a prior (partially failed)
 	// approve already added before re-appending, so a retry can't stack footers.
-	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.ConversationID, "PR")
+	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.conversations, orgID, art.ConversationID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		writeUpstreamGitHub(w, "GitHub API error", err)
@@ -536,10 +537,11 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		return
 	}
 
-	// Post-success bookkeeping runs detached from r.Context(): the PR is already
-	// ready on GitHub, so a client disconnect mustn't leave the run/task in a
-	// half-cleaned state. Each step is best-effort + logged, and each gets its own
-	// tx so one failure doesn't roll back the others.
+	// Post-success bookkeeping runs detached from r.Context(): the PR is
+	// already ready on GitHub, so a client disconnect mustn't leave the
+	// conversation/task in a half-cleaned state. Each step is best-effort +
+	// logged, and each gets its own tx so one failure doesn't roll back the
+	// others.
 	cleanupCtx := context.WithoutCancel(r.Context())
 
 	// Step 1: flip the artifact to open and refresh its snapshot to the promoted
@@ -558,7 +560,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
 	}
 	// Compose the audit row with the flip (TFAC-483): the org-App MarkPRReady is a
-	// human-authorized, org-executed write — run_id is the drafting run, actor is
+	// human-authorized, org-executed write — conversation_id is the drafting conversation, actor is
 	// the approver. Recording inside the flip tx keeps the audit row and the
 	// artifact state atomic (both land or neither).
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
@@ -577,27 +579,30 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	if art.ConversationID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", art.ConversationID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "conversation", art.ConversationID, "error", err)
 		}
 	}
 
 	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
-	// never flips run status or resumes/terminates a blueprint. The only lifecycle
-	// effect is closing the task when this was the LAST unresolved artifact on an
-	// already-terminal blueprint (§3); otherwise a no-op.
+	// never flips conversation status or resumes/terminates a blueprint. The
+	// only lifecycle effect is closing the task when this was the LAST
+	// unresolved artifact on an already-terminal blueprint (§3); otherwise a
+	// no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
-	// Step 4: tell the drafting agent its PR was approved — live if the run is
-	// warm, else via its ledger on resume. Decoupled from the resolution above.
-	// Note the one carve-out to the ledger's "never miss" property: if the
-	// best-effort flip in step 1 failed (logged above), the artifact row stays at
-	// state=draft, so a terminal-run resume can't re-derive this note — the live
-	// steer is then the only delivery. That double-failure (flip failed AND no warm
-	// process) drops the note, which is acceptable here: the GitHub PR is already
-	// open (the authoritative fact), and the un-flipped draft has bigger problems
-	// than the note (it also blocks terminal-on-last closure until reconciliation).
+	// Step 4: tell the drafting agent its PR was approved — live if the
+	// conversation is warm, else via its ledger on resume. Decoupled from
+	// the resolution above. Note the one carve-out to the ledger's "never
+	// miss" property: if the best-effort flip in step 1 failed (logged
+	// above), the artifact row stays at state=draft, so a terminal
+	// conversation's resume can't re-derive this note — the live steer is
+	// then the only delivery. That double-failure (flip failed AND no warm
+	// process) drops the note, which is acceptable here: the GitHub PR is
+	// already open (the authoritative fact), and the un-flipped draft has
+	// bigger problems than the note (it also blocks terminal-on-last
+	// closure until reconciliation).
 	ah.injectArtifactNote(orgID, openArt)
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -609,12 +614,12 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 // handleArtifactDismiss resolves ONE artifact as a decoupled sidecar operation,
 // the per-item counterpart to approve: it abandons the GitHub object and flips
-// the artifact's state, never touching the run's lifecycle. A draft PR is closed
-// on GitHub (best-effort) and flipped to closed; a pending review has its GitHub
-// pending review deleted and is flipped to dismissed. Branches are never touched.
-// An already-terminal artifact (a non-draft PR / non-pending review) is a 409 —
-// there is nothing left to resolve. After the flip it runs the shared
-// terminal-on-last task-closure check.
+// the artifact's state, never touching the conversation's lifecycle. A draft
+// PR is closed on GitHub (best-effort) and flipped to closed; a pending review
+// has its GitHub pending review deleted and is flipped to dismissed. Branches
+// are never touched. An already-terminal artifact (a non-draft PR / non-pending
+// review) is a 409 — there is nothing left to resolve. After the flip it runs
+// the shared terminal-on-last task-closure check.
 func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -698,18 +703,19 @@ func artifactPRNumber(art *domain.Artifact) int {
 }
 
 // closeTaskIfTerminalAndResolved is the shared terminal-on-last task-closure
-// check, run after any per-artifact resolve (approve or dismiss). It re-reads the
-// artifact set governing the run and closes the task IFF the controlling run
+// check, run after any per-artifact resolve (approve or dismiss). It re-reads
+// the task's artifact set and closes the task IFF the controlling blueprint run
 // reached a CLEAN completion AND no unresolved artifact remains. Otherwise it
 // no-ops:
 //
-//   - a LIVE run keeps running — resolving an artifact never closes its task; the
-//     run's own eventual termination (terminateBlueprint / standalone completion)
-//     re-checks this and closes the task then.
-//   - a cleanly-completed run with other unresolved artifacts stays in the approval
-//     column; the last resolution is what closes it.
-//   - an ABORTED / FAILED / CANCELLED run leaves the task open for human attention
-//     regardless of artifact state — mirroring terminateBlueprint (blueprint.go)
+//   - a LIVE blueprint run keeps running — resolving an artifact never closes
+//     its task; the run's own eventual termination (terminateBlueprint /
+//     standalone completion) re-checks this and closes the task then.
+//   - a cleanly-completed blueprint run with other unresolved artifacts stays in
+//     the approval column; the last resolution is what closes it.
+//   - an ABORTED / FAILED / CANCELLED blueprint run leaves the task open for
+//     human attention regardless of artifact state — mirroring
+//     terminateBlueprint (blueprint.go)
 //     and processCompletion (run.go), which close the task only on a clean finish.
 //     Resolving a stray draft PR on an aborted blueprint must not override the
 //     "needs a human" disposition.
@@ -721,18 +727,19 @@ func artifactPRNumber(art *domain.Artifact) int {
 //
 // Governing signals: only a blueprint run is a task run, so only it can close a
 // task — clean completion is its blueprint run reaching status=completed. A
-// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run) is
-// task-less and is a no-op here. The "anything still unresolved?" check is scoped
-// to the whole TASK (all its runs), matching teardownTaskArtifacts, so a stranded
-// artifact from a prior attempt blocks closure.
+// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run)
+// is task-less and is a no-op here. The "anything still unresolved?" check is
+// scoped to the whole TASK (all its conversations), matching
+// teardownTaskArtifacts, so a stranded artifact from a prior attempt blocks
+// closure.
 //
-// Detached + best-effort: the caller already mutated the GitHub object and flipped
-// the artifact, so a failure here must not unwind that. Fails CLOSED on the close
-// direction — any read error leaves the task open (recoverable; the next resolve
-// or run termination re-checks) rather than closing a task that may still hold
-// unresolved work.
-func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, runID string) {
-	if runID == "" {
+// Detached + best-effort: the caller already mutated the GitHub object and
+// flipped the artifact, so a failure here must not unwind that. Fails CLOSED on
+// the close direction — any read error leaves the task open (recoverable; the
+// next resolve or conversation termination re-checks) rather than closing a
+// task that may still hold unresolved work.
+func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, conversationID string) {
+	if conversationID == "" {
 		return
 	}
 	var (
@@ -741,11 +748,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Step 1: only a blueprint run is a task run, so only it can drive
-		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
-		// — a future interactive/ad-hoc run) is task-less by construction (NULL
-		// task_id), so there is nothing to close: leave taskID empty and no-op below.
-		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
+		// Step 1: only a blueprint run is task-linked, so only it can drive
+		// terminal-on-last task closure. A non-blueprint conversation (origin <>
+		// 'blueprint' — a future interactive/ad-hoc conversation) is task-less
+		// by construction (NULL task_id), so there is nothing to close: leave taskID empty and no-op below.
+		br, _, bpErr := tx.Blueprints.GetRunForConversation(ctx, orgID, conversationID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
@@ -759,24 +766,24 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		if !closeEligible {
 			return nil // no need to scan artifacts if we can't close anyway
 		}
-		// Step 2: unresolved check scoped to the TASK (all its runs), matching
-		// teardownTaskArtifacts — not just the current blueprint's step runs. A
-		// stranded artifact from a prior attempt (e.g. a teardown that partially
-		// failed on a network blip) must block closure rather than be silently
-		// skipped, so we never close the task with an unresolved draft PR / pending
-		// review sitting on GitHub.
-		runs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		// Step 2: unresolved check scoped to the TASK (all its conversations),
+		// matching teardownTaskArtifacts — not just the current blueprint's step
+		// conversations. A stranded artifact from a prior attempt (e.g. a
+		// teardown that partially failed on a network blip) must block closure
+		// rather than be silently skipped, so we never close the task with an
+		// unresolved draft PR / pending review sitting on GitHub.
+		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
-			return fmt.Errorf("list runs for task: %w", e)
+			return fmt.Errorf("list conversations for task: %w", e)
 		}
-		has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
+		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, convs)
 		if e != nil {
 			return e
 		}
 		unresolved = has
 		return nil
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "conversation", conversationID, "error", err)
 		return
 	}
 	if taskID == "" || !closeEligible || unresolved {
@@ -790,7 +797,7 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "conversation", conversationID, "error", err)
 		return
 	}
 	// Move the card to Done on peer boards without a refetch.
@@ -801,16 +808,17 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 	})
 }
 
-// runsHaveUnresolvedArtifacts reports whether any of the given runs still holds an
-// unresolved artifact (a draft PR or a ready review — domain.HasUnresolvedArtifacts),
-// reading each run's artifacts under the caller's tx. One query per run, bounded
+// conversationsHaveUnresolvedArtifacts reports whether any of the given
+// conversations still holds an unresolved artifact (a draft PR or a ready
+// review — domain.HasUnresolvedArtifacts), reading each conversation's
+// artifacts under the caller's tx. One query per conversation, bounded
 // by a blueprint's step count. Shared by the terminal-on-last check so the
 // "blueprint still has unresolved work" definition lives next to its single use.
-func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
-	for i := range runs {
-		arts, err := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) (bool, error) {
+	for i := range convs {
+		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
 		if err != nil {
-			return false, fmt.Errorf("artifacts.ListByRun(%s): %w", runs[i].ID, err)
+			return false, fmt.Errorf("artifacts.ListByConversation(%s): %w", convs[i].ID, err)
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
 			return true, nil

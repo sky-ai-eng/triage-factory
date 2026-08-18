@@ -25,12 +25,12 @@ import (
 
 // fenceFixture is one seeded conversation with one live claim on it.
 type fenceFixture struct {
-	store    db.ConversationStore
-	orgID    string
-	runID    string
-	claimID  string
-	promptID string
-	seed     dbtest.ConversationSeeder
+	store          db.ConversationStore
+	orgID          string
+	conversationID string
+	claimID        string
+	promptID       string
+	seed           dbtest.ConversationSeeder
 }
 
 func newFenceFixture(t *testing.T, h *pgtest.Harness, executorID string) fenceFixture {
@@ -45,18 +45,18 @@ func newFenceFixture(t *testing.T, h *pgtest.Harness, executorID string) fenceFi
 	ent := seed.Entity(t, "fence")
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	runID := seed.Run(t, domain.Conversation{
+	conversationID := seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: promptID, Status: "running", Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
 	})
-	if err := store.SetExecutorSystem(context.Background(), orgID, runID, executorID, 1); err != nil {
+	if err := store.SetExecutorSystem(context.Background(), orgID, conversationID, executorID, 1); err != nil {
 		t.Fatalf("mint claim: %v", err)
 	}
-	claims := seed.ClaimRows(t, runID)
+	claims := seed.ClaimRows(t, conversationID)
 	if len(claims) != 1 {
 		t.Fatalf("claims = %+v, want exactly the one minted engagement", claims)
 	}
-	return fenceFixture{store: store, orgID: orgID, runID: runID, claimID: claims[0].ID, promptID: promptID, seed: seed}
+	return fenceFixture{store: store, orgID: orgID, conversationID: conversationID, claimID: claims[0].ID, promptID: promptID, seed: seed}
 }
 
 // seedSecondConversation adds another running conversation in the same org,
@@ -66,19 +66,19 @@ func seedSecondConversation(t *testing.T, fx fenceFixture) string {
 	ent := fx.seed.Entity(t, "fence-other")
 	ev := fx.seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID := fx.seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-	return fx.seed.Run(t, domain.Conversation{
+	return fx.seed.Conversation(t, domain.Conversation{
 		TaskID: taskID, PromptID: fx.promptID, Status: "running", Model: "m",
 		BlueprintRunID: fx.seed.BlueprintRun(t, taskID),
 	})
 }
 
 // reap is the fleet reaper's release, from a connection of its own.
-func reap(t *testing.T, conn *sql.DB, orgID, runID string) {
+func reap(t *testing.T, conn *sql.DB, orgID, conversationID string) {
 	t.Helper()
 	res, err := conn.Exec(`
 		UPDATE claims SET released_at = now(), outcome = 'reaped'
 		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
-	`, orgID, runID)
+	`, orgID, conversationID)
 	if err != nil {
 		t.Fatalf("reap claim: %v", err)
 	}
@@ -99,19 +99,19 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 	t.Run("InsertMessage", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-insert")
 		if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Content: "live",
+			ConversationID: fx.conversationID, Role: "assistant", Content: "live",
 		}); err != nil {
 			t.Fatalf("insert while claimed: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
 		_, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Content: "zombie",
+			ConversationID: fx.conversationID, Role: "assistant", Content: "zombie",
 		})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("insert after reap = %v, want ErrClaimReleased", err)
 		}
-		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.runID)
+		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
 		if err != nil {
 			t.Fatalf("Messages: %v", err)
 		}
@@ -124,19 +124,19 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-deliver")
 		pending := false
 		id, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "user", Content: "pending", Delivered: &pending,
+			ConversationID: fx.conversationID, Role: "user", Content: "pending", Delivered: &pending,
 		})
 		if err != nil {
 			t.Fatalf("insert pending row: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		if err := fx.store.MarkDeliveredForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, []int{int(id)}, ""); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.MarkDeliveredForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, []int{int(id)}, ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-delivered after reap = %v, want ErrClaimReleased", err)
 		}
 		// The row is still pending, so the successor's assembly still sees it
 		// — which is the corruption the refusal prevented.
-		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.runID)
+		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.conversationID)
 		if err != nil || len(msgs) != 1 {
 			t.Fatalf("ListForAssembly = %+v (err %v)", msgs, err)
 		}
@@ -148,22 +148,22 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 	t.Run("Compact", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-compact")
 		spanID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Content: "history",
+			ConversationID: fx.conversationID, Role: "assistant", Content: "history",
 		})
 		if err != nil {
 			t.Fatalf("insert span row: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
 		resultRow := &domain.Message{Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionResult, Content: "summary"}
-		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, nil, resultRow, []int{int(spanID)})
+		err = fx.store.CompactForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, nil, resultRow, []int{int(spanID)})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("compact after reap = %v, want ErrClaimReleased", err)
 		}
 		// Nothing landed: the span is still active and no result row exists —
 		// a zombie must not rewrite the successor's window.
-		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.runID)
+		msgs, err := fx.store.ListForAssemblySystem(ctx, fx.orgID, fx.conversationID)
 		if err != nil || len(msgs) != 1 || msgs[0].ID != int(spanID) {
 			t.Fatalf("assembly after refused compact = %+v (err %v), want the untouched span row", msgs, err)
 		}
@@ -172,21 +172,21 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 	t.Run("SettleCompactionRequest", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-settle")
 		reqID, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "user",
+			ConversationID: fx.conversationID, Role: "user",
 			Subtype: domain.MessageSubtypeInjectionCompactionRequest, Content: "please compact",
 		})
 		if err != nil {
 			t.Fatalf("insert request row: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
 		cost := 0.1
-		err = fx.store.SettleCompactionRequestForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID,
+		err = fx.store.SettleCompactionRequestForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID,
 			int(reqID), 1000, 10, 0, 0, &cost, "no-parseable-summary")
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("settle after reap = %v, want ErrClaimReleased", err)
 		}
-		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.runID)
+		msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
 		if err != nil || len(msgs) != 1 {
 			t.Fatalf("Messages = %+v (err %v)", msgs, err)
 		}
@@ -197,13 +197,13 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 	t.Run("Complete", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-complete")
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "completed", 1.5, 100, 2, "done", "finish", "", "")
+		err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "completed", 1.5, 100, 2, "done", "finish", "", "")
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("complete after reap = %v, want ErrClaimReleased", err)
 		}
-		got, err := fx.store.Get(ctx, fx.orgID, fx.runID)
+		got, err := fx.store.Get(ctx, fx.orgID, fx.conversationID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
@@ -213,23 +213,23 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if got.CompletedAt != nil {
 			t.Errorf("completed_at stamped by a refused terminal: %v", got.CompletedAt)
 		}
-		if claims := fx.seed.ClaimRows(t, fx.runID); claims[0].Outcome != "reaped" {
+		if claims := fx.seed.ClaimRows(t, fx.conversationID); claims[0].Outcome != "reaped" {
 			t.Errorf("claim outcome = %q, want reaped (the refused terminal must not rewrite it)", claims[0].Outcome)
 		}
 	})
 
 	t.Run("MarkFailed", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-fail")
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		ok, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, string(domain.RunFailureCrash))
+		ok, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash))
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed after reap = (%v, %v), want ErrClaimReleased", ok, err)
 		}
 		if ok {
 			t.Error("mark-failed after reap reported a flip")
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "running" {
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "running" {
 			t.Errorf("status = %q, want running (the refused terminal must not land)", got.Status)
 		}
 	})
@@ -240,25 +240,25 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// live run it owns. A late self-fence must not cancel a successor's
 		// conversation on its way out.
 		fx := newFenceFixture(t, h, "exec-fence-cancel")
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		ok, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
+		ok, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("park-cancelled after reap = (%v, %v), want ErrClaimReleased", ok, err)
 		}
 		if ok {
 			t.Error("park-cancelled after reap reported a flip")
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "running" {
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "running" {
 			t.Errorf("status = %q, want running (the refused write must not land)", got.Status)
 		}
 		// The unfenced twin is what a user's cancel uses, and it still works
 		// on the same row — the fence gates the executor, not the person.
-		flipped, err := fx.store.ParkOpenSystem(ctx, fx.orgID, fx.runID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
+		flipped, err := fx.store.ParkOpenSystem(ctx, fx.orgID, fx.conversationID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
 		if err != nil || !flipped {
 			t.Fatalf("unfenced user cancel = (%v, %v), want it to flip", flipped, err)
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "open" {
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "open" {
 			t.Errorf("status = %q, want open (a cancel parks; it never writes a terminal of its own)", got.Status)
 		}
 	})
@@ -268,15 +268,15 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// the next wake reconnects to, and a zombie's late system/init would
 		// overwrite the id the successor is resuming against.
 		fx := newFenceFixture(t, h, "exec-fence-session")
-		if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "sess-live"); err != nil {
+		if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-live"); err != nil {
 			t.Fatalf("session while claimed: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "sess-zombie"); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-zombie"); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("session after reap = %v, want ErrClaimReleased", err)
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.SessionID != "sess-live" {
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.SessionID != "sess-live" {
 			t.Errorf("sdk_session_id = %q, want sess-live (the refused write must not land)", got.SessionID)
 		}
 	})
@@ -287,20 +287,20 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// so a late stamp points the successor's resume at a directory that
 		// does not exist where the work moved to.
 		fx := newFenceFixture(t, h, "exec-fence-worktree")
-		if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "/tmp/triagefactory-runs/live"); err != nil {
+		if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "/tmp/triagefactory-runs/live"); err != nil {
 			t.Fatalf("worktree path while claimed: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "/tmp/triagefactory-runs/zombie"); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "/tmp/triagefactory-runs/zombie"); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("worktree path after reap = %v, want ErrClaimReleased", err)
 		}
-		if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.WorktreePath != "/tmp/triagefactory-runs/live" {
+		if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.WorktreePath != "/tmp/triagefactory-runs/live" {
 			t.Errorf("worktree_path = %q, want /tmp/triagefactory-runs/live (the refused write must not land)", got.WorktreePath)
 		}
 		// The unfenced twin is the claimless door and is untouched by any of
 		// this — a mint-time stamp has no claim to be measured against.
-		if err := fx.store.SetWorktreePathSystem(ctx, fx.orgID, fx.runID, "/tmp/triagefactory-runs/unfenced"); err != nil {
+		if err := fx.store.SetWorktreePathSystem(ctx, fx.orgID, fx.conversationID, "/tmp/triagefactory-runs/unfenced"); err != nil {
 			t.Fatalf("unfenced stamp: %v", err)
 		}
 	})
@@ -310,15 +310,15 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// then comes up would re-stamp the successor's claim with a dead
 		// executor's identity — which the reaper reads back as executor loss.
 		fx := newFenceFixture(t, h, "exec-fence-executor")
-		if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "exec-fence-executor-live", 4); err != nil {
+		if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "exec-fence-executor-live", 4); err != nil {
 			t.Fatalf("executor stamp while claimed: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.runID, fx.claimID, "exec-zombie", 9); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "exec-zombie", 9); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("executor stamp after reap = %v, want ErrClaimReleased", err)
 		}
-		claims := fx.seed.ClaimRows(t, fx.runID)
+		claims := fx.seed.ClaimRows(t, fx.conversationID)
 		if len(claims) != 1 {
 			t.Fatalf("claims = %+v, want one (a refused stamp must not mint a claim of its own)", claims)
 		}
@@ -330,15 +330,15 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 
 	t.Run("SetPhase", func(t *testing.T) {
 		fx := newFenceFixture(t, h, "exec-fence-phase")
-		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.runID, fx.claimID, "cloning"); err != nil {
+		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "cloning"); err != nil {
 			t.Fatalf("phase while claimed: %v", err)
 		}
-		reap(t, h.AdminDB, fx.orgID, fx.runID)
+		reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 
-		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.runID, fx.claimID, "agent_starting"); !errors.Is(err, db.ErrClaimReleased) {
+		if err := fx.store.SetClaimPhaseSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "agent_starting"); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("phase after reap = %v, want ErrClaimReleased", err)
 		}
-		if claims := fx.seed.ClaimRows(t, fx.runID); claims[0].Phase != "cloning" {
+		if claims := fx.seed.ClaimRows(t, fx.conversationID); claims[0].Phase != "cloning" {
 			t.Errorf("phase = %q, want cloning (the refused write must not land)", claims[0].Phase)
 		}
 	})
@@ -361,7 +361,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, other, fx.claimID, "completed", 0, 0, 0, "", "finish", "", ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("complete on another conversation = %v, want ErrClaimReleased", err)
 		}
-		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
+		if _, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, other, fx.claimID, string(domain.ConversationFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("mark-failed on another conversation = %v, want ErrClaimReleased", err)
 		}
 		if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, other, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user")); !errors.Is(err, db.ErrClaimReleased) {
@@ -400,7 +400,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 		// The engagement's own conversation is unaffected — this refuses
 		// misdirected writes, not the caller.
 		if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Content: "own conversation",
+			ConversationID: fx.conversationID, Role: "assistant", Content: "own conversation",
 		}); err != nil {
 			t.Fatalf("insert onto its own conversation: %v", err)
 		}
@@ -417,7 +417,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 			"unknown":   "6f1b7d3e-0000-4000-8000-000000000000",
 		} {
 			_, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, claimID, &domain.Message{
-				ConversationID: fx.runID, Role: "assistant", Content: name,
+				ConversationID: fx.conversationID, Role: "assistant", Content: name,
 			})
 			if !errors.Is(err, db.ErrClaimReleased) {
 				t.Errorf("insert with %s claim id = %v, want ErrClaimReleased", name, err)
@@ -449,7 +449,7 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 	if _, err := reaperTx.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = 'reaped'
 		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
-	`, fx.orgID, fx.runID); err != nil {
+	`, fx.orgID, fx.conversationID); err != nil {
 		t.Fatalf("reaper release: %v", err)
 	}
 
@@ -457,7 +457,7 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		_, werr := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, fx.claimID, &domain.Message{
-			ConversationID: fx.runID, Role: "assistant", Content: "zombie",
+			ConversationID: fx.conversationID, Role: "assistant", Content: "zombie",
 		})
 		done <- werr
 	}()
@@ -482,7 +482,7 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 		t.Fatal("fenced write never returned after the release committed")
 	}
 
-	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.runID)
+	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
@@ -501,12 +501,12 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	fx := newFenceFixture(t, h, "exec-zombie")
 	zombieClaim := fx.claimID
 
-	reap(t, h.AdminDB, fx.orgID, fx.runID)
+	reap(t, h.AdminDB, fx.orgID, fx.conversationID)
 	// The requeued conversation is claimed again, by whoever picks it up.
-	if err := fx.store.SetExecutorSystem(ctx, fx.orgID, fx.runID, "exec-successor", 7); err != nil {
+	if err := fx.store.SetExecutorSystem(ctx, fx.orgID, fx.conversationID, "exec-successor", 7); err != nil {
 		t.Fatalf("successor claim: %v", err)
 	}
-	claims := fx.seed.ClaimRows(t, fx.runID)
+	claims := fx.seed.ClaimRows(t, fx.conversationID)
 	if len(claims) != 2 {
 		t.Fatalf("claims = %+v, want the reaped engagement plus its successor", claims)
 	}
@@ -516,23 +516,23 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	}
 
 	if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, successorClaim, &domain.Message{
-		ConversationID: fx.runID, Role: "assistant", Content: "successor",
+		ConversationID: fx.conversationID, Role: "assistant", Content: "successor",
 	}); err != nil {
 		t.Fatalf("successor insert: %v", err)
 	}
 	if _, err := fx.store.InsertMessageForClaimSystem(ctx, fx.orgID, zombieClaim, &domain.Message{
-		ConversationID: fx.runID, Role: "assistant", Content: "zombie",
+		ConversationID: fx.conversationID, Role: "assistant", Content: "zombie",
 	}); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie insert = %v, want ErrClaimReleased", err)
 	}
 	// The zombie's terminal is refused too, so the successor keeps driving a
 	// conversation that is still `running` rather than one buried under a
 	// stale completion.
-	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "failed", 0, 0, 0, "", "", "", string(domain.RunFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
+	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "failed", 0, 0, 0, "", "", "", string(domain.ConversationFailureCrash)); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie complete = %v, want ErrClaimReleased", err)
 	}
 
-	got, err := fx.store.Get(ctx, fx.orgID, fx.runID)
+	got, err := fx.store.Get(ctx, fx.orgID, fx.conversationID)
 	if err != nil || got == nil {
 		t.Fatalf("Get: err=%v got=%v", err, got)
 	}
@@ -542,7 +542,7 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 	if got.ExecutorID != "exec-successor" {
 		t.Errorf("executor = %q, want exec-successor", got.ExecutorID)
 	}
-	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.runID)
+	msgs, err := fx.store.Messages(ctx, fx.orgID, fx.conversationID)
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
 	}
@@ -555,10 +555,10 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 
 	// And the successor's own terminal still works — the fence refuses
 	// zombies, not owners.
-	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, "completed", 0.25, 900, 1, "done", "finish", "", ""); err != nil {
+	if err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, "completed", 0.25, 900, 1, "done", "finish", "", ""); err != nil {
 		t.Fatalf("successor complete: %v", err)
 	}
-	if got, _ := fx.store.Get(ctx, fx.orgID, fx.runID); got.Status != "completed" {
+	if got, _ := fx.store.Get(ctx, fx.orgID, fx.conversationID); got.Status != "completed" {
 		t.Errorf("status = %q, want completed", got.Status)
 	}
 }
@@ -581,43 +581,43 @@ func TestClaimFence_ZombieCannotCorruptTheSuccessorsResumeCoordinate(t *testing.
 	zombieClaim := fx.claimID
 
 	// The zombie's own engagement, recorded while it legitimately owned the row.
-	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "s1"); err != nil {
+	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "s1"); err != nil {
 		t.Fatalf("zombie session while claimed: %v", err)
 	}
-	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "/tmp/triagefactory-runs/host-a"); err != nil {
+	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "/tmp/triagefactory-runs/host-a"); err != nil {
 		t.Fatalf("zombie worktree path while claimed: %v", err)
 	}
 
-	reap(t, h.AdminDB, fx.orgID, fx.runID)
-	if err := fx.store.SetExecutorSystem(ctx, fx.orgID, fx.runID, "exec-successor-coords", 7); err != nil {
+	reap(t, h.AdminDB, fx.orgID, fx.conversationID)
+	if err := fx.store.SetExecutorSystem(ctx, fx.orgID, fx.conversationID, "exec-successor-coords", 7); err != nil {
 		t.Fatalf("successor claim: %v", err)
 	}
-	claims := fx.seed.ClaimRows(t, fx.runID)
+	claims := fx.seed.ClaimRows(t, fx.conversationID)
 	if len(claims) != 2 {
 		t.Fatalf("claims = %+v, want the reaped engagement plus its successor", claims)
 	}
 	successorClaim := claims[1].ID
 
 	// The successor rehydrates onto its own host and starts its own session.
-	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, "s2"); err != nil {
+	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, "s2"); err != nil {
 		t.Fatalf("successor session: %v", err)
 	}
-	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, "/tmp/triagefactory-runs/host-b"); err != nil {
+	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, "/tmp/triagefactory-runs/host-b"); err != nil {
 		t.Fatalf("successor worktree path: %v", err)
 	}
 
 	// The zombie's late init, clone stamp, and go-live stamp all arrive now.
-	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "s1"); !errors.Is(err, db.ErrClaimReleased) {
+	if err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "s1"); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie session after handover = %v, want ErrClaimReleased", err)
 	}
-	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "/tmp/triagefactory-runs/host-a"); !errors.Is(err, db.ErrClaimReleased) {
+	if err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "/tmp/triagefactory-runs/host-a"); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie worktree path after handover = %v, want ErrClaimReleased", err)
 	}
-	if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.runID, zombieClaim, "exec-zombie-coords", 1); !errors.Is(err, db.ErrClaimReleased) {
+	if err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.conversationID, zombieClaim, "exec-zombie-coords", 1); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("zombie executor stamp after handover = %v, want ErrClaimReleased", err)
 	}
 
-	got, err := fx.store.Get(ctx, fx.orgID, fx.runID)
+	got, err := fx.store.Get(ctx, fx.orgID, fx.conversationID)
 	if err != nil || got == nil {
 		t.Fatalf("Get: err=%v got=%v", err, got)
 	}
@@ -633,13 +633,13 @@ func TestClaimFence_ZombieCannotCorruptTheSuccessorsResumeCoordinate(t *testing.
 
 	// And the coordinate the successor left behind is what a resume actually
 	// reads: the un-terminal flip keeps it, so the next claim wakes on s2.
-	if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.runID, successorClaim, db.ParkIdle()); err != nil {
+	if _, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.conversationID, successorClaim, db.ParkIdle()); err != nil {
 		t.Fatalf("successor park: %v", err)
 	}
-	if ok, err := fx.store.MarkQueuedForResume(ctx, fx.orgID, fx.runID); err != nil || !ok {
+	if ok, err := fx.store.MarkQueuedForResume(ctx, fx.orgID, fx.conversationID); err != nil || !ok {
 		t.Fatalf("requeue for resume: ok=%v err=%v", ok, err)
 	}
-	if got, _ = fx.store.Get(ctx, fx.orgID, fx.runID); got.SessionID != "s2" {
+	if got, _ = fx.store.Get(ctx, fx.orgID, fx.conversationID); got.SessionID != "s2" {
 		t.Errorf("sdk_session_id at resume = %q, want s2", got.SessionID)
 	}
 }

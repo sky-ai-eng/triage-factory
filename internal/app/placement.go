@@ -48,7 +48,7 @@ func (a *App) buildPlacement() error {
 		appLog.Info("placement affinity enabled (capacity-weighted rendezvous)",
 			"aging", cfg.Aging, "liveness", cfg.Liveness)
 	} else {
-		appLog.Info("placement affinity disabled (queue is global-oldest; every run claimable anywhere)")
+		appLog.Info("placement affinity disabled (queue is global-oldest; every conversation claimable anywhere)")
 	}
 	return nil
 }

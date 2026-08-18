@@ -630,10 +630,10 @@ func closeTaskRows(ctx context.Context, q queryer, orgID, taskID, closeReason, c
 	return res.RowsAffected()
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		n, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
@@ -654,17 +654,17 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		rows, err := q.QueryContext(ctx, `
 			SELECT id FROM conversations
 			WHERE org_id = $1 AND task_id = $2
-			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		`, orgID, taskID)
 		if err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 		// Drained and closed (scanIDs closes) before the UPDATE below rather
 		// than on a defer: both ride the one connection this tx holds, and an
 		// open cursor is the kind of thing a driver is entitled to refuse to
 		// write around.
-		if runIDs, err = scanIDs(rows, "conversations.id"); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+		if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// The same predicate one join further out, rather than a stamp keyed on
@@ -683,7 +683,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 			      WHERE c.org_id = br.org_id
 			        AND c.task_id = $2
 			        AND c.blueprint_run_id = br.id
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, orgID, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)
@@ -693,7 +693,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
 func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
@@ -1087,15 +1087,15 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.q, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedConversations(ctx, s.q, orgID, entityID, promptID)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.admin, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedConversations(ctx, s.admin, orgID, entityID, promptID)
 }
 
-func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
+func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
 	// Same shape as SQLite. Postgres' ROW_NUMBER / OVER / CTEs are
 	// identical syntax-wise; the only difference is the started_at
 	// fallback literal (Postgres requires a typed cast on the

@@ -42,7 +42,7 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 
 	// A write op relays as one op (the tx stays orchestrator-side) and lands in
 	// the store; the stored row — with its minted id and the org bound from the
-	// orchestrator's RunInfo — comes back.
+	// orchestrator's ConversationInfo — comes back.
 	art := domain.Artifact{
 		Provider:   domain.ArtifactProviderGitHub,
 		Kind:       domain.ArtifactKindComment,
@@ -59,13 +59,13 @@ func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {
 		t.Fatal("expected a stored artifact id back from the relay")
 	}
 	if stored.OrgID != info.OrgID {
-		t.Fatalf("stored org = %q, want %q (bound from RunInfo, not the args)", stored.OrgID, info.OrgID)
+		t.Fatalf("stored org = %q, want %q (bound from ConversationInfo, not the args)", stored.OrgID, info.OrgID)
 	}
 
 	// A read op relays and returns the just-written row.
-	arts, err := rt.ListRunArtifacts(ctx)
+	arts, err := rt.ListConversationArtifacts(ctx)
 	if err != nil {
-		t.Fatalf("ListRunArtifacts relay: %v", err)
+		t.Fatalf("ListConversationArtifacts relay: %v", err)
 	}
 	found := false
 	for _, a := range arts {
@@ -105,18 +105,18 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	if err != nil || ent == nil {
 		t.Fatalf("relayed read touch did not resolve-or-create the entity: ent=%v err=%v", ent, err)
 	}
-	if role := touchRole(t, conn, info.RunID, ent.ID); role != domain.MemoryRoleTouched {
+	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("relayed touch role = %q, want %q", role, domain.MemoryRoleTouched)
 	}
 }
 
-// TestRelayServer_BindsOrgFromRunInfoNotArgs is the org-scoping guarantee: the
+// TestRelayServer_BindsOrgFromConversationInfoNotArgs is the org-scoping guarantee: the
 // relay envelope carries no org id, so the orchestrator binds identity from the
-// RelayServer's own RunInfo. A sidecar runtime that believes it is a DIFFERENT
+// RelayServer's own ConversationInfo. A sidecar runtime that believes it is a DIFFERENT
 // org (a compromised or confused sidecar) still can only touch the org the
 // orchestrator sealed the run to — the write lands under the SERVER's org, not
 // the runtime's.
-func TestRelayServer_BindsOrgFromRunInfoNotArgs(t *testing.T) {
+func TestRelayServer_BindsOrgFromConversationInfoNotArgs(t *testing.T) {
 	stores, info := newCaptureStores(t, true)
 	srv := NewRelayServer(stores, info, nil)
 
@@ -137,7 +137,7 @@ func TestRelayServer_BindsOrgFromRunInfoNotArgs(t *testing.T) {
 		t.Fatalf("UpsertArtifact relay: %v", err)
 	}
 	if stored.OrgID != info.OrgID {
-		t.Fatalf("write bound the org from the sidecar's runtime (%q); it MUST bind from the orchestrator's RunInfo (%q)",
+		t.Fatalf("write bound the org from the sidecar's runtime (%q); it MUST bind from the orchestrator's ConversationInfo (%q)",
 			stored.OrgID, info.OrgID)
 	}
 }

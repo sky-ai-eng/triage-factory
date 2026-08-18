@@ -101,12 +101,12 @@ func withStubPrepareBundle(t *testing.T) {
 func validLaunchParams(containerID string) sandbox.LaunchParams {
 	_ = os.MkdirAll(sandbox.RunTreeRoot("run"), 0o755)
 	return sandbox.LaunchParams{
-		RunID:       "run",
-		ContainerID: containerID,
-		Worktree:    sandbox.RunTreeRoot("run"),
-		SDKDir:      "/opt/tf/sdk",
-		Args:        []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
-		// The netns name must be the one RunID derives — the ownership check
+		ConversationID: "run",
+		ContainerID:    containerID,
+		Worktree:       sandbox.RunTreeRoot("run"),
+		SDKDir:         "/opt/tf/sdk",
+		Args:           []string{"/usr/bin/node", "/sdk/wrapper.mjs", "-p", "hi"},
+		// The netns name must be the one ConversationID derives — the ownership check
 		// binds it to the run, not just the tf-<hex>-<idx> shape.
 		NetnsPath: "/var/run/netns/" + sandbox.NetnsNameForRun("run", 1),
 	}

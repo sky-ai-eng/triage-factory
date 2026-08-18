@@ -13,13 +13,13 @@ import { STEP_VAR, TONE_TEXT, TONE_VAR, type Glow, type StepState, type Tone } f
 // corner-reinforcement brackets (the column L-bracket DNA, now hugging the
 // card), a recessed header "label plate" with a registration tick, and
 // monospace readout data. Status is carried by light: a left-edge spine in the
-// run's tone plus, for live work, a breathing glow. (The lane's own glow was
+// conversation's tone plus, for live work, a breathing glow. (The lane's own glow was
 // retired — the light rides the work, not the column around it.)
 
 // CardPlane is the crate body: a translucent frosted panel with a beveled
 // machined edge (inner top highlight + bottom shadow), a faint hairline border
 // for panel definition, rust corner brackets, the status spine (+ optional
-// chain notches), and — when a run is live — a status glow.
+// chain notches), and — when a conversation is live — a status glow.
 export function CardPlane({
   glow,
   dim,
@@ -51,8 +51,8 @@ export function CardPlane({
         {children}
       </div>
 
-      {/* Status glow: a 1px inner ring + outward bloom in the run's tone.
-          Breathing for a live run; steady for a state that wants attention.
+      {/* Status glow: a 1px inner ring + outward bloom in the conversation's tone.
+          Breathing for a live conversation; steady for a state that wants attention.
           A wrapper-level overlay so the bloom spills past the unclipped panel. */}
       {glow && (
         <motion.div

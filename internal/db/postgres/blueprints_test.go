@@ -190,12 +190,13 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 }
 
 // TestBlueprintStore_Postgres_RunLifecycle exercises CreateRun → GetRun →
-// RunsForBlueprint (surfacing the step run's terminal conversations.outcome) →
+// ConversationsForBlueprint (surfacing the step conversation's terminal
+// conversations.outcome) →
 // TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild pins the
 // atomic guarantee: flipping a blueprint_run to a terminal status parks any
-// still-mid-flight child run in the same transaction (stamping parked_at), so
-// a terminal parent is never observed alongside a live child. Mirrors the
-// SQLite coverage to prevent Postgres/SQLite divergence.
+// still-mid-flight child conversation in the same transaction (stamping
+// parked_at), so a terminal parent is never observed alongside a live
+// child. Mirrors the SQLite coverage to prevent Postgres/SQLite divergence.
 func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -218,7 +219,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
-	childID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
+	childID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID); err != nil {
 		t.Fatalf("set child running: %v", err)
 	}
@@ -257,7 +258,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if !changed {
 		t.Fatal("MarkRunStatusSystem reported no change")
 	}
-	if st, parked := pgRunParked(t, h, childID); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, childID); st != "open" || !parked {
 		t.Errorf("child = (%q, parked=%v), want (open, true) — a terminal parent must not strand a live child", st, parked)
 	}
 	assertClaimReleased(childID)
@@ -272,7 +273,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun 2: %v", err)
 	}
-	childID2 := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
+	childID2 := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID2); err != nil {
 		t.Fatalf("set child 2 running: %v", err)
 	}
@@ -285,13 +286,13 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if !changed {
 		t.Fatal("MarkRunStatus reported no change")
 	}
-	if st, parked := pgRunParked(t, h, childID2); st != "open" || !parked {
+	if st, parked := pgConversationParked(t, h, childID2); st != "open" || !parked {
 		t.Errorf("child 2 = (%q, parked=%v), want (open, true)", st, parked)
 	}
 	assertClaimReleased(childID2)
 }
 
-// MarkRunStatus → GetRunForRun on a real Postgres tx. Covers the UUID/TEXT
+// MarkRunStatus → GetRunForConversation on a real Postgres tx. Covers the UUID/TEXT
 // column split (blueprint_runs.id UUID, blueprint_id TEXT).
 func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -342,19 +343,19 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		t.Errorf("round-tripped step plan[0] = %+v, want frozen prompt %s body 'do the step'", cr.StepPlan[0], stepPromptID)
 	}
 
-	// Seed a step run, persist a terminal outcome the way processCompletion
-	// does, and confirm RunsForBlueprint surfaces it — the channel the
+	// Seed a step conversation, persist a terminal outcome the way
+	// processCompletion does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
-	stepRunID := seedPgRun(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepRunID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
-		t.Fatalf("complete step run: %v", err)
+	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
+	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
+		t.Fatalf("complete step conversation: %v", err)
 	}
-	stepRuns, err := blueprints.RunsForBlueprint(ctx, orgID, blueprintRunID)
+	stepConversations, err := blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
 	if err != nil {
-		t.Fatalf("RunsForBlueprint: %v", err)
+		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
-	if len(stepRuns) != 1 || stepRuns[0].Outcome != "finish" {
-		t.Errorf("RunsForBlueprint = %+v, want one run with outcome=finish", stepRuns)
+	if len(stepConversations) != 1 || stepConversations[0].Outcome != "finish" {
+		t.Errorf("ConversationsForBlueprint = %+v, want one conversation with outcome=finish", stepConversations)
 	}
 
 	// Mark the blueprint completed; second attempt should be no-op.
@@ -373,32 +374,32 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 		t.Error("expected changed=false on terminal row (race guard)")
 	}
 
-	// GetRunForRun resolves step → blueprint.
-	cr2, idx, err := blueprints.GetRunForRun(ctx, orgID, stepRunID)
+	// GetRunForConversation resolves step → blueprint.
+	cr2, idx, err := blueprints.GetRunForConversation(ctx, orgID, stepConversationID)
 	if err != nil {
-		t.Fatalf("GetRunForRun: %v", err)
+		t.Fatalf("GetRunForConversation: %v", err)
 	}
 	if cr2 == nil || cr2.ID != blueprintRunID {
-		t.Errorf("GetRunForRun blueprint = %+v, want id=%s", cr2, blueprintRunID)
+		t.Errorf("GetRunForConversation blueprint = %+v, want id=%s", cr2, blueprintRunID)
 	}
 	if idx == nil || *idx != 0 {
-		t.Errorf("GetRunForRun stepIdx = %v, want 0", idx)
+		t.Errorf("GetRunForConversation stepIdx = %v, want 0", idx)
 	}
 
-	// GetRunForRunSystem mirrors GetRunForRun for goroutine-internal
+	// GetRunForConversationSystem mirrors GetRunForConversation for goroutine-internal
 	// callers (blueprint orchestrator cleanup, post-resume finalize) that
 	// have no JWT-claims context. The contract is identical — both
 	// arms read the same row — so the assertion is just that the
 	// admin-pool variant returns the same values.
-	cr3, idx3, err := blueprints.GetRunForRunSystem(ctx, orgID, stepRunID)
+	cr3, idx3, err := blueprints.GetRunForConversationSystem(ctx, orgID, stepConversationID)
 	if err != nil {
-		t.Fatalf("GetRunForRunSystem: %v", err)
+		t.Fatalf("GetRunForConversationSystem: %v", err)
 	}
 	if cr3 == nil || cr3.ID != blueprintRunID {
-		t.Errorf("GetRunForRunSystem blueprint = %+v, want id=%s", cr3, blueprintRunID)
+		t.Errorf("GetRunForConversationSystem blueprint = %+v, want id=%s", cr3, blueprintRunID)
 	}
 	if idx3 == nil || *idx3 != 0 {
-		t.Errorf("GetRunForRunSystem stepIdx = %v, want 0", idx3)
+		t.Errorf("GetRunForConversationSystem stepIdx = %v, want 0", idx3)
 	}
 }
 
@@ -502,7 +503,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 
 	// ---- Event-triggered CreateRun ----
 	// No JWT claims tx — the admin pool handles the insert directly.
-	eventRunID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	eventBlueprintRunID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID:  blueprintID,
 		TaskID:       taskID,
 		TriggerType:  domain.BlueprintTriggerEvent,
@@ -515,7 +516,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	var landedCreator sql.NullString
 	if err := h.AdminDB.QueryRow(
 		`SELECT trigger_type, creator_user_id::text FROM blueprint_runs WHERE id = $1`,
-		eventRunID,
+		eventBlueprintRunID,
 	).Scan(&landedTrigger, &landedCreator); err != nil {
 		t.Fatalf("read back event blueprint_run: %v", err)
 	}
@@ -529,7 +530,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// ---- Manual CreateRun ----
 	// Inside WithTx so JWT claims are set; the COALESCE in
 	// createRunManual resolves tf.current_user_id() to userID.
-	var manualRunID string
+	var manualBlueprintRunID string
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		id, err := tx.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 			BlueprintID:  blueprintID,
@@ -540,7 +541,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		manualRunID = id
+		manualBlueprintRunID = id
 		return nil
 	}); err != nil {
 		t.Fatalf("manual CreateRun under app-pool: %v", err)
@@ -548,7 +549,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	var manualCreator sql.NullString
 	if err := h.AdminDB.QueryRow(
 		`SELECT creator_user_id::text FROM blueprint_runs WHERE id = $1`,
-		manualRunID,
+		manualBlueprintRunID,
 	).Scan(&manualCreator); err != nil {
 		t.Fatalf("read back manual blueprint_run: %v", err)
 	}
@@ -563,13 +564,13 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// The blueprint_runs_select RLS policy was widened so event-triggered
 	// rows (creator_user_id NULL) resolve via plain org membership
 	// rather than the creator-equals-caller predicate. Without that,
-	// the request-facing GetRun / GetRunForRun / CancelBlueprint paths
+	// the request-facing GetRun / GetRunForConversation / CancelBlueprint paths
 	// would silently 404 on every auto-fired blueprint because the
 	// app-pool SELECT can't match a NULL creator. Verify a WithTx
 	// read of the event-triggered row succeeds.
 	var sawEventRun bool
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		cr, err := tx.Blueprints.GetRun(ctx, orgID, eventRunID)
+		cr, err := tx.Blueprints.GetRun(ctx, orgID, eventBlueprintRunID)
 		if err != nil {
 			return err
 		}
@@ -634,10 +635,10 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
-	// Seed a step run under each blueprint so the cross-org
-	// RunsForBlueprintSystem check below has rows to (not) leak.
-	seedPgRun(t, h, orgA, userA, taskA, stepIDA, crA, 0)
-	seedPgRun(t, h, orgB, userB, taskB, stepIDB, crB, 0)
+	// Seed a step conversation under each blueprint so the cross-org
+	// ConversationsForBlueprintSystem check below has rows to (not) leak.
+	seedPgStepConversation(t, h, orgA, userA, taskA, stepIDA, crA, 0)
+	seedPgStepConversation(t, h, orgB, userB, taskB, stepIDB, crB, 0)
 
 	// ListStepsSystem on org A must not see blueprint B's step.
 	stepsA, err := blueprints.ListStepsSystem(ctx, orgA, blueprintIDB)
@@ -648,13 +649,14 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("ListStepsSystem(orgA, blueprintIDB) leaked %d rows, want 0", len(stepsA))
 	}
 
-	// RunsForBlueprintSystem on org A must not return cross-org step runs.
-	runsCrossOrg, err := blueprints.RunsForBlueprintSystem(ctx, orgA, crB)
+	// ConversationsForBlueprintSystem on org A must not return cross-org step
+	// conversations.
+	convsCrossOrg, err := blueprints.ConversationsForBlueprintSystem(ctx, orgA, crB)
 	if err != nil {
-		t.Fatalf("RunsForBlueprintSystem cross-org: %v", err)
+		t.Fatalf("ConversationsForBlueprintSystem cross-org: %v", err)
 	}
-	if len(runsCrossOrg) != 0 {
-		t.Errorf("RunsForBlueprintSystem(orgA, crB) leaked %d rows, want 0", len(runsCrossOrg))
+	if len(convsCrossOrg) != 0 {
+		t.Errorf("ConversationsForBlueprintSystem(orgA, crB) leaked %d rows, want 0", len(convsCrossOrg))
 	}
 
 	// MarkRunStatusSystem on org A against org B's blueprint run is a no-op.
@@ -770,7 +772,7 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 // seedPgOrgForBlueprints creates the (org, user, membership) triplet
 // blueprint row writes need to satisfy creator_user_id FK resolution.
 // Returns both ids — blueprint tests also need the userID directly for
-// seeding tasks / runs whose RLS predicate gates on
+// seeding tasks / conversations whose RLS predicate gates on
 // creator_user_id = tf.current_user_id().
 func seedPgOrgForBlueprints(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	t.Helper()
@@ -981,17 +983,17 @@ func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	return taskID
 }
 
-// seedPgRun inserts a conversations row linked to a blueprint_run for verdict /
+// seedPgStepConversation inserts a conversations row linked to a blueprint_run for verdict /
 // step-to-blueprint resolution tests.
-func seedPgRun(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, blueprintRunID string, stepIdx int) string {
+func seedPgStepConversation(t *testing.T, h *pgtest.Harness, orgID, userID, taskID, promptID, blueprintRunID string, stepIdx int) string {
 	t.Helper()
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	teamID := firstTeamForOrg(t, h, orgID)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, task_id, prompt_id, status, model, started_at, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3, $4, $5, $6, 'running', 'claude-sonnet-4-6', now(), $7, $8)
-	`, runID, orgID, userID, teamID, taskID, promptID, blueprintRunID, stepIdx); err != nil {
-		t.Fatalf("seed run: %v", err)
+	`, conversationID, orgID, userID, teamID, taskID, promptID, blueprintRunID, stepIdx); err != nil {
+		t.Fatalf("seed conversation: %v", err)
 	}
-	return runID
+	return conversationID
 }

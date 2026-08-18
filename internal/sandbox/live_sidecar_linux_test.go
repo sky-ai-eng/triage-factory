@@ -211,11 +211,11 @@ func installInProcessSidecarHarness() (func(), error) {
 // run's subnet index; the socket negative Starts run B's sandbox itself with a
 // probe payload.
 type liveRun struct {
-	runID      string
-	run        LaunchedRun
-	sb         *Sandbox
-	sidecar    LaunchedSidecar
-	sidecarUID int
+	conversationID string
+	run            LaunchedRun
+	sb             *Sandbox
+	sidecar        LaunchedSidecar
+	sidecarUID     int
 }
 
 // startLiveRun Wraps a sandbox and launches its credential sidecar, registering
@@ -225,7 +225,7 @@ type liveRun struct {
 // (LaunchSidecar's own doc warns this). customize, if non-nil, mutates the
 // Config before Wrap (the socket negative uses it to set run B's probe argv and
 // its own-socket bind mount).
-func startLiveRun(t *testing.T, ctx context.Context, runID string, customize func(cfg *Config)) *liveRun {
+func startLiveRun(t *testing.T, ctx context.Context, conversationID string, customize func(cfg *Config)) *liveRun {
 	t.Helper()
 	if os.Geteuid() != 0 {
 		t.Skip("live sidecar harness needs root: setuid sidecar + gVisor caps")
@@ -236,24 +236,24 @@ func startLiveRun(t *testing.T, ctx context.Context, runID string, customize fun
 	}
 
 	cfg := minimalConfig(t)
-	cfg.RunID = runID
+	cfg.ConversationID = conversationID
 	if customize != nil {
 		customize(&cfg)
 	}
 
 	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
-		t.Fatalf("Wrap %s: %v", runID, err)
+		t.Fatalf("Wrap %s: %v", conversationID, err)
 	}
 
-	sidecar, err := LaunchSidecar(ctx, SidecarConfig{RunID: runID, SubnetIdx: sb.SubnetIdx})
+	sidecar, err := LaunchSidecar(ctx, SidecarConfig{ConversationID: conversationID, SubnetIdx: sb.SubnetIdx})
 	if err != nil {
 		_ = run.Close()
 		_ = sb.Close()
-		t.Fatalf("LaunchSidecar %s (subnet idx %d): %v", runID, sb.SubnetIdx, err)
+		t.Fatalf("LaunchSidecar %s (subnet idx %d): %v", conversationID, sb.SubnetIdx, err)
 	}
 
-	lr := &liveRun{runID: runID, run: run, sb: sb, sidecar: sidecar, sidecarUID: SidecarUID(sb.SubnetIdx)}
+	lr := &liveRun{conversationID: conversationID, run: run, sb: sb, sidecar: sidecar, sidecarUID: SidecarUID(sb.SubnetIdx)}
 	t.Cleanup(lr.teardown)
 	return lr
 }
@@ -355,19 +355,19 @@ func runPtraceProbeAsUID(t *testing.T, uid, targetPid int) string {
 }
 
 // newAgentHostSocketListener stands up a real host-side agenthost unix socket at
-// TrustedAgentHostSocketPath(runID) and serves the same one-byte accept the
+// TrustedAgentHostSocketPath(conversationID) and serves the same one-byte accept the
 // cross-tenant probe uses, so a dial that reaches it succeeds. It grants the
 // socket to the sandbox identity exactly as the production root path does
 // (grantSocketToSandbox: chown WorktreeUID + 0600), so the run's OWN sandbox can
 // connect to it through the bind mount. Returns the host path; registers
 // cleanup.
-func newAgentHostSocketListener(t *testing.T, runID string) string {
+func newAgentHostSocketListener(t *testing.T, conversationID string) string {
 	t.Helper()
 	root := trustedAgentHostSocketRoot
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatalf("mkdir agenthost socket root %s: %v", root, err)
 	}
-	sockPath := TrustedAgentHostSocketPath(runID)
+	sockPath := TrustedAgentHostSocketPath(conversationID)
 	_ = os.Remove(sockPath) // clear any stale file
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {

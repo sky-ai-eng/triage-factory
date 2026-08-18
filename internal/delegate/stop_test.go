@@ -58,14 +58,14 @@ func (f *fakeDrainer) callsCopy() []drainCall {
 
 // TestStop_OpenAutoRun_DrainsQueue pins the fix for the
 // "stop without active goroutine never calls notifyDrainer" leak.
-// An auto-fired run parked `open` has no goroutine defer to piggy-back on, so
-// without the explicit drain the task's firing queue would stick until some
-// other run terminated.
+// An auto-fired conversation parked `open` has no goroutine defer to piggy-back
+// on, so without the explicit drain the task's firing queue would stick until
+// some other conversation terminated.
 func TestStop_OpenAutoRun_DrainsQueue(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r1", "sess-1", "/tmp/wt-r1")
+	seedConversation(t, database, "r1", "sess-1", "/tmp/wt-r1")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r1'`); err != nil {
-		t.Fatalf("park run: %v", err)
+		t.Fatalf("park conversation: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -101,11 +101,11 @@ func TestStop_OpenAutoRun_DrainsQueue(t *testing.T) {
 // guard against someone later adding the filter at the call site instead.
 func TestStop_OpenManualRun_NoDrain(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
-	// Manual is the seedRun default but we set it explicitly for
+	seedConversation(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
+	// Manual is the seedConversation default but we set it explicitly for
 	// clarity and pin to `open`.
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
-		t.Fatalf("park run: %v", err)
+		t.Fatalf("park conversation: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -122,7 +122,7 @@ func TestStop_OpenManualRun_NoDrain(t *testing.T) {
 	// honest without making it slow.
 	select {
 	case <-drainer.called:
-		t.Fatal("DrainTask called for manual run; should be filtered by trigger_type")
+		t.Fatal("DrainTask called for manual conversation; should be filtered by trigger_type")
 	case <-time.After(200 * time.Millisecond):
 	}
 }
@@ -130,15 +130,15 @@ func TestStop_OpenManualRun_NoDrain(t *testing.T) {
 // TestStop_AlreadyTerminal_NoDrain confirms we don't double-drain
 // a row that some other path already terminated. Without the
 // "only on flipped == true" guard, a stale stop on a completed
-// run would fire a redundant drain.
+// conversation would fire a redundant drain.
 func TestStop_AlreadyTerminal_NoDrain(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-done", "sess-3", "/tmp/wt-rd")
+	seedConversation(t, database, "r-done", "sess-3", "/tmp/wt-rd")
 	// Trigger_type='event' requires creator_user_id IS NULL per the
-	// CHECK invariant. seedRun defaults to manual +
+	// CHECK invariant. seedConversation defaults to manual +
 	// sentinel creator; the UPDATE has to clear creator alongside.
 	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
-		t.Fatalf("complete run: %v", err)
+		t.Fatalf("complete conversation: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -146,7 +146,7 @@ func TestStop_AlreadyTerminal_NoDrain(t *testing.T) {
 	s.SetQueueDrainer(drainer)
 
 	if err := s.Stop(runmode.LocalDefaultOrgID, "r-done", ""); err == nil {
-		t.Fatal("expected 'no active run' error on terminal row")
+		t.Fatal("expected 'no active conversation' error on terminal row")
 	}
 
 	select {
@@ -167,9 +167,9 @@ func TestStop_AlreadyTerminal_NoDrain(t *testing.T) {
 // under a cancelled one, decided by which button was pressed.
 func TestStop_OpenStep_FreezesBlueprintRun(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-step", "sess-step", "/tmp/wt-rs")
+	seedConversation(t, database, "r-step", "sess-step", "/tmp/wt-rs")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-step'`); err != nil {
-		t.Fatalf("park run: %v", err)
+		t.Fatalf("park conversation: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -178,13 +178,13 @@ func TestStop_OpenStep_FreezesBlueprintRun(t *testing.T) {
 		t.Fatalf("stop: %v", err)
 	}
 
-	var runStatus, bpStatus, stopReason string
+	var convStatus, bpStatus, stopReason string
 	var cancelRequested bool
-	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = 'r-step'`).Scan(&runStatus, &stopReason); err != nil {
-		t.Fatalf("read run status: %v", err)
+	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = 'r-step'`).Scan(&convStatus, &stopReason); err != nil {
+		t.Fatalf("read conversation status: %v", err)
 	}
-	if runStatus != "open" || stopReason != "user_cancelled" {
-		t.Errorf("run = (%q, %q), want (open, user_cancelled) — a stop parks, it never writes a terminal of its own", runStatus, stopReason)
+	if convStatus != "open" || stopReason != "user_cancelled" {
+		t.Errorf("conversation = (%q, %q), want (open, user_cancelled) — a stop parks, it never writes a terminal of its own", convStatus, stopReason)
 	}
 	if err := database.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = 'seedbpr-r-step'`).Scan(&bpStatus, &cancelRequested); err != nil {
 		t.Fatalf("read blueprint_run status: %v", err)
@@ -202,12 +202,13 @@ func TestStop_OpenStep_FreezesBlueprintRun(t *testing.T) {
 // — a closed or swiped task, an archived team — the teardown verb carries the
 // blueprint terminal with it. Nothing will resume these conversations, so a
 // frozen 'running' blueprint would hold a worktree and count as live work
-// forever. seedRun links the run to a 1-step blueprint_run "seedbpr-<runID>".
+// forever. seedConversation links the conversation to a 1-step blueprint_run
+// "seedbpr-<conversationID>".
 func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-teardown", "sess-teardown", "/tmp/wt-rt")
+	seedConversation(t, database, "r-teardown", "sess-teardown", "/tmp/wt-rt")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-teardown'`); err != nil {
-		t.Fatalf("park run: %v", err)
+		t.Fatalf("park conversation: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -216,13 +217,13 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 		t.Fatalf("teardown: %v", err)
 	}
 
-	var runStatus, bpStatus string
+	var convStatus, bpStatus string
 	var cancelRequested bool
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-teardown'`).Scan(&runStatus); err != nil {
-		t.Fatalf("read run status: %v", err)
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = 'r-teardown'`).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation status: %v", err)
 	}
-	if runStatus != "open" {
-		t.Errorf("run status = %q, want open — even a teardown parks the conversation rather than writing a terminal on it", runStatus)
+	if convStatus != "open" {
+		t.Errorf("conversation status = %q, want open — even a teardown parks the conversation rather than writing a terminal on it", convStatus)
 	}
 	if err := database.QueryRow(`SELECT status, cancel_requested FROM blueprint_runs WHERE id = 'seedbpr-r-teardown'`).Scan(&bpStatus, &cancelRequested); err != nil {
 		t.Fatalf("read blueprint_run status: %v", err)
@@ -247,9 +248,9 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	const runID = "r-bp-cancel"
-	seedRun(t, database, runID, "sess-bp-cancel", "/tmp/wt-bp-cancel")
-	brID := "seedbpr-" + runID
+	const conversationID = "r-bp-cancel"
+	seedConversation(t, database, conversationID, "sess-bp-cancel", "/tmp/wt-bp-cancel")
+	brID := "seedbpr-" + conversationID
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
@@ -270,7 +271,7 @@ func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 	// behind it was cancelled. `user_cancelled` would be a step nobody
 	// cancelled claiming somebody did — the person cancelled the blueprint.
 	var stepStatus, parkReason string
-	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, runID).Scan(&stepStatus, &parkReason); err != nil {
+	if err := database.QueryRow(`SELECT status, COALESCE(park_reason, '') FROM conversations WHERE id = ?`, conversationID).Scan(&stepStatus, &parkReason); err != nil {
 		t.Fatalf("read step conversation: %v", err)
 	}
 	if stepStatus != "open" || parkReason != string(domain.ParkReasonBlueprintCancelled) {
@@ -284,9 +285,9 @@ func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 func TestCancelBlueprint_AlreadyTerminalIsNoOp(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	const runID = "r-bp-done"
-	seedRun(t, database, runID, "sess-bp-done", "/tmp/wt-bp-done")
-	brID := "seedbpr-" + runID
+	const conversationID = "r-bp-done"
+	seedConversation(t, database, conversationID, "sess-bp-done", "/tmp/wt-bp-done")
+	brID := "seedbpr-" + conversationID
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
 		t.Fatalf("complete blueprint: %v", err)
 	}
@@ -336,24 +337,24 @@ func TestStop_UniformAcrossBlueprintShapes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			runID := "r-shape-" + tc.suffix
-			seedRun(t, database, runID, "sess-"+tc.suffix, "/tmp/wt-"+tc.suffix)
-			brID := "seedbpr-" + runID
+			conversationID := "r-shape-" + tc.suffix
+			seedConversation(t, database, conversationID, "sess-"+tc.suffix, "/tmp/wt-"+tc.suffix)
+			brID := "seedbpr-" + conversationID
 			if tc.plan != nil {
 				if _, err := database.Exec(`UPDATE blueprint_runs SET step_plan = ?, current_step_index = ? WHERE id = ?`, tc.plan(t), tc.stepIdx, brID); err != nil {
 					t.Fatalf("set step plan: %v", err)
 				}
 			}
-			if _, err := database.Exec(`UPDATE conversations SET blueprint_step_index = ? WHERE id = ?`, tc.stepIdx, runID); err != nil {
+			if _, err := database.Exec(`UPDATE conversations SET blueprint_step_index = ? WHERE id = ?`, tc.stepIdx, conversationID); err != nil {
 				t.Fatalf("set step index: %v", err)
 			}
 
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-			if err := s.Stop(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID); err != nil {
+			if err := s.Stop(runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID); err != nil {
 				t.Fatalf("stop: %v", err)
 			}
 
-			if got := storedStatus(t, database, runID); got != "open" {
+			if got := storedStatus(t, database, conversationID); got != "open" {
 				t.Errorf("conversation status = %q, want open", got)
 			}
 			var bpStatus string
@@ -369,9 +370,9 @@ func TestStop_UniformAcrossBlueprintShapes(t *testing.T) {
 
 	t.Run("no blueprint", func(t *testing.T) {
 		database := newDelegateTestDB(t)
-		// seedRun mints the entity/event/task chain; this conversation hangs off
+		// seedConversation mints the entity/event/task chain; this conversation hangs off
 		// the same task with no blueprint_run of its own.
-		seedRun(t, database, "r-anchor", "sess-anchor", "/tmp/wt-anchor")
+		seedConversation(t, database, "r-anchor", "sess-anchor", "/tmp/wt-anchor")
 		var taskID string
 		if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = 'r-anchor'`).Scan(&taskID); err != nil {
 			t.Fatalf("lookup task: %v", err)
@@ -394,7 +395,7 @@ func TestStop_UniformAcrossBlueprintShapes(t *testing.T) {
 // TestStop_MidBlueprintStep_ResumesAndIsDriven is the acceptance test the
 // whole change exists for: a stopped intermediate step is not merely marked
 // resumable, it actually resumes. The parked row is claimed off the ordinary
-// run queue and driven, which only happens while its blueprint is still
+// conversation queue and driven, which only happens while its blueprint is still
 // 'running' and not cancel-requested — the exact state the old
 // conversation-level cancel destroyed.
 //
@@ -405,13 +406,13 @@ func TestStop_UniformAcrossBlueprintShapes(t *testing.T) {
 func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
-	const runID = "r-resume-after-stop"
+	const conversationID = "r-resume-after-stop"
 	// A real worktree, empty: the rehydrate warm-returns (a missing one is a
 	// runtime failure, which hands the claim back rather than delivering) and
 	// the claim then stops on the absent session transcript instead of
 	// launching an agent.
-	seedRun(t, database, runID, "sess-resume", t.TempDir())
-	brID := "seedbpr-" + runID
+	seedConversation(t, database, conversationID, "sess-resume", t.TempDir())
+	brID := "seedbpr-" + conversationID
 	plan, err := json.Marshal([]domain.BlueprintPlanStep{
 		{StepIndex: 0, PromptID: "test-prompt", PromptName: "One", PromptBody: "b", Source: "user"},
 		{StepIndex: 1, PromptID: "test-prompt", PromptName: "Two", PromptBody: "b", Source: "user"},
@@ -425,11 +426,11 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.Stop(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID); err != nil {
+	if err := s.Stop(runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "carry on"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "carry on"); err != nil {
 		t.Fatalf("resume after stop: %v (a stopped step must stay resumable)", err)
 	}
 
@@ -438,22 +439,22 @@ func TestStop_MidBlueprintStep_ResumesAndIsDriven(t *testing.T) {
 	// produced.
 	claimAndDispatch(t, s, database)
 
-	if _, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, runID); err != nil || ok {
+	if _, _, ok, err := s.pendingInput.Consume(context.Background(), runmode.LocalDefaultOrgID, conversationID); err != nil || ok {
 		t.Errorf("pending input still queued after the claim (ok=%v err=%v); the resume was accepted but never driven", ok, err)
 	}
 }
 
-// TestParkRunOpen_StoppedKeepsTheWorkspace is the stop-costs-disk
+// TestParkConversationOpen_StoppedKeepsTheWorkspace is the stop-costs-disk
 // trade, pinned. The old cancel terminal removed the worktree on its way out,
 // which threw the workspace away at exactly the moment a user who just killed
-// a wedged run is most likely to want it back. Now the run parks `open`, the
-// snapshot is written BEFORE the flip (so a resume that lands without the warm
-// worktree can still rebuild it), and the warm tree is left for the
-// blueprint's own cleanup.
-func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
+// a wedged conversation is most likely to want it back. Now the conversation
+// parks `open`, the snapshot is written BEFORE the flip (so a resume that lands
+// without the warm worktree can still rebuild it), and the warm tree is left
+// for the blueprint's own cleanup.
+func TestParkConversationOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, runID, taskID := setupAdvanceFixture(t, "cancel-park")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "cancel-park")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -463,29 +464,29 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	// A workspace with something in it that only the snapshot can carry.
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work in progress")
-	namespace := blueprintRunIDForRun(t, database, runID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
-	if fenced := s.parkRunOpen(context.Background(), liveParkContext{
-		orgID:       runmode.LocalDefaultOrgID,
-		runID:       runID,
-		taskID:      taskID,
-		namespace:   namespace,
-		claudeCwd:   wtPath,
-		triggerType: "event",
-		reason:      db.ParkStopped("system_cancelled", "Cancelled by system"),
+	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		taskID:         taskID,
+		namespace:      namespace,
+		claudeCwd:      wtPath,
+		triggerType:    "event",
+		reason:         db.ParkStopped("system_cancelled", "Cancelled by system"),
 	}, ""); fenced {
-		t.Fatal("parkRunOpen reported a fence trip on an unfenced store")
+		t.Fatal("parkConversationOpen reported a fence trip on an unfenced store")
 	}
 
 	var status, stopReason string
 	var parked bool
 	if err := database.QueryRow(
-		`SELECT status, COALESCE(park_reason, ''), parked_at IS NOT NULL FROM conversations WHERE id = ?`, runID,
+		`SELECT status, COALESCE(park_reason, ''), parked_at IS NOT NULL FROM conversations WHERE id = ?`, conversationID,
 	).Scan(&status, &stopReason, &parked); err != nil {
-		t.Fatalf("read run: %v", err)
+		t.Fatalf("read conversation: %v", err)
 	}
 	if status != "open" || stopReason != "system_cancelled" {
-		t.Errorf("run = (%q, %q), want (open, system_cancelled)", status, stopReason)
+		t.Errorf("conversation = (%q, %q), want (open, system_cancelled)", status, stopReason)
 	}
 	if !parked {
 		t.Error("parked_at unset; the snapshot-retention sweep keys the parked workspace off it")
@@ -494,7 +495,7 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 	// The snapshot exists…
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
 	if err != nil {
-		t.Fatalf("cancelled run wrote no workspace snapshot: %v", err)
+		t.Fatalf("cancelled conversation wrote no workspace snapshot: %v", err)
 	}
 	_ = rc.Close()
 	// …and the warm worktree was not torn down under it.
@@ -506,31 +507,32 @@ func TestParkRunOpen_StoppedKeepsTheWorkspace(t *testing.T) {
 // TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable drives the
 // two halves of a split-mode stop in the order they really run.
 //
-// In the control/executor split, EVERY stop of a live native run takes the
-// DB-only park: the process registry Spawner.stop consults first is per-pod,
-// and control never holds the process. So control parks the row, releases the
-// claim, and fires the cancel signal at the executor as best-effort
-// hastening; the executor's own teardown lands seconds later, holding a claim
-// that is already released. Every write it makes is refused — which leaves
-// the unfenced workspace snapshot as the only thing it still has to
-// contribute, and the only thing a follow-up needs.
+// In the control/executor split, EVERY stop of a live native-runtime
+// conversation takes the DB-only park: the process registry Spawner.stop
+// consults first is per-pod, and control never holds the process. So control
+// parks the row, releases the claim, and fires the cancel signal at the
+// executor as best-effort hastening; the executor's own teardown lands
+// seconds later, holding a claim that is already released. Every write it
+// makes is refused — which leaves the unfenced workspace snapshot as the only
+// thing it still has to contribute, and the only thing a follow-up needs.
 //
 // That is the sequence this test pins, because it used to be broken end to
 // end: the engine classified a ctx kill observed inside a store write as a
 // failure, the failure path's FIRST write is fenced, and it returned there
-// before reaching any snapshot. Net state was a parked run with no workspace
-// anywhere, and a follow-up a minute later answered 410 "this run's workspace
-// has expired" for a workspace that had never been saved.
+// before reaching any snapshot. Net state was a parked conversation with no
+// workspace anywhere, and a follow-up a minute later answered 410 "this
+// conversation's workspace has expired" for a workspace that had never been
+// saved.
 func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, runID, taskID := setupAdvanceFixture(t, "cross-pod-stop")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "cross-pod-stop")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
 	}
 	s.SetStorage(blobs)
-	markNative(t, database, runID)
+	markNative(t, database, conversationID)
 
 	// The worktree lives on the executor. Control's copy of the path resolves
 	// to nothing, exactly as it would on another machine — so recoverability
@@ -539,18 +541,18 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "half-finished work")
 	if _, err := database.Exec(
 		`UPDATE conversations SET worktree_path = ? WHERE id = ?`,
-		filepath.Join(t.TempDir(), "not-on-this-pod"), runID,
+		filepath.Join(t.TempDir(), "not-on-this-pod"), conversationID,
 	); err != nil {
 		t.Fatalf("point the row at an off-pod worktree: %v", err)
 	}
-	namespace := blueprintRunIDForRun(t, database, runID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	// 1. Control's half: park, release the claim, signal the executor. It
 	// takes no snapshot — the workspace is on a machine it cannot reach.
-	if err := s.Stop(runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID); err != nil {
+	if err := s.Stop(runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
-	if got := storedStatus(t, database, runID); got != "open" {
+	if got := storedStatus(t, database, conversationID); got != "open" {
 		t.Fatalf("after control's park, status = %q, want open", got)
 	}
 
@@ -559,14 +561,14 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	// whose claim step 1 released. SQLite does not fence (single process,
 	// nothing to refuse), so the refusal is injected — as everywhere else in
 	// this package.
-	fenced := &fencedConversationStore{ConversationStore: s.agentRuns}
-	s.agentRuns = fenced
-	gotFenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, runID,
+	fenced := &fencedConversationStore{ConversationStore: s.conversations}
+	s.conversations = fenced
+	gotFenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		loadTask(t, s, taskID),
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: "claim-1", blueprintRunID: namespace},
 		namespace, wtPath, "manual", runmode.LocalDefaultUserID, time.Now(),
 		agentloop.Result{Kind: agentloop.ResultCancelled, Err: context.Canceled}, nil)
-	s.agentRuns = fenced.ConversationStore
+	s.conversations = fenced.ConversationStore
 	if !gotFenced {
 		t.Fatal("the executor's teardown did not report the fence trip; it would go on to react to a conversation it no longer owns")
 	}
@@ -580,7 +582,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 		t.Fatalf("the fenced teardown wrote no workspace snapshot: %v", err)
 	}
 	_ = rc.Close()
-	if got := storedStatus(t, database, runID); got != "open" {
+	if got := storedStatus(t, database, conversationID); got != "open" {
 		t.Errorf("status = %q, want open — control's park stands and the fenced teardown records no terminal of its own", got)
 	}
 	// One row, and it is the stop's own note. A stop is not an agent_error,
@@ -588,7 +590,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	// records what it did, on the transcript, where the resumed model reads
 	// it.
 	var msgs int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, runID).Scan(&msgs); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM messages WHERE conversation_id = ?`, conversationID).Scan(&msgs); err != nil {
 		t.Fatalf("count messages: %v", err)
 	}
 	if msgs != 1 {
@@ -597,7 +599,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 	var role, subtype, content string
 	var isError bool
 	if err := database.QueryRow(
-		`SELECT role, subtype, content, is_error FROM messages WHERE conversation_id = ?`, runID,
+		`SELECT role, subtype, content, is_error FROM messages WHERE conversation_id = ?`, conversationID,
 	).Scan(&role, &subtype, &content, &isError); err != nil {
 		t.Fatalf("read the stop note: %v", err)
 	}
@@ -611,15 +613,15 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 
 	// 3. The user's follow-up, a minute later. It has to be accepted off the
 	// snapshot alone, and it has to be claimable.
-	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, runID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
+	if err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, conversationID, runmode.LocalDefaultUserID, "actually, try the other approach"); err != nil {
 		t.Fatalf("follow-up after a cross-pod stop: %v (ErrWorkspaceExpired here is the bug this ticket exists for)", err)
 	}
-	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "test-executor", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "test-executor", 1, db.ClaimPlacement{})
 	if err != nil {
-		t.Fatalf("claim next run: %v", err)
+		t.Fatalf("claim next conversation: %v", err)
 	}
-	if claimed == nil || claimed.ID != runID {
-		t.Fatalf("claimed = %v, want the stopped conversation %s — the follow-up was accepted but nothing will drive it", claimed, runID)
+	if claimed == nil || claimed.ID != conversationID {
+		t.Fatalf("claimed = %v, want the stopped conversation %s — the follow-up was accepted but nothing will drive it", claimed, conversationID)
 	}
 }
 
@@ -631,7 +633,7 @@ func TestStop_CrossPodNativeStop_KeepsTheWorkspaceAndStaysResumable(t *testing.T
 func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
-	s, database, runID, taskID := setupAdvanceFixture(t, "native-genuine-fail")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "native-genuine-fail")
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
@@ -640,26 +642,26 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "work the failure discards")
-	namespace := blueprintRunIDForRun(t, database, runID)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
-	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, runID,
+	if fenced := s.recordNativeResult(context.Background(), runmode.LocalDefaultOrgID, conversationID,
 		loadTask(t, s, taskID),
 		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: namespace},
 		namespace, wtPath, "event", "", time.Now(),
 		agentloop.Result{
 			Kind:        agentloop.ResultFailed,
-			FailureKind: domain.RunFailureAgentError,
+			FailureKind: domain.ConversationFailureAgentError,
 			Err:         errors.New("tool host is unusable: broken pipe"),
 		}, nil); fenced {
 		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
 	}
 
-	if got := storedStatus(t, database, runID); got != "failed" {
+	if got := storedStatus(t, database, conversationID); got != "failed" {
 		t.Errorf("status = %q, want failed", got)
 	}
 	var content string
 	if err := database.QueryRow(
-		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, runID,
+		`SELECT content FROM messages WHERE conversation_id = ? AND is_error = 1`, conversationID,
 	).Scan(&content); err != nil {
 		t.Fatalf("read the failure row: %v", err)
 	}
@@ -669,25 +671,25 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	if ok, err := s.Storage().Exists(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace)); err != nil {
 		t.Fatalf("snapshot existence: %v", err)
 	} else if ok {
-		t.Error("a failed run snapshotted its workspace; the failure path keeps no workspace and the reaper never enumerates one")
+		t.Error("a failed conversation snapshotted its workspace; the failure path keeps no workspace and the reaper never enumerates one")
 	}
 }
 
 // TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone: a stale
-// teardown — one aimed at a run that already concluded — must stay a pure
+// teardown — one aimed at a conversation that already concluded — must stay a pure
 // no-op. The blueprint-layer signal is the reason this needs its own guard:
 // raising cancel_requested on a blueprint that has moved on to its next step
 // would cancel work the caller never aimed at.
 func TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-stale", "sess-stale", "/tmp/wt-stale")
+	seedConversation(t, database, "r-stale", "sess-stale", "/tmp/wt-stale")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = 'r-stale'`); err != nil {
-		t.Fatalf("complete run: %v", err)
+		t.Fatalf("complete conversation: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-stale", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err == nil {
-		t.Fatal("expected 'no active run' on a concluded run")
+		t.Fatal("expected 'no active conversation' on a concluded conversation")
 	}
 
 	var status string

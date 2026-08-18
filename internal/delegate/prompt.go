@@ -295,9 +295,9 @@ func (s *Spawner) collectExtraTools(promptAllowedTools string) string {
 }
 
 type agentResult struct {
-	// Outcome is the single terminal vocabulary (continue|finish|abort) —
-	// renamed from the legacy `status` field for clarity. See domain.RunOutcome
-	// and the completion block in internal/agentprompt.
+	// Outcome is the single terminal vocabulary (continue|finish|abort).
+	// See domain.ConversationOutcome and the completion block in
+	// internal/agentprompt.
 	Outcome string `json:"outcome"`
 	// Summary is the natural-language "what I did" — required on a
 	// finish/continue. Maps to conversations.result_summary.
@@ -317,10 +317,10 @@ type agentResult struct {
 // outcome token, or a recognized one missing its companion, is not a valid
 // conclusion — it's an invalid attempt the driver re-prompts to fix.
 func (r *agentResult) isValid() bool {
-	switch domain.RunOutcome(r.Outcome) {
-	case domain.RunOutcomeContinue, domain.RunOutcomeFinish:
+	switch domain.ConversationOutcome(r.Outcome) {
+	case domain.ConversationOutcomeContinue, domain.ConversationOutcomeFinish:
 		return r.Summary != ""
-	case domain.RunOutcomeAbort:
+	case domain.ConversationOutcomeAbort:
 		return r.Reason != ""
 	default:
 		return false

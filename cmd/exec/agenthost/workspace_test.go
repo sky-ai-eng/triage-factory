@@ -50,12 +50,12 @@ func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL str
 	}
 }
 
-func workspaceInfo(runID string) RunInfo {
-	return RunInfo{
-		OrgID:  runmode.LocalDefaultOrgID,
-		UserID: runmode.LocalDefaultUserID,
-		TeamID: runmode.LocalDefaultTeamID,
-		RunID:  runID,
+func workspaceInfo(conversationID string) ConversationInfo {
+	return ConversationInfo{
+		OrgID:          runmode.LocalDefaultOrgID,
+		UserID:         runmode.LocalDefaultUserID,
+		TeamID:         runmode.LocalDefaultTeamID,
+		ConversationID: conversationID,
 	}
 }
 
@@ -66,14 +66,14 @@ type createRecorder struct {
 	prCalls       int
 
 	// checkout args
-	coOwner, coRepo, coCloneURL, coRef, coRunID, coRunRoot string
-	coAuth                                                 worktree.CloneAuth
+	coOwner, coRepo, coCloneURL, coRef, coConversationID, coRunRoot string
+	coAuth                                                          worktree.CloneAuth
 
 	// PR args
-	prOwner, prRepo, prUpstream, prHead, prHeadBranch, prRunID, prRunRoot string
-	prNumber                                                              int
-	prBase                                                                string
-	prAuth                                                                worktree.CloneAuth
+	prOwner, prRepo, prUpstream, prHead, prHeadBranch, prConversationID, prRunRoot string
+	prNumber                                                                       int
+	prBase                                                                         string
+	prAuth                                                                         worktree.CloneAuth
 
 	path string
 	err  error
@@ -82,16 +82,16 @@ type createRecorder struct {
 func stubWorkspaceCreates(t *testing.T, rec *createRecorder) {
 	t.Helper()
 	origCheckout, origPR := workspaceCreateCheckout, workspaceCreatePR
-	workspaceCreateCheckout = func(_ context.Context, owner, repo, cloneURL, ref, runID, runRoot string, opts ...worktree.CloneOption) (string, error) {
+	workspaceCreateCheckout = func(_ context.Context, owner, repo, cloneURL, ref, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
 		rec.checkoutCalls++
-		rec.coOwner, rec.coRepo, rec.coCloneURL, rec.coRef, rec.coRunID, rec.coRunRoot = owner, repo, cloneURL, ref, runID, runRoot
+		rec.coOwner, rec.coRepo, rec.coCloneURL, rec.coRef, rec.coConversationID, rec.coRunRoot = owner, repo, cloneURL, ref, conversationID, runRoot
 		rec.coAuth = worktree.CloneAuthFromOptions(opts...)
 		return rec.path, rec.err
 	}
-	workspaceCreatePR = func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, runID, runRoot string, opts ...worktree.CloneOption) (string, error) {
+	workspaceCreatePR = func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
 		rec.prCalls++
 		rec.prOwner, rec.prRepo, rec.prUpstream, rec.prHead, rec.prHeadBranch = owner, repo, upstream, head, headBranch
-		rec.prNumber, rec.prRunID, rec.prRunRoot = prNumber, runID, runRoot
+		rec.prNumber, rec.prConversationID, rec.prRunRoot = prNumber, conversationID, runRoot
 		rec.prBase = worktree.BaseBranchFromOptions(opts...)
 		rec.prAuth = worktree.CloneAuthFromOptions(opts...)
 		return rec.path, rec.err
@@ -103,26 +103,26 @@ func stubWorkspaceCreates(t *testing.T, rec *createRecorder) {
 
 // TestLocalClient_WorkspaceRoots pins the host-root derivation: the run's
 // recorded worktree_path when present (the value resume maintains — after a
-// cold rehydrate the runID-derived path diverges from the real cwd), the
-// worktree.RunRoot(runID) fallback otherwise; and both views equal for the
+// cold rehydrate the conversationID-derived path diverges from the real cwd), the
+// worktree.RunRoot(conversationID) fallback otherwise; and both views equal for the
 // in-process client (no sandbox boundary on this transport).
 func TestLocalClient_WorkspaceRoots(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-roots", runmode.LocalDefaultUserID, "manual")
-	client := NewLocal(stores, workspaceInfo("run-roots"))
+	seedConversation(t, stores, conn, "conv-roots", runmode.LocalDefaultUserID, "manual")
+	client := NewLocal(stores, workspaceInfo("conv-roots"))
 
 	host, agent, err := client.WorkspaceRoots(context.Background())
 	if err != nil {
 		t.Fatalf("WorkspaceRoots: %v", err)
 	}
-	if want := worktree.RunRoot("run-roots"); host != want {
+	if want := worktree.RunRoot("conv-roots"); host != want {
 		t.Errorf("host root (no worktree_path) = %q, want RunRoot fallback %q", host, want)
 	}
 	if host != agent {
 		t.Errorf("LocalClient views differ: host %q, agent %q — no sandbox boundary on this transport", host, agent)
 	}
 
-	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-roots", "/data/runs/rehydrated-root"); err != nil {
+	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-roots", "/data/runs/rehydrated-root"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 	host, agent, err = client.WorkspaceRoots(context.Background())
@@ -142,8 +142,8 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 // cd-able path (TFAC-546).
 func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-ipc-roots", runmode.LocalDefaultUserID, "manual")
-	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "run-ipc-roots", "/tmp/triagefactory-runs/run-ipc-roots"); err != nil {
+	seedConversation(t, stores, conn, "conv-ipc-roots", runmode.LocalDefaultUserID, "manual")
+	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-ipc-roots", "/tmp/triagefactory-runs/conv-ipc-roots"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 
@@ -152,7 +152,7 @@ func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, workspaceInfo("run-ipc-roots"), nil)
+	srv := NewServer(stores, workspaceInfo("conv-ipc-roots"), nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -166,8 +166,8 @@ func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WorkspaceRoots over IPC: %v", err)
 	}
-	if host != "/tmp/triagefactory-runs/run-ipc-roots" {
-		t.Errorf("host root = %q, want the run's recorded worktree_path", host)
+	if host != "/tmp/triagefactory-runs/conv-ipc-roots" {
+		t.Errorf("host root = %q, want the conversation's recorded worktree_path", host)
 	}
 	if agent != "/work" {
 		t.Errorf("agent root = %q, want /work (the sandbox mount)", agent)
@@ -181,10 +181,10 @@ func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 // ref+pr conflict — all before any git runs.
 func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-gates", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "conv-gates", runmode.LocalDefaultUserID, "manual")
 	rec := &createRecorder{}
 	stubWorkspaceCreates(t, rec)
-	client := NewLocal(stores, workspaceInfo("run-gates"))
+	client := NewLocal(stores, workspaceInfo("conv-gates"))
 	ctx := context.Background()
 
 	if _, err := client.CreateWorkspaceCheckout(ctx, "sky", "nowhere", "", 0); err == nil || !strings.Contains(err.Error(), "not configured") {
@@ -226,11 +226,11 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 // the operator's own git path).
 func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-co", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "conv-co", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	rec := &createRecorder{path: "/wt/path"}
 	stubWorkspaceCreates(t, rec)
-	client := NewLocal(stores, workspaceInfo("run-co"))
+	client := NewLocal(stores, workspaceInfo("conv-co"))
 
 	path, err := client.CreateWorkspaceCheckout(context.Background(), "sky", "core", "feature-x", 0)
 	if err != nil {
@@ -251,10 +251,10 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	if rec.coRef != "feature-x" {
 		t.Errorf("ref = %q, want the raw branch", rec.coRef)
 	}
-	if rec.coRunID != "run-co" {
-		t.Errorf("runID = %q, want run-co", rec.coRunID)
+	if rec.coConversationID != "conv-co" {
+		t.Errorf("conversationID = %q, want conv-co", rec.coConversationID)
 	}
-	if want := worktree.RunRoot("run-co"); rec.coRunRoot != want {
+	if want := worktree.RunRoot("conv-co"); rec.coRunRoot != want {
 		t.Errorf("runRoot = %q, want the host root %q", rec.coRunRoot, want)
 	}
 	if rec.coAuth != (worktree.CloneAuth{}) {
@@ -281,19 +281,19 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 	defer gh.Close()
 
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-pr", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "conv-pr", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	// The workspace CLI reserves the conversation_worktrees row BEFORE the create — and
 	// the host-side PR fetch rides the exec-gh channel, whose least-privilege
 	// gate requires that row. Mirror the production ordering.
-	if _, _, err := stores.RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "run-pr", RepoID: "sky/core", Path: "/wt/pr-path", Ref: "pr-42",
+	if _, _, err := stores.ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "conv-pr", RepoID: "sky/core", Path: "/wt/pr-path", Ref: "pr-42",
 	}); err != nil {
 		t.Fatalf("reserve conversation_worktrees row: %v", err)
 	}
 	rec := &createRecorder{path: "/wt/pr-path"}
 	stubWorkspaceCreates(t, rec)
-	client := NewLocal(stores, workspaceInfo("run-pr"))
+	client := NewLocal(stores, workspaceInfo("conv-pr"))
 	client.SetGitHubResolver(tokenResolver{
 		fakeGitHubResolver: fakeGitHubResolver{baseURL: gh.URL, token: "api-token"},
 		cloneToken:         "ghs_clone_token",
@@ -357,11 +357,11 @@ func TestStrictlyWithin(t *testing.T) {
 // create failure surfaces to the caller (which releases its reservation).
 func TestLocalClient_CreateWorkspaceCheckout_CreateErrorPropagates(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-fail", runmode.LocalDefaultUserID, "manual")
+	seedConversation(t, stores, conn, "conv-fail", runmode.LocalDefaultUserID, "manual")
 	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	rec := &createRecorder{err: errors.New("simulated git failure")}
 	stubWorkspaceCreates(t, rec)
-	client := NewLocal(stores, workspaceInfo("run-fail"))
+	client := NewLocal(stores, workspaceInfo("conv-fail"))
 
 	if _, err := client.CreateWorkspaceCheckout(context.Background(), "sky", "core", "", 0); err == nil || !strings.Contains(err.Error(), "simulated git failure") {
 		t.Errorf("err = %v, want the create failure to propagate", err)

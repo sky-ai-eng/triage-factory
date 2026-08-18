@@ -1,5 +1,5 @@
 // stripWorktree collapses the agent's absolute worktree paths down to paths
-// relative to the run's worktree root, so run surfaces show
+// relative to the conversation's worktree root, so display surfaces show
 // "frontend/src/index.css" instead of the
 // /private/var/folders/.../triagefactory-runs/<id>/frontend/src/index.css
 // mouthful. It runs over arbitrary strings (bash commands, JSON args, output),

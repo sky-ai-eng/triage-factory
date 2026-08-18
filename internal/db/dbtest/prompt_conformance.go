@@ -16,15 +16,15 @@ import (
 //   - the teamID Create should attribute prompts to. Every prompt is
 //     team-scoped, so the seeder threads it; SQLite pins the local sentinel,
 //     Postgres binds the test team.
-//   - a RunSeeder hook that lets the harness create conversations rows the
-//     Stats subtests need. The harness doesn't know how to create
-//     conversations directly (RunStore lands in wave 3b); the backend test
+//   - a conversation-seeder hook that lets the harness create conversations
+//     rows the Stats subtests need. The harness doesn't wire a
+//     db.ConversationStore of its own; the backend test
 //     owns that wiring against its own connection. Each backend
 //     translates a logical fixture (promptID + N runs at given
 //     timestamps) into its own schema's INSERT shape.
-type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedRuns RunSeederForStats)
+type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID string, seedConversations ConversationSeederForStats)
 
-// RunSeederForStats is a callback the harness invokes to populate
+// ConversationSeederForStats is a callback the harness invokes to populate
 // rows in the conversations table for Stats assertions. statusByOffset maps
 // row index → status string ("completed" / "failed" / "running"
 // etc.); the seeder generates one run per entry, with started_at
@@ -32,7 +32,7 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
 // the prompt's id the Stats subtests created via Create.
-type RunSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
+type ConversationSeederForStats func(t *testing.T, promptID string, statusByOffset []string) []string
 
 // RunPromptStoreConformance runs the shared assertion suite against
 // any db.PromptStore impl. Each subtest gets a fresh store via
@@ -188,15 +188,15 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Stats_AggregatesRuns", func(t *testing.T) {
-		store, orgID, teamID, seedRuns := factory(t)
+	t.Run("Stats_AggregatesConversations", func(t *testing.T) {
+		store, orgID, teamID, seedConversations := factory(t)
 		ctx := context.Background()
 		// Set up: a prompt + 5 runs (3 completed, 1 failed, 1 running).
 		id := "stats-p"
 		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "S", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create stats prompt: %v", err)
 		}
-		seedRuns(t, id, []string{"completed", "completed", "completed", "failed", "running"})
+		seedConversations(t, id, []string{"completed", "completed", "completed", "failed", "running"})
 		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("stats: %v", err)
@@ -231,14 +231,14 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// cutoff the query filters on is built the same way, so a local
 		// skeleton also asks the database for a window it isn't rendering.
 		forceDayBoundaryLocalZone(t)
-		store, orgID, teamID, seedRuns := factory(t)
+		store, orgID, teamID, seedConversations := factory(t)
 		ctx := context.Background()
 
 		id := "day-bucket-p"
 		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "DB", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		seedRuns(t, id, []string{"completed", "completed", "failed"})
+		seedConversations(t, id, []string{"completed", "completed", "failed"})
 
 		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
@@ -267,7 +267,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Stats_NoRuns_ReturnsZeros", func(t *testing.T) {
+	t.Run("Stats_NoConversations_ReturnsZeros", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := "unused-p"
@@ -312,24 +312,24 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 	})
 
-	t.Run("Delete_WithRunHistory_Succeeds", func(t *testing.T) {
-		// Regression: a user prompt with run history must be
+	t.Run("Delete_WithConversationHistory_Succeeds", func(t *testing.T) {
+		// Regression: a user prompt with conversation history must be
 		// deletable without hitting the conversations.prompt_id RESTRICT FK (a hard DELETE
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
-		store, orgID, teamID, seedRuns := factory(t)
+		store, orgID, teamID, seedConversations := factory(t)
 		ctx := context.Background()
 		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "rh-1", Name: "RH", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		seedRuns(t, "rh-1", []string{"completed", "failed"})
+		seedConversations(t, "rh-1", []string{"completed", "failed"})
 		if err := store.Delete(ctx, orgID, "rh-1"); err != nil {
-			t.Fatalf("delete prompt with run history failed (the FK-500 regression): %v", err)
+			t.Fatalf("delete prompt with conversation history failed (the FK-500 regression): %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, "rh-1"); got != nil {
 			t.Fatalf("Get after delete = %+v; want nil", got)
 		}
 		if got, _ := store.GetSystem(ctx, orgID, "rh-1"); got == nil {
-			t.Fatalf("GetSystem after delete = nil; the row + its runs must survive as the audit trail")
+			t.Fatalf("GetSystem after delete = nil; the row + its conversations must survive as the audit trail")
 		}
 	})
 

@@ -48,10 +48,10 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	}
 
 	// The queued step-0 run carries the event shape AND the firing trigger.
-	var runID, gotType, gotTrig string
+	var conversationID, gotType, gotTrig string
 	if err := database.QueryRow(
 		`SELECT id, trigger_type, COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ?`, brID,
-	).Scan(&runID, &gotType, &gotTrig); err != nil {
+	).Scan(&conversationID, &gotType, &gotTrig); err != nil {
 		t.Fatalf("read step-0 run: %v", err)
 	}
 	if gotType != "event" || gotTrig != trigID {
@@ -65,14 +65,14 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	if _, err := database.Exec(`
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content)
 		VALUES (?, ?, 'assistant', '', 'work')
-	`, org, runID); err != nil {
+	`, org, conversationID); err != nil {
 		t.Fatalf("seed ledger row: %v", err)
 	}
 	var cat string
 	var viewTrig sql.NullString
 	if err := database.QueryRow(
 		`SELECT category, trigger_id FROM llm_spend
-		 WHERE source = 'run' AND source_id = (SELECT id FROM messages WHERE conversation_id = ?)`, runID,
+		 WHERE source = 'run' AND source_id = (SELECT id FROM messages WHERE conversation_id = ?)`, conversationID,
 	).Scan(&cat, &viewTrig); err != nil {
 		t.Fatalf("read llm_spend row: %v", err)
 	}

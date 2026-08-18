@@ -248,14 +248,14 @@ func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error
 	return err
 }
 
-func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
 	var n int
 	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE prompt_id = ?`, id).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
+		return 0, fmt.Errorf("count conversation references: %w", err)
 	}
 	return n, nil
 }
@@ -279,7 +279,7 @@ func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id
 // function shape was three statements and the conformance harness
 // covers both backends with identical assertions — a CTE optimization
 // is a future patch, not a port. Stats lives on PromptStore (vs
-// RunStore) because the queries key on prompt_id and the prompts
+// ConversationStore) because the queries key on prompt_id and the prompts
 // handler is the only consumer.
 func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*domain.PromptStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {

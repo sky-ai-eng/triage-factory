@@ -748,9 +748,9 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 // single connection, so there is no admin/app split; the contract matches the
 // Postgres impl.
 //
-// The run row and the task's agent claim commit together — see
+// The blueprint run row and the task's agent claim commit together — see
 // db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
-// error and leaves the run committed.
+// error and leaves the blueprint run committed.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, false, err
@@ -953,7 +953,7 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	return out, total, rows.Err()
 }
 
-func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
+func (s *blueprintStore) GetRunForConversation(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, nil, err
 	}
@@ -961,7 +961,7 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 		blueprintRunID sql.NullString
 		stepIndex      sql.NullInt64
 	)
-	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, runID).
+	err := s.q.QueryRowContext(ctx, `SELECT blueprint_run_id, blueprint_step_index FROM conversations WHERE id = ?`, stepConversationID).
 		Scan(&blueprintRunID, &stepIndex)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, nil
@@ -984,8 +984,8 @@ func (s *blueprintStore) GetRunForRun(ctx context.Context, orgID, runID string) 
 	return br, idx, nil
 }
 
-func (s *blueprintStore) GetRunForRunSystem(ctx context.Context, orgID, runID string) (*domain.BlueprintRun, *int, error) {
-	return s.GetRunForRun(ctx, orgID, runID)
+func (s *blueprintStore) GetRunForConversationSystem(ctx context.Context, orgID, stepConversationID string) (*domain.BlueprintRun, *int, error) {
+	return s.GetRunForConversation(ctx, orgID, stepConversationID)
 }
 
 func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
@@ -1004,15 +1004,15 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	}
 	now := time.Now().UTC()
 	// Flip the blueprint_run terminal AND cancel any still-active child
-	// run in one transaction, so a terminal parent can never be observed (or
-	// committed) alongside a live child. inTx composes with the caller's tx when
-	// MarkRunStatus runs inside SyntheticClaimsWithTx (manual path) and opens a
-	// fresh one on the bare admin/system handle — either way the two writes are
-	// all-or-nothing. Without a non-terminal child a cancel that raced the
-	// dispatcher's claim/setup window (or a parked `open` step the
-	// sequence-cancel path skips) would strand a child 'running', keeping the
-	// dispatcher on phantom work and pinning its feature branch in a worktree,
-	// requeuing forever.
+	// conversation in one transaction, so a terminal parent can never be
+	// observed (or committed) alongside a live child. inTx composes with the
+	// caller's tx when MarkRunStatus runs inside SyntheticClaimsWithTx (manual
+	// path) and opens a fresh one on the bare admin/system handle — either way
+	// the two writes are all-or-nothing. Without a non-terminal child a cancel
+	// that raced the dispatcher's claim/setup window (or a parked `open` step
+	// the sequence-cancel path skips) would strand a child 'running', keeping
+	// the dispatcher on phantom work and pinning its feature branch in a
+	// worktree, requeuing forever.
 	var changed bool
 	err := inTx(ctx, s.q, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
@@ -1033,7 +1033,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 		// paths the triggering step is already terminal, so this is a guard that
 		// fires only on the race.
 		if changed && status.Terminal() {
-			return parkOrphanedChildRuns(ctx, q, id)
+			return parkOrphanedChildConversations(ctx, q, id)
 		}
 		return nil
 	})
@@ -1043,11 +1043,12 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 	return changed, nil
 }
 
-// parkOrphanedChildRuns parks every still-mid-flight child run of
-// blueprintRunID `open` and releases those children's active claims. Called by
-// MarkRunStatus's atomic flip; RunQueueStore.ReconcileOrphanedRuns applies the
-// same predicate in its own boot sweep (it can't share this body — different
-// store, different scope).
+// parkOrphanedChildConversations parks every still-mid-flight child
+// conversation of blueprintRunID `open` and releases those children's active
+// claims. Called by MarkRunStatus's atomic flip;
+// ConversationQueueStore.ReconcileOrphanedConversations applies the same
+// predicate in its own boot sweep (it can't share this body — different store,
+// different scope).
 //
 // A park, not a terminal: the child neither failed nor concluded, it was
 // stopped when its parent ended. Read the `open` as "stopped without
@@ -1055,7 +1056,7 @@ func (s *blueprintStore) MarkRunStatus(ctx context.Context, orgID, id string, st
 // refuses it. Scoped to status IS NULL: a child that already parked itself
 // keeps its own parked_at and park_reason, and one that already reached a
 // terminal is left alone.
-func parkOrphanedChildRuns(ctx context.Context, q queryer, blueprintRunID string) error {
+func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRunID string) error {
 	// Claims first: the subquery's mid-flight predicate matches exactly the
 	// rows the park below is about to retire, and both statements share the
 	// caller's transaction, so the pair lands atomically either way.
@@ -1126,7 +1127,7 @@ func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id s
 	return n > 0, nil
 }
 
-func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+func (s *blueprintStore) ConversationsForBlueprint(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1209,7 +1210,7 @@ func (s *blueprintStore) RunsForBlueprint(ctx context.Context, orgID, blueprintR
 	return out, rows.Err()
 }
 
-func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -1217,7 +1218,7 @@ func (s *blueprintStore) ActiveStepRunIDs(ctx context.Context, orgID, blueprintR
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
 		  AND (status IS NULL
-		       OR status NOT IN (`+runTerminalStatusesSQL+`,'open'))
+		       OR status NOT IN (`+conversationTerminalStatusesSQL+`,'open'))
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err
@@ -1280,10 +1281,10 @@ func (s *blueprintStore) GetRunSystem(ctx context.Context, orgID, id string) (*d
 	return s.GetRun(ctx, orgID, id)
 }
 
-func (s *blueprintStore) ActiveStepRunIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
-	return s.ActiveStepRunIDs(ctx, orgID, blueprintRunID)
+func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, orgID, blueprintRunID string) ([]string, error) {
+	return s.ActiveStepConversationIDs(ctx, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) RunsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
-	return s.RunsForBlueprint(ctx, orgID, blueprintRunID)
+func (s *blueprintStore) ConversationsForBlueprintSystem(ctx context.Context, orgID, blueprintRunID string) ([]domain.Conversation, error) {
+	return s.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
 }

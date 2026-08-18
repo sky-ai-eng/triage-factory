@@ -13,7 +13,7 @@ import (
 
 // finalizeHost is a host whose FinalizeReviewDraft returns a canned outcome —
 // the seam the response contract rests on. It embeds agenthost.Client (nil) so
-// it satisfies the interface; prFinalizeReview reaches only LookupRun and
+// it satisfies the interface; prFinalizeReview reaches only LookupConversation and
 // FinalizeReviewDraft.
 type finalizeHost struct {
 	agenthost.Client
@@ -22,8 +22,8 @@ type finalizeHost struct {
 	gotEv  string
 }
 
-func (h *finalizeHost) LookupRun(context.Context) (agenthost.RunInfo, error) {
-	return agenthost.RunInfo{RunID: "run-1", OrgID: "org-1"}, nil
+func (h *finalizeHost) LookupConversation(context.Context) (agenthost.ConversationInfo, error) {
+	return agenthost.ConversationInfo{ConversationID: "run-1", OrgID: "org-1"}, nil
 }
 
 func (h *finalizeHost) FinalizeReviewDraft(_ context.Context, reviewID, event, _ string) (agenthost.ReviewFinalizeResult, error) {

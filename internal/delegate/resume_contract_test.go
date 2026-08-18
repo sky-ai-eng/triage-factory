@@ -22,11 +22,11 @@ import (
 // stepFixture is one blueprint_run spanning several conversation rows on a
 // single task — the shape every assertion below is about.
 type stepFixture struct {
-	s        *Spawner
-	database *sql.DB
-	task     domain.Task
-	brID     string
-	runIDs   []string
+	s               *Spawner
+	database        *sql.DB
+	task            domain.Task
+	brID            string
+	conversationIDs []string
 }
 
 // seedStepFixture stands up a `steps`-long blueprint on a task of the given
@@ -100,27 +100,27 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		t.Fatalf("stamp the blueprint's shared worktree: %v", err)
 	}
 
-	runIDs := make([]string, steps)
+	conversationIDs := make([]string, steps)
 	for i := range steps {
 		idx := i
-		runIDs[i] = fmt.Sprintf("%s-step%d", suffix, i)
+		conversationIDs[i] = fmt.Sprintf("%s-step%d", suffix, i)
 		stepWT := ""
 		if i == 0 {
 			stepWT = sharedWT // the source setup stamped it on the first claim
 		}
 		dbtest.SeedConversation(t, database, domain.Conversation{
-			ID: runIDs[i], TaskID: task.ID, PromptID: promptIDs[i], Status: "running",
-			Model: "claude-sonnet-4-6", SessionID: "sess-" + runIDs[i], WorktreePath: stepWT,
+			ID: conversationIDs[i], TaskID: task.ID, PromptID: promptIDs[i], Status: "running",
+			Model: "claude-sonnet-4-6", SessionID: "sess-" + conversationIDs[i], WorktreePath: stepWT,
 			BlueprintRunID: brID, BlueprintStepIndex: &idx,
 		})
 	}
 
 	return stepFixture{
-		s:        NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6"),
-		database: database,
-		task:     *task,
-		brID:     brID,
-		runIDs:   runIDs,
+		s:               NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6"),
+		database:        database,
+		task:            *task,
+		brID:            brID,
+		conversationIDs: conversationIDs,
 	}
 }
 
@@ -136,11 +136,11 @@ func (f stepFixture) blueprintRun(t *testing.T) *domain.BlueprintRun {
 }
 
 // claimStep runs one step's claim through buildStepConfig's later-step arm,
-// exactly as dispatchClaimedRun does, and returns the config it resolved.
+// exactly as dispatchClaimedConversation does, and returns the config it resolved.
 func (f stepFixture) claimStep(t *testing.T, br *domain.BlueprintRun, step int) runConfig {
 	t.Helper()
-	run := domain.Conversation{ID: f.runIDs[step], TaskID: f.task.ID, BlueprintRunID: f.brID}
-	cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, br, f.task, run, nil, nil)
+	conv := domain.Conversation{ID: f.conversationIDs[step], TaskID: f.task.ID, BlueprintRunID: f.brID}
+	cfg, err := f.s.buildStepConfig(context.Background(), runmode.LocalDefaultOrgID, br, f.task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig for step %d: %v", step, err)
 	}
@@ -179,14 +179,14 @@ func TestBuildStepConfig_StampsWorktreePathOnEveryStepRow(t *testing.T) {
 			f := seedStepFixture(t, source, source+"-stamp", 3, wt)
 			br := f.blueprintRun(t)
 
-			for step := 1; step < len(f.runIDs); step++ {
+			for step := 1; step < len(f.conversationIDs); step++ {
 				if cfg := f.claimStep(t, br, step); cfg.wtPath != wt {
 					t.Fatalf("step %d resolved wtPath = %q, want the shared %q", step, cfg.wtPath, wt)
 				}
 			}
 
-			for step, runID := range f.runIDs {
-				if got := storedWorktreePath(t, f.database, runID); got != wt {
+			for step, conversationID := range f.conversationIDs {
+				if got := storedWorktreePath(t, f.database, conversationID); got != wt {
 					t.Errorf("step %d conversation worktree_path = %q, want %q — a follow-up to it would be refused for a missing field", step, got, wt)
 				}
 			}
@@ -204,11 +204,11 @@ func TestBuildStepConfig_StampsNativeStepRowsToo(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	wt := t.TempDir()
 	f := seedStepFixture(t, "jira", "native-stamp", 2, wt)
-	markNative(t, f.database, f.runIDs[1])
+	markNative(t, f.database, f.conversationIDs[1])
 
 	f.claimStep(t, f.blueprintRun(t), 1)
 
-	if got := storedWorktreePath(t, f.database, f.runIDs[1]); got != wt {
+	if got := storedWorktreePath(t, f.database, f.conversationIDs[1]); got != wt {
 		t.Errorf("native step worktree_path = %q, want %q", got, wt)
 	}
 }
@@ -300,7 +300,7 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			if cfg.workspace != domain.WorkspaceProvenanceRehydrated {
 				t.Errorf("workspace provenance = %q, want rehydrated — the loop's resume notice is written off this", cfg.workspace)
 			}
-			if got := storedWorktreePath(t, f.database, f.runIDs[1]); got != rebuilt {
+			if got := storedWorktreePath(t, f.database, f.conversationIDs[1]); got != rebuilt {
 				t.Errorf("conversation worktree_path = %q, want the rebuilt %q — the row must point at the tree the resumed session runs in", got, rebuilt)
 			}
 		})
@@ -324,7 +324,7 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 	f := seedStepFixture(t, "github", "finished", 3, wt)
 
 	br := f.blueprintRun(t)
-	for step := 1; step < len(f.runIDs); step++ {
+	for step := 1; step < len(f.conversationIDs); step++ {
 		f.claimStep(t, br, step)
 	}
 
@@ -333,15 +333,15 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 	if _, err := f.database.Exec(`UPDATE conversations SET status='completed', outcome='finish'`); err != nil {
 		t.Fatalf("conclude the steps: %v", err)
 	}
-	finishBlueprint(t, f.database, f.brID, "completed", len(f.runIDs)-1)
+	finishBlueprint(t, f.database, f.brID, "completed", len(f.conversationIDs)-1)
 
-	for step, runID := range f.runIDs {
-		run, err := f.s.agentRuns.GetSystem(ctx, org, runID)
-		if err != nil || run == nil {
+	for step, conversationID := range f.conversationIDs {
+		conv, err := f.s.conversations.GetSystem(ctx, org, conversationID)
+		if err != nil || conv == nil {
 			t.Fatalf("load step %d: %v", step, err)
 		}
-		ok, reason := f.s.ResumabilityFor(ctx, org, run)
-		if step == len(f.runIDs)-1 {
+		ok, reason := f.s.ResumabilityFor(ctx, org, conv)
+		if step == len(f.conversationIDs)-1 {
 			if !ok {
 				t.Fatalf("final step: ResumabilityFor = (false, %q), want resumable", reason)
 			}
@@ -357,7 +357,7 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 	// claimed off the ordinary queue, and driven down the resume path. The
 	// delivery fails fast on a session transcript this bare worktree never
 	// held; reaching a terminal at all is the proof it was driven.
-	final := f.runIDs[len(f.runIDs)-1]
+	final := f.conversationIDs[len(f.conversationIDs)-1]
 	if err := f.s.SendMessage(ctx, org, final, runmode.LocalDefaultUserID, "one more thing"); err != nil {
 		t.Fatalf("SendMessage to the final step of a finished blueprint: %v", err)
 	}
@@ -395,17 +395,17 @@ func (h *recordingHandler) warnedFields(t *testing.T) []string {
 		if r.Level != slog.LevelWarn || r.Message != "SDK conversation is missing a resume coordinate; resume will refuse this row" {
 			continue
 		}
-		var field, run string
+		var field, conversation string
 		r.Attrs(func(a slog.Attr) bool {
 			switch a.Key {
 			case "field":
 				field = a.Value.String()
-			case "run":
-				run = a.Value.String()
+			case "conversation":
+				conversation = a.Value.String()
 			}
 			return true
 		})
-		if run == "" {
+		if conversation == "" {
 			t.Error("the warning must name the conversation; without it there is nothing to look up")
 		}
 		if field == "" {
@@ -484,15 +484,15 @@ func TestAssertResumeCoordinates_NamesEveryMissingField(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newDelegateTestDB(t)
-			const runID = "r-contract"
-			seedRun(t, database, runID, "sess-contract", "/tmp/wt")
-			if _, err := database.Exec(tc.mutate, runID); err != nil {
+			const conversationID = "r-contract"
+			seedConversation(t, database, conversationID, "sess-contract", "/tmp/wt")
+			if _, err := database.Exec(tc.mutate, conversationID); err != nil {
 				t.Fatalf("stage the row: %v", err)
 			}
 			s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 			logs := captureDelegateLog(t)
-			s.assertResumeCoordinates(context.Background(), runmode.LocalDefaultOrgID, runID, tc.at)
+			s.assertResumeCoordinates(context.Background(), runmode.LocalDefaultOrgID, conversationID, tc.at)
 
 			got := logs.warnedFields(t)
 			if len(got) != len(tc.want) {

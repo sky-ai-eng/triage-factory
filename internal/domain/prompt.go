@@ -13,7 +13,7 @@ type Prompt struct {
 	Source       string `json:"source"`        // "system", "user", "imported", "marketplace" (TFAC-538 install copy)
 	AllowedTools string `json:"allowed_tools"` // comma-separated extra tools parsed from SKILL.md/agent frontmatter
 	Model        string `json:"model"`         // per-prompt model override; "" = inherit settings.AI.Model at dispatch
-	UsageCount   int    `json:"usage_count"`   // how many agent runs have used this prompt
+	UsageCount   int    `json:"usage_count"`   // how many agent conversations have used this prompt
 	// TeamID is the owning team. Every prompt is team-scoped:
 	// team_id is NOT NULL and is the sole scoping signal (no visibility
 	// column). Handlers read this to enforce same-team references (a

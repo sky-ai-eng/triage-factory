@@ -23,7 +23,7 @@ func TestRepoReferences_Postgres(t *testing.T) {
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "reporef")
 		conversation := func(t *testing.T, suffix string) string {
 			t.Helper()
-			return seedPgArtifactRun(t, h, orgID, teamID, userID)
+			return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 		}
 		return stores, orgID, teamID, conversation
 	})

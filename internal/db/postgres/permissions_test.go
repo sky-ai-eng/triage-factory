@@ -32,7 +32,7 @@ func TestPermissionStore_Postgres_Conformance(t *testing.T) {
 		seed := dbtest.PermissionSeeder{
 			Conversation: func(t *testing.T) string {
 				t.Helper()
-				return seedPgArtifactRun(t, h, orgID, teamID, userID)
+				return seedPgArtifactConversation(t, h, orgID, teamID, userID)
 			},
 			Claim: func(t *testing.T, conversationID string) string {
 				t.Helper()

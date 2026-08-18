@@ -32,7 +32,7 @@ type fakeRelayRuntime struct {
 	relayCalls int
 }
 
-func (f *fakeRelayRuntime) Info() agenthost.RunInfo { return agenthost.RunInfo{} }
+func (f *fakeRelayRuntime) Info() agenthost.ConversationInfo { return agenthost.ConversationInfo{} }
 
 func (f *fakeRelayRuntime) Relay(_ context.Context, _, _ string, _, _ any) error {
 	i := f.relayCalls

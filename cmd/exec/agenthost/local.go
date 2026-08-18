@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/cmd/exec/runident"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
@@ -21,7 +21,7 @@ import (
 )
 
 // LocalClient is the in-process implementation of Client. Holds a
-// resolved RunInfo (set at construction by either the host CLI's
+// resolved ConversationInfo (set at construction by either the host CLI's
 // env-resolving constructor or the daemon's per-socket handler) and
 // the db.Stores bundle the binary is wired against. Every write
 // branches on info.IsEventTriggered to choose admin-pool `...System`
@@ -36,7 +36,7 @@ import (
 // trivially preserved without serializing.
 type LocalClient struct {
 	stores db.Stores
-	info   RunInfo
+	info   ConversationInfo
 
 	// rt is the seam every DB-backed effect routes through: directRuntime over
 	// db.Stores in all/local (and when the orchestrator serves a relayed op),
@@ -88,14 +88,14 @@ type LocalClient struct {
 
 // NewLocal builds a LocalClient bound to the given stores + identity, with an
 // in-process directRuntime over those stores. Callers that resolve identity
-// from env (NewLocalFromEnv) hand the resolved RunInfo here; the daemon
+// from env (NewLocalFromEnv) hand the resolved ConversationInfo here; the daemon
 // hands the per-socket run info here at request dispatch.
-func NewLocal(stores db.Stores, info RunInfo) *LocalClient {
+func NewLocal(stores db.Stores, info ConversationInfo) *LocalClient {
 	return &LocalClient{
 		stores:    stores,
 		info:      info,
 		rt:        newDirectRuntime(stores, info),
-		gateWired: stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
+		gateWired: stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
 	}
 }
 
@@ -139,15 +139,15 @@ func (c *LocalClient) SetGitHubResolver(r ghclient.Resolver) {
 	}
 }
 
-func (c *LocalClient) LookupRun(_ context.Context) (RunInfo, error) {
-	// Empty RunID at this stage means the env-resolving constructor was
+func (c *LocalClient) LookupConversation(_ context.Context) (ConversationInfo, error) {
+	// Empty ConversationID at this stage means the env-resolving constructor was
 	// bypassed (test seam) or the caller constructed a LocalClient
-	// directly with a zero-value RunInfo. Surface the same sentinel
-	// the runident path does so subcommand helpers can translate it
-	// to their package-local "missing run id" sentinel without
+	// directly with a zero-value ConversationInfo. Surface the same sentinel
+	// the convident path does so subcommand helpers can translate it
+	// to their package-local "missing conversation id" sentinel without
 	// having to distinguish callers.
-	if c.info.RunID == "" {
-		return RunInfo{}, runident.ErrRunIdentityMissing
+	if c.info.ConversationID == "" {
+		return ConversationInfo{}, convident.ErrConversationIdentityMissing
 	}
 	return c.info, nil
 }
@@ -156,15 +156,15 @@ func (c *LocalClient) Close() error { return nil }
 
 // --- review draft finalization ---
 
-// runReviewArtifact locates the pending review draft this run's add/finalize op
-// is acting on. A run can hold several review drafts at once (run-scoped dedup,
+// conversationReviewArtifact locates the pending review draft this conversation's add/finalize op
+// is acting on. A conversation can hold several review drafts at once (conversation-scoped dedup,
 // one per PR — TFAC-494), so it resolves by the handle the agent passes (the
 // artifact id) rather than just the first pending review, which could be a
 // different PR's draft. An empty handle (defensive — exec always passes one)
-// falls back to the run's sole pending review. Returns an actionable error when
+// falls back to the conversation's sole pending review. Returns an actionable error when
 // no matching pending review exists.
-func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+func (c *LocalClient) conversationReviewArtifact(ctx context.Context, reviewID string) (*domain.Artifact, error) {
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -172,17 +172,17 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 		if art := domain.PendingReviewArtifactByID(arts, reviewID); art != nil {
 			return art, nil
 		}
-		return nil, fmt.Errorf("review %s is not a pending review for this run — run `gh pr start-review` first", reviewID)
+		return nil, fmt.Errorf("review %s is not a pending review for this conversation — run `gh pr start-review` first", reviewID)
 	}
 	art := domain.FirstPendingReviewArtifact(arts)
 	if art == nil {
-		return nil, fmt.Errorf("no pending review for this run — run `gh pr start-review` first")
+		return nil, fmt.Errorf("no pending review for this conversation — run `gh pr start-review` first")
 	}
 	return art, nil
 }
 
 // FinalizeReviewDraft is the host side of `gh pr finalize-review`: it locates the
-// run's review artifact, gates on comment freshness vs. the PR's current head,
+// conversation's review artifact, gates on comment freshness vs. the PR's current head,
 // stages the body + event, snapshots the agent's draft (body + event + the
 // locally staged inline comments) into details.proposed as the approve-time
 // human-feedback baseline, and sets the ready sentinel
@@ -214,7 +214,7 @@ func (c *LocalClient) runReviewArtifact(ctx context.Context, reviewID string) (*
 // comment shares the current head, so approval pins that single commit_id.
 func (c *LocalClient) FinalizeReviewDraft(ctx context.Context, reviewID, event, body string) (ReviewFinalizeResult, error) {
 	staged := ReviewFinalizeResult{}
-	art, err := c.runReviewArtifact(ctx, reviewID)
+	art, err := c.conversationReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return staged, err
 	}
@@ -317,7 +317,7 @@ func (c *LocalClient) resolveReviewPosture(ctx context.Context, art *domain.Arti
 	res, err := c.rt.ReviewPosture(ctx, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("review posture unresolved; staging the review for approval",
-			"run", c.info.RunID, "artifact", art.ID, "error", err)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", err)
 		return ReviewPostureResolution{}, false
 	}
 	return res, true
@@ -371,7 +371,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {
 		agenthostLog.Warn("auto-post review: no GitHub client; leaving the review staged for approval",
-			"run", c.info.RunID, "artifact", art.ID, "error", err)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", err)
 		return ReviewFinalizeResult{}
 	}
 	// The footer is the same run-attribution block the approval path appends, so
@@ -381,7 +381,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	footer, ferr := c.rt.AgentFooter(ctx, "review")
 	if ferr != nil {
 		agenthostLog.Warn("auto-post review: agent footer unavailable; posting without it",
-			"run", c.info.RunID, "artifact", art.ID, "error", ferr)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", ferr)
 		footer = ""
 	}
 
@@ -394,7 +394,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
 	if cerr != nil || !claimed {
 		agenthostLog.Warn("auto-post review: could not claim the draft; leaving it for human approval",
-			"run", c.info.RunID, "artifact", art.ID, "claimed", claimed, "error", cerr)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "claimed", claimed, "error", cerr)
 		return ReviewFinalizeResult{}
 	}
 	// releaseClaim undoes the claim so the draft is approvable again. Best-effort
@@ -405,7 +405,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 			domain.ArtifactStateReviewSubmitted, domain.ArtifactStateReviewPending, "", "", "")
 		if rerr != nil || !released {
 			agenthostLog.Error("auto-post review: failed to release the claim — the review is stuck as submitted without a posted review",
-				"run", c.info.RunID, "artifact", art.ID, "released", released, "error", rerr)
+				"conversation", c.info.ConversationID, "artifact", art.ID, "released", released, "error", rerr)
 		}
 	}
 
@@ -415,7 +415,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	details, derr := c.claimedReviewDetails(ctx, art.ID)
 	if derr != nil {
 		agenthostLog.Warn("auto-post review: re-reading the claimed draft failed; leaving it for human approval",
-			"run", c.info.RunID, "artifact", art.ID, "error", derr)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "error", derr)
 		releaseClaim()
 		return ReviewFinalizeResult{}
 	}
@@ -423,7 +423,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	// open; re-apply it to what is actually about to be posted.
 	if !review.PostureSubmits(posture.Posture, posture.Identity, details.ReviewEvent, details.StagedComments) {
 		agenthostLog.Info("auto-post review: the draft changed under the posture while claiming; staging it for approval",
-			"run", c.info.RunID, "artifact", art.ID, "posture", posture.Posture)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "posture", posture.Posture)
 		releaseClaim()
 		return ReviewFinalizeResult{}
 	}
@@ -438,7 +438,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 			base, berr := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 			if berr != nil {
 				agenthostLog.Warn("auto-post review: github base unresolved; using default host",
-					"run", c.info.RunID, "artifact", art.ID, "error", berr)
+					"conversation", c.info.ConversationID, "artifact", art.ID, "error", berr)
 				return ""
 			}
 			return base
@@ -446,7 +446,7 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	})
 	if err != nil {
 		agenthostLog.Warn("auto-post review: submit failed; the review stays staged for human approval",
-			"run", c.info.RunID, "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
 		releaseClaim()
 		return ReviewFinalizeResult{}
 	}
@@ -469,10 +469,10 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 	}
 	if stamped, serr := stamp(); serr != nil || !stamped {
 		agenthostLog.Warn("auto-post review: stamping the posted review onto the artifact failed; retrying once",
-			"run", c.info.RunID, "artifact", art.ID, "stamped", stamped, "error", serr)
+			"conversation", c.info.ConversationID, "artifact", art.ID, "stamped", stamped, "error", serr)
 		if stamped, serr := stamp(); serr != nil || !stamped {
 			agenthostLog.Error("auto-post review: stamp failed twice — the artifact shows submitted without the posted review's id/URL",
-				"run", c.info.RunID, "artifact", art.ID, "review", submitted.ExternalID, "url", submitted.URL, "error", serr)
+				"conversation", c.info.ConversationID, "artifact", art.ID, "review", submitted.ExternalID, "url", submitted.URL, "error", serr)
 		}
 	}
 	// The audit row is appended on its own (the artifact is already written by the
@@ -487,14 +487,14 @@ func (c *LocalClient) postFinalizedReview(ctx context.Context, art *domain.Artif
 
 // claimedReviewDetails re-reads a review draft this caller has already claimed
 // and returns its details. It goes through the run's artifact list — the same
-// read runReviewArtifact uses — rather than a by-id fetch, because that read is
+// read conversationReviewArtifact uses — rather than a by-id fetch, because that read is
 // already on the runtime in both placements; a claimed draft is one of a
 // handful of rows, so the difference is a slice scan.
 //
 // Deliberately NOT filtered on pending: the caller's own claim just moved the
 // row to submitted, so a pending-only lookup would never find it.
 func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID string) (domain.ReviewArtifactDetails, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return domain.ReviewArtifactDetails{}, err
 	}
@@ -508,7 +508,7 @@ func (c *LocalClient) claimedReviewDetails(ctx context.Context, artifactID strin
 		}
 		return details, nil
 	}
-	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this run", artifactID)
+	return domain.ReviewArtifactDetails{}, fmt.Errorf("claimed review %s is no longer readable on this conversation", artifactID)
 }
 
 // reconcileStagedCommentsToHead forward-maps every staged comment from the commit
@@ -653,7 +653,7 @@ func shortCommit(sha string) string {
 }
 
 // ResetReviewDraft is the host side of `gh pr start-review --fresh`: a pure local
-// reset of this run's review draft for owner/repo#number, with zero GitHub calls.
+// reset of this conversation's review draft for owner/repo#number, with zero GitHub calls.
 // It clears the staged comments, the body/event ready sentinel, and the
 // write-once Proposed snapshot back to an empty pending draft, keeping the
 // artifact row, its handle, and its pinned head SHA. Returns the draft's handle
@@ -677,7 +677,7 @@ func shortCommit(sha string) string {
 // the first place. If a future flow needs the head re-pinned, refresh it on the
 // normal (non-fresh) start-review path, which already reads the head.
 func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error) {
-	arts, err := c.listArtifactsByRun(ctx)
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return "", "", err
 	}
@@ -713,10 +713,10 @@ func (c *LocalClient) ResetReviewDraft(ctx context.Context, owner, repo string, 
 	return art.ID, details.HeadSHA, nil
 }
 
-// listArtifactsByRun reads the calling run's artifacts through the runtime
+// listArtifactsByConversation reads the calling conversation's artifacts through the runtime
 // (directRuntime respects the event-vs-manual pool split; relayRuntime relays).
-func (c *LocalClient) listArtifactsByRun(ctx context.Context) ([]domain.Artifact, error) {
-	return c.rt.ListRunArtifacts(ctx)
+func (c *LocalClient) listArtifactsByConversation(ctx context.Context) ([]domain.Artifact, error) {
+	return c.rt.ListConversationArtifacts(ctx)
 }
 
 // saveReviewDraftDetails persists a mutated review draft's details_json through
@@ -759,20 +759,20 @@ func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (b
 	return c.rt.TeamTracksRepo(ctx, owner, repo)
 }
 
-func (c *LocalClient) GetRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.RunWorktree, error) {
-	return c.rt.GetRunWorktreeByRepoRef(ctx, repoID, ref)
+func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+	return c.rt.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
 }
 
-func (c *LocalClient) ListRunWorktrees(ctx context.Context) ([]domain.RunWorktree, error) {
-	return c.rt.ListRunWorktrees(ctx)
+func (c *LocalClient) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
+	return c.rt.ListConversationWorktrees(ctx)
 }
 
-func (c *LocalClient) InsertRunWorktree(ctx context.Context, row domain.RunWorktree) (bool, string, error) {
-	return c.rt.InsertRunWorktree(ctx, row)
+func (c *LocalClient) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
+	return c.rt.InsertConversationWorktree(ctx, row)
 }
 
-func (c *LocalClient) DeleteRunWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.rt.DeleteRunWorktree(ctx, repoID, ref)
+func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
+	return c.rt.DeleteConversationWorktree(ctx, repoID, ref)
 }
 
 // --- agent run footer ---
@@ -815,7 +815,7 @@ func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact
 	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 	if err != nil {
 		agenthostLog.Warn("resolve github base for branch URL failed; keeping default host",
-			"run", c.info.RunID, "target", a.Target, "ref", a.ExternalID, "error", err)
+			"conversation", c.info.ConversationID, "target", a.Target, "ref", a.ExternalID, "error", err)
 		return a
 	}
 	if u, ok := domain.BranchArtifactWebURL(base, a.Target, a.ExternalID); ok {
@@ -1028,7 +1028,7 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // Recording happens here on the LocalClient because the multi daemon
 // dispatches every host-routed Jira call through NewLocal (server.go), so this
 // one seam covers both the sandbox (daemon) and the local-mode CLI, with the
-// full RunInfo + Stores in scope.
+// full ConversationInfo + Stores in scope.
 //
 // Every mediated Jira *mutation* is captured: issue create, and the in-place
 // edits — transition, assign/unassign, update-fields, set-parent, set-priority
@@ -1083,7 +1083,7 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 	key = domain.NormalizeJiraKey(key)
 	if commentID == "" {
 		agenthostLog.Debug("jira comment recorded without an id; skipping artifact",
-			"run", c.info.RunID, "issue", key)
+			"conversation", c.info.ConversationID, "issue", key)
 		return
 	}
 	a := domain.Artifact{
@@ -1425,7 +1425,7 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-attached")
 		return fmt.Errorf("repo %s is not attached to this project, so it cannot be accessed here; use a repo attached to this project instead", repoID)
 	}
-	rows, lerr := c.rt.ListRunWorktrees(ctx)
+	rows, lerr := c.rt.ListConversationWorktrees(ctx)
 	if lerr != nil {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
@@ -1504,7 +1504,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 	return detail, nil
 }
 
-// touchPR records a durable run→entity touch for the PR owner/repo#number an
+// touchPR records a durable conversation→entity touch for the PR owner/repo#number an
 // addressed read just resolved — best-effort via the runtime, so it relays to
 // the orchestrator on the sidecar and never fails the read. URL is left empty:
 // the poll cycle owns stub enrichment. Set-returning GitHub reads (pr list,
@@ -1597,20 +1597,20 @@ func (c *LocalClient) GithubCreatePR(ctx context.Context, owner, repo, head, bas
 	return number, htmlURL, nodeID, nil
 }
 
-// GithubCreatePendingReview records this run's review draft — a fully TF-side
-// artifact, with zero GitHub writes (TFAC-494). It mints a run-scoped `review`
+// GithubCreatePendingReview records this conversation's review draft — a fully TF-side
+// artifact, with zero GitHub writes (TFAC-494). It mints a conversation-scoped `review`
 // artifact (state=pending, no ready sentinel, empty ExternalID; the reviewed
 // commitSHA pinned into details for the atomic submit at approval) and returns
 // the artifact id as the local review handle the agent passes to add/finalize.
 //
-// Because the dedup key is run-scoped, two runs (different teams, a re-delegate,
+// Because the dedup key is conversation-scoped, two conversations (different teams, a re-delegate,
 // interactive steering) reviewing the same PR each get their own draft row and
 // never collide — the multi-tenant pending-review-slot collision the
 // GitHub-native model (TFAC-463) introduced is gone, along with the identity
 // branch and ErrPendingReviewCollision. The comments param is unused (start-review
 // seeds no inline comments; the agent adds them via add-review-comment).
 func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo string, number int, commitSHA string, _ []ghclient.SubmitReviewComment) (string, error) {
-	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.RunID)
+	a := domain.NewReviewArtifact(owner+"/"+repo, number, commitSHA, c.info.ConversationID)
 	stored, err := c.UpsertArtifact(ctx, a)
 	if err != nil {
 		return "", fmt.Errorf("record review draft artifact: %w", err)
@@ -1618,9 +1618,9 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 	return stored.ID, nil
 }
 
-// GithubAddPendingReviewComment appends one inline comment to this run's review
+// GithubAddPendingReviewComment appends one inline comment to this conversation's review
 // draft, staged entirely TF-side (TFAC-494) — no GitHub *write*. It locates the
-// run's pending review artifact, validates the local handle, mints a stable
+// conversation's pending review artifact, validates the local handle, mints a stable
 // TF-local comment id, appends it to details.StagedComments, and returns the id.
 // body already carries the severity badge baked in (the caller bakes it);
 // line>0 with a non-nil startLine makes it a multi-line range.
@@ -1648,7 +1648,7 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 // anchors to and validates against the live PR head instead — the pre-TFAC-494
 // behavior, internally consistent on its own.
 func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, repo, reviewID, path, body string, line int, startLine *int, commitSHA string) (string, error) {
-	art, err := c.runReviewArtifact(ctx, reviewID)
+	art, err := c.conversationReviewArtifact(ctx, reviewID)
 	if err != nil {
 		return "", err
 	}
@@ -1769,7 +1769,7 @@ func intPtrEq(a, b *int) bool {
 // add-review-comment — so the comment submits verbatim at approval. Pure local
 // write, no GitHub call. An unknown id is an error.
 func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {
-	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	art, details, idx, err := c.conversationStagedComment(ctx, commentID)
 	if err != nil {
 		return err
 	}
@@ -1784,11 +1784,11 @@ func (c *LocalClient) UpdateStagedReviewComment(ctx context.Context, commentID, 
 	return nil
 }
 
-// DeleteStagedReviewComment removes one staged comment from this run's review
+// DeleteStagedReviewComment removes one staged comment from this conversation's review
 // draft by its TF-local id. Pure local write, no GitHub call. An unknown id is an
 // error.
 func (c *LocalClient) DeleteStagedReviewComment(ctx context.Context, commentID string) error {
-	art, details, idx, err := c.runStagedComment(ctx, commentID)
+	art, details, idx, err := c.conversationStagedComment(ctx, commentID)
 	if err != nil {
 		return err
 	}
@@ -1819,15 +1819,15 @@ func errIfFinalized(details domain.ReviewArtifactDetails) error {
 	return nil
 }
 
-// runStagedComment locates this run's pending review draft that holds the staged
+// conversationStagedComment locates this conversation's pending review draft that holds the staged
 // comment with the given TF-local id, returning the artifact, its parsed details,
 // and the comment's index in details.StagedComments. The id is a UUID minted at
 // add-review-comment, unique within the run, so scanning every pending review
 // draft (a run can hold one per PR) finds the owning draft. Returns an actionable
 // error when no draft carries it — the most likely cause is the agent passing a
 // numeric (live GitHub) comment id, which belongs on the REST update/delete path.
-func (c *LocalClient) runStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
-	arts, err := c.listArtifactsByRun(ctx)
+func (c *LocalClient) conversationStagedComment(ctx context.Context, commentID string) (*domain.Artifact, domain.ReviewArtifactDetails, int, error) {
+	arts, err := c.listArtifactsByConversation(ctx)
 	if err != nil {
 		return nil, domain.ReviewArtifactDetails{}, 0, err
 	}
@@ -2099,7 +2099,7 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo string, number, commentID int, htmlURL string) {
 	if commentID <= 0 {
 		agenthostLog.Debug("github comment recorded without an id; skipping artifact",
-			"run", c.info.RunID, "repo", owner+"/"+repo, "pr", number)
+			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "pr", number)
 		return
 	}
 	a := domain.Artifact{
@@ -2124,7 +2124,7 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID int, state string) {
 	if commentID <= 0 {
 		agenthostLog.Debug("github comment state change without an id; skipping artifact",
-			"run", c.info.RunID, "state", state)
+			"conversation", c.info.ConversationID, "state", state)
 		return
 	}
 	// The audit action follows the state: a top-level comment edit re-stamps the
@@ -2166,7 +2166,7 @@ func (c *LocalClient) recordGithubCommentState(ctx context.Context, commentID in
 func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, base, title, body string, number int, nodeID, htmlURL string, draft bool) {
 	if number <= 0 {
 		agenthostLog.Debug("github PR recorded without a number; skipping artifact",
-			"run", c.info.RunID, "repo", owner+"/"+repo)
+			"conversation", c.info.ConversationID, "repo", owner+"/"+repo)
 		return
 	}
 	a := domain.NewPullRequestArtifact(
@@ -2200,7 +2200,7 @@ func (c *LocalClient) upsertGithubArtifact(ctx context.Context, a domain.Artifac
 // artifact upsert (the audit log of record for every org-credential write). The
 // credential is the org GitHub App / org Jira service account / Slack bot
 // token by construction — exec resolves the org's system credential, never a
-// user's own — so every bot write qualifies. run_id is this run, actor_user_id
+// user's own — so every bot write qualifies. conversation_id is this conversation, actor_user_id
 // is the kicking-off user (empty → NULL for an event-triggered run, an
 // autonomous system action).
 //
@@ -2265,12 +2265,12 @@ func egressDeniedAction(conversationID, target, reason string) *domain.ExternalA
 // clearest "this agent is lost or probing" signal the product has, but a
 // recording failure must never disturb the run.
 func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason string) {
-	c.recordBotAction(ctx, egressDeniedAction(c.info.RunID, target, reason))
+	c.recordBotAction(ctx, egressDeniedAction(c.info.ConversationID, target, reason))
 }
 
 // GHChannelWriteAction builds the audit row for one mutating request the
 // real-`gh` channel forwarded, REST or GraphQL. Exported because local mode
-// records it without a LocalClient in hand (the delegate holds stores + RunInfo
+// records it without a LocalClient in hand (the delegate holds stores + ConversationInfo
 // and writes through the shared funnel), while the sandbox path goes through
 // RecordGHChannelWrite below — one builder, so the row is identical either way.
 //
@@ -2560,14 +2560,14 @@ func jiraAction(a domain.Artifact, action, from, to string) *domain.ExternalActi
 
 // branchPushActionInfo builds the ActionBranchPushed row for a branch artifact,
 // or nil for any other kind. The dedup key is deterministic —
-// branch:<run>:<ref>:<sha> — so the git pre-push hook and the git-proxy
-// backstop, which both observe the same push, collapse to one row; a force-push
-// (new sha) is recorded distinctly. The push lands on GitHub under whichever org
-// credential the run's git path carries, which is why the caller supplies it.
-// Free-function form (the counterpart of the LocalClient method) so the direct
-// runtime — which owns UpsertArtifact but holds no LocalClient — can build it
-// from a RunInfo directly.
-func branchPushActionInfo(a domain.Artifact, info RunInfo, credential string) *domain.ExternalAction {
+// branch:<conversationID>:<ref>:<sha> — so the git pre-push hook and the
+// git-proxy backstop, which both observe the same push, collapse to one row; a
+// force-push (new sha) is recorded distinctly. The push lands on GitHub under
+// whichever org credential the conversation's git path carries, which is why
+// the caller supplies it. Free-function form (the counterpart of the
+// LocalClient method) so the direct runtime — which owns UpsertArtifact but
+// holds no LocalClient — can build it from a ConversationInfo directly.
+func branchPushActionInfo(a domain.Artifact, info ConversationInfo, credential string) *domain.ExternalAction {
 	if a.Kind != domain.ArtifactKindBranch {
 		return nil
 	}
@@ -2580,7 +2580,7 @@ func branchPushActionInfo(a domain.Artifact, info RunInfo, credential string) *d
 		URL:        a.URL,
 		ToState:    domain.ArtifactStateBranchPushed,
 		Credential: credential,
-		DedupKey:   domain.BranchPushDedupKey(info.RunID, a.ExternalID, sha),
+		DedupKey:   domain.BranchPushDedupKey(info.ConversationID, a.ExternalID, sha),
 		DetailJSON: a.DetailsJSON, // {"sha":...,"new":...}
 	}
 	stampActionIdentityInfo(act, info)

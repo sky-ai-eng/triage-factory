@@ -22,22 +22,22 @@ import (
 // (per-task, auto-only) → fire or enqueue.
 //
 // Breaker is a hard skip — a tripped breaker means the user has work to
-// investigate before more runs land on this entity-prompt pair. Queueing
-// past it would just stack stale firings the user didn't ask for. It stays
+// investigate before more conversations land on this entity-prompt pair.
+// Queueing past it would just stack stale firings the user didn't ask for. It stays
 // entity-scoped on purpose: repeated failures of one prompt against one
 // entity are the signal, whichever task carried them.
 //
-// The task gate is the serialization point: at most one auto run in flight
-// per task, whichever trigger it came from. A sibling task on the same
+// The task gate is the serialization point: at most one auto conversation in
+// flight per task, whichever trigger it came from. A sibling task on the same
 // entity has its own gate and fires independently. If the gate is closed
-// (this task's own run is live, or older firings are queued for FIFO
-// fairness), the firing folds into the live run or enqueues onto
+// (this task's own conversation is live, or older firings are queued for FIFO
+// fairness), the firing folds into the live conversation or enqueues onto
 // pending_firings instead of being dropped silently.
 //
 // Returns fired=true iff this call actually committed the bot to the task —
 // an immediate fireDelegate success, or a new row landed in pending_firings
 // (queued because the task was busy; the commitment is real even though
-// the run hasn't started yet). Every other exit — already claimed by
+// the conversation hasn't started yet). Every other exit — already claimed by
 // another team, the bot disabled for the team, no agent bootstrapped, the
 // breaker tripped, a duplicate already queued, or a replay hitting
 // ErrAlreadyFired — returns (false, nil): nothing new happened on this call,
@@ -56,7 +56,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a
-	// second run against the same situation — that is the cross-team
+	// second conversation against the same situation — that is the cross-team
 	// duplication the one-task model exists to prevent. A trigger whose
 	// acting team IS the current owner still proceeds, so multiple
 	// prompts one team configured on the same event all run.
@@ -66,19 +66,19 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		return false, nil
 	}
 	// Resolve the org's agent ONCE here. It's the single source for three
-	// consumers that must agree: the bot-disabled-team gate, the run's actor
-	// (frozen onto blueprint_runs.actor_agent_id via DelegateOpts), and the
-	// task's claim (the AgentClaimStamp each commitment carries). Resolving
-	// once guarantees conversations.actor_agent_id and
-	// tasks.claimed_by_agent_id are the same id with no second lookup to
-	// drift, and it's available at step-0 enqueue — which is what lets the
-	// claim ride the run insert's own transaction instead of following it as a
+	// consumers that must agree: the bot-disabled-team gate, the blueprint
+	// run's actor (frozen onto blueprint_runs.actor_agent_id via DelegateOpts),
+	// and the task's claim (the AgentClaimStamp each commitment carries).
+	// Resolving once guarantees conversations.actor_agent_id and
+	// tasks.claimed_by_agent_id are the same id with no second lookup to drift,
+	// and it's available at step-0 enqueue — which is what lets the claim ride
+	// the blueprint-run insert's own transaction instead of following it as a
 	// separate write.
 	//
 	// Nil r.agents is pre-D-Claims test wiring: skip the gate, leave agentID
-	// empty (the run records no actor, the claim stamp is the zero value and
-	// every store skips it) — preserving the "proceed with auto-fire" degrade.
-	// Production always wires it.
+	// empty (the blueprint run records no actor, the claim stamp is the zero
+	// value and every store skips it) — preserving the "proceed with
+	// auto-fire" degrade. Production always wires it.
 	var agentID string
 	if r.agents != nil {
 		a, err := r.agents.GetForOrgSystem(ctx, orgID)
@@ -94,8 +94,8 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		// turned off in team_agents.enabled, the auto-trigger is a no-op
 		// — the task is already in the team queue (created by HandleEvent
 		// upstream); a human will swipe-delegate later if they want a
-		// run. Skip silently rather than firing on a disabled team. Requires
-		// team_agents too; nil (older test wiring) degrades to "proceed".
+		// conversation. Skip silently rather than firing on a disabled team.
+		// Requires team_agents too; nil (older test wiring) degrades to "proceed".
 		if r.teamAgents != nil {
 			if a == nil {
 				// No bootstrapped agent — bootstrap is now fatal at
@@ -140,7 +140,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// the wrapped prompt — identical to the pre-blueprint behavior).
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
 	breakerPromptID := r.breakerPromptID(ctx, orgID, trigger.BlueprintID)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(ctx, orgID, entityID, breakerPromptID)
+	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, entityID, breakerPromptID)
 	if err != nil {
 		routerLog.Error("breaker query failed", "entity", entityID, "prompt", breakerPromptID, "error", err)
 		return false, fmt.Errorf("breaker query: %w", err)
@@ -162,29 +162,29 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		return false, nil
 	}
 
-	// Per-task gate. Closed if an auto run is active on THIS TASK, or any
-	// pending_firings rows are already queued for it (FIFO fairness).
+	// Per-task gate. Closed if an auto conversation is active on THIS TASK, or
+	// any pending_firings rows are already queued for it (FIFO fairness).
 	// Compose the gate from its two halves: ConversationStore owns the
-	// runs-shaped predicate, PendingFiringsStore owns the queue-shaped one.
-	// The gate opens only when neither side blocks.
+	// conversation-shaped predicate, PendingFiringsStore owns the queue-shaped
+	// one. The gate opens only when neither side blocks.
 	//
 	// The task is the unit, not the entity. A task is one situation needing
 	// attention — that is what its (entity, event type, discriminator) dedup
 	// key means — so two situations on one pull request may each have an
 	// agent working. Gating on the entity conflated them, and once a
 	// conversation could park indefinitely (a stop freezes its blueprint
-	// 'running' by design) one such run held the gate shut for every other
-	// situation on that entity, with nothing left to reopen it.
+	// 'running' by design) one such conversation held the gate shut for every
+	// other situation on that entity, with nothing left to reopen it.
 	//
-	// The active-run read resolves the run's ID rather than a bool: a busy
-	// gate is the additive-injection path, and folding the new event into
-	// the run needs the run.
-	activeRunID, err := r.agentRuns.ActiveAutoRunIDForTaskSystem(ctx, orgID, task.ID)
+	// The active-conversation read resolves the conversation's ID rather than
+	// a bool: a busy gate is the additive-injection path, and folding the new
+	// event into the conversation needs the conversation.
+	activeConversationID, err := r.conversations.ActiveAutoConversationIDForTaskSystem(ctx, orgID, task.ID)
 	if err != nil {
-		routerLog.Error("task gate active-run query failed", "task_id", task.ID, "error", err)
-		return false, fmt.Errorf("task gate active-run query: %w", err)
+		routerLog.Error("task gate active-conversation query failed", "task_id", task.ID, "error", err)
+		return false, fmt.Errorf("task gate active-conversation query: %w", err)
 	}
-	hasActive := activeRunID != ""
+	hasActive := activeConversationID != ""
 	hasPending := false
 	if !hasActive {
 		hasPending, err = r.firings.HasPendingForTask(ctx, orgID, task.ID)
@@ -194,24 +194,25 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		}
 	}
 	if hasActive || hasPending {
-		// A busy gate now always means THIS task's own run is live, so
-		// absorption is the default rather than a same-task special case:
-		// fold the event into the run instead of deferring a second one.
-		// Only a firing with no live run to fold into (hasPending with the
-		// run already gone) still defers.
+		// A busy gate now always means THIS task's own conversation is live,
+		// so absorption is the default rather than a same-task special case:
+		// fold the event into the conversation instead of deferring a second
+		// one. Only a firing with no live conversation to fold into (hasPending
+		// with the conversation already gone) still defers.
 		if hasActive {
 			// The claim rides whichever durable write the injection makes —
-			// folding an event into the live run is the bot taking
+			// folding an event into the live conversation is the bot taking
 			// responsibility for this task exactly as a fresh fire or a
-			// deferral is. The run belongs to this same task, so the standing
-			// claim is normally already the bot's and the stamp is a race-safe
-			// no-op; it moves only when the task was user-requeued while its
-			// run stayed live, which this new event re-commits.
-			if r.tryAdditiveInjection(ctx, orgID, entityID, activeRunID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
+			// deferral is. The conversation belongs to this same task, so the
+			// standing claim is normally already the bot's and the stamp is a
+			// race-safe no-op; it moves only when the task was user-requeued
+			// while its conversation stayed live, which this new event
+			// re-commits.
+			if r.tryAdditiveInjection(ctx, orgID, entityID, activeConversationID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
 				return false, nil
 			}
-			// The run went terminal between the gate read and the injection
-			// attempt, or the injection couldn't be delivered durably — fall
+			// The conversation went terminal between the gate read and the
+			// injection attempt, or the injection couldn't be delivered durably — fall
 			// through to the normal deferral so the firing is never silently
 			// dropped.
 		}
@@ -219,16 +220,15 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	}
 
 	// Consolidate the owner team to the acting team BEFORE firing. An
-	// auto-fired run inherits conversations.team_id from tasks.team_id at insert,
-	// and the claim (which also consolidates the owner) lands inside that
-	// same insert — so without this, a run fired by a team other than the
-	// creation-time owner (e.g. the owner had auto-delegation disabled and
-	// a lower-priority team is firing) would read the stale owner as it
-	// writes its own row. Owner-only update, no claim touch: if the fire
-	// fails the task is owned by the team that tried, unclaimed — not a
-	// phantom claim. Skipped when the acting team already is the owner
-	// (the common path, and same-team multi-prompt where an active run
-	// may exist).
+	// auto-fired conversation inherits conversations.team_id from tasks.team_id
+	// at insert, and the claim (which also consolidates the owner) lands inside
+	// that same insert — so without this, a conversation fired by a team other
+	// than the creation-time owner (e.g. the owner had auto-delegation disabled
+	// and a lower-priority team is firing) would read the stale owner as it
+	// writes its own row. Owner-only update, no claim touch: if the fire fails
+	// the task is owned by the team that tried, unclaimed — not a phantom
+	// claim. Skipped when the acting team already is the owner (the common
+	// path, and same-team multi-prompt where an active conversation may exist).
 	if actingTeamID != "" && actingTeamID != teamIDValue(task) {
 		if err := r.tasks.SetOwnerTeamSystem(ctx, orgID, task.ID, actingTeamID); err != nil {
 			routerLog.Error("failed to consolidate owner team before fire", "task_id", task.ID, "error", err)
@@ -236,17 +236,18 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 			task.TeamID = teamIDPtr(actingTeamID)
 		}
 	}
-	// The claim rides the fenced run insert's transaction (see
-	// db.AgentClaimStamp): the run row and "the bot owns this task" are one
-	// durable write, so there is no window where the run is live and the board
-	// still shows the task free. A stamp refusal — a user claiming mid-fire —
-	// does not roll the run back; the human wins the claim, the run still runs,
-	// and the drain path's claim_changed guard keeps later firings off it.
+	// The claim rides the fenced blueprint-run insert's transaction (see
+	// db.AgentClaimStamp): the blueprint-run row and "the bot owns this task"
+	// are one durable write, so there is no window where the conversation is
+	// live and the board still shows the task free. A stamp refusal — a user
+	// claiming mid-fire — does not roll the blueprint run back; the human wins
+	// the claim, the conversation still runs, and the drain path's
+	// claim_changed guard keeps later firings off it.
 	if _, err := r.fireDelegate(ctx, orgID, task, trigger, triggeringEventID, agentID, claimStamp(agentID, actingTeamID)); err != nil {
-		// A replayed event (at-least-once queue) whose first run
+		// A replayed event (at-least-once queue) whose first blueprint run
 		// already committed hits the (event, trigger) fence and comes back
-		// as ErrAlreadyFired. Clean skip — the original run + its claim
-		// stand, so we must NOT re-stamp the claim or log an error.
+		// as ErrAlreadyFired. Clean skip — the original blueprint run + its
+		// claim stand, so we must NOT re-stamp the claim or log an error.
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			routerLog.Info("auto-delegate skipped: event already fired this trigger (replay)",
 				"task_id", task.ID, "trigger", trigger.ID, "event_id", triggeringEventID)
@@ -265,8 +266,9 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		routerLog.Error("fire failed", "task_id", task.ID, "trigger", trigger.ID, "error", err)
 		return false, fmt.Errorf("fire delegate: %w", err)
 	}
-	// The run and its claim are committed. Sync what the router still holds in
-	// memory from the row itself, and broadcast if the claim moved.
+	// The blueprint run and its claim are committed. Sync what the router
+	// still holds in memory from the row itself, and broadcast if the claim
+	// moved.
 	r.syncClaimAfterCommit(ctx, orgID, task, agentID)
 	return true, nil
 }
@@ -290,8 +292,8 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 	// entirely.
 	//
 	// The claim rides the insert's transaction: a queued firing commits the
-	// bot to this task just as a fired run does, so a failed enqueue leaves no
-	// phantom claim and a landed one is never claim-less. The store skips the
+	// bot to this task just as a fired blueprint run does, so a failed enqueue
+	// leaves no phantom claim and a landed one is never claim-less. The store skips the
 	// stamp on the collapse path, where the already-queued duplicate's own
 	// enqueue made the commitment.
 	inserted, claimed, err := r.firings.Enqueue(ctx, orgID, "", entityID, task.ID, trigger.ID, triggeringEventID, claimStamp(agentID, actingTeamID))
@@ -312,8 +314,9 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 }
 
 // tryAdditiveInjection folds a firing into its task's already-active auto
-// run via the cross-pod-aware injection seam, instead of deferring a second
-// run onto pending_firings. runID is that run, resolved by the caller from
+// conversation via the cross-pod-aware injection seam, instead of deferring a
+// second conversation onto pending_firings. conversationID is that
+// conversation's id, resolved by the caller from
 // the firing's own task — so it belongs to that task by construction, with
 // no separate ownership check to make. Returns true when the caller should
 // treat the firing as handled; false when the caller must fall through to
@@ -321,22 +324,23 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 //
 // The one fall-through is StageOrDeliverAdditiveEvent reporting
 // InjectNotDelivered — dropped outright (no live process anywhere, and the
-// durable append itself failed), or durably staged onto a run that's since
-// gone fully terminal (a staged row only flushes on the run's next resume,
-// so a run that can never resume would silently lose it). Neither case has
-// a durable row to fall back on, so this defers.
+// durable append itself failed), or durably staged onto a conversation
+// that's since gone fully terminal (a staged row only flushes on the
+// conversation's next resume, so one that can never resume would silently
+// lose it). Neither case has a durable row to fall back on, so this
+// defers.
 //
 // InjectDeliveredRemote is distinct from the other "handled" outcomes: a
 // live remote executor now owns recording task_events 'injected' (or
-// compensating with a pending_firing enqueue if the run turns out dead by
-// apply time) — this method must NOT record it here, or a slow/failed
-// remote apply could leave a duplicate or premature bookkeeping row. The
-// claim travels with the signal for the same reason: the owner stamps it
-// inside whichever of those two writes it makes. The stamp this method does
-// on that branch is the immediate, broadcast-carrying half — if it fails,
-// the owner's coupled write is what makes the claim durable, so the
-// commitment can no longer outlive it.
-func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
+// compensating with a pending_firing enqueue if the conversation turns out
+// dead by apply time) — this method must NOT record it here, or a
+// slow/failed remote apply could leave a duplicate or premature bookkeeping
+// row. The claim travels with the signal for the same reason: the owner
+// stamps it inside whichever of those two writes it makes. The stamp this
+// method does on that branch is the immediate, broadcast-carrying half — if
+// it fails, the owner's coupled write is what makes the claim durable, so
+// the commitment can no longer outlive it.
+func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conversationID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
 	// Best-effort: an empty metadataJSON still renders a body naming the
 	// event type alone, so a lookup failure degrades rather than drops the
 	// injection.
@@ -346,7 +350,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, runID, trigger.EventType, body, delegate.AdditiveFiringRef{
+	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body, delegate.AdditiveFiringRef{
 		EntityID:          entityID,
 		TaskID:            task.ID,
 		TriggerID:         trigger.ID,
@@ -358,7 +362,7 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 		return false
 	case delegate.InjectDeliveredRemote:
 		routerLog.Info("handed additive event to a live remote executor via conversation_signals",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "event_type", trigger.EventType)
 		r.stampAgentClaim(ctx, orgID, task, claim)
 		return true
 	default: // InjectDeliveredLocal, InjectStagedResumable
@@ -366,23 +370,23 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, runI
 		// together rather than committing the fold against a task the board
 		// still shows as free. The injection itself is already delivered
 		// (or durably staged), so this stays a handled outcome either way —
-		// falling through to the deferral would fire a second run for an event
-		// the agent has already been handed.
+		// falling through to the deferral would fire a second blueprint run for
+		// an event the agent has already been handed.
 		if claimed, err := r.tasks.MarkEventInjectedSystem(ctx, orgID, task.ID, triggeringEventID, claim); err != nil {
-			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "run_id", runID, "error", err)
+			routerLog.Error("failed to mark injected task_event", "task_id", task.ID, "conversation", conversationID, "error", err)
 		} else {
 			r.claimCommitted(orgID, task, claim.ActingTeamID, claim.AgentID, claimed)
 		}
-		routerLog.Info("injected additive event into active run",
-			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "run_id", runID, "event_type", trigger.EventType)
+		routerLog.Info("injected additive event into active conversation",
+			"entity", entityID, "task_id", task.ID, "trigger", trigger.ID, "conversation", conversationID, "event_type", trigger.EventType)
 		return true
 	}
 }
 
 // claimStamp packages the claim the three commitment points hand to their
 // store call. agentID is the org agent resolved ONCE by tryAutoDelegate — the
-// same id frozen onto the run's blueprint_run actor — so the claim and the
-// run's execution attribution can't drift.
+// same id frozen onto blueprint_runs.actor_agent_id — so the claim and the
+// blueprint run's execution attribution can't drift.
 //
 // Empty agentID (the seam between db init and agent bootstrap, or test wiring
 // with no agents store) yields the zero stamp, team included. The team is
@@ -445,12 +449,13 @@ func (r *Router) claimCommitted(orgID string, task *domain.Task, actingTeamID, a
 	})
 }
 
-// syncClaimAfterCommit reads back the claim that rode the fenced run insert.
-// The fire path is the one commitment whose store call the router doesn't make
-// itself — it goes through the spawner — so the outcome comes from the row
-// rather than a return value. This is a read of the claim column, not a
-// derivation from run liveness: a user who won the race mid-fire reads back as
-// the owner and neither the in-memory task nor the Board is told otherwise.
+// syncClaimAfterCommit reads back the claim that rode the fenced blueprint-run
+// insert. The fire path is the one commitment whose store call the router
+// doesn't make itself — it goes through the spawner — so the outcome comes
+// from the row rather than a return value. This is a read of the claim column,
+// not a derivation from conversation liveness: a user who won the race
+// mid-fire reads back as the owner and neither the in-memory task nor the
+// Board is told otherwise.
 //
 // Best-effort. A failed read leaves the router's in-memory copy stale for the
 // rest of this event's trigger loop, which is what a failed stamp used to do
@@ -461,7 +466,7 @@ func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *d
 	}
 	fresh, err := r.tasks.GetSystem(ctx, orgID, task.ID)
 	if err != nil || fresh == nil {
-		routerLog.Warn("could not read back the task claim committed with the run", "task_id", task.ID, "error", err)
+		routerLog.Warn("could not read back the task claim committed with the blueprint run", "task_id", task.ID, "error", err)
 		return
 	}
 	moved := task.ClaimedByAgentID != agentID && fresh.ClaimedByAgentID == agentID
@@ -484,9 +489,9 @@ func (r *Router) syncClaimAfterCommit(ctx context.Context, orgID string, task *d
 // stampAgentClaim is the standalone claim write, now reduced to the one
 // commitment the router cannot ride a transaction with: an additive event
 // handed to a live REMOTE executor. That pod owns the durable write (the
-// 'injected' mark, or the compensating pending_firing if the run is gone by
-// apply time) and stamps the claim inside it — the signal payload carries the
-// claim for exactly that. This call is the local, immediate half, so the Board
+// 'injected' mark, or the compensating pending_firing if the conversation is
+// gone by apply time) and stamps the claim inside it — the signal payload
+// carries the claim for exactly that. This call is the local, immediate half, so the Board
 // sees the claim now instead of one cross-pod hop later; if it fails, the
 // owner's coupled write still makes it durable.
 func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain.Task, claim dbpkg.AgentClaimStamp) {
@@ -502,23 +507,25 @@ func (r *Router) stampAgentClaim(ctx context.Context, orgID string, task *domain
 }
 
 // fireDelegate transitions the task to delegated status, broadcasts the
-// change, then fires the spawner. Returns the run ID on success — used by
-// DrainTask to record which run a queued firing materialized into.
+// change, then fires the spawner. Returns the blueprint-run ID on success —
+// used by DrainTask to record which blueprint run a queued firing
+// materialized into.
 //
 // triggeringEventID is the event instance driving this fire:
 // the immediate path passes tryAutoDelegate's event id, the drain path
-// passes the pending firing's. It threads into DelegateOpts so the run
-// insert is fenced on (triggering_event_id, trigger_id); a replayed event
-// whose first run already committed surfaces as delegate.ErrAlreadyFired,
-// which both callers treat as a clean skip rather than a duplicate fire.
+// passes the pending firing's. It threads into DelegateOpts so the
+// blueprint-run insert is fenced on (triggering_event_id, trigger_id); a
+// replayed event whose first blueprint run already committed surfaces as
+// delegate.ErrAlreadyFired, which both callers treat as a clean skip
+// rather than a duplicate fire.
 //
 // actorAgentID is the executing bot, resolved once by the caller — the immediate
 // path passes the agent it resolved up front (and stamps the same id as the
 // claim); the drain path passes the firing's already-stamped task claim. It's
 // frozen onto blueprint_runs.actor_agent_id at mint and inherited by every step.
 //
-// claim is the task claim to write inside the run insert's own transaction,
-// and is deliberately NOT derived from actorAgentID. The immediate path passes
+// claim is the task claim to write inside the blueprint-run insert's own
+// transaction, and is deliberately NOT derived from actorAgentID. The immediate path passes
 // one: this fire is the commitment, so the claim must land with it. The drain
 // path passes the zero stamp: its firing's claim was committed by the enqueue
 // that queued it, and attemptDrainOne has just re-validated that the claim is
@@ -528,7 +535,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	// The handoff point, and the last thing this trace can see: what the
 	// spawner enqueues is claimed minutes later, by another process, and up
 	// to five times — so the engagement gets its own root and the
-	// conversation.id stamped below is what joins the two. A link would
+	// blueprint_run.id stamped below is what joins the two. A link would
 	// promise a 1:1 relationship that does not exist.
 	ctx, span := tracer.Start(ctx, "route.delegate", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
@@ -539,7 +546,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 
 	// No status flip here. Previously we transitioned to
 	// status='delegated' for UI feedback + dedup. Now the
-	// responsibility axis is the claim columns: the run insert writes
+	// responsibility axis is the claim columns: the blueprint-run insert writes
 	// claimed_by_agent_id in its own transaction and the caller
 	// broadcasts task_claimed, which is what the Board now listens
 	// for. Status stays 'queued' until a genuine lifecycle move (done
@@ -558,7 +565,7 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		return "", fmt.Errorf("task %s disappeared before spawn", task.ID)
 	}
 
-	runID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
+	blueprintRunID, err := r.spawner.Delegate(*fresh, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: trigger.BlueprintID,
 		TriggerType:         "event",
@@ -569,9 +576,10 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 	})
 	if err != nil {
 		// Post-B+: nothing to revert status-wise (status stayed 'queued').
-		// The claim didn't land either — it rides the run insert, so a failure
-		// that never committed a run never committed a claim. This leaves the
-		// task in a clean unclaimed-queued state, which is correct.
+		// The claim didn't land either — it rides the blueprint-run insert, so a
+		// failure that never committed a blueprint run never committed a claim.
+		// This leaves the task in a clean unclaimed-queued state, which is
+		// correct.
 		//
 		// The two anticipated refusals — a replay hitting the fence, a task
 		// that went busy under the fire — are outcomes both callers handle
@@ -587,42 +595,42 @@ func (r *Router) fireDelegate(ctx context.Context, orgID string, task *domain.Ta
 		}
 		return "", err
 	}
-	span.SetAttributes(telemetry.ConversationID(runID))
-	routerLog.InfoContext(ctx, "started run for task", "run_id", runID, "task_id", task.ID)
-	return runID, nil
+	span.SetAttributes(telemetry.BlueprintRunID(blueprintRunID))
+	routerLog.InfoContext(ctx, "started blueprint run for task", "blueprint_run", blueprintRunID, "task_id", task.ID)
+	return blueprintRunID, nil
 }
 
 // DrainTask is the spawner's hook into the per-task firing queue.
-// Called when an auto run terminates on the task (any terminal status).
-// A completed run that left an unresolved artifact still counts as terminal
-// here — the artifact is an async sidecar, so it releases the task
-// lock and doesn't block downstream processing.
+// Called when an auto conversation terminates on the task (any terminal
+// status). A completed conversation that left an unresolved artifact still
+// counts as terminal here — the artifact is an async sidecar, so it releases
+// the task lock and doesn't block downstream processing.
 //
 // Pops the task's pending firings in FIFO order, validates each against
 // current state (task still active? trigger still enabled? breaker still
 // under threshold?), and fires the first valid one. Stale firings are
 // soft-deleted with a skip_reason and the loop continues. At most one
-// firing actually fires per drain — that run becomes the new in-flight
-// for the task and gates further drains naturally. A sibling task on the
+// firing actually fires per drain — that blueprint run becomes the new
+// in-flight for the task and gates further drains naturally. A sibling task on the
 // same entity has its own queue and its own drain; neither waits on the
 // other.
 func (r *Router) DrainTask(orgID, taskID string) {
 	// The drain is its own unit of work rather than its caller's: the
-	// spawner hooks it off a run's terminal (a goroutine whose run context
+	// spawner hooks it off a conversation's terminal (a goroutine whose context
 	// is already unwinding) and the sweeper off a periodic tick. Both need
 	// every pop to reach a terminal mark — a firing abandoned mid-drain sits
 	// in 'draining' until the staleness sweep notices — so the drain holds a
 	// detached context instead of borrowing one that is about to die.
 	ctx := context.Background()
 
-	// Serialize drains per task. Without this, a fast-terminating run
+	// Serialize drains per task. Without this, a fast-terminating conversation
 	// fired by an earlier drain can spawn a second DrainTask goroutine
 	// that pops the same pending_firings row before the first drain
 	// transitions it out of 'pending' — leading to duplicate fireDelegate
 	// calls. The MarkFired/MarkSkipped guards on
 	// status='pending' protect the row's own mutation but cannot un-fire
-	// the duplicate run. This mutex closes the window: the second drain
-	// blocks until the first releases, by which point the firing has
+	// the duplicate blueprint run. This mutex closes the window: the second
+	// drain blocks until the first releases, by which point the firing has
 	// landed in a terminal status and the second drain's pop returns the
 	// next row (or nothing).
 	mu := r.taskDrainLock(taskID)
@@ -639,7 +647,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			return // queue empty
 		}
 
-		runID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
+		blueprintRunID, skipReason, transientErr := r.attemptDrainOne(ctx, orgID, firing)
 		if transientErr != nil {
 			// Transient failure (DB read, Delegate). PopForTask already
 			// claimed this row into 'draining', so release it
@@ -648,16 +656,17 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			// over a temporary problem, and a 'draining' row left
 			// unresolved is invisible to HasPendingForTask /
 			// ListTasksWithPending and would never be retried. The
-			// periodic sweeper or the next run-terminal will retry once
-			// released.
+			// periodic sweeper or the next conversation terminal will retry
+			// once released.
 			if err := r.firings.Release(ctx, orgID, firing.ID); err != nil {
 				routerLog.Error("release firing after transient drain error failed",
 					"firing_id", firing.ID, "task_id", taskID, "error", err)
 			}
 			if errors.Is(transientErr, errDrainTaskBusy) {
-				// Routine gate race, not a failure: another run went active
-				// between the pop and the fire; the release above re-queues
-				// the intent for the busy run's own terminal drain.
+				// Routine gate race, not a failure: another conversation went
+				// active between the pop and the fire; the release above
+				// re-queues the intent for the busy conversation's own terminal
+				// drain.
 				routerLog.Info("drain deferred: task busy, firing released for retry",
 					"firing_id", firing.ID, "task_id", taskID)
 			} else {
@@ -666,17 +675,17 @@ func (r *Router) DrainTask(orgID, taskID string) {
 			}
 			return
 		}
-		if runID != "" {
-			if err := r.firings.MarkFired(ctx, orgID, firing.ID, runID); err != nil {
-				// Durability race: the run was created (side-effect
+		if blueprintRunID != "" {
+			if err := r.firings.MarkFired(ctx, orgID, firing.ID, blueprintRunID); err != nil {
+				// Durability race: the blueprint run was created (side-effect
 				// committed inside the spawner goroutine) but the UPDATE
-				// that records the firing→run association failed.
+				// that records the firing→blueprint-run association failed.
 				//
 				// Roll the side-effect chain back in reverse: tear down
-				// the run we just spawned — blueprint included, since the
+				// the blueprint run we just spawned — blueprint included, since the
 				// firing that minted it is being undone — then revert the
 				// task to 'queued' so the limbo state (task=delegated + no
-				// live run) is not externally visible. Mirrors what
+				// live blueprint run) is not externally visible. Mirrors what
 				// fireDelegate already does when spawner.Delegate itself
 				// fails.
 				//
@@ -688,12 +697,17 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// 'pending' rows, and HasPendingForTask /
 				// ListTasksWithPending don't see 'draining' rows
 				// either, so nothing would ever pick it up again.
-				routerLog.Error("mark firing fired failed, rolling back: tearing down run + reverting task to queued",
-					"firing_id", firing.ID, "run_id", runID, "error", err)
+				routerLog.Error("mark firing fired failed, rolling back: tearing down blueprint run + reverting task to queued",
+					"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", err)
+				// TODO(TFAC-840): this teardown never fires. StopAndCancelBlueprint
+				// resolves its id against conversations, and what Delegate returned
+				// is the blueprint_run — so the call always comes back
+				// ErrNoActiveConversation and the spawned blueprint run keeps executing
+				// while its task reverts to queued.
 				if r.spawner != nil {
-					if cerr := r.spawner.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseFiringReverted); cerr != nil {
-						routerLog.Warn("stop run after mark-fired failure (run may already be terminal, drain still triggers from its defer)",
-							"run_id", runID, "error", cerr)
+					if cerr := r.spawner.StopAndCancelBlueprint(orgID, blueprintRunID, "", delegate.StopCauseFiringReverted); cerr != nil {
+						routerLog.Warn("stop blueprint run after mark-fired failure (may already be terminal, drain still triggers from its defer)",
+							"blueprint_run", blueprintRunID, "error", cerr)
 					}
 				}
 				r.revertTaskStatus(ctx, orgID, firing.TaskID, "queued")
@@ -702,7 +716,7 @@ func (r *Router) DrainTask(orgID, taskID string) {
 						"firing_id", firing.ID, "error", rerr)
 				}
 			}
-			return // one fire per drain — the new run gates the rest
+			return // one fire per drain — the new blueprint run gates the rest
 		}
 		// Skipped or fire failed; record reason and continue draining.
 		if err := r.firings.MarkSkipped(ctx, orgID, firing.ID, skipReason); err != nil {
@@ -725,10 +739,10 @@ func (r *Router) DrainTask(orgID, taskID string) {
 // least one pending firing. The sweeper is the safety net for stuck
 // queues: a firing left in 'pending' after a transient validation/fire
 // error needs *some* drain to retry it, and the natural trigger
-// (notifyDrainer from an auto-run terminal) only fires when an auto run
-// is actively terminating. If nothing's terminating — task has no
-// active runs and no events arrive — the queue would otherwise sit
-// indefinitely.
+// (notifyDrainer from an auto-conversation terminal) only fires when an auto
+// conversation is actively terminating. If nothing's terminating — task has
+// no active conversations and no events arrive — the queue would otherwise
+// sit indefinitely.
 //
 // Cadence is 30s by default; tuneable via interval. Each tick lists
 // tasks with pending firings (cheap — partial index) and calls
@@ -795,12 +809,12 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 		return
 	}
 	for _, tid := range ids {
-		// Skip a task whose own run is still live — its terminal will drain
-		// the queue. Scoped to the task, so one task parked indefinitely no
+		// Skip a task whose own conversation is still live — its terminal will
+		// drain the queue. Scoped to the task, so one task parked indefinitely no
 		// longer makes the sweeper step over every sibling task's queue on
-		// the same entity, which is how a stopped run used to halt triage
-		// for a whole pull request.
-		active, err := r.agentRuns.HasActiveAutoRunForTaskSystem(ctx, orgID, tid)
+		// the same entity, which is how a stopped conversation used to halt
+		// triage for a whole pull request.
+		active, err := r.conversations.HasActiveAutoConversationForTaskSystem(ctx, orgID, tid)
 		if err != nil {
 			routerLog.Error("drain sweeper: active-check failed", "task_id", tid, "org", orgID, "error", err)
 			continue
@@ -815,7 +829,7 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // attemptDrainOne validates a popped firing against current state and
 // fires it if everything still holds. Three outcomes:
 //
-//   - (runID, "", nil)         — fire succeeded; caller marks 'fired'.
+//   - (blueprintRunID, "", nil)         — fire succeeded; caller marks 'fired'.
 //   - ("", skipReason, nil)    — definitive "no longer relevant"; caller
 //     marks 'skipped_stale'. Reserved for: task_closed (done /
 //     dismissed / snoozed — task isn't drain-eligible on the
@@ -823,10 +837,10 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 //     claim_changed (a user took the task over or
 //     requeued it after the firing was enqueued, so the bot's
 //     original commitment is no longer current; drainer must not
-//     fire a phantom bot run against a now-user-claimed task).
+//     fire a phantom bot conversation against a now-user-claimed task).
 //   - ("", "", err)            — transient failure (DB read, fire-time);
 //     caller leaves the firing in 'pending' state and bails the drain
-//     loop. The periodic sweeper or next run-terminal will retry.
+//     loop. The periodic sweeper or next conversation terminal will retry.
 //
 // Validation reads from live tables, not from the firing row, so the
 // drainer reflects the world *now* — invalidation falls out for free
@@ -835,9 +849,10 @@ func (r *Router) sweepOrg(ctx context.Context, orgID string) {
 // We classify Delegate errors as transient too: even when spawner.Delegate
 // refuses (rate-limited GitHub, missing creds, worktree race), the firing
 // intent is still valid and worth retrying. The breaker handles the
-// "actually broken, repeated failure" case via run-level failure counts —
-// but only once we've started enough runs to trip it. Until then, retry.
-func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (runID, skipReason string, transientErr error) {
+// "actually broken, repeated failure" case via conversation-level failure
+// counts — but only once we've started enough conversations to trip it.
+// Until then, retry.
+func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *domain.PendingFiring) (blueprintRunID, skipReason string, transientErr error) {
 	task, err := r.tasks.GetSystem(ctx, orgID, firing.TaskID)
 	if err != nil {
 		return "", "", fmt.Errorf("task lookup: %w", err)
@@ -859,7 +874,7 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 	// User-claim (claimed_by_user_id set) or requeue (both cleared)
 	// invalidates the original commitment. Without this check, a
 	// pending firing would fire even after the user explicitly took
-	// the task over, producing a phantom bot run on a now-user-
+	// the task over, producing a phantom bot conversation on a now-user-
 	// claimed task.
 	if task.ClaimedByAgentID == "" {
 		return "", domain.PendingFiringSkipClaimChanged, nil
@@ -874,7 +889,7 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 	}
 
 	breakerThreshold := derefIntDefault(trigger.BreakerThreshold, 0)
-	failures, err := r.tasks.CountConsecutiveFailedRunsSystem(ctx, orgID, firing.EntityID, r.breakerPromptID(ctx, orgID, trigger.BlueprintID))
+	failures, err := r.tasks.CountConsecutiveFailedConversationsSystem(ctx, orgID, firing.EntityID, r.breakerPromptID(ctx, orgID, trigger.BlueprintID))
 	if err != nil {
 		return "", "", fmt.Errorf("breaker query: %w", err)
 	}
@@ -887,14 +902,14 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 	// the new blueprint_run's frozen actor matches the standing task claim. No
 	// claim stamp rides this insert: the claim is already the bot's (the guard
 	// above just read it), and re-writing it would be the one shape that turns a
-	// user's requeue-with-a-live-run back into a bot claim.
+	// user's requeue-with-a-live-conversation back into a bot claim.
 	id, err := r.fireDelegate(ctx, orgID, task, *trigger, firing.TriggeringEventID, task.ClaimedByAgentID, dbpkg.AgentClaimStamp{})
 	if err != nil {
-		// The run for this (event, trigger) already exists — a
+		// The blueprint run for this (event, trigger) already exists — a
 		// prior drain attempt fired it (process died before MarkFired), or
 		// the immediate path did before this firing was popped. Definitive
 		// "no longer relevant": mark skipped_stale so the firing doesn't
-		// retry forever. The existing run gates / drains the entity.
+		// retry forever. The existing blueprint run gates / drains the entity.
 		if errors.Is(err, delegate.ErrAlreadyFired) {
 			return "", domain.PendingFiringSkipAlreadyFired, nil
 		}
@@ -902,8 +917,8 @@ func (r *Router) attemptDrainOne(ctx context.Context, orgID string, firing *doma
 		// this drain's pop and the fenced insert (a fresh immediate fire,
 		// or a racing drainer). NOT a skip: the queued intent is still
 		// valid — surface it transient-shaped so the caller releases the
-		// firing back to 'pending'; the busy run's own terminal drain (or
-		// the sweeper) retries it.
+		// firing back to 'pending'; the busy conversation's own terminal drain
+		// (or the sweeper) retries it.
 		if errors.Is(err, delegate.ErrTaskBusy) {
 			return "", "", errDrainTaskBusy
 		}
@@ -920,13 +935,13 @@ var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing rele
 // revertTaskStatus moves a task's lifecycle axis back to the given
 // status and broadcasts the change so the frontend doesn't get stuck
 // showing a stale state. Claim cols are intentionally left alone —
-// The three axes (lifecycle / claim / runs) are
+// The three axes (lifecycle / claim / conversations) are
 // orthogonal, and this helper only touches lifecycle.
 //
 // The only caller today is the mark-fired-failure rollback path in
-// DrainTask: a run was successfully spawned but the UPDATE that
-// records the firing→run association failed. The recovery flow
-// cancels the run, leaves the firing in 'pending' so the next drain
+// DrainTask: a blueprint run was successfully spawned but the UPDATE that
+// records the firing→blueprint-run association failed. The recovery flow
+// cancels it, leaves the firing in 'pending' so the next drain
 // retries it, and reverts the task lifecycle for FE consistency.
 // Critically, the firing's *commitment* (the bot has taken this task)
 // is unchanged — the next drain pass needs the bot claim to remain

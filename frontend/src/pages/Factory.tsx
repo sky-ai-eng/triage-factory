@@ -25,8 +25,14 @@ import {
   noteWrittenTeam,
   teamFilterQuery,
 } from '../hooks/useTeams'
-import type { Conversation, FactoryEntity, FactorySnapshot, RunStatusValue, Task } from '../types'
-import { isActiveStatus } from '../lib/runStatus'
+import type {
+  Conversation,
+  FactoryEntity,
+  FactorySnapshot,
+  ConversationStatusValue,
+  Task,
+} from '../types'
+import { isActiveStatus } from '../lib/conversationStatus'
 import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // Production factory page — Babylon scene driven by /api/factory/snapshot.
@@ -50,9 +56,9 @@ import { apiErrors, apiJSON, httpErrorMessage } from '../lib/apiClient'
 // debounce delays that.
 const REFETCH_DEBOUNCE_MS = 250
 
-// Drop target ID for the runs tray inside the station drawer. A
+// Drop target ID for the conversations tray inside the station drawer. A
 // constant string is fine — the drawer only renders one station at a
-// time, so there's never more than one runs-drop target on the page.
+// time, so there's never more than one drop target on the page.
 const RUNS_DROP_ID = 'factory-runs-drop'
 
 // Cinematic auto-attract: idle this long (ms) with the factory tab
@@ -546,9 +552,10 @@ function StationChassis({ info }: { info: ClickedStationInfo | null }) {
         emptyMessage="No runs in flight"
         items={runs.map((r) => ({
           key: r.run.ID,
-          dot: runStatusColor(r.run.Status),
-          body: <RunRow run={r.run} task={r.task} />,
-          // Clicking a run opens its full-screen station page in a new tab.
+          dot: conversationStatusColor(r.run.Status),
+          body: <ConversationRow conversation={r.run} task={r.task} />,
+          // Clicking a conversation opens its full-screen station page in a
+          // new tab.
           href: orgHref(`/runs/${r.run.ID}`),
         }))}
         dropId={RUNS_DROP_ID}
@@ -791,15 +798,15 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
   )
 }
 
-function RunRow({ run, task }: { run: Conversation; task: Task }) {
+function ConversationRow({ conversation, task }: { conversation: Conversation; task: Task }) {
   const ref = task.source_id || task.entity_id
-  const isOpen = run.Status === 'open'
+  const isOpen = conversation.Status === 'open'
   return (
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
       {isOpen && (
         <span
           className="inline-flex items-center text-[12px] leading-none"
-          style={{ color: runStatusColor(run.Status) }}
+          style={{ color: conversationStatusColor(conversation.Status) }}
           title="Run is open — not concluded, not currently executing"
         >
           ◌
@@ -808,11 +815,13 @@ function RunRow({ run, task }: { run: Conversation; task: Task }) {
       <span className="font-mono text-[11px] text-text-primary">{ref}</span>
       <span
         className="text-[10px] uppercase tracking-wider"
-        style={{ color: runStatusColor(run.Status) }}
+        style={{ color: conversationStatusColor(conversation.Status) }}
       >
-        {runStatusLabel(run.Status)}
+        {conversationStatusLabel(conversation.Status)}
       </span>
-      <span className="ml-auto font-mono text-[10px] text-text-tertiary">{formatRunMeta(run)}</span>
+      <span className="ml-auto font-mono text-[10px] text-text-tertiary">
+        {formatConversationMeta(conversation)}
+      </span>
     </div>
   )
 }
@@ -822,16 +831,18 @@ function entityLabel(e: FactoryEntity): string {
   return e.source_id || e.id.slice(0, 8)
 }
 
-// Status-keyed colors for the run-row indicator dot and the inline
+// Status-keyed colors for the conversation-row indicator dot and the inline
 // status label. Pulled from the project palette tokens so the trays
 // feel cohesive with the rest of the app: claim/sage for active,
 // snooze/amber for parked, dismiss/rose for failed, secondary for the
-// rest (queued, and completed — a finished run is unremarkable here).
+// rest (queued, and completed — a finished conversation is unremarkable
+// here).
 //
 // The active arm is the shared predicate rather than a list of names, so
-// every claim phase — including a run parked awaiting its credential
-// bundle — reads as working instead of falling through to the inert grey.
-function runStatusColor(status: RunStatusValue): string {
+// every claim phase — including a conversation parked awaiting its
+// credential bundle — reads as working instead of falling through to the
+// inert grey.
+function conversationStatusColor(status: ConversationStatusValue): string {
   if (isActiveStatus(status)) return '#3f6b4d' // --color-claim (sage)
   switch (status) {
     case 'open':
@@ -845,7 +856,7 @@ function runStatusColor(status: RunStatusValue): string {
 
 // Shorter copy for the statuses whose raw name reads badly in a tray row;
 // everything else renders as itself.
-function runStatusLabel(status: RunStatusValue): string {
+function conversationStatusLabel(status: ConversationStatusValue): string {
   switch (status) {
     case 'agent_starting':
       return 'starting'
@@ -856,15 +867,15 @@ function runStatusLabel(status: RunStatusValue): string {
   }
 }
 
-function formatRunMeta(run: Conversation): string {
+function formatConversationMeta(conversation: Conversation): string {
   const parts: string[] = []
-  if (run.DurationMs && run.DurationMs > 0) {
-    const sec = Math.round(run.DurationMs / 1000)
+  if (conversation.DurationMs && conversation.DurationMs > 0) {
+    const sec = Math.round(conversation.DurationMs / 1000)
     if (sec < 60) parts.push(`${sec}s`)
     else parts.push(`${Math.floor(sec / 60)}m ${sec % 60}s`)
   }
-  if (run.TotalCostUSD && run.TotalCostUSD > 0) {
-    parts.push(`$${run.TotalCostUSD.toFixed(2)}`)
+  if (conversation.TotalCostUSD && conversation.TotalCostUSD > 0) {
+    parts.push(`$${conversation.TotalCostUSD.toFixed(2)}`)
   }
   return parts.join(' · ')
 }

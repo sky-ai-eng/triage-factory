@@ -3,8 +3,8 @@ package domain
 import "time"
 
 // Artifact is one row in the artifacts table — the single durable,
-// run-attributed, polymorphic record of something a run produced in an
-// external system (a pushed branch, a draft/open PR, a draft/submitted
+// conversation-attributed, polymorphic record of something a conversation
+// produced in an external system (a pushed branch, a draft/open PR, a draft/submitted
 // review, a Jira/Linear issue, a comment). One row per external object;
 // the (Provider, Kind) pair discriminates the shape. See TFAC-455.
 //
@@ -13,14 +13,14 @@ import "time"
 // pre-push hook, git-proxy backstop, reconciliation) saw it first.
 // Build the key with ArtifactDedupKey.
 //
-// TeamID is denormalized from the owning run so reads scope by team
-// exactly like runs. RunID is nullable (empty string here) so a row
-// survives a run purge for audit — the FK is ON DELETE SET NULL.
+// TeamID is denormalized from the owning conversation so reads scope by team
+// exactly like conversations. ConversationID is nullable (empty string here) so
+// a row survives a conversation purge for audit — the FK is ON DELETE SET NULL.
 type Artifact struct {
 	ID string `json:"id"`
-	// ConversationID is the run that produced this artifact. Empty after the run
-	// is purged (FK ON DELETE SET NULL) — the artifact outlives it for
-	// the audit ledger.
+	// ConversationID is the conversation that produced this artifact. Empty
+	// after the conversation is purged (FK ON DELETE SET NULL) — the artifact
+	// outlives it for the audit ledger.
 	ConversationID string `json:"conversation_id,omitempty"`
 	OrgID          string `json:"org_id"`
 	TeamID         string `json:"team_id"`
@@ -116,7 +116,7 @@ const (
 	// issue (Jira / future Linear). These track the *last* action on the
 	// row, not the first: because the artifact is one deduped row, a
 	// 'created' issue that a later upsert touches again flips to 'updated',
-	// so "did this run create or only update the issue?" is NOT recoverable
+	// so "did this conversation create or only update the issue?" is NOT recoverable
 	// from state alone — a writer that needs that distinction must record it
 	// in details_json at create time.
 	ArtifactStateIssueCreated = "created"
@@ -240,7 +240,7 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 // reconcilableNonTerminal lists, per Kind, the states the reconciler
 // (TFAC-464) treats as non-terminal AND backed by a fetchable GitHub object —
 // the exact set Artifacts.ListNonTerminalBySystem returns and the Tier-2
-// run-scoped refresh filters to. It is the single source of truth both the
+// conversation-scoped refresh filters to. It is the single source of truth both the
 // store's SQL predicate and IsReconcilableNonTerminal derive from.
 //
 // PR 'pending' is deliberately excluded: a pending PR is intent-only (no
@@ -260,8 +260,8 @@ var reconcilableNonTerminal = map[string]map[string]bool{
 
 // IsReconcilableNonTerminal reports whether an artifact of (kind, state) is
 // in the reconciler's working set: non-terminal AND backed by a fetchable
-// GitHub object. The Tier-2 run-scoped refresh filters a run's artifacts
-// through this so it reconciles exactly what the org-wide Tier-1 query would;
+// GitHub object. The Tier-2 conversation-scoped refresh filters a
+// conversation's artifacts through this so it reconciles exactly what the org-wide Tier-1 query would;
 // the ListNonTerminal store tests pin it equal to the store's SQL predicate.
 func IsReconcilableNonTerminal(kind, state string) bool {
 	return reconcilableNonTerminal[kind][state]

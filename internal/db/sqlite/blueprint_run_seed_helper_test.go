@@ -10,7 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedBlueprintRunForRun mints a blueprint + blueprint_run pointed at the
+// seedBlueprintRunForConversation mints a blueprint + blueprint_run pointed at the
 // given task so a `conversations` row can reference blueprint_runs(id). The
 // column is nullable, but the conversations_origin_requires_parents CHECK
 // requires it (plus task_id/prompt_id) to be set when origin='blueprint'
@@ -20,7 +20,7 @@ import (
 // Shared across the package-sqlite CRUD test files (factory, prompts,
 // conversation_worktrees, task_memory) whose `conversations` fixtures are
 // not the system under test — they just need a valid FK target.
-func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
+func seedBlueprintRunForConversation(t *testing.T, conn *sql.DB, taskID string) string {
 	t.Helper()
 	blueprintID := "bp_" + uuid.New().String()
 	if _, err := conn.Exec(`
@@ -49,14 +49,14 @@ func seedBlueprintRunForRun(t *testing.T, conn *sql.DB, taskID string) string {
 }
 
 // insertConversationForTest inserts a conversations row directly — the test
-// fixture stand-in for the queue's EnqueueRun mint, staging rows in
+// fixture stand-in for the queue's EnqueueConversation mint, staging rows in
 // arbitrary status. The trigger_type↔creator CHECK is satisfied by pairing
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
 // BlueprintRunID, BlueprintStepIndex.
-func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.Conversation) {
+func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversation) {
 	t.Helper()
-	trigger := run.TriggerType
+	trigger := conv.TriggerType
 	if trigger == "" {
 		trigger = "manual"
 	}
@@ -65,21 +65,21 @@ func insertConversationForTest(t *testing.T, conn *sql.DB, run domain.Conversati
 		creator = runmode.LocalDefaultUserID
 	}
 	var triggerID any
-	if run.TriggerID != "" {
-		triggerID = run.TriggerID
+	if conv.TriggerID != "" {
+		triggerID = conv.TriggerID
 	}
 	var stepIdx any
-	if run.BlueprintStepIndex != nil {
-		stepIdx = *run.BlueprintStepIndex
+	if conv.BlueprintStepIndex != nil {
+		stepIdx = *conv.BlueprintStepIndex
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
 		                           creator_user_id, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
-	`, run.ID, run.TaskID, run.PromptID, run.Status, run.Model,
-		trigger, triggerID, runmode.LocalDefaultTeamID, creator, run.BlueprintRunID, stepIdx); err != nil {
-		t.Fatalf("insert conversation %s: %v", run.ID, err)
+	`, conv.ID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID, stepIdx); err != nil {
+		t.Fatalf("insert conversation %s: %v", conv.ID, err)
 	}
 }
 

@@ -84,27 +84,27 @@ func (a *App) startWorkers(ctx context.Context) {
 		a.startKnowledgeWatcher()
 	}
 
-	// Dispatcher workers (executor/all): the run-queue dispatcher (claims +
-	// executes queued runs, reconciling crash-stranded runs on boot) and the
-	// workspace-snapshot retention reaper (bounds durable parked/aborted-run
-	// snapshot blobs by TTL; a no-op when no blob store is wired). A control
-	// pod builds the spawner but never claims delegated runs, so neither
-	// runs there.
+	// Dispatcher workers (executor/all): the conversation-queue dispatcher
+	// (claims + executes queued conversations, reconciling crash-stranded
+	// conversations on boot) and the workspace-snapshot retention reaper
+	// (bounds durable parked/aborted-conversation snapshot blobs by TTL; a
+	// no-op when no blob store is wired). A control pod builds the spawner
+	// but never claims delegated conversations, so neither runs there.
 	if a.plan.dispatcher {
-		go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
+		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 	}
 
 	// The shared tf_ctl control-plane listener + the cross-pod run-control
 	// workers (TFAC-585). Multi mode only: local mode never wires
-	// SetRunSignals (so the apply loop / purge reaper below are no-ops
+	// SetConversationSignals (so the apply loop / purge reaper below are no-ops
 	// there anyway), never builds a backplane, and role=all always
 	// self-holds the brain — nothing ever relays into a local process, so
 	// there is no reason to open a Postgres LISTEN connection at all.
 	// startCtlListener (ctl.go) is the ONE tf_ctl LISTEN per pod, every
-	// role: it routes run-signal doorbells to the spawner, session kicks to
-	// the WS backplane, and trigger/PollSoon relays to handleCtlMessage
-	// (which holder-gates them).
+	// role: it routes conversation-signal doorbells to the spawner, session
+	// kicks to the WS backplane, and trigger/PollSoon relays to
+	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
 		a.startCtlListener(ctx)
 		// The signal apply loop only makes sense on dispatcher-capable
@@ -112,18 +112,18 @@ func (a *App) startWorkers(ctx context.Context) {
 		// LISTEN (TFAC-586) is the same gate: only a dispatcher-capable
 		// role has a claim loop worth nudging.
 		if a.plan.dispatcher {
-			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+			go a.spawner.ConversationSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
 			go a.startWakeListener(ctx)
 		}
 		// The purge reaper is system housekeeping, not tied to executor
 		// identity — runs on brain roles like the other reapers/sweepers
 		// (never on a plain executor, avoiding N-executor duplicate sweeps).
 		if a.plan.brain {
-			purgeAge, perr := delegate.ParseRunSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_CONVERSATION_SIGNAL_PURGE_AFTER"))
 			if perr != nil {
-				appLog.Warn("run signal purge age", "error", perr)
+				appLog.Warn("conversation signal purge age", "error", perr)
 			}
-			go a.spawner.RunSignalPurgeReaper(ctx, delegate.DefaultRunSignalPurgeInterval, purgeAge)
+			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
 		}
 	}
 
@@ -133,8 +133,9 @@ func (a *App) startWorkers(ctx context.Context) {
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
 	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
-	// row a minute (cpu/load/mem/oom deployment-wide; run-scoped fields only on
-	// executor-capable roles) and reaps the ~30d tail. The dashboard reads it.
+	// row a minute (cpu/load/mem/oom deployment-wide; claim-scoped fields only
+	// on executor-capable roles) and reaps the ~30d tail. The dashboard reads
+	// it.
 	go a.spawner.RunInstanceStatSampler(ctx, delegate.DefaultInstanceStatSampleInterval, delegate.DefaultInstanceStatRetention)
 
 	// WS backplane workers (TFAC-584) — nil in local mode / before
@@ -184,11 +185,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
 }
 
-// cleanupWorktrees removes orphaned worktrees from crashed runs. Parked
-// `open` runs are preserved whole — their worktree dir
+// cleanupWorktrees removes orphaned worktrees from crashed conversations.
+// Parked `open` conversations are preserved whole — their worktree dir
 // and ~/.claude/projects session JSONL are the warm resume cache. A load
-// failure just forgoes that optimization; those runs still resume by
-// rehydrating from snapshot.
+// failure just forgoes that optimization; those conversations still resume
+// by rehydrating from snapshot.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic

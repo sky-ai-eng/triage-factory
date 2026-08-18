@@ -8,7 +8,7 @@ import (
 )
 
 // credRequestProvisionTimeout bounds a single cred_request handler's
-// ProvisionForRun call (TFAC-614) — well inside the executor's own
+// ProvisionForConversation call (TFAC-614) — well inside the executor's own
 // 2-minute awaiting-credentials deadline, so a stalled DB/GitHub
 // round-trip degrades to one deferred backstop-sweep retry instead of
 // leaking a goroutine per dropped notification.
@@ -127,29 +127,29 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		// timeout here just costs one deferred pass — the backstop sweep
 		// (internal/credprovision.RunAwaitingSweep) retries it. Unlike
 		// a.dispatchManagerTrigger's fire-and-forget Trigger() channel
-		// send, ProvisionForRun does real work and its error is worth
+		// send, ProvisionForConversation does real work and its error is worth
 		// logging.
 		if a.credProvisioner != nil {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForRun(ctx, msg.OrgID, msg.RunID); err != nil {
-					appLog.Warn("tf_ctl: cred_request provision failed", "run", msg.RunID, "error", err)
+				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID); err != nil {
+					appLog.Warn("tf_ctl: cred_request provision failed", "conversation", msg.ConversationID, "error", err)
 				}
 			}()
 		}
 	case "curator_cred_request":
 		// The curator-turn analog of cred_request: a home executor
 		// standing a turn's credential sidecar up nudges the brain to seal that
-		// turn's bundle. msg.RunID carries the curator conversation id. Same
+		// turn's bundle. msg.ConversationID carries the curator conversation id. Same
 		// holder-gated, bounded-context, backstop-swept shape as cred_request
 		// above; nil at TF_ROLE=executor / local (never the brain holder).
 		if a.credProvisioner != nil {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForCuratorTurn(ctx, msg.OrgID, msg.RunID); err != nil {
-					appLog.Warn("tf_ctl: curator_cred_request provision failed", "request", msg.RunID, "error", err)
+				if err := a.credProvisioner.ProvisionForCuratorTurn(ctx, msg.OrgID, msg.ConversationID); err != nil {
+					appLog.Warn("tf_ctl: curator_cred_request provision failed", "request", msg.ConversationID, "error", err)
 				}
 			}()
 		}

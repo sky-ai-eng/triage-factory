@@ -15,7 +15,7 @@ import "time"
 // fall back to PAT-borrow. Local mode populates
 // GitHubPATUserID with the sentinel user (the lone human in the
 // synthetic single-tenant world) at bootstrap; the PAT itself still
-// lives in the OS keychain and is looked up at run dispatch via the
+// lives in the OS keychain and is looked up at dispatch via the
 // user identity here.
 type Agent struct {
 	ID                         string

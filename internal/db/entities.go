@@ -10,7 +10,7 @@ import (
 
 // EntityStore owns the entities table — the long-lived "source
 // object" (PR, Jira issue, Linear ticket, Slack message) that every
-// event, task, and run hangs off. Lives from first poll until the
+// event, task, and conversation hangs off. Lives from first poll until the
 // poller observes the upstream as closed/merged.
 //
 // Audiences:
@@ -353,7 +353,7 @@ type EntityStore interface {
 
 	// ClassificationStatusSystem reports whether the entity has been
 	// project-classified yet — (classified, exists, err). It backs the
-	// delegation spawner's pre-run wait (internal/projectclassify
+	// delegation spawner's pre-launch wait (internal/projectclassify
 	// WaitFor), which blocks until the classifier has decided an entity
 	// before reading project_id for knowledge-base injection.
 	//
@@ -398,11 +398,11 @@ type EntityStore interface {
 	//
 	// Stamp-if-NULL is the whole contract, and it is what lets two unordered
 	// writers converge on one answer. A PR the bot opens has no TF author to
-	// resolve, so the commissioning team is recorded from the run that opened
-	// it; that write races the poller, which mints the same entity by natural
+	// resolve, so the commissioning team is recorded from the conversation
+	// that opened it; that write races the poller, which mints the same entity by natural
 	// key whenever it next sees the PR. Either order lands the same owner —
-	// the run's write back-fills a row the poller already created, or it
-	// creates the row the poller later enriches — and neither can overwrite an
+	// the conversation's write back-fills a row the poller already created, or
+	// it creates the row the poller later enriches — and neither can overwrite an
 	// owner some *other* writer chose, because the only value this can replace
 	// is NULL. An explicit owner (an operator's transfer) is therefore
 	// permanent as far as this path is concerned, and re-delivery of the same

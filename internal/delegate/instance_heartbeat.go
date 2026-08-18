@@ -260,9 +260,9 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	// executor's own log. CompareAndSwap fires only on a real transition.
 	switch {
 	case draining && s.draining.CompareAndSwap(false, true):
-		dispatchLog.Info("instance draining: operator asked this executor to quiesce — no new runs will be claimed; live runs finish or hibernate on idle", "instance", id)
+		dispatchLog.Info("instance draining: operator asked this executor to quiesce — no new conversations will be claimed; live engagements finish or hibernate on idle", "instance", id)
 	case !draining && s.draining.CompareAndSwap(true, false):
-		dispatchLog.Info("instance resumed: drain cleared — claiming new runs again", "instance", id)
+		dispatchLog.Info("instance resumed: drain cleared — claiming new conversations again", "instance", id)
 	}
 	return true
 }
@@ -278,7 +278,7 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 // regardless of how many further heartbeats observe the same supersession.
 //
 // Fence completion (spec §4.1(4), second half): kill every live sandbox
-// via the same cancel machinery Cancel(runID) uses, THEN invoke
+// via the same cancel machinery Cancel(conversationID) uses, THEN invoke
 // onSupersessionFence (wired by internal/app to a loud log + os.Exit with
 // a distinct code) — so a zombie's in-flight work can't keep running and
 // double the reaper-requeued attempt's external writes. Ordered
@@ -287,7 +287,7 @@ func (s *Spawner) fenceIdentity(id string, bootEpoch int64) {
 	if !s.identityFenced.CompareAndSwap(false, true) {
 		return
 	}
-	dispatchLog.Error("instance identity superseded — fencing: no new runs will be claimed or resumed by this process; restart it to re-register. Likely cause: a second process booted from a copy of this state root (cloned volume / duplicated data directory), or the database was restored from a backup.",
+	dispatchLog.Error("instance identity superseded — fencing: no new conversations will be claimed or resumed by this process; restart it to re-register. Likely cause: a second process booted from a copy of this state root (cloned volume / duplicated data directory), or the database was restored from a backup.",
 		"instance", id, "boot_epoch", bootEpoch)
 	killed := s.killAllLiveSandboxes()
 	dispatchLog.Warn("killed live sandboxes after identity supersession", "instance", id, "count", killed)
@@ -337,7 +337,7 @@ func (s *Spawner) checkPartitionSelfFence(id string, elapsed time.Duration) {
 		return
 	}
 	killed := s.killAllLiveSandboxes()
-	dispatchLog.Error("instance heartbeat exceeded the self-fence deadline — fencing: live sandboxes killed to avoid a duplicate execution; the reaper may already have requeued this instance's claimed runs",
+	dispatchLog.Error("instance heartbeat exceeded the self-fence deadline — fencing: live sandboxes killed to avoid a duplicate execution; the reaper may already have requeued this instance's claimed conversations",
 		"instance", id, "self_fence_deadline", deadline, "elapsed_since_last_good_contact", elapsed, "sandboxes_killed", killed)
 }
 
@@ -357,7 +357,7 @@ func (s *Spawner) PartitionFenced() bool {
 // control pod (which never populates s.cancels for delegated runs — it
 // runs no dispatcher) or an executor with nothing in flight kills zero,
 // harmlessly. The goroutine actually running each cancelled step observes
-// ctx.Err() and parks its own run (parkRunOpen) exactly as a
+// ctx.Err() and parks its own run (parkConversationOpen) exactly as a
 // user-initiated Cancel does; this function only fires the signal.
 func (s *Spawner) killAllLiveSandboxes() int {
 	s.mu.Lock()

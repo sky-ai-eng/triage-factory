@@ -15,21 +15,21 @@ import (
 // seedMessageAt inserts a non-user run message stamped at the given time, so
 // a test can place the artifact-change ledger watermark (the run's last agent
 // activity) before/after the artifacts it seeds.
-func seedMessageAt(t *testing.T, s *Spawner, runID string, at time.Time) {
+func seedMessageAt(t *testing.T, s *Spawner, conversationID string, at time.Time) {
 	t.Helper()
-	if _, err := s.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: runID, Role: "assistant", Content: "agent turn", CreatedAt: at,
+	if _, err := s.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
+		ConversationID: conversationID, Role: "assistant", Content: "agent turn", CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("seed agent message: %v", err)
 	}
 }
 
 // seedResolvedArtifact upserts an artifact in a given post-resolution state for
-// runID (updated_at = now), so the ledger derivation sees it as a human
+// conversationID (updated_at = now), so the ledger derivation sees it as a human
 // resolution after a past watermark.
-func seedResolvedArtifact(t *testing.T, s *Spawner, runID string, a domain.Artifact) {
+func seedResolvedArtifact(t *testing.T, s *Spawner, conversationID string, a domain.Artifact) {
 	t.Helper()
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
@@ -43,7 +43,7 @@ func seedResolvedArtifact(t *testing.T, s *Spawner, runID string, a domain.Artif
 // ledger table.
 func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-led", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-led", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Watermark in the past, so the artifacts seeded "now" all land after it.
@@ -63,12 +63,12 @@ func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 		"https://github.com/o/r/pull/2", "PR two", "", true) // draft=true → state=draft
 	seedResolvedArtifact(t, s, "r-led", draftPR)
 
-	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-led")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-led")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 
-	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, run)
+	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv)
 	if block == "" {
 		t.Fatal("expected a non-empty ledger block")
 	}
@@ -91,7 +91,7 @@ func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 // re-bundled into the ledger — the watermark filters it out.
 func TestArtifactLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-pre", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-pre", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Watermark in the FAR future, so the artifact seeded "now" is before it.
@@ -101,11 +101,11 @@ func TestArtifactLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 		"https://github.com/o/r/pull/1", "PR one", "", false)
 	seedResolvedArtifact(t, s, "r-pre", approvedPR)
 
-	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-pre")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-pre")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
-	if block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, run); block != "" {
+	if block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv); block != "" {
 		t.Errorf("expected empty ledger (resolution predates the watermark), got %q", block)
 	}
 }
@@ -134,7 +134,7 @@ func waitSteerCalls(t *testing.T, fc *fakeController, want int) {
 // so a resolution after the run started still lands in the ledger.
 func TestArtifactLedgerForResume_FallsBackToStartedAt(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-nomsg", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-nomsg", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Pin started_at into the past so the artifact seeded "now" is unambiguously
@@ -148,16 +148,16 @@ func TestArtifactLedgerForResume_FallsBackToStartedAt(t *testing.T) {
 		"https://github.com/o/r/pull/1", "PR one", "", false)
 	seedResolvedArtifact(t, s, "r-nomsg", approvedPR)
 
-	run, err := s.agentRuns.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 	// Sanity: this run genuinely has no agent message, so we exercise the fallback.
-	if _, ok, err := s.agentRuns.LastAgentActivityAtSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg"); err != nil || ok {
+	if _, ok, err := s.conversations.LastAgentActivityAtSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg"); err != nil || ok {
 		t.Fatalf("precondition: want no agent message (ok=false), got ok=%v err=%v", ok, err)
 	}
 
-	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, run)
+	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv)
 	if block == "" || !strings.Contains(block, "o/r#1") {
 		t.Errorf("expected the resolution in the ledger via the StartedAt fallback, got %q", block)
 	}
@@ -180,8 +180,8 @@ func TestInjectArtifactNote_LiveSteersWrappedNote(t *testing.T) {
 	waitSteerCalls(t, fc, 1)
 	fc.mu.Lock()
 	defer fc.mu.Unlock()
-	if fc.steerCalls != 1 || fc.steerRunID != "run-live" {
-		t.Fatalf("steer = {calls:%d runID:%q}, want {1 run-live}", fc.steerCalls, fc.steerRunID)
+	if fc.steerCalls != 1 || fc.steerConversationID != "run-live" {
+		t.Fatalf("steer = {calls:%d conversationID:%q}, want {1 run-live}", fc.steerCalls, fc.steerConversationID)
 	}
 	if !strings.Contains(fc.steerText, "<system-note>") || !strings.Contains(fc.steerText, "o/r#7") || !strings.Contains(fc.steerText, "approved") {
 		t.Errorf("steered text missing wrapper/ref/copy: %q", fc.steerText)

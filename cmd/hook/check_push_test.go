@@ -51,11 +51,11 @@ func prePushStdin(remoteRef string) *strings.Reader {
 }
 
 func policyHost(stores db.Stores, eventTriggered bool) agenthost.Client {
-	return agenthost.NewLocal(stores, agenthost.RunInfo{
+	return agenthost.NewLocal(stores, agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            "r1",
+		ConversationID:   "r1",
 		IsEventTriggered: eventTriggered,
 	})
 }

@@ -175,11 +175,11 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	s := newStorageSpawner(t)
 	s.repos = repos
 
-	const runID = "wt-proxy-auth"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-proxy-auth"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 	writeSession(t, wtPath, "sess-proxy", `{"type":"summary"}`)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	// The concluded blueprint's worktree is gone — cold rehydrate.
@@ -200,9 +200,9 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	t.Cleanup(func() { restoreWorkspaceGit = restore })
 
 	sandbox := proxySandbox("http://10.42.0.3:4100", "run-placeholder")
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, sandbox)
-	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed); err != nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed); err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 
@@ -229,16 +229,16 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 
-	const runID = "wt-seed-bare"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-seed-bare"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
 	gitT(t, wtPath, "add", "agent.txt")
 	gitT(t, wtPath, "commit", "-m", "agent work")
 
 	s := newStorageSpawner(t)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -258,9 +258,9 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	}
 	s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: upstream}}
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, nil)
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed)
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed)
 	if err != nil {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}

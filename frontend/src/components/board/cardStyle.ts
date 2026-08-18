@@ -1,5 +1,5 @@
 import type { Conversation } from '../../types'
-import { isActiveRun } from '../../lib/runStatus'
+import { isActiveConversation } from '../../lib/conversationStatus'
 
 // cardStyle — the design tokens + status→tone logic for the board's lit-plane
 // cards. Pure module (no JSX) so the shared chrome components live in
@@ -15,7 +15,7 @@ import { isActiveRun } from '../../lib/runStatus'
 
 // Tone is the card's semantic color vocabulary, mapped to theme tokens so it
 // tracks light/dark automatically. `rust` is the resting accent (a plain task);
-// the rest encode run state.
+// the rest encode conversation state.
 export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutral'
 
 export const TONE_VAR: Record<Tone, string> = {
@@ -38,18 +38,18 @@ export const TONE_TEXT: Record<Tone, string> = {
 
 export interface Glow {
   tone: Tone
-  // Breathing = an actively-turning run (the lane is alive). Steady = a state
+  // Breathing = an actively-turning conversation (the lane is alive). Steady = a state
   // that wants attention but isn't moving (waiting on you, or it failed).
   breathing: boolean
 }
 
-// runGlow decides whether the card itself lights up. Only a LIVE run glows — a
+// conversationGlow decides whether the card itself lights up. Only a LIVE conversation glows — a
 // breathing "work is alive here" bloom. Everything else returns null: a steady
 // colored glow on a settled/cancelled/waiting card just reads as a tinted
 // drop-shadow under the card (and those states already announce themselves via
 // the attention row / result verdict).
-export function runGlow(run: Conversation): Glow | null {
-  if (isActiveRun(run)) return { tone: 'active', breathing: true }
+export function conversationGlow(conversation: Conversation): Glow | null {
+  if (isActiveConversation(conversation)) return { tone: 'active', breathing: true }
   return null
 }
 

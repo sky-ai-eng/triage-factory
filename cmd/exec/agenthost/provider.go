@@ -24,10 +24,10 @@ import (
 // carries the run's non-secret coordinates only — the brain binds identity
 // from the claim, never from wire input.
 type ProvisionScope struct {
-	OrgID  string
-	TeamID string
-	TaskID string
-	RunID  string
+	OrgID          string
+	TeamID         string
+	TaskID         string
+	ConversationID string
 }
 
 // ProviderCredentialResolver resolves one provider's sealed credential set for
@@ -64,11 +64,11 @@ func RegisterProviderCredential(namespace string, r ProviderCredentialResolver) 
 
 // ProviderOp is the orchestrator-side handler for one provider policy/data op
 // (Primitive 2): it holds the run's org-scoped stores and binds identity from
-// RunInfo — the wire args carry no org id, so a sidecar cannot steer the op at
+// ConversationInfo — the wire args carry no org id, so a sidecar cannot steer the op at
 // another org. args is the op's opaque request; the return is marshaled as the
 // op result (nil for a notify-style op). Registered by a provider under its
 // (namespace, op).
-type ProviderOp func(ctx context.Context, stores db.Stores, info RunInfo, args json.RawMessage) (any, error)
+type ProviderOp func(ctx context.Context, stores db.Stores, info ConversationInfo, args json.RawMessage) (any, error)
 
 // providerOps is the process-global registry of provider policy/data op
 // handlers, keyed namespace → op. Same single-threaded-startup-write contract
@@ -104,7 +104,7 @@ func ResetProviders() {
 // RelayServer (serving a relayed provider op) and the direct runtime (running
 // one locally in all/local). An unknown namespace/op is an error, never a
 // silent success.
-func dispatchProviderOp(ctx context.Context, stores db.Stores, info RunInfo, namespace, op string, argsRaw json.RawMessage) (json.RawMessage, error) {
+func dispatchProviderOp(ctx context.Context, stores db.Stores, info ConversationInfo, namespace, op string, argsRaw json.RawMessage) (json.RawMessage, error) {
 	ops, ok := providerOps[namespace]
 	if !ok {
 		return nil, fmt.Errorf("unknown relay namespace %q", namespace)
@@ -128,7 +128,7 @@ func dispatchProviderOp(ctx context.Context, stores db.Stores, info RunInfo, nam
 
 // dispatchProviderOpLocal is the direct-runtime entry: marshal the typed args,
 // run the op, unmarshal the result into out (nil out for a notify-style op).
-func dispatchProviderOpLocal(ctx context.Context, stores db.Stores, info RunInfo, namespace, op string, args, out any) error {
+func dispatchProviderOpLocal(ctx context.Context, stores db.Stores, info ConversationInfo, namespace, op string, args, out any) error {
 	raw, err := json.Marshal(args)
 	if err != nil {
 		return fmt.Errorf("marshal %s/%s args: %w", namespace, op, err)

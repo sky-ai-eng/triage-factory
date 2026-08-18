@@ -1,0 +1,53 @@
+package sqlite_test
+
+import (
+	"context"
+	"testing"
+
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// TestConversationStore_SQLite_LookupOrgForConversationSystem_ReturnsSentinelOrgID
+// pins the local-mode behavior of the cold-start identity probe used
+// by cmd/exec/convident — every locally-seeded run resolves back to
+// the LocalDefaultOrgID sentinel.
+func TestConversationStore_SQLite_LookupOrgForConversationSystem_ReturnsSentinelOrgID(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	stores := sqlitestore.New(conn)
+	seeder := newSQLiteConversationSeeder(conn)
+
+	entityID := seeder.Entity(t, "lookup")
+	eventID := seeder.Event(t, entityID, "github:pr:opened")
+	taskID := seeder.Task(t, entityID, "github:pr:opened", eventID)
+
+	conversationID := seeder.Conversation(t, domain.Conversation{
+		ID: "run-lookup-1", TaskID: taskID, PromptID: "p_conversation_test", Status: "running", Model: "m",
+		BlueprintRunID: seeder.BlueprintRun(t, taskID),
+	})
+
+	got, err := stores.Conversations.LookupOrgForConversationSystem(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("LookupOrgForConversationSystem: %v", err)
+	}
+	if got != runmode.LocalDefaultOrgID {
+		t.Errorf("LookupOrgForConversationSystem = %q; want %q", got, runmode.LocalDefaultOrgID)
+	}
+}
+
+// TestConversationStore_SQLite_LookupOrgForConversationSystem_UnknownReturnsEmpty
+// — an unknown conversationID returns ("", nil). Callers (convident) map that
+// to ErrConversationIdentityNotFound rather than a SQL error.
+func TestConversationStore_SQLite_LookupOrgForConversationSystem_UnknownReturnsEmpty(t *testing.T) {
+	conn := newSQLiteForConversationTest(t)
+	stores := sqlitestore.New(conn)
+
+	got, err := stores.Conversations.LookupOrgForConversationSystem(context.Background(), "ghost-run")
+	if err != nil {
+		t.Fatalf("LookupOrgForConversationSystem: %v", err)
+	}
+	if got != "" {
+		t.Errorf("LookupOrgForConversationSystem on unknown conversation = %q; want empty string", got)
+	}
+}

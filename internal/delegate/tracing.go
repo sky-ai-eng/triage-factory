@@ -98,24 +98,24 @@ func (e *engagement) finish(outcome string, err error) {
 // everything this span covers is UPSTREAM of the runtime branch: a native
 // run's setup is traced here in full even though the loop it hands off to
 // is deliberately out of scope.
-func (s *Spawner) beginEngagement(ctx context.Context, run *domain.Conversation) (context.Context, func()) {
+func (s *Spawner) beginEngagement(ctx context.Context, conv *domain.Conversation) (context.Context, func()) {
 	attrs := []attribute.KeyValue{
-		telemetry.ConversationID(run.ID),
-		telemetry.OrgID(run.OrgID),
-		telemetry.ClaimAttempt(run.Attempts),
+		telemetry.ConversationID(conv.ID),
+		telemetry.OrgID(conv.OrgID),
+		telemetry.ClaimAttempt(conv.Attempts),
 	}
-	if run.TaskID != "" {
-		attrs = append(attrs, telemetry.TaskID(run.TaskID))
+	if conv.TaskID != "" {
+		attrs = append(attrs, telemetry.TaskID(conv.TaskID))
 	}
-	if run.Runtime != "" {
-		attrs = append(attrs, telemetry.Runtime(run.Runtime))
+	if conv.Runtime != "" {
+		attrs = append(attrs, telemetry.Runtime(conv.Runtime))
 	}
 	ctx, span := tracer.Start(ctx, "engagement.setup",
 		trace.WithNewRoot(), trace.WithAttributes(attrs...))
 
 	e := &engagement{span: span, sc: span.SpanContext()}
 	s.mu.Lock()
-	s.engagements[run.ID] = e
+	s.engagements[conv.ID] = e
 	s.mu.Unlock()
 
 	return ctx, func() {
@@ -127,26 +127,26 @@ func (s *Spawner) beginEngagement(ctx context.Context, run *domain.Conversation)
 		// have registered its own engagement by the time this teardown runs,
 		// and deleting by key alone would take the successor's link target
 		// with it.
-		if s.engagements[run.ID] == e {
-			delete(s.engagements, run.ID)
+		if s.engagements[conv.ID] == e {
+			delete(s.engagements, conv.ID)
 		}
 		s.mu.Unlock()
 	}
 }
 
-// endEngagement closes runID's root with an explicit outcome. Safe for a
+// endEngagement closes conversationID's root with an explicit outcome. Safe for a
 // conversation with no engagement registered (every non-dispatch caller of
 // updatePhase — a resume turn, an unwired fixture) and safe to call twice.
-func (s *Spawner) endEngagement(runID, outcome string) {
-	s.engagementFor(runID).finish(outcome, nil)
+func (s *Spawner) endEngagement(conversationID, outcome string) {
+	s.engagementFor(conversationID).finish(outcome, nil)
 }
 
-// failEngagement closes runID's root on a setup failure, with the cause on
+// failEngagement closes conversationID's root on a setup failure, with the cause on
 // the span. The one exit that gets an error status — everything else that
 // ends an engagement early is a disposition, and "traces with errors" stays
 // a usable filter only if it means something went wrong.
-func (s *Spawner) failEngagement(runID string, err error) {
-	s.engagementFor(runID).finish(engagementSetupFailed, err)
+func (s *Spawner) failEngagement(conversationID string, err error) {
+	s.engagementFor(conversationID).finish(engagementSetupFailed, err)
 }
 
 // stopOutcome names why an engagement ended before the agent came up, for
@@ -175,32 +175,32 @@ func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 	return "", false
 }
 
-// endEngagementIfStopped closes runID's root when a cancellation is what
+// endEngagementIfStopped closes conversationID's root when a cancellation is what
 // ended it, naming which one. A no-op otherwise — including, importantly,
 // once the agent has gone live, since the root ends exactly once.
-func (s *Spawner) endEngagementIfStopped(runID string, parent, step context.Context) {
+func (s *Spawner) endEngagementIfStopped(conversationID string, parent, step context.Context) {
 	if outcome, ok := stopOutcome(parent, step); ok {
-		s.endEngagement(runID, outcome)
+		s.endEngagement(conversationID, outcome)
 	}
 }
 
-// engagementFor resolves runID's live engagement, or nil. Nil-safe
+// engagementFor resolves conversationID's live engagement, or nil. Nil-safe
 // downstream, so callers never branch on it.
-func (s *Spawner) engagementFor(runID string) *engagement {
-	if s == nil || runID == "" {
+func (s *Spawner) engagementFor(conversationID string) *engagement {
+	if s == nil || conversationID == "" {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.engagements[runID]
+	return s.engagements[conversationID]
 }
 
-// engagementSpanContext is runID's retained root SpanContext, for the
+// engagementSpanContext is conversationID's retained root SpanContext, for the
 // out-of-package consumers that capture it once (the per-run RelayServer).
 // The zero SpanContext when there is no engagement, which every link site
 // treats as "no link".
-func (s *Spawner) engagementSpanContext(runID string) trace.SpanContext {
-	e := s.engagementFor(runID)
+func (s *Spawner) engagementSpanContext(conversationID string) trace.SpanContext {
+	e := s.engagementFor(conversationID)
 	if e == nil {
 		return trace.SpanContext{}
 	}
@@ -221,17 +221,17 @@ func (s *Spawner) engagementSpanContext(runID string) trace.SpanContext {
 // Note the sampling caveat from the epic: links do not share the parent's
 // sampling decision, so nothing here may assume both sides survive. Every
 // span this opens carries conversation.id itself for exactly that reason.
-func (s *Spawner) startPunctual(ctx context.Context, runID, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
-	return startPunctualLinked(ctx, s.engagementSpanContext(runID), runID, name, attrs...)
+func (s *Spawner) startPunctual(ctx context.Context, conversationID, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return startPunctualLinked(ctx, s.engagementSpanContext(conversationID), conversationID, name, attrs...)
 }
 
 // startPunctualLinked is startPunctual for a caller that captured the
 // engagement's SpanContext once rather than looking it up per call — the
 // per-run RelayServer, whose whole point is that it already knows its run.
-func startPunctualLinked(ctx context.Context, sc trace.SpanContext, runID, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+func startPunctualLinked(ctx context.Context, sc trace.SpanContext, conversationID, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	opts := []trace.SpanStartOption{trace.WithNewRoot()}
-	if runID != "" {
-		attrs = append(attrs, telemetry.ConversationID(runID))
+	if conversationID != "" {
+		attrs = append(attrs, telemetry.ConversationID(conversationID))
 	}
 	if len(attrs) > 0 {
 		opts = append(opts, trace.WithAttributes(attrs...))

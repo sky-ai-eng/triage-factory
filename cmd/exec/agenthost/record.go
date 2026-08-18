@@ -19,11 +19,11 @@ import (
 
 // withWriteInfo picks the per-run routing strategy off info directly (the
 // free-function counterpart of LocalClient.withWrite, for callers — like an
-// ee extension handler — that hold a RunInfo but not a LocalClient).
+// ee extension handler — that hold a ConversationInfo but not a LocalClient).
 func withWriteInfo(
 	ctx context.Context,
 	stores db.Stores,
-	info RunInfo,
+	info ConversationInfo,
 	system func() error,
 	user func(ts db.TxStores) error,
 ) error {
@@ -33,20 +33,21 @@ func withWriteInfo(
 	return stores.Tx.SyntheticClaimsWithTx(ctx, info.OrgID, info.UserID, user)
 }
 
-// stampActionIdentityInfo fills the run/org/team/actor common to every
-// bot-attributed action from info. The action-specific fields (provider,
-// action, target, credential, from/to, dedup) are set by the caller.
-func stampActionIdentityInfo(act *domain.ExternalAction, info RunInfo) {
+// stampActionIdentityInfo fills the conversation/org/team/actor common to
+// every bot-attributed action from info. The action-specific fields
+// (provider, action, target, credential, from/to, dedup) are set by the
+// caller.
+func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) {
 	act.OrgID = info.OrgID
 	act.TeamID = info.TeamID
-	act.ConversationID = info.RunID
+	act.ConversationID = info.ConversationID
 	act.ActorUserID = info.UserID // empty for event-triggered → SQL NULL
 }
 
 // recordActionSystemInfo appends act on the admin pool (event-triggered
 // runs). A nil act — or a partial test wiring with no ExternalActions store —
 // is a no-op.
-func recordActionSystemInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) error {
+func recordActionSystemInfo(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) error {
 	if act == nil || stores.ExternalActions == nil {
 		return nil
 	}
@@ -84,12 +85,12 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 // already-applied action. Swallowed, but counted: this is the last stage of
 // the audit funnel auditstats.go measures, and the only one a local-mode
 // deployment (no sidecar, no relay) can reach.
-func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact, act *domain.ExternalAction) {
+func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) {
 	if a != nil {
 		if stores.Artifacts == nil {
 			return
 		}
-		a.ConversationID = info.RunID
+		a.ConversationID = info.ConversationID
 		a.OrgID = info.OrgID
 		a.TeamID = info.TeamID
 	} else if act == nil || stores.ExternalActions == nil {
@@ -112,7 +113,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 	// The artifact kind is a closed domain vocabulary; its target is a repo
 	// path, and stays out.
 	ctx, span := tracer.Start(ctx, "artifact.record",
-		trace.WithAttributes(telemetry.ConversationID(info.RunID), telemetry.OrgID(info.OrgID)))
+		trace.WithAttributes(telemetry.ConversationID(info.ConversationID), telemetry.OrgID(info.OrgID)))
 	defer span.End()
 	if a != nil {
 		span.SetAttributes(telemetry.Op(a.Kind))
@@ -147,7 +148,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 		recordSpanError(span, err)
 		recordAuditDrop(ctx, dropStageRecord, recordDropOp(a, act))
 		agenthostLog.Warn("external write recording failed (action already applied)",
-			"run", info.RunID, "kind", kind, "target", target, "error", err)
+			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
 	touched := recordTouchInfo(ctx, stores, info, act)
@@ -177,7 +178,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info RunInfo, a 
 // be domain.SlackSourceID(channel, rootTS), the same key the ingest pipeline
 // uses (ee/slack/ingest.go), so a bot-authored write on a thread
 // resolves/creates the identical entity a human mention would.
-func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) (string, error) {
+func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, provider, target, url string) (string, error) {
 	if stores.Entities == nil {
 		return "", nil
 	}
@@ -197,7 +198,7 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInf
 
 // recordEntityTouch resolves-or-creates the touched entity for (provider,
 // target, url) and, when it maps to a real entity, persists a durable
-// (run_id, entity_id, role='touched') row. Shared by the write funnel
+// (conversation_id, entity_id, role='touched') row. Shared by the write funnel
 // (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
 //
 // Best-effort throughout: a resolve or record failure is logged and swallowed
@@ -211,18 +212,18 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info RunInf
 // It returns the entity it resolved (empty for a skipped or failed resolve) so
 // a later consumer in the same funnel call can reuse it rather than resolving
 // the same key again; callers with no such consumer ignore the result.
-func recordEntityTouch(ctx context.Context, stores db.Stores, info RunInfo, provider, target, url string) string {
+func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationInfo, provider, target, url string) string {
 	id, err := resolveTouchedEntityInfo(ctx, stores, info, provider, target, url)
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
-			"run", info.RunID, "target", target, "error", err)
+			"conversation", info.ConversationID, "target", target, "error", err)
 		return ""
 	}
 	if id == "" || stores.TaskMemory == nil {
 		return id
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.RunID, id, domain.MemoryRoleTouched); err != nil {
-		agenthostLog.Warn("touched-entity record failed", "run", info.RunID, "entity", id, "error", err)
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, id, domain.MemoryRoleTouched); err != nil {
+		agenthostLog.Warn("touched-entity record failed", "conversation", info.ConversationID, "entity", id, "error", err)
 	}
 	return id
 }
@@ -245,12 +246,12 @@ func (r resolvedEntity) matches(provider, target string) bool {
 }
 
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
-// external action into its (provider, target, url) and records the run→entity
+// external action into its (provider, target, url) and records the conversation→entity
 // touch. A nil action (an audit-only write with no external action) touches
 // nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
 //
 // Returns what it resolved, for stampPROwnership to reuse — see the funnel.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *domain.ExternalAction) resolvedEntity {
+func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) resolvedEntity {
 	if act == nil {
 		return resolvedEntity{}
 	}
@@ -294,12 +295,12 @@ func recordTouchInfo(ctx context.Context, stores db.Stores, info RunInfo, act *d
 // only when it names the same (provider, target) the artifact does, so the
 // artifact stays the authority for who owns the PR even if the action beside it
 // ever points somewhere else.
-func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *domain.Artifact, touched resolvedEntity) {
+func stampPROwnership(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, touched resolvedEntity) {
 	if a == nil || a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindPullRequest {
 		return
 	}
 	// Defensive: auto-fire is gated on an owned task and artifacts.team_id is
-	// NOT NULL, so a run without a team should not reach here. If one does,
+	// NOT NULL, so a conversation without a team should not reach here. If one does,
 	// there is no owner to record and the entity keeps its NULL.
 	if info.TeamID == "" || stores.Entities == nil {
 		return
@@ -310,7 +311,7 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *do
 		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
 		if err != nil {
 			agenthostLog.Warn("owning-team stamp skipped: entity resolve failed",
-				"run", info.RunID, "target", a.Target, "error", err)
+				"conversation", info.ConversationID, "target", a.Target, "error", err)
 			return
 		}
 	}
@@ -320,20 +321,20 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *do
 	stamped, err := stores.Entities.StampOwningTeamIfUnsetSystem(ctx, info.OrgID, entityID, info.TeamID)
 	if err != nil {
 		agenthostLog.Warn("owning-team stamp failed",
-			"run", info.RunID, "entity", entityID, "target", a.Target, "error", err)
+			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "error", err)
 		return
 	}
 	if stamped {
 		agenthostLog.Info("stamped owning team on bot-opened PR",
-			"run", info.RunID, "entity", entityID, "target", a.Target, "team", info.TeamID)
+			"conversation", info.ConversationID, "entity", entityID, "target", a.Target, "team", info.TeamID)
 	}
 }
 
 // loadEntityMemory is the host side of `exec memory load`: it looks up the
 // entity for (source, sourceID) by its natural key — LOOKUP ONLY, never
 // FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
-// on a hit returns that entity's prior run memory scoped to the run's team,
-// plus records a best-effort run→entity 'touched' row (loading IS an address).
+// on a hit returns that entity's prior conversation memory scoped to the conversation's team,
+// plus records a best-effort conversation→entity 'touched' row (loading IS an address).
 //
 // Unlike recordEntityTouch's resolve-or-create, a miss here records NOTHING and
 // returns an empty result with an empty EntityID — the deliberate asymmetry the
@@ -349,7 +350,7 @@ func stampPROwnership(ctx context.Context, stores db.Stores, info RunInfo, a *do
 // fetched-all-then-sliced) so a hot entity's long history isn't transferred to
 // keep only the tail. The touch is best-effort — a read never fails on its
 // touch.
-func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationInfo, source, sourceID string, limit int) (*MemoryLoadResult, error) {
 	res := &MemoryLoadResult{Source: source, SourceID: sourceID, Memories: []MemoryLoadEntry{}}
 	if stores.Entities == nil {
 		return res, nil
@@ -384,7 +385,7 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, sourc
 		}
 		for _, m := range mems {
 			res.Memories = append(res.Memories, MemoryLoadEntry{
-				RunID:          m.RunID,
+				ConversationID: m.ConversationID,
 				BlueprintRunID: m.BlueprintRunID,
 				CreatedAt:      m.CreatedAt,
 				Content:        m.Content,
@@ -394,8 +395,8 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info RunInfo, sourc
 		// Record the touch strictly after the reads (loading is an address).
 		// Best-effort: a load never fails on its touch — the row self-heals on the
 		// next addressed hit, and on the sidecar a dropped relay costs one row.
-		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.RunID, entity.ID, domain.MemoryRoleTouched); err != nil {
-			agenthostLog.Warn("memory-load touch record failed", "run", info.RunID, "entity", entity.ID, "error", err)
+		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, info.OrgID, info.ConversationID, entity.ID, domain.MemoryRoleTouched); err != nil {
+			agenthostLog.Warn("memory-load touch record failed", "conversation", info.ConversationID, "entity", entity.ID, "error", err)
 		}
 	}
 	return res, nil

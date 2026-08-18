@@ -22,8 +22,8 @@ type pushDetails struct {
 }
 
 // newTestStores opens an in-memory SQLite, migrates it, and seeds one
-// conversations row the artifacts FK (run_id) can point at. Returns the
-// stores plus the run id to wire into RunInfo.
+// conversations row the artifacts FK (conversation_id) can point at. Returns the
+// stores plus the conversation id to wire into ConversationInfo.
 func newTestStores(t *testing.T) (db.Stores, string) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -39,29 +39,29 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	if _, err := conn.Exec(`INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
-	// Minimal valid run: event-triggered (creator_user_id NULL) + a
+	// Minimal valid conversation: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
-	// sentinels. The artifact only needs run_id to satisfy its FK.
+	// sentinels. The artifact only needs conversation_id to satisfy its FK.
 	if _, err := conn.Exec(`INSERT INTO conversations (id, trigger_type, creator_user_id, origin, status) VALUES ('r1', 'event', NULL, 'interactive', 'running')`); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return sqlitestore.New(conn), "r1"
 }
 
-func hostFor(stores db.Stores, runID string, eventTriggered bool) agenthost.Client {
-	return agenthost.NewLocal(stores, agenthost.RunInfo{
+func hostFor(stores db.Stores, conversationID string, eventTriggered bool) agenthost.Client {
+	return agenthost.NewLocal(stores, agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		IsEventTriggered: eventTriggered,
 	})
 }
 
 func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
-	stores, runID := newTestStores(t)
-	host := hostFor(stores, runID, false)
+	stores, conversationID := newTestStores(t)
+	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{
 		"--remote", "https://github.com/octo/repo.git",
@@ -70,9 +70,9 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1", len(arts))
@@ -96,8 +96,8 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
 	}
-	if a.ConversationID != runID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
-		t.Errorf("identity not stamped: run=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
+	if a.ConversationID != conversationID || a.OrgID != runmode.LocalDefaultOrgID || a.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("identity not stamped: conversation=%q org=%q team=%q", a.ConversationID, a.OrgID, a.TeamID)
 	}
 	var d pushDetails
 	if err := json.Unmarshal([]byte(a.DetailsJSON), &d); err != nil {
@@ -112,15 +112,15 @@ func TestRecordPush_UpsertsBranchArtifact(t *testing.T) {
 // lands on the one deduped row, updating the volatile payload (sha, new)
 // rather than minting a second artifact.
 func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
-	stores, runID := newTestStores(t)
-	host := hostFor(stores, runID, false)
+	stores, conversationID := newTestStores(t)
+	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "aaa", "--new=true"})
 	runRecordPush(host, []string{"--remote", "git@github.com:octo/repo.git", "--ref", "refs/heads/main", "--sha", "bbb", "--new=false"})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1 (re-push must upsert)", len(arts))
@@ -133,18 +133,18 @@ func TestRecordPush_RepushUpsertsOneRow(t *testing.T) {
 }
 
 // TestRecordPush_EventTriggeredUsesSystemPool exercises the admin-pool
-// branch (an auto-delegated run has no user identity). In SQLite both pools
-// are the one connection, so success here just confirms the branch writes a
-// row rather than erroring.
+// branch (an auto-delegated conversation has no user identity). In SQLite
+// both pools are the one connection, so success here just confirms the
+// branch writes a row rather than erroring.
 func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
-	stores, runID := newTestStores(t)
-	host := hostFor(stores, runID, true)
+	stores, conversationID := newTestStores(t)
+	host := hostFor(stores, conversationID, true)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "ccc", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1", len(arts))
@@ -154,14 +154,14 @@ func TestRecordPush_EventTriggeredUsesSystemPool(t *testing.T) {
 // TestRecordPush_SkipsNonBranchRef confirms a tag (or any non refs/heads ref)
 // is not recorded as a branch artifact.
 func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
-	stores, runID := newTestStores(t)
-	host := hostFor(stores, runID, false)
+	stores, conversationID := newTestStores(t)
+	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/tags/v1.0", "--sha", "ddd", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts, want 0 (tags are not branches)", len(arts))
@@ -174,12 +174,12 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 // anchored to the GHES host, not github.com. This is the scenario the earlier
 // github.com-only gate silently dropped before an artifact was ever written.
 func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
-	stores, runID := newTestStores(t)
+	stores, conversationID := newTestStores(t)
 	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
 		t.Fatalf("seed org github base: %v", err)
 	}
-	host := hostFor(stores, runID, false)
+	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{
 		"--remote", "https://github.corp.example.com/octo/repo.git",
@@ -188,9 +188,9 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 		"--new=true",
 	})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 1 {
 		t.Fatalf("got %d artifacts, want 1 (a GHES push must be captured in local mode)", len(arts))
@@ -205,18 +205,18 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 // an unrelated remote is never recorded (and never mis-anchored to the GHES
 // host).
 func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
-	stores, runID := newTestStores(t)
+	stores, conversationID := newTestStores(t)
 	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
 		t.Fatalf("seed org github base: %v", err)
 	}
-	host := hostFor(stores, runID, false)
+	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})
 
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(arts) != 0 {
 		t.Fatalf("got %d artifacts, want 0 (github.com is not the GHES org's host)", len(arts))

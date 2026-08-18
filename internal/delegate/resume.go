@@ -22,7 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// ErrRunNotResumable is returned when a wake's compare-and-swap found the
+// ErrConversationNotResumable is returned when a wake's compare-and-swap found the
 // conversation no longer in a resumable state (MarkQueuedForResume only flips
 // open / completed) — a concurrent failure or terminal moved it out from under
 // the caller. Callers map this to 409 Conflict so the client can refresh and
@@ -34,7 +34,7 @@ import (
 // claim to deliver — nothing about that is a conflict to report. A flip lost
 // to a conversation that went terminal instead IS one: nothing will claim it,
 // so the queued message is never delivered.
-var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
+var ErrConversationNotResumable = errors.New("resume: conversation not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
 // intact but its blueprint will never drive it again, so a wake would strand it
@@ -57,7 +57,7 @@ var ErrRunNotResumable = errors.New("resume: run not in a resumable state")
 // freezes its blueprint 'running' with the pointer on that step, precisely so
 // the parked step stays claimable.
 //
-// Its own sentinel rather than ErrRunNotResumable, because the two say
+// Its own sentinel rather than ErrConversationNotResumable, because the two say
 // different things to a person. "Not resumable" means the state moved under
 // you: refresh and look again. This means refreshing will never change it.
 var ErrConversationConcluded = errors.New("resume: this conversation can no longer be continued — its blueprint has moved past this step, or was cancelled (only the step a blueprint is currently on takes follow-ups)")
@@ -75,7 +75,7 @@ var ErrStepHandedOff = errors.New("resume: this step just handed off to the next
 // reaped by the retention TTL. The conversation's status is left unchanged (no
 // flip), so the user gets a clear "this workspace has expired" signal rather
 // than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
-var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired and can no longer be resumed")
+var ErrWorkspaceExpired = errors.New("resume: this conversation's workspace has expired and can no longer be resumed")
 
 // lostWakeOutcome answers for a wake whose compare-and-swap found the
 // conversation already moved. The message is queued either way — the only
@@ -108,22 +108,22 @@ var ErrWorkspaceExpired = errors.New("resume: this run's workspace has expired a
 // step the CAS's hand-off guard refused after the pre-check let it through. The
 // conflict is right (nothing claims it while the reactor still owes it a
 // decision); only the log line's "went terminal" overstates what happened.
-func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) error {
-	run, err := s.agentRuns.GetSystem(ctx, orgID, runID)
+func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID string) error {
+	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil {
 		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
-			"run", runID, "org_id", orgID, "error", err)
-		return ErrRunNotResumable
+			"conversation", conversationID, "org_id", orgID, "error", err)
+		return ErrConversationNotResumable
 	}
-	if run == nil {
-		return ErrRunNotResumable
+	if conv == nil {
+		return ErrConversationNotResumable
 	}
-	if run.Status == domain.StatusQueued || domain.IsActiveRunStatus(run.Status) {
+	if conv.Status == domain.StatusQueued || domain.IsActiveConversationStatus(conv.Status) {
 		return nil
 	}
 	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
-		"run", runID, "org_id", orgID, "status", run.Status)
-	return ErrRunNotResumable
+		"conversation", conversationID, "org_id", orgID, "status", conv.Status)
+	return ErrConversationNotResumable
 }
 
 // recordResumeTaskEvent puts a follow-up on its task's timeline.
@@ -141,21 +141,21 @@ func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, runID string) erro
 // row would turn a follow-up that worked into an error nobody can act on.
 // run carries the pre-flip state — the whole point of the row is which rest
 // state the follow-up woke.
-func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID string, run domain.Conversation) {
-	if s.events == nil || s.tasks == nil || run.TaskID == "" {
+func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID string, conv domain.Conversation) {
+	if s.events == nil || s.tasks == nil || conv.TaskID == "" {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
 	meta, err := json.Marshal(events.SystemConversationResumedMetadata{
-		ConversationID: run.ID,
-		TaskID:         run.TaskID,
+		ConversationID: conv.ID,
+		TaskID:         conv.TaskID,
 		UserID:         userID,
-		BlueprintRunID: run.BlueprintRunID,
-		FromStatus:     run.Status,
-		FromOutcome:    run.Outcome,
+		BlueprintRunID: conv.BlueprintRunID,
+		FromStatus:     conv.Status,
+		FromOutcome:    conv.Outcome,
 	})
 	if err != nil {
-		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "run", run.ID, "error", err)
+		delegateLog.Warn("marshal resume event metadata failed; the follow-up is not on the task timeline", "conversation", conv.ID, "error", err)
 		return
 	}
 	eventID, err := s.events.RecordSystem(ctx, orgID, domain.Event{
@@ -165,11 +165,11 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 		OccurredAt:   time.Now().UTC(),
 	})
 	if err != nil {
-		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "run", run.ID, "task", run.TaskID, "error", err)
+		delegateLog.Warn("record resume event failed; the follow-up is not on the task timeline", "conversation", conv.ID, "task", conv.TaskID, "error", err)
 		return
 	}
-	if err := s.tasks.RecordEventSystem(ctx, orgID, run.TaskID, eventID, "resumed"); err != nil {
-		delegateLog.Warn("link resume event to task failed", "run", run.ID, "task", run.TaskID, "event", eventID, "error", err)
+	if err := s.tasks.RecordEventSystem(ctx, orgID, conv.TaskID, eventID, "resumed"); err != nil {
+		delegateLog.Warn("link resume event to task failed", "conversation", conv.ID, "task", conv.TaskID, "event", eventID, "error", err)
 	}
 }
 
@@ -178,15 +178,15 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // cold-rehydrate from. A check we can't complete (no storage wired, a blob
 // hiccup) counts as recoverable — a transient inability to verify must never
 // strand a resumable run as expired, and the claim path re-checks for real.
-func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *domain.Conversation) bool {
-	if run.WorktreePath != "" {
-		if _, err := os.Stat(run.WorktreePath); err == nil {
+func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *domain.Conversation) bool {
+	if conv.WorktreePath != "" {
+		if _, err := os.Stat(conv.WorktreePath); err == nil {
 			return true
 		} else if !os.IsNotExist(err) {
 			// A stat we couldn't complete (permission, I/O) is not proof the
 			// worktree is gone — count it as recoverable rather than emit a
 			// false 410 on a transient error.
-			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "run", run.ID, "path", run.WorktreePath, "error", err)
+			delegateLog.Warn("resume: worktree stat inconclusive; treating as recoverable", "conversation", conv.ID, "path", conv.WorktreePath, "error", err)
 			return true
 		}
 	}
@@ -194,9 +194,9 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 	if blobs == nil {
 		return true
 	}
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(run.BlueprintRunID, run.ID)))
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(conv.BlueprintRunID)))
 	if err != nil {
-		delegateLog.Warn("resume: snapshot existence check failed", "run", run.ID, "error", err)
+		delegateLog.Warn("resume: snapshot existence check failed", "conversation", conv.ID, "error", err)
 		return true
 	}
 	return ok
@@ -208,7 +208,7 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, run *d
 // began with rather than re-resolving live state mid-run.
 type ResumeOptions struct {
 	// Model is the model the run started with. **Required** — a resume
-	// must reuse the model captured at run start (run.Model, captured by
+	// must reuse the model captured at run start (conv.Model, captured by
 	// dispatchResumeClaim), never a freshly-resolved one, or a config change
 	// the initial invocation and the resume would silently switch models
 	// mid-run. ResumeWithMessage rejects an empty Model with an error
@@ -237,15 +237,16 @@ type ResumeOptions struct {
 	// TRIAGE_FACTORY_BLUEPRINT_RUN_ID so per-run scratch paths resolve to the
 	// same place they did on the initial invocation. Required for the resume to
 	// stay consistent with the initial env; callers capture it from the run
-	// (dispatchResumeClaim → run.BlueprintRunID).
+	// (dispatchResumeClaim → conv.BlueprintRunID).
 	Namespace string
 
-	// TeamID is the run's owning team. Resolves the presence-gated
-	// absent-auto-deny policy for the resumed run's permission prompts
-	// (TFAC-392), and stamps the resumed run's agenthost.RunInfo.TeamID so
-	// the capture writers can attribute artifacts (TFAC-458). The claim
-	// captures it from the run row (run.TeamID, NOT NULL); empty falls back
-	// to the schema defaults for the absent-auto-deny resolve.
+	// TeamID is the conversation's owning team. Resolves the presence-gated
+	// absent-auto-deny policy for the resumed conversation's permission
+	// prompts (TFAC-392), and stamps the resumed conversation's
+	// agenthost.ConversationInfo.TeamID so the capture writers can attribute
+	// artifacts (TFAC-458). The claim captures it from the conversation row
+	// (conv.TeamID, NOT NULL); empty falls back to the schema defaults for
+	// the absent-auto-deny resolve.
 	TeamID string
 
 	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
@@ -283,10 +284,10 @@ type ResumeOutcome struct {
 // open run when the warm process is gone.
 //
 // Callers pass the sessionID captured during the initial run (read
-// from conversations.sdk_session_id, populated on the runSink during the original
+// from conversations.sdk_session_id, populated on the conversationSink during the original
 // invocation), the cwd the original run used so the resumed
 // subprocess sees the same worktree, and the user message to append
-// to the conversation. The runID is reused so resumed messages append
+// to the conversation. The conversationID is reused so resumed messages append
 // to the existing messages stream — the UI sees one coherent
 // conversation.
 //
@@ -296,7 +297,7 @@ type ResumeOutcome struct {
 // gives up. Mirroring the initial invocation's status updates here
 // would produce double terminal completion writes with stale
 // cost/duration fields overwriting the real totals.
-func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
+func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, sessionID, cwd, message string, opts ResumeOptions, triggerType, creatorUserID string) (*ResumeOutcome, error) {
 	if sessionID == "" {
 		return nil, fmt.Errorf("resume: missing session id")
 	}
@@ -308,7 +309,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// team) resolve — is what closes the mid-run model-drift gap: a config
 	// change between the initial invocation and this resume must never
 	// switch models underneath a single logical run. The resume claim captures
-	// and passes it (run.Model); an empty value is a wiring bug, surfaced loudly.
+	// and passes it (conv.Model); an empty value is a wiring bug, surfaced loudly.
 	if opts.Model == "" {
 		return nil, fmt.Errorf("resume: missing model (caller must pass the model captured at run start)")
 	}
@@ -326,7 +327,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	}
 
 	extraEnv := []string{
-		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
+		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume
 		// cwd IS the original run-root (runAgent passed runRoot as the
 		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
@@ -365,7 +366,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	var startAgentHost func() (sandbox.Mount, io.Closer, error)
 	if opts.sidecar != nil {
 		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			return agenthost.SocketMountFor(runID), noopCloser{}, nil
+			return agenthost.SocketMountFor(conversationID), noopCloser{}, nil
 		}
 	}
 
@@ -374,15 +375,15 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
 	// needs its own listener, placeholder and trust file).
 	ownerForGH, _, _ := strings.Cut(opts.RepoEnv, "/")
-	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, runID, ownerForGH, agenthost.RunInfo{
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, conversationID, ownerForGH, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           creatorUserID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
 	})
 	defer func() { _ = localGHCloser.Close() }()
-	ghChannel := opts.sidecar.ghChannel(runID)
+	ghChannel := opts.sidecar.ghChannel(conversationID)
 	if ghChannel == nil {
 		ghChannel = localGH
 	}
@@ -400,11 +401,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		}),
 		MaxTurns:        100,
 		ExtraEnv:        extraEnv,
-		TraceID:         runID,
+		TraceID:         conversationID,
 		MemoryNamespace: opts.Namespace,
 		OrgID:           orgID,
 		Secrets:         s.getRunSecrets(),
-		LLMResolver:     s.llmResolverForRun(orgID, runID),
+		LLMResolver:     s.llmResolverForConversation(orgID, conversationID),
 		// This turn's own engagement pays for this turn's jail.
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
@@ -417,12 +418,12 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.
-		SkillsSourcePath: stagedStepSkillsSource(runID),
+		SkillsSourcePath: stagedStepSkillsSource(conversationID),
 		// Same for the prior-memory tree: a resume continues the same step, so it
 		// reads the same handoff it started with rather than a freshly rendered one.
-		MemorySourcePath: stagedEntityMemorySource(runID),
+		MemorySourcePath: stagedEntityMemorySource(conversationID),
 	}
-	sink := newRunSink(s, orgID, runID, opts.claimID, triggerType, creatorUserID)
+	sink := newConversationSink(s, orgID, conversationID, opts.claimID, triggerType, creatorUserID)
 
 	// Off-allowlist tool calls route the same way the initial run does:
 	// gVisor-sandboxed delegated runs auto-approve (the sandbox + the static
@@ -432,9 +433,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	// their only boundary. opts.TeamID falls back to defaults when empty.
 	var perms agentproc.PermissionHandler
 	if agentproc.WillSandbox() {
-		perms = s.AutoApprovePermissionHandler(runID)
+		perms = s.AutoApprovePermissionHandler(conversationID)
 	} else {
-		perms = s.BrowserPermissionHandler(orgID, runID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
+		perms = s.BrowserPermissionHandler(orgID, conversationID, opts.claimID, s.resolveAbsentAutoDeny(ctx, opts.TeamID))
 	}
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
@@ -446,18 +447,18 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
 			// taskID is intentionally omitted: hibernation is disabled on
-			// resumes (idleTimeout 0 below), so markRunOpen — the only
+			// resumes (idleTimeout 0 below), so markConversationOpen — the only
 			// taskID consumer — is unreachable here. (It also degrades safely
 			// to a no-op board recompute if a future change re-enables idle.)
 			park: liveParkContext{
-				orgID:         orgID,
-				runID:         runID,
-				namespace:     opts.Namespace,
-				claudeCwd:     cwd,
-				triggerType:   triggerType,
-				creatorUserID: creatorUserID,
-				claimID:       opts.claimID,
-				runtime:       domain.ConversationRuntimeSDK,
+				orgID:          orgID,
+				conversationID: conversationID,
+				namespace:      opts.Namespace,
+				claudeCwd:      cwd,
+				triggerType:    triggerType,
+				creatorUserID:  creatorUserID,
+				claimID:        opts.claimID,
+				runtime:        domain.ConversationRuntimeSDK,
 			},
 			opts:        baseOpts,
 			perms:       perms,
@@ -470,8 +471,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, runID, sessionID
 
 	// A fence trip on this path — the sink's refused insert, or the driver's
 	// refused park — surfaces as an outcome with no completion, and the caller
-	// routes that through failRun. That is the correct disposition and it is
-	// safe to reach: failRun's terminal is itself claim-fenced, so the refusal
+	// routes that through failConversation. That is the correct disposition and it is
+	// safe to reach: failConversation's terminal is itself claim-fenced, so the refusal
 	// repeats there and nothing lands on the successor's row. No dedicated
 	// fenced field on ResumeOutcome, because there is no action it would
 	// unlock that isn't already refused one layer down.

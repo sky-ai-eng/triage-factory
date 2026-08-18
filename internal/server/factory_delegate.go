@@ -363,13 +363,14 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Now attempt the spawn. Delegate's failure modes (blueprint not
-	// found, DB error creating the run row) DON'T unstamp the claim
-	// — the user's commitment is real, the run just didn't fire.
+	// found, DB error creating the conversation row) DON'T unstamp the
+	// claim — the user's commitment is real, the conversation just didn't
+	// fire.
 	// task.ClaimedByAgentID mirrors the just-stamped claim for the shared
-	// task object; the actor is passed explicitly so the run's frozen
-	// blueprint_run actor matches it.
+	// task object; the actor is passed explicitly so the conversation's
+	// frozen blueprint_run actor matches it.
 	task.ClaimedByAgentID = a.ID
-	runID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
+	blueprintRunID, err := s.spawner.Delegate(*task, delegate.DelegateOpts{
 		OrgID:               orgID,
 		ExplicitBlueprintID: req.BlueprintID,
 		TriggerType:         "manual",
@@ -390,8 +391,10 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, factoryDelegateResponse{
-		TaskID:         task.ID,
-		ConversationID: runID,
+		TaskID: task.ID,
+		// TODO(TFAC-840): carries the blueprint_run id, not a conversation id —
+		// a wire contract, so correcting it is that ticket's call.
+		ConversationID: blueprintRunID,
 		ClaimStamped:   true,
 	})
 }

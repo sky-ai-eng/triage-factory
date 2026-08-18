@@ -3,7 +3,7 @@
 // and NO secret store — it reaches its org-bound policy (channel authz,
 // workspace resolution) by RELAYING through the runtime to the
 // orchestrator-side ops (exec_provider_ops.go), and its bot token by SELECTING
-// from the run's sealed bundle (exec_provider.go). That is what lets the same
+// from the claim's sealed bundle (exec_provider.go). That is what lets the same
 // handler run in the orchestrator (all/local) AND in the capless per-run
 // credential sidecar, where the exec-verb parser now lives.
 //
@@ -102,10 +102,10 @@ type slackReactResult struct{}
 // Every store touch below is a RELAY to the orchestrator-side policy op
 // (exec_provider_ops.go): the handler holds no db.Stores. The orchestrator
 // answers with an authorization result or a workspace IDENTITY (never a
-// token), binding the run's org from its own RunInfo. The bot TOKEN is then
-// SELECTED locally from the run's sealed bundle — so no secret crosses back.
+// token), binding the conversation's org from its own ConversationInfo. The bot TOKEN is then
+// SELECTED locally from the claim's sealed bundle — so no secret crosses back.
 
-// authorizeChannel is the stage-1 gate: the run's team must track channelID.
+// authorizeChannel is the stage-1 gate: the conversation's team must track channelID.
 // The op errors when it doesn't, so a nil return means authorized.
 func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) error {
 	return rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, nil)
@@ -151,7 +151,7 @@ func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, rt agentho
 }
 
 // selectBotToken picks the bot token for a resolved (workspace, app) identity
-// from the run's sealed bundle — in-process, never asking the orchestrator for
+// from the claim's sealed bundle — in-process, never asking the orchestrator for
 // a secret. A pair outside the sealed (== authorizable) set is an error,
 // symmetric with a channel the team doesn't track.
 func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity) (string, error) {
@@ -165,7 +165,7 @@ func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slack
 	}
 	token, ok := creds.tokenFor(ws.WorkspaceID, ws.APIAppID)
 	if !ok {
-		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this run's sealed set", ws.WorkspaceID, ws.APIAppID)
+		return "", fmt.Errorf("slack: no bot token for workspace %s (app %s) in this claim's sealed set", ws.WorkspaceID, ws.APIAppID)
 	}
 	return token, nil
 }
@@ -688,7 +688,7 @@ func (h *slackExecHandler) download(ctx context.Context, rt agenthost.ExtensionR
 	if err != nil {
 		return slackDownloadResult{}, fmt.Errorf("slack: look up file: %w", err)
 	}
-	// Authorize against the file's OWN channel membership, not the run's
+	// Authorize against the file's OWN channel membership, not the conversation's
 	// context — resolveTokenForDownload only picked a bot identity, it never
 	// checked a channel (download has none to check upfront). Every other verb
 	// authorizes before making any Slack call; download can only do so after

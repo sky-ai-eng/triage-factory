@@ -139,10 +139,10 @@ func TestLocalGHChannel_WiresRealGH(t *testing.T) {
 		seen []ghinjector.ObservedMutation
 	)
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-1",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "conv-wire-1",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 		Observe: func(_ context.Context, m ghinjector.ObservedMutation) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -215,10 +215,10 @@ func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-2",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "conv-wire-2",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 	})
 	if err != nil {
 		t.Fatalf("ghchannel.Start: %v", err)
@@ -259,31 +259,31 @@ func TestLocalGHChannel_IgnoresUserGHConfig(t *testing.T) {
 	}
 }
 
-// Close stops the listener and removes the run's directory. A run that outlives
-// its channel gets connection-refused, which surfaces to the agent as a plain gh
-// error — the same contract multi mode has.
+// Close stops the listener and removes the channel directory. A run that
+// outlives its channel gets connection-refused, which surfaces to the agent as
+// a plain gh error — the same contract multi mode has.
 func TestLocalGHChannel_CloseTearsDown(t *testing.T) {
 	upstream, _ := fakeUpstream(t)
 	paths.SetForTest(t, t.TempDir())
 
 	ch, err := ghchannel.Start(ghchannel.Config{
-		RunID:       "run-wire-3",
-		Upstream:    upstream.URL + "/api/v3",
-		BinDir:      wireBinDir(t),
-		TokenSource: func(context.Context) (string, error) { return wireReal, nil },
+		ConversationID: "conv-wire-3",
+		Upstream:       upstream.URL + "/api/v3",
+		BinDir:         wireBinDir(t),
+		TokenSource:    func(context.Context) (string, error) { return wireReal, nil },
 	})
 	if err != nil {
 		t.Fatalf("ghchannel.Start: %v", err)
 	}
-	runDir := paths.GHChannelRunDir("run-wire-3")
+	channelDir := paths.GHChannelDir("conv-wire-3")
 	if _, err := os.Stat(ch.CertPath); err != nil {
 		t.Fatalf("trust file missing before Close: %v", err)
 	}
 	if err := ch.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := os.Stat(runDir); !os.IsNotExist(err) {
-		t.Errorf("stat(%s) = %v, want the run directory removed", runDir, err)
+	if _, err := os.Stat(channelDir); !os.IsNotExist(err) {
+		t.Errorf("stat(%s) = %v, want the channel directory removed", channelDir, err)
 	}
 	if err := ch.Close(); err != nil {
 		t.Errorf("second Close: %v, want it to be idempotent", err)

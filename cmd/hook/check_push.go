@@ -35,9 +35,10 @@ const ExitRefused = 3
 // command, which is the failure that actually happens.
 //
 // Every outcome other than a positive "this ref is protected and the policy
-// says no" allows the push: no run context, an unreadable database, a remote
-// that isn't the org's GitHub host, an unparseable line. A mistake-guard that
-// fails closed on a dead database is a broken tool, not a safer one.
+// says no" allows the push: no conversation context, an unreadable database,
+// a remote that isn't the org's GitHub host, an unparseable line. A
+// mistake-guard that fails closed on a dead database is a broken tool, not a
+// safer one.
 func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn io.Reader) int {
 	fs := flag.NewFlagSet("hook check-push", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -63,9 +64,9 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 	}
 	repoRef := domain.RepoRef{Owner: owner, Repo: repo}
 
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hook check-push: no run context (%v); allowing push\n", err)
+		fmt.Fprintf(os.Stderr, "hook check-push: no conversation context (%v); allowing push\n", err)
 		return 0
 	}
 	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoRef, info.IsEventTriggered)

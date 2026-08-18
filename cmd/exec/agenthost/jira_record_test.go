@@ -59,18 +59,18 @@ func startFakeJira(t *testing.T) *httptest.Server {
 
 // newJiraRecordingStores builds a real SQLite store bundle (so Artifacts / Tx /
 // Orgs are live) with the Jira credential faked to point at jiraURL, seeds a
-// run for the artifacts FK to anchor on, and returns the bundle + the run
-// identity. eventTriggered picks the write path withWrite routes through:
-// admin pool (no user) when true, a synthetic-claims tx (manual run) when
-// false — both are exercised across the tests below.
-func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, RunInfo) {
+// conversation for the artifacts FK to anchor on, and returns the bundle + the
+// conversation identity. eventTriggered picks the write path withWrite routes
+// through: admin pool (no user) when true, a synthetic-claims tx (manual
+// conversation) when false — both are exercised across the tests below.
+func newJiraRecordingStores(t *testing.T, jiraURL string, eventTriggered bool) (db.Stores, ConversationInfo) {
 	_, stores, info := newJiraRecordingStoresConn(t, jiraURL, eventTriggered)
 	return stores, info
 }
 
 // newJiraRecordingStoresConn is newJiraRecordingStores plus the raw *sql.DB, for
 // touch tests that read conversation_memory_entities directly.
-func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered bool) (*sql.DB, db.Stores, RunInfo) {
+func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered bool) (*sql.DB, db.Stores, ConversationInfo) {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -83,29 +83,29 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 
-	const runID = "11111111-1111-1111-1111-111111111111"
+	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(
-		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, runID,
+		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	stores := sqlitestore.New(conn)
 	stores.Secrets = fakeJiraSecrets{url: jiraURL, pat: "org-pat"}
-	info := RunInfo{
+	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            runID,
+		ConversationID:   conversationID,
 		IsEventTriggered: eventTriggered,
 	}
 	return conn, stores, info
 }
 
-func listRunArtifacts(t *testing.T, stores db.Stores, runID string) []domain.Artifact {
+func listConversationArtifacts(t *testing.T, stores db.Stores, conversationID string) []domain.Artifact {
 	t.Helper()
-	arts, err := stores.Artifacts.ListByRun(context.Background(), runmode.LocalDefaultOrgID, runID)
+	arts, err := stores.Artifacts.ListByConversation(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	return arts
 }
@@ -131,7 +131,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if key != "SKY-1" {
 					t.Fatalf("created key = %q, want SKY-1", key)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
 					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 				}
@@ -141,8 +141,8 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					a.DedupKey != "jira:issue:SKY-1" {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
-				if a.ConversationID != info.RunID || a.TeamID != runmode.LocalDefaultTeamID {
-					t.Errorf("attribution mismatch: run=%q team=%q", a.ConversationID, a.TeamID)
+				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
+					t.Errorf("attribution mismatch: conversation=%q team=%q", a.ConversationID, a.TeamID)
 				}
 			})
 
@@ -154,7 +154,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraTransitionTo(context.Background(), "SKY-9", "Done"); err != nil {
 					t.Fatalf("JiraTransitionTo: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
 					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 				}
@@ -176,7 +176,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraAddComment(context.Background(), "SKY-9", "looks good to me"); err != nil {
 					t.Fatalf("JiraAddComment: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
 					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 				}
@@ -199,7 +199,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraAssignToSelf(context.Background(), "SKY-9"); err != nil {
 					t.Fatalf("JiraAssignToSelf: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
 					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 				}
@@ -225,7 +225,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}); err != nil {
 					t.Fatalf("JiraUpdateIssue: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 {
 					t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
 				}
@@ -247,7 +247,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraSetParent(context.Background(), "SKY-9", "SKY-1"); err != nil {
 					t.Fatalf("JiraSetParent: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
 					arts[0].DedupKey != "jira:issue:SKY-9" || arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-parent artifact mismatch: %+v", arts)
@@ -265,7 +265,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if err := client.JiraSetPriority(context.Background(), "SKY-9", "Low"); err != nil {
 					t.Fatalf("JiraSetPriority: %v", err)
 				}
-				arts := listRunArtifacts(t, stores, info.RunID)
+				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].DedupKey != "jira:issue:SKY-9" ||
 					arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-priority artifact mismatch: %+v", arts)
@@ -299,7 +299,7 @@ func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 		t.Fatalf("JiraAddComment: %v", err)
 	}
 
-	for _, a := range listRunArtifacts(t, stores, info.RunID) {
+	for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
 		switch a.Kind {
 		case domain.ArtifactKindIssue:
 			if a.URL != "https://acme.atlassian.net/browse/SKY-7" {
@@ -330,7 +330,7 @@ func TestLocalClient_JiraComment_NoID_SkipsArtifact(t *testing.T) {
 	if err := client.JiraAddComment(context.Background(), "SKY-9", "no id back"); err != nil {
 		t.Fatalf("JiraAddComment must succeed even when the id is missing: %v", err)
 	}
-	if arts := listRunArtifacts(t, stores, info.RunID); len(arts) != 0 {
+	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
 		t.Errorf("expected no artifact when comment id is empty, got %+v", arts)
 	}
 }
@@ -351,7 +351,7 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 		t.Fatalf("JiraAddComment: %v", err)
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 2 {
 		t.Fatalf("want 2 artifacts (one issue, one comment), got %d: %+v", len(arts), arts)
 	}

@@ -1,12 +1,13 @@
 import type { Conversation } from '../../types'
-import { chainPosition, completionKind, isActiveRun } from '../../lib/runStatus'
+import { chainPosition, completionKind, isActiveConversation } from '../../lib/conversationStatus'
 import { hasUnresolvedArtifacts } from '../../lib/approval'
 
-// stationStyle — the design system for the run-station HMI. It maps a run's
-// status to the single "light" the whole machine wears, plus the motion knobs
-// (scanner / vent heat / belt speed) that make a live run feel like a station on
-// the factory line. Pure module (no JSX) so the presentational components in
-// runstation/* import it freely and Fast Refresh stays happy.
+// stationStyle — the design system for the run-station HMI. It maps a
+// conversation's status to the single "light" the whole machine wears, plus
+// the motion knobs (scanner / vent heat / belt speed) that make a live
+// conversation feel like a station on the factory line. Pure module (no JSX)
+// so the presentational components in runstation/* import it freely and Fast
+// Refresh stays happy.
 //
 // The machine is lit by state, not chrome — the board's grammar pulled onto a
 // full screen. A baseline cyan "powered" trim is always on; a dominant
@@ -30,7 +31,7 @@ export interface StationState {
   light: string
   /** Uppercase status word shown in the label plate. */
   label: string
-  /** A live run breathes, scans, runs hot, and moves the belt. */
+  /** A live conversation breathes, scans, runs hot, and moves the belt. */
   live: boolean
   /** The scanner sweep runs only while a turn is actively executing. */
   scanner: boolean
@@ -44,11 +45,11 @@ export interface StationState {
 // light from the factory's LED perimeter, toned for the warm field.
 export const HMI_CYAN = 'var(--hmi-cyan)'
 
-// stationState collapses the run lifecycle into the machine's lit state. Every
-// active status — each setup phase and running alike — reads as one thing: the
-// machine is hot and scanning.
-export function stationState(run: Conversation): StationState {
-  if (isActiveRun(run)) {
+// stationState collapses the conversation lifecycle into the machine's lit
+// state. Every active status — each setup phase and running alike — reads as
+// one thing: the machine is hot and scanning.
+export function stationState(conversation: Conversation): StationState {
+  if (isActiveConversation(conversation)) {
     return {
       key: 'working',
       light: 'var(--color-delegate)',
@@ -59,12 +60,13 @@ export function stationState(run: Conversation): StationState {
       belt: 1,
     }
   }
-  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled run
-  // (idle / terminal) that still holds unresolved draft PRs or ready reviews
-  // wears the amber "your move" light, regardless of its run status. A live run
-  // keeps WORKING (handled above) — the dock surfaces the approval affordance
-  // without recoloring the whole machine mid-turn.
-  if (hasUnresolvedArtifacts(run)) {
+  // Approval is derived, not a stored status (TFAC-382/TFAC-492): a settled
+  // conversation (idle / terminal) that still holds unresolved draft PRs or
+  // ready reviews wears the amber "your move" light, regardless of its stored
+  // status. A live conversation keeps WORKING (handled above) — the dock
+  // surfaces the approval affordance without recoloring the whole machine
+  // mid-turn.
+  if (hasUnresolvedArtifacts(conversation)) {
     return {
       key: 'attention',
       light: 'var(--color-snooze)',
@@ -75,7 +77,7 @@ export function stationState(run: Conversation): StationState {
       belt: 0.16,
     }
   }
-  switch (run.Status) {
+  switch (conversation.Status) {
     case 'open':
       // Honest idle: not executing, not concluded. Powered, waiting — the
       // machine glows its baseline cyan, belt idling, vents barely warm.
@@ -103,13 +105,13 @@ export function stationState(run: Conversation): StationState {
       // wears a different light for each, because "this step is done" and "the
       // task is done" are not the same news, and the green DONE plate was
       // telling a viewer mid-chain that the whole thing had stopped.
-      switch (completionKind(run)) {
+      switch (completionKind(conversation)) {
         case 'handoff': {
           // Cyan, not green: the powered-and-waiting trim. This step concluded
           // and the line moved on, so the belt keeps idling — green here reads
           // as "nothing follows", which is exactly the wrong conclusion. The
           // position rides the label so the plate itself says where you are.
-          const pos = chainPosition(run)
+          const pos = chainPosition(conversation)
           return {
             key: 'handoff',
             light: HMI_CYAN,
@@ -158,7 +160,7 @@ export function stationState(run: Conversation): StationState {
       return {
         key: 'open',
         light: HMI_CYAN,
-        label: run.Status.toUpperCase(),
+        label: conversation.Status.toUpperCase(),
         live: false,
         scanner: false,
         heat: 0.2,
@@ -173,10 +175,10 @@ export function tint(color: string, pct: number): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`
 }
 
-// liveHeat — vent-heat 0..1 for a live run: idles at the state's base heat and
-// flares toward 1 when the agent just emitted (a tool call / message in the last
-// few seconds), decaying over ~6s. Reads as the machine pulsing hot as work
-// flows through it.
+// liveHeat — vent-heat 0..1 for a live conversation: idles at the state's
+// base heat and flares toward 1 when the agent just emitted (a tool call /
+// message in the last few seconds), decaying over ~6s. Reads as the machine
+// pulsing hot as work flows through it.
 export function liveHeat(base: number, lastMessageAt: number | null, now: number): number {
   if (!lastMessageAt) return base
   const since = (now - lastMessageAt) / 1000

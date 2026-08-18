@@ -1333,7 +1333,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 
 	var br *domain.BlueprintRun
 	var fallbackSteps []domain.BlueprintStep
-	var stepRuns []domain.Conversation
+	var stepConversations []domain.Conversation
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
@@ -1343,7 +1343,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		if br == nil {
 			return nil
 		}
-		stepRuns, e = tx.Blueprints.RunsForBlueprint(r.Context(), orgID, id)
+		stepConversations, e = tx.Blueprints.ConversationsForBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
@@ -1378,18 +1378,18 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		}
 	}
 
-	runByStep := map[int]*domain.Conversation{}
-	for i := range stepRuns {
-		if stepRuns[i].BlueprintStepIndex != nil {
-			runByStep[*stepRuns[i].BlueprintStepIndex] = &stepRuns[i]
+	convByStep := map[int]*domain.Conversation{}
+	for i := range stepConversations {
+		if stepConversations[i].BlueprintStepIndex != nil {
+			convByStep[*stepConversations[i].BlueprintStepIndex] = &stepConversations[i]
 		}
 	}
 
 	views := make([]blueprintRunStepView, 0, len(steps))
 	for _, step := range steps {
 		view := blueprintRunStepView{Step: step}
-		if run, ok := runByStep[step.StepIndex]; ok {
-			view.Run = run
+		if conv, ok := convByStep[step.StepIndex]; ok {
+			view.Run = conv
 		}
 		views = append(views, view)
 	}

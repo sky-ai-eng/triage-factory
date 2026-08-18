@@ -60,7 +60,7 @@ func (s *Spawner) snapshotRetention() time.Duration {
 // until ctx is cancelled. Wired alongside the other startup/periodic sweeps in
 // internal/app. A nil store or blob store makes it a logged no-op.
 func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration) {
-	if s.agentRuns == nil || s.Storage() == nil {
+	if s.conversations == nil || s.Storage() == nil {
 		delegateLog.Warn("snapshot reaper not started: no store / blob store wired")
 		return
 	}
@@ -91,11 +91,11 @@ func (s *Spawner) RunSnapshotReaper(ctx context.Context, interval time.Duration)
 // Best-effort: errors are logged, never fatal.
 func (s *Spawner) ReapExpiredSnapshots(ctx context.Context) {
 	blobs := s.Storage()
-	if blobs == nil || s.agentRuns == nil {
+	if blobs == nil || s.conversations == nil {
 		return
 	}
 	cutoff := time.Now().UTC().Add(-s.snapshotRetention())
-	keys, err := s.agentRuns.ListReapableSnapshotKeysSystem(ctx, cutoff)
+	keys, err := s.conversations.ListReapableSnapshotKeysSystem(ctx, cutoff)
 	if err != nil {
 		delegateLog.Warn("snapshot reaper: list reapable keys failed", "error", err)
 		return

@@ -84,18 +84,18 @@ func TestMaterializePriorMemories_ReadableLayout(t *testing.T) {
 	// The current workflow run's two earlier steps, seeded newest-first so the
 	// materializer is provably ordering on step index and not on arrival order.
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "step2-run", promptID: "p-implement", stepIndex: 1,
+		conversationID: "step2-run", promptID: "p-implement", stepIndex: 1,
 		blueprintRunID: currentBlueprintRunID, entityID: entity.ID, taskID: task.ID,
 		content: "step 2 findings",
 	})
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "step1-run", promptID: "p-triage", stepIndex: 0,
+		conversationID: "step1-run", promptID: "p-triage", stepIndex: 0,
 		blueprintRunID: currentBlueprintRunID, entityID: entity.ID, taskID: task.ID,
 		content: "step 1 findings",
 	})
 	// A prior, separate run on the same entity.
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "prior-run", promptID: "p-cifix", stepIndex: 0,
+		conversationID: "prior-run", promptID: "p-cifix", stepIndex: 0,
 		blueprintRunID: priorBlueprintRunID, entityID: entity.ID, taskID: task.ID,
 		content: "what i did last time", createdAt: "2026-07-20 09:30:00+00:00",
 	})
@@ -128,11 +128,11 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-cifix", Name: "CI Fix", Body: "x", Source: "user"})
 
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "run-a", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-a",
+		conversationID: "run-a", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-a",
 		entityID: entity.ID, taskID: task.ID, content: "first attempt", createdAt: "2026-07-20 09:00:00+00:00",
 	})
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "run-b", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-b",
+		conversationID: "run-b", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-b",
 		entityID: entity.ID, taskID: task.ID, content: "second attempt", createdAt: "2026-07-20 17:00:00+00:00",
 	})
 
@@ -150,15 +150,15 @@ func TestMaterializePriorMemories_HistoryNameCollision(t *testing.T) {
 // this-run/ and only then clears the path for its own write. The clear must
 // never be the reason a later step loses its predecessor's handoff.
 func TestBlueprintHandoff_MemorySurvivesTheFixedPathClear(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "handoff")
-	makeRunBlueprintStep(t, database, runID, taskID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "handoff")
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
-	blueprintRunID := "bpr-" + runID
+	blueprintRunID := "bpr-" + conversationID
 
 	// Step 1 writes the fixed path and terminates.
 	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
 
 	// Step 2's run start, in the order runAgent performs it.
@@ -234,7 +234,7 @@ func TestScanRepoFiles_GuardsEveryWriteIntoATrackedScratchDir(t *testing.T) {
 	seedBlueprintRun(t, database, stores, "bp-guard", "bpr-guard", task.ID)
 	ensureTestPrompt(t, database, domain.Prompt{ID: "p-cifix", Name: "CI Fix", Body: "x", Source: "user"})
 	seedMemory(t, ctx, stores, database, memoryFixture{
-		runID: "prior-run", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-guard",
+		conversationID: "prior-run", promptID: "p-cifix", stepIndex: 0, blueprintRunID: "bpr-guard",
 		entityID: entity.ID, taskID: task.ID, content: "TF memory that must not land",
 		createdAt: "2026-07-20 09:30:00+00:00",
 	})
@@ -367,7 +367,7 @@ func seedBlueprintRun(t *testing.T, database *sql.DB, stores db.Stores, blueprin
 // memoryFixture describes one prior run's memory: the conversation that
 // produced it (prompt + step index + workflow run) and the row's content.
 type memoryFixture struct {
-	runID          string
+	conversationID string
 	promptID       string
 	stepIndex      int
 	blueprintRunID string
@@ -381,20 +381,20 @@ func seedMemory(t *testing.T, ctx context.Context, stores db.Stores, database *s
 	t.Helper()
 	stepIndex := f.stepIndex
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: f.runID, TaskID: f.taskID, PromptID: f.promptID, Status: "completed", Model: "m",
+		ID: f.conversationID, TaskID: f.taskID, PromptID: f.promptID, Status: "completed", Model: "m",
 		BlueprintRunID: f.blueprintRunID, BlueprintStepIndex: &stepIndex,
 	})
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, f.runID, f.entityID, f.blueprintRunID, f.content); err != nil {
-		t.Fatalf("upsert memory %s: %v", f.runID, err)
+	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, f.conversationID, f.entityID, f.blueprintRunID, f.content); err != nil {
+		t.Fatalf("upsert memory %s: %v", f.conversationID, err)
 	}
 	// The primary join row a real run's completion writes — the entity-scoped
 	// read is join-based, so without it the materializer sees nothing.
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, f.runID, f.entityID, domain.MemoryRolePrimary); err != nil {
-		t.Fatalf("seed join row %s: %v", f.runID, err)
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, f.conversationID, f.entityID, domain.MemoryRolePrimary); err != nil {
+		t.Fatalf("seed join row %s: %v", f.conversationID, err)
 	}
 	if f.createdAt != "" {
-		if _, err := database.Exec(`UPDATE conversation_memory SET created_at = ? WHERE conversation_id = ?`, f.createdAt, f.runID); err != nil {
-			t.Fatalf("stamp created_at %s: %v", f.runID, err)
+		if _, err := database.Exec(`UPDATE conversation_memory SET created_at = ? WHERE conversation_id = ?`, f.createdAt, f.conversationID); err != nil {
+			t.Fatalf("stamp created_at %s: %v", f.conversationID, err)
 		}
 	}
 }

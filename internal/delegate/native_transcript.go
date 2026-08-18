@@ -9,7 +9,7 @@ import (
 )
 
 // nativeTranscript adapts the conversations store to the native loop's
-// Transcript surface. It is the runSink of this runtime: every row the loop
+// Transcript surface. It is the conversationSink of this runtime: every row the loop
 // writes lands through here and fans out to the websocket, so a native
 // conversation streams to the UI in the same shapes an SDK one does.
 //
@@ -44,17 +44,17 @@ func newNativeTranscript(s *Spawner, orgID, conversationID, claimID string) *nat
 // Reads are deliberately unfenced — a stale read corrupts nothing, and the
 // write fence is what protects the transcript.
 func (t *nativeTranscript) ListForAssembly(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
-	return t.spawner.agentRuns.ListForAssemblySystem(ctx, orgID, conversationID)
+	return t.spawner.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 }
 
 func (t *nativeTranscript) MarkDelivered(ctx context.Context, orgID, conversationID string, ids []int, subtype string) error {
-	return t.spawner.agentRuns.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, t.claimID, ids, subtype)
+	return t.spawner.conversations.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, t.claimID, ids, subtype)
 }
 
 // Insert appends a row and broadcasts it. The row is attributed to this
 // engagement's claim by the same call that fences the write.
 func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain.Message) (int, error) {
-	id, err := t.spawner.agentRuns.InsertMessageForClaimSystem(ctx, orgID, t.claimID, msg)
+	id, err := t.spawner.conversations.InsertMessageForClaimSystem(ctx, orgID, t.claimID, msg)
 	if err != nil {
 		return 0, fmt.Errorf("insert message: %w", err)
 	}
@@ -78,7 +78,7 @@ func (t *nativeTranscript) Insert(ctx context.Context, orgID string, msg *domain
 // path produced one (delivered + inactive is compacted history, which the
 // display keeps).
 func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
-	if err := t.spawner.agentRuns.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs); err != nil {
+	if err := t.spawner.conversations.CompactForClaimSystem(ctx, orgID, conversationID, t.claimID, replyRow, resultRow, inactiveIDs); err != nil {
 		return err
 	}
 	if replyRow != nil {
@@ -89,7 +89,7 @@ func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID st
 }
 
 func (t *nativeTranscript) SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
-	return t.spawner.agentRuns.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
+	return t.spawner.conversations.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
 		requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason)
 }
 

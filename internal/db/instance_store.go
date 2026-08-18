@@ -13,7 +13,7 @@ import (
 //
 // The table is deliberately NOT org-scoped — a fleet member isn't tenant
 // data — so every method here is admin-pool-only in Postgres (no app-pool
-// counterpart, hence no "...System" suffix; same shape as RunQueueStore /
+// counterpart, hence no "...System" suffix; same shape as ConversationQueueStore /
 // EventQueueStore). SQLite is N=1: one process, one row, epoch bumping per
 // restart.
 type InstanceStore interface {

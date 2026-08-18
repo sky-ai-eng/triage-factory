@@ -428,8 +428,8 @@ func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc
 			// OOMKilled is read from the run's Wait result (in-process it is
 			// captured before the cgroup is torn down; brokered the broker
 			// reports it with the exit), so the attribution is stable here.
-			l.termErr = fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
-				ErrRunMemoryLimit, RunMemoryLimitMB(), waitErr)
+			l.termErr = fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_CLAIM_MEMORY_LIMIT_MB): %v",
+				ErrClaimMemoryLimit, ClaimMemoryLimitMB(), waitErr)
 		} else {
 			l.termErr = fmt.Errorf("agent runtime exited with error: %w", waitErr)
 		}

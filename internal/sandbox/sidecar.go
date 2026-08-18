@@ -100,10 +100,10 @@ const SidecarContainerIDSuffix = "-sc"
 // of Wrap, translated on Linux into the narrow, broker-validated
 // SidecarLaunchParams exactly as Wrap translates Config into LaunchParams.
 type SidecarConfig struct {
-	// RunID identifies the agent run, purely for the sidecar's grep-friendly
-	// container id (see wrap's own RunID doc) — never trusted for anything
+	// ConversationID identifies the agent run, purely for the sidecar's grep-friendly
+	// container id (see wrap's own ConversationID doc) — never trusted for anything
 	// privileged.
-	RunID string
+	ConversationID string
 
 	// SubnetIdx is THIS run's subnet index, already allocated by Wrap
 	// (Sandbox.SubnetIdx) — the same index that names the run's netns and

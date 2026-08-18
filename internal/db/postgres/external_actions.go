@@ -14,8 +14,9 @@ import (
 // split the artifacts store uses:
 //
 //   - q: app pool (tf_app, RLS-active). Record composes inside the claims-bearing
-//     WithTx that runs the audited action (manual bot runs under synthetic
-//     claims, the server approval/board handlers under the actor's claims), so
+//     WithTx that runs the audited action (manual bot conversations under
+//     synthetic claims, the server approval/board handlers under the actor's
+//     claims), so
 //     external_actions_all's WITH CHECK gates the write by org. ListByTeam reads
 //     here under the same org-scoped policy.
 //   - admin: admin pool (BYPASSRLS). RecordSystem routes here for the
@@ -55,8 +56,8 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 }
 
 // RecordSystem runs the same insert on the admin pool (BYPASSRLS) for
-// event-triggered bot runs + the Jira mirror, which hold an org identity but no
-// JWT-claims context. See the type doc.
+// event-triggered bot conversations + the Jira mirror, which hold an org
+// identity but no JWT-claims context. See the type doc.
 func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e domain.ExternalAction) error {
 	return s.record(ctx, s.admin, orgID, e)
 }
@@ -117,12 +118,12 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	return out, total, err
 }
 
-// ListByRun reads one conversation's actions on the app pool, under the same
-// org-scoped policy ListByTeam reads through — the run-visibility check the
-// handler already made is what narrows it to a run the caller may see. The
-// conversation_id bind casts to uuid so a malformed path value is a query error
-// rather than a text comparison against a uuid column.
-func (s *externalActionStore) ListByRun(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
+// ListByConversation reads one conversation's actions on the app pool, under the same
+// org-scoped policy ListByTeam reads through — the conversation-visibility
+// check the handler already made is what narrows it to a conversation the
+// caller may see. The conversation_id bind casts to uuid so a malformed path
+// value is a query error rather than a text comparison against a uuid column.
+func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error) {
 	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND conversation_id = $2::uuid`, []any{orgID, conversationID}, opts)
 	if err != nil {
 		return nil, 0, err

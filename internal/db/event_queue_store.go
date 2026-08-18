@@ -107,7 +107,7 @@ type EventQueueStore interface {
 	//
 	// executorID/bootEpoch (the caller's persistent instance-registry
 	// identity) are stamped atomically in the same claim statement,
-	// mirroring RunQueueStore.ClaimNextRun — so ResetProcessing can later
+	// mirroring ConversationQueueStore.ClaimNextConversation — so ResetProcessing can later
 	// self-sweep only this instance's own orphaned rows.
 	//
 	// Cross-org by design: the drain worker is a single system service
@@ -140,7 +140,7 @@ type EventQueueStore interface {
 	// 'processing' row at startup means a crash mid-process, so it must be
 	// replayed.
 	//
-	// Ownership-scoped, mirroring RunQueueStore.ResetProcessingRuns:
+	// Ownership-scoped, mirroring ConversationQueueStore.ResetProcessingConversations:
 	// only rows stamped executor_id = executorID AND boot_epoch < bootEpoch
 	// are reset — this instance's own orphans from a strictly earlier boot
 	// of itself. A live sibling's still-processing row (a different

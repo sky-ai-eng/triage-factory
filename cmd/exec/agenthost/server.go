@@ -51,7 +51,7 @@ const sandboxAgentRoot = "/work"
 // is owned by the sandbox UID (chmod 0600 — see internal/agentproc).
 // Any RPC that arrives here is, by construction, acting AS this run;
 // the server does not accept identity from the wire and uses its
-// constructor-supplied RunInfo for every method's routing.
+// constructor-supplied ConversationInfo for every method's routing.
 type Server struct {
 	// rt is the runtime every per-request LocalClient's DB effects route
 	// through: directRuntime over db.Stores on all/local (NewServer), or
@@ -64,7 +64,7 @@ type Server struct {
 	// zero db.Stores on the executor sidecar (which holds no store — the gh/jira
 	// verbs route through proxyCreds there, so the resolver path is never taken).
 	stores db.Stores
-	info   RunInfo
+	info   ConversationInfo
 
 	// gateWired reports whether the exec-gh repo authz gate can run — true on the
 	// sidecar and a fully-wired all/local Server, false for a partial fixture.
@@ -105,12 +105,12 @@ type Server struct {
 }
 
 // NewServer constructs a Server bound to (stores, info). info comes
-// from the spawner's per-run map — it carries the run's owning org
-// and the kicking-off user identity (empty for event-triggered runs).
+// from the spawner's per-conversation map — it carries the conversation's owning org
+// and the kicking-off user identity (empty for event-triggered conversations).
 // proxyCreds is non-nil only for a TF_ROLE=executor run; nil disables the
 // proxy branch and every gh/jira verb resolves through ghResolver / the Jira
 // resolver exactly as before.
-func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Server {
+func NewServer(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredentials) *Server {
 	resolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
 	rt := newDirectRuntime(stores, info)
 	// Share the one resolver with the runtime so the review-posture identity
@@ -121,7 +121,7 @@ func NewServer(stores db.Stores, info RunInfo, proxyCreds *ProxyCredentials) *Se
 		rt:           rt,
 		stores:       stores,
 		info:         info,
-		gateWired:    stores.TeamGitHubRepos != nil && stores.RunWorktrees != nil,
+		gateWired:    stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
 		ghResolver:   resolver,
 		proxyCreds:   proxyCreds,
 		upstreamGate: newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
@@ -409,8 +409,8 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	}
 
 	switch method {
-	case methodLookupRun:
-		return lookupRunResult{Info: s.info}, nil
+	case methodLookupConversation:
+		return lookupConversationResult{Info: s.info}, nil
 
 	case methodFinalizeReviewDraft:
 		var a finalizeReviewDraftArgs
@@ -449,11 +449,11 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		return emptyResult{}, client.DeleteStagedReviewComment(ctx, a.CommentID)
 
 	case methodGetConversation:
-		run, err := client.GetConversation(ctx)
+		conv, err := client.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return agentRunResult{Run: run}, nil
+		return getConversationResult{Conversation: conv}, nil
 
 	case methodGetTask:
 		var a getTaskArgs
@@ -495,41 +495,41 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return teamTracksRepoResult{Tracks: tracks}, nil
 
-	case methodGetRunWorktreeByRepoRef:
-		var a runWorktreeByRepoRefArgs
+	case methodGetConversationWorktreeByRepoRef:
+		var a conversationWorktreeByRepoRefArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		w, err := client.GetRunWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		w, err := client.GetConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
 		if err != nil {
 			return nil, err
 		}
-		return runWorktreeResult{Worktree: w}, nil
+		return conversationWorktreeResult{Worktree: w}, nil
 
-	case methodListRunWorktrees:
-		w, err := client.ListRunWorktrees(ctx)
+	case methodListConversationWorktrees:
+		w, err := client.ListConversationWorktrees(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return runWorktreesResult{Worktrees: w}, nil
+		return conversationWorktreesResult{Worktrees: w}, nil
 
-	case methodInsertRunWorktree:
-		var a insertRunWorktreeArgs
+	case methodInsertConversationWorktree:
+		var a insertConversationWorktreeArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		inserted, winningPath, err := client.InsertRunWorktree(ctx, a.Row)
+		inserted, winningPath, err := client.InsertConversationWorktree(ctx, a.Row)
 		if err != nil {
 			return nil, err
 		}
-		return insertRunWorktreeResult{Inserted: inserted, WinningPath: winningPath}, nil
+		return insertConversationWorktreeResult{Inserted: inserted, WinningPath: winningPath}, nil
 
-	case methodDeleteRunWorktreeByRepoRef:
-		var a deleteRunWorktreeByRepoRefArgs
+	case methodDeleteConversationWorktreeByRepoRef:
+		var a deleteConversationWorktreeByRepoRefArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, client.DeleteRunWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		return emptyResult{}, client.DeleteConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
 
 	case methodWorkspaceRoots:
 		// The transport IS the namespace boundary: an RPC arriving here came

@@ -10,17 +10,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-func TestListWorkspaces_MissingRunID(t *testing.T) {
+func TestListWorkspaces_MissingConversationID(t *testing.T) {
 	stores, _ := newTestDB(t)
-	if _, err := listWorkspaces(hostFor(stores, "")); !errors.Is(err, errMissingRunID) {
-		t.Errorf("err = %v, want errMissingRunID", err)
+	if _, err := listWorkspaces(hostFor(stores, "")); !errors.Is(err, errMissingConversationID) {
+		t.Errorf("err = %v, want errMissingConversationID", err)
 	}
 }
 
-func TestListWorkspaces_RunNotFound(t *testing.T) {
+func TestListWorkspaces_ConversationNotFound(t *testing.T) {
 	stores, _ := newTestDB(t)
-	if _, err := listWorkspaces(hostFor(stores, "missing-run")); !errors.Is(err, errRunNotFound) {
-		t.Errorf("err = %v, want errRunNotFound", err)
+	if _, err := listWorkspaces(hostFor(stores, "missing-run")); !errors.Is(err, errConversationNotFound) {
+		t.Errorf("err = %v, want errConversationNotFound", err)
 	}
 }
 
@@ -29,7 +29,7 @@ func TestListWorkspaces_RunNotFound(t *testing.T) {
 // reject one), mirroring `workspace add`.
 func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedGitHubRun(t, database, "gh-run")
+	seedGitHubConversation(t, database, "gh-run")
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 
 	out, err := listWorkspaces(hostFor(stores, "gh-run"))
@@ -50,14 +50,14 @@ func TestListWorkspaces_GitHubRunAllowed(t *testing.T) {
 
 func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "owner", "alpha", "https://x", "main")
 	seedRepository(t, database, "owner", "beta", "https://x", "main")
 	seedRepository(t, database, "owner", "gamma", "https://x", "main")
 
 	// Materialize one of the three.
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "r1", RepoID: "owner/beta",
+	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "r1", RepoID: "owner/beta",
 		Path: "/tmp/wt/beta", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed materialized: %v", err)
@@ -93,7 +93,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 
 func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 
 	out, err := listWorkspaces(hostFor(stores, "r1"))
 	if err != nil {
@@ -110,12 +110,12 @@ func TestListWorkspaces_NoConfiguredRepos(t *testing.T) {
 func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	// Materialized worktrees from a sibling run must NOT leak into r1's list.
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
-	seedJiraRun(t, database, "r2", "SKY-2")
+	seedJiraConversation(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r2", "SKY-2")
 	seedRepository(t, database, "owner", "shared", "https://x", "main")
 
-	if _, _, err := sqlitestore.New(database.Conn).RunWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.RunWorktree{
-		RunID: "r2", RepoID: "owner/shared",
+	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "r2", RepoID: "owner/shared",
 		Path: "/tmp/wt/r2/owner/shared", Ref: "@default",
 	}); err != nil {
 		t.Fatalf("seed r2 materialized: %v", err)
@@ -142,7 +142,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// deliberately NOT exposed — too verbose for a per-call discovery
 	// surface.
 	stores, database := newTestDB(t)
-	seedJiraRun(t, database, "r1", "SKY-1")
+	seedJiraConversation(t, database, "r1", "SKY-1")
 
 	if _, err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner: "owner", Repo: "alpha",

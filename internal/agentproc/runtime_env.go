@@ -32,41 +32,41 @@ func agentRuntimeEnv() []string {
 	return []string{jscJITEnvKey + "=0"}
 }
 
-// ErrRunMemoryLimit marks an agent process killed by its per-run
+// ErrClaimMemoryLimit marks an agent process killed by its per-run
 // memory ceiling. It rides inside the returned error chain so callers
 // classify with errors.Is — never by matching message text — when
 // recording a machine-readable failure kind for the UI.
-var ErrRunMemoryLimit = errors.New("run exceeded its memory limit")
+var ErrClaimMemoryLimit = errors.New("run exceeded its memory limit")
 
-// DefaultRunMemoryLimitMB is the per-run memory ceiling handed to the
-// sandbox when TF_RUN_MEMORY_LIMIT_MB is unset. Deliberately generous —
+// DefaultClaimMemoryLimitMB is the per-run memory ceiling handed to the
+// sandbox when TF_CLAIM_MEMORY_LIMIT_MB is unset. Deliberately generous —
 // ~16x the fleet-measured per-run budget — because in-sandbox builds
 // legitimately spike (go build, dependency installs); the ceiling is
 // host protection against a pathological run, not budget enforcement.
-const DefaultRunMemoryLimitMB = 4096
+const DefaultClaimMemoryLimitMB = 4096
 
-// RunMemoryLimitMB resolves the per-run sandbox memory ceiling from
-// TF_RUN_MEMORY_LIMIT_MB. Empty → the default; 0 → disabled; invalid →
+// ClaimMemoryLimitMB resolves the per-run sandbox memory ceiling from
+// TF_CLAIM_MEMORY_LIMIT_MB. Empty → the default; 0 → disabled; invalid →
 // the default with one warning per process (a bad value must not brick
 // spawning). Read per spawn like the other agent runtime knobs.
 //
 // Exported because the native runtime derives its per-command bash budget
 // from the same number the launch caps the jail at: the two must be one
 // resolution, not two reads of one env var that could disagree.
-func RunMemoryLimitMB() int {
-	raw := strings.TrimSpace(os.Getenv("TF_RUN_MEMORY_LIMIT_MB"))
+func ClaimMemoryLimitMB() int {
+	raw := strings.TrimSpace(os.Getenv("TF_CLAIM_MEMORY_LIMIT_MB"))
 	if raw == "" {
-		return DefaultRunMemoryLimitMB
+		return DefaultClaimMemoryLimitMB
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 0 {
-		warnBadRunMemoryLimitOnce.Do(func() {
-			agentprocLog.Warn("invalid TF_RUN_MEMORY_LIMIT_MB; using default",
-				"raw", raw, "default_mb", DefaultRunMemoryLimitMB)
+		warnBadClaimMemoryLimitOnce.Do(func() {
+			agentprocLog.Warn("invalid TF_CLAIM_MEMORY_LIMIT_MB; using default",
+				"raw", raw, "default_mb", DefaultClaimMemoryLimitMB)
 		})
-		return DefaultRunMemoryLimitMB
+		return DefaultClaimMemoryLimitMB
 	}
 	return n
 }
 
-var warnBadRunMemoryLimitOnce sync.Once
+var warnBadClaimMemoryLimitOnce sync.Once

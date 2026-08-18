@@ -36,7 +36,7 @@ func (s *RelayServer) startRelayOp(ctx context.Context, name, namespace, op stri
 		trace.WithNewRoot(),
 		trace.WithAttributes(
 			telemetry.Op(namespace+"."+op),
-			telemetry.ConversationID(s.info.RunID),
+			telemetry.ConversationID(s.info.ConversationID),
 			telemetry.OrgID(s.info.OrgID),
 		),
 	}

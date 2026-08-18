@@ -868,9 +868,9 @@ type BlueprintDuplicationFactory func(t *testing.T) (store db.BlueprintStore, or
 func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicationFactory) {
 	t.Helper()
 
-	// seedRun creates a source blueprint with the given prompts as ordered steps
+	// seedConversation creates a source blueprint with the given prompts as ordered steps
 	// (briefs[i] paired positionally) and returns the blueprint id + prompt ids.
-	seedRun := func(t *testing.T, store db.BlueprintStore, orgID, teamID, slug string, prompts []domain.Prompt, seed DuplicationPromptSeeder, briefs []string) (string, []string) {
+	seedConversation := func(t *testing.T, store db.BlueprintStore, orgID, teamID, slug string, prompts []domain.Prompt, seed DuplicationPromptSeeder, briefs []string) (string, []string) {
 		t.Helper()
 		ctx := context.Background()
 		bpID := seedBlueprint(t, store, orgID, teamID, slug)
@@ -887,7 +887,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 	t.Run("DuplicateFullBlueprint", func(t *testing.T) {
 		store, orgID, teamID, seed, getPrompt := factory(t)
 		ctx := context.Background()
-		srcID, srcPrompts := seedRun(t, store, orgID, teamID, "dup-full",
+		srcID, srcPrompts := seedConversation(t, store, orgID, teamID, "dup-full",
 			[]domain.Prompt{
 				{Name: "Map", Body: "map the surface", Model: "opus", Source: "user"},
 				{Name: "Write", Body: "write the review", Source: "user"},
@@ -954,7 +954,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		if len(srcSteps) != 2 || srcSteps[0].StepPromptID != srcPrompts[0] || srcSteps[1].StepPromptID != srcPrompts[1] {
 			t.Fatalf("source steps mutated: %+v", srcSteps)
 		}
-		// seedRun's ReplaceSteps already stamped the source user_modified=true;
+		// seedConversation's ReplaceSteps already stamped the source user_modified=true;
 		// DuplicatePrompts must leave that alone (it never touches the source).
 		src, err := store.Get(ctx, orgID, srcID)
 		if err != nil || src == nil || !src.UserModified {
@@ -965,7 +965,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 	t.Run("NonContiguousSelectionYieldsSeparateBlueprints", func(t *testing.T) {
 		store, orgID, teamID, seed, _ := factory(t)
 		ctx := context.Background()
-		_, p := seedRun(t, store, orgID, teamID, "dup-gap",
+		_, p := seedConversation(t, store, orgID, teamID, "dup-gap",
 			[]domain.Prompt{
 				{Name: "P0", Body: "b0", Source: "user"},
 				{Name: "P1", Body: "b1", Source: "user"},
@@ -994,7 +994,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 	t.Run("ContiguousSubRunReDensifies", func(t *testing.T) {
 		store, orgID, teamID, seed, getPrompt := factory(t)
 		ctx := context.Background()
-		_, p := seedRun(t, store, orgID, teamID, "dup-subrun",
+		_, p := seedConversation(t, store, orgID, teamID, "dup-subrun",
 			[]domain.Prompt{
 				{Name: "P0", Body: "b0", Source: "user"},
 				{Name: "P1", Body: "b1", Source: "user"},
@@ -1035,7 +1035,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 	t.Run("SystemPromptCopiedAsUser", func(t *testing.T) {
 		store, orgID, teamID, seed, getPrompt := factory(t)
 		ctx := context.Background()
-		_, p := seedRun(t, store, orgID, teamID, "dup-sys",
+		_, p := seedConversation(t, store, orgID, teamID, "dup-sys",
 			[]domain.Prompt{
 				{Name: "Shipped", Body: "shipped body", Source: "system", SystemSlug: "system-dup-step"},
 			}, seed, nil)

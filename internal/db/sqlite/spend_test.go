@@ -27,9 +27,10 @@ func TestSpendStore_SQLite(t *testing.T) {
 		stores := sqlitestore.New(conn)
 
 		// One org agent (UNIQUE per org) for the actor_agent_id passthrough, and
-		// two projects (team-scoped + null-team) so curator_requests' NOT NULL
-		// project_id FK is satisfied and the curator team_id snapshot has both a
-		// team and a null-team source. The local tenant sentinels (org/team/user)
+		// two projects (team-scoped + null-team) so the curator conversations'
+		// project_id FK (set on curator rows, NULL for every other type) has both
+		// a team and a null-team source for the curator team_id snapshot. The
+		// local tenant sentinels (org/team/user)
 		// already exist via BootstrapSchemaForTest → SeedLocalTenantRows.
 		agentID := uuid.New().String()
 		if _, err := conn.Exec(
@@ -139,7 +140,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 		return strconv.FormatInt(id, 10)
 	}
 	return dbtest.SpendSeeder{
-		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
+		Conversation: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
@@ -150,7 +151,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
 				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, f.Status, f.StartedAt,
 			); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			return seedLedgerRow(t, id, f.Model, costArg(f.Cost), f.Tokens, f.StartedAt)
 		},

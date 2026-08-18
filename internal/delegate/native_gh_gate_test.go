@@ -143,7 +143,7 @@ func TestClassifyGHCommand(t *testing.T) {
 // model writing "gh pr merge" into a file is reporting, not merging.
 func TestGHCommandGate_OnlyReadsBashCalls(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-gate-bash", "", "/tmp/wt-gate-bash")
+	seedConversation(t, database, "r-gate-bash", "", "/tmp/wt-gate-bash")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	gate := s.ghCommandGate(runmode.LocalDefaultOrgID, "r-gate-bash")
 
@@ -333,7 +333,7 @@ func TestNativeGate_MergeReArmsAfterHumanInput(t *testing.T) {
 	h.seed(domain.Message{Role: "tool", ToolCallID: "c0", IsError: true, Content: mergeGateQuestion})
 	h.seed(domain.Message{Role: "assistant", Content: "my mission says to merge"})
 
-	gate := h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.runID)
+	gate := h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.conversationID)
 	if deny := gate(context.Background(), bashCall("c1", merge)); deny != "" {
 		t.Fatalf("the question re-fired with no human input since: %q", deny)
 	}
@@ -417,24 +417,24 @@ type gateTurn struct {
 }
 
 type gateHarness struct {
-	t       *testing.T
-	spawner *Spawner
-	runID   string
-	host    *recordingToolHost
-	turns   []gateTurn
+	t              *testing.T
+	spawner        *Spawner
+	conversationID string
+	host           *recordingToolHost
+	turns          []gateTurn
 }
 
-func newGateHarness(t *testing.T, runID, mission string, turns []gateTurn) *gateHarness {
+func newGateHarness(t *testing.T, conversationID, mission string, turns []gateTurn) *gateHarness {
 	t.Helper()
 	database := newDelegateTestDB(t)
-	seedRun(t, database, runID, "", "/tmp/wt-"+runID)
-	markEngaged(t, database, runID)
-	markNative(t, database, runID)
+	seedConversation(t, database, conversationID, "", "/tmp/wt-"+conversationID)
+	markEngaged(t, database, conversationID)
+	markNative(t, database, conversationID)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-5")
 
-	h := &gateHarness{t: t, spawner: s, runID: runID, host: &recordingToolHost{}, turns: turns}
-	if _, err := newNativeTranscript(s, runmode.LocalDefaultOrgID, runID, "").
-		Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(runID, runmode.LocalDefaultUserID, mission)); err != nil {
+	h := &gateHarness{t: t, spawner: s, conversationID: conversationID, host: &recordingToolHost{}, turns: turns}
+	if _, err := newNativeTranscript(s, runmode.LocalDefaultOrgID, conversationID, "").
+		Insert(context.Background(), runmode.LocalDefaultOrgID, pendingUserInput(conversationID, runmode.LocalDefaultUserID, mission)); err != nil {
 		t.Fatalf("seed the mission: %v", err)
 	}
 	return h
@@ -444,8 +444,8 @@ func newGateHarness(t *testing.T, runID, mission string, turns []gateTurn) *gate
 // do not produce.
 func (h *gateHarness) seed(row domain.Message) {
 	h.t.Helper()
-	row.ConversationID = h.runID
-	if _, err := h.spawner.agentRuns.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &row); err != nil {
+	row.ConversationID = h.conversationID
+	if _, err := h.spawner.conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &row); err != nil {
 		h.t.Fatalf("seed row: %v", err)
 	}
 }
@@ -453,16 +453,16 @@ func (h *gateHarness) seed(row domain.Message) {
 func (h *gateHarness) run() agentloop.Result {
 	h.t.Helper()
 	engine := &agentloop.Engine{
-		Transcript:  newNativeTranscript(h.spawner, runmode.LocalDefaultOrgID, h.runID, ""),
+		Transcript:  newNativeTranscript(h.spawner, runmode.LocalDefaultOrgID, h.conversationID, ""),
 		Credentials: staticGateCredentials{provider: &scriptedGateProvider{turns: h.turns}},
 		Tools:       h.host,
 		Hooks: agentloop.Hooks{
-			BeforeToolCall: h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.runID),
+			BeforeToolCall: h.spawner.ghCommandGate(runmode.LocalDefaultOrgID, h.conversationID),
 		},
 	}
 	return engine.Run(context.Background(), agentloop.Params{
 		OrgID:          runmode.LocalDefaultOrgID,
-		ConversationID: h.runID,
+		ConversationID: h.conversationID,
 		Model:          "claude-sonnet-4-5",
 		SystemPrompt:   "system",
 		HasBlueprint:   true,
@@ -472,7 +472,7 @@ func (h *gateHarness) run() agentloop.Result {
 // toolResults returns the conversation's tool rows in assembly order.
 func (h *gateHarness) toolResults() []domain.Message {
 	h.t.Helper()
-	rows, err := h.spawner.agentRuns.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, h.runID)
+	rows, err := h.spawner.conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, h.conversationID)
 	if err != nil {
 		h.t.Fatalf("list for assembly: %v", err)
 	}

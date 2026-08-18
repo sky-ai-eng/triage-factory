@@ -16,9 +16,9 @@ import (
 // launch validation — this test is what catches that instead of it
 // surfacing as every sandboxed run rejected in production.
 func TestRunRoot_MatchesBrokerTrustedRoot(t *testing.T) {
-	for _, runID := range []string{"run-1", "00000000-0000-0000-0000-0000000000aa", "itest-abc"} {
-		if got, want := RunRoot(runID), sandbox.RunTreeRoot(runID); got != want {
-			t.Errorf("RunRoot(%q) = %q, want sandbox.RunTreeRoot %q", runID, got, want)
+	for _, conversationID := range []string{"run-1", "00000000-0000-0000-0000-0000000000aa", "itest-abc"} {
+		if got, want := RunRoot(conversationID), sandbox.RunTreeRoot(conversationID); got != want {
+			t.Errorf("RunRoot(%q) = %q, want sandbox.RunTreeRoot %q", conversationID, got, want)
 		}
 	}
 }

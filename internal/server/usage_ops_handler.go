@@ -37,7 +37,7 @@ type opsFailureKind struct {
 }
 
 // handleUsageOrgOps serves GET /api/usage/org/ops — org-admin gated. Reuses the
-// usage window parsing and the RunQueue's org-scoped timing reads.
+// usage window parsing and the ConversationQueue's org-scoped timing reads.
 func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -46,9 +46,10 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	if h.runQueue == nil {
-		// This pod holds no run-queue reader — deployment shape, not an outage.
-		writeNotConfigured(w, "the run queue reader is not configured on this deployment")
+	if h.conversationQueue == nil {
+		// This pod holds no conversation-queue reader — deployment shape, not
+		// an outage.
+		writeNotConfigured(w, "the conversation queue reader is not configured on this deployment")
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
@@ -59,12 +60,12 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	timings, err := h.runQueue.RecentRunTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
+	timings, err := h.conversationQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
 		internalError(w, "usage-ops-timings", err)
 		return
 	}
-	queued, err := h.runQueue.QueuedRunAgesForOrgSystem(r.Context(), orgID)
+	queued, err := h.conversationQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "usage-ops-queue", err)
 		return
@@ -101,7 +102,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 				failureCounts[t.FailureKind]++
 			}
 		}
-		if domain.IsActiveRunStatus(t.Status) {
+		if domain.IsActiveConversationStatus(t.Status) {
 			resp.RunsActive++
 		}
 	}

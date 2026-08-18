@@ -151,9 +151,10 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		details.ReviewBody = *req.ReviewBody
 	}
 	if req.ReviewEvent != nil {
-		// Validate early (400) rather than deferring to approval-time GitHub
-		// rejection. review_event also doubles as the ready sentinel, so an empty
-		// or bogus value would silently un-park the run as well as fail the submit.
+		// Validate early (400) rather than deferring to approval-time
+		// GitHub rejection. review_event also doubles as the ready
+		// sentinel, so an empty or bogus value would silently un-park
+		// the conversation as well as fail the submit.
 		if !validReviewEvent(*req.ReviewEvent) {
 			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 				Reason:  httpx.ReasonInvalidField,
@@ -211,10 +212,11 @@ func writeReviewNotPending(w http.ResponseWriter, state string) {
 // reviewApprove creates and submits the staged review to GitHub atomically
 // (SubmitReview — one POST carrying commit_id + event + body + footer + the staged
 // comments[]), stamps the submitted review's id + URL onto the artifact, records
-// the human verdict into conversation_memory, and runs the shared run/task/blueprint
-// bookkeeping. Nothing touched GitHub before this point (the review was staged
-// entirely TF-side), so concurrent runs on one PR each submit their own review
-// here — GitHub allows unlimited submitted reviews per identity.
+// the human verdict into conversation_memory, and runs the shared
+// conversation/task/blueprint bookkeeping. Nothing touched GitHub before this
+// point (the review was staged entirely TF-side), so concurrent runs on one PR
+// each submit their own review here — GitHub allows unlimited submitted reviews
+// per identity.
 //
 // The pending → submitted flip is a CAS CLAIM taken BEFORE the GitHub write, so
 // the submit is at-most-once: of two racing approves (two tabs, two pods) exactly
@@ -328,7 +330,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 		Repo:    repo,
 		Number:  number,
 		Details: details,
-		Footer:  agentmeta.Build(ah.agentRuns, orgID, fresh.ConversationID, "review"),
+		Footer:  agentmeta.Build(ah.conversations, orgID, fresh.ConversationID, "review"),
 		WebBase: func() string {
 			base, baseErr := ah.ghResolver.BaseURLFor(cleanupCtx, orgID)
 			if baseErr != nil {
@@ -382,7 +384,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	// submitted review finally has both — a never-published draft had neither) and
 	// the actual submitted event into details, and compose the audit row with the
 	// stamp (TFAC-483). The org-App submit is a human-authorized, org-executed
-	// write — run_id is the drafting run, actor is the approver. The state is
+	// write — conversation_id is the drafting conversation, actor is the approver. The state is
 	// already submitted (the claim), so this is a submitted→submitted CAS carrying
 	// the coordinates; retried once, and a double failure is loud — until the
 	// stamp lands the row shows submitted with no URL, which is why this must not
@@ -431,16 +433,16 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	if fresh.ConversationID != "" {
 		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
+			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", fresh.ConversationID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "conversation", fresh.ConversationID, "error", err)
 		}
 	}
 
 	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
-	// never flips run status or resumes/terminates a blueprint. The only lifecycle
-	// effect is closing the task when this was the LAST unresolved artifact on an
-	// already-terminal blueprint; otherwise a no-op.
+	// never flips conversation status or resumes/terminates a blueprint. The
+	// only lifecycle effect is closing the task when this was the LAST
+	// unresolved artifact on an already-terminal blueprint; otherwise a no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, fresh.ConversationID)
 
 	// Tell the drafting agent its review was submitted (live or via the ledger).
@@ -459,7 +461,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 // reviewDismiss resolves a pending review artifact by abandoning it: it flips the
 // artifact pending → dismissed, then runs the terminal-on-last task-closure check.
 // The per-item counterpart to reviewApprove; like approve it never touches the
-// run's lifecycle. No GitHub call and NO external-actions audit row — the review
+// conversation's lifecycle. No GitHub call and NO external-actions audit row — the review
 // is staged entirely TF-side (TFAC-494), so a dismiss is a purely local state
 // change, not an org-credential write (external_actions records only writes). The
 // flip is the whole resolution. An already-submitted / already-dismissed review
@@ -837,7 +839,7 @@ func derefInt(p *int) int {
 
 // validReviewEvent reports whether e is a GitHub PullRequestReviewEvent the
 // approve path can submit. Empty is intentionally invalid: review_event doubles
-// as the ready sentinel, so clearing it would un-park the run.
+// as the ready sentinel, so clearing it would un-park the conversation.
 func validReviewEvent(e string) bool {
 	switch e {
 	case "APPROVE", "COMMENT", "REQUEST_CHANGES":

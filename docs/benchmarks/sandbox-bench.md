@@ -11,7 +11,7 @@ Exactly what the executor launches for a native engagement. The bench brings
 up its own cap-broker (it answers the `cap-broker` subcommand itself, so
 `capbroker.Start`'s bare-metal fallback spawns the broker from the bench
 binary and installs the IPC client as `internal/sandbox`'s privileged ops),
-then per sandbox: seeds a worktree at `RunTreeRoot(runID)`, stands up the
+then per sandbox: seeds a worktree at `RunTreeRoot(rootKey)`, stands up the
 per-run network via `SetupRunNetwork`, binds an (unserved) agenthost socket
 at the broker's trusted per-run path, and launches the resident
 `tf-harness-tools serve` jail through `agentproc.LaunchToolHost`. Every

@@ -12,19 +12,19 @@ import (
 // contains no credential-shaped values; sandbox itself does no
 // filtering or injection.
 type Config struct {
-	// RunID identifies the agent run. Used as the OCI container id
+	// ConversationID identifies the agent run. Used as the OCI container id
 	// passed to runsc and as input to the netns / veth naming.
 	// Any string is accepted — sandbox sha1-hashes it internally to
 	// derive an 8-hex-char fragment for tf-<frag>-<subnetIdx>, so the
 	// reaper's strict hex regex matches regardless of caller shape
-	// (UUID, "live-smoke", anything). Same RunID → same fragment.
-	RunID string
+	// (UUID, "live-smoke", anything). Same ConversationID → same fragment.
+	ConversationID string
 
 	// MemoryNamespace is the run's blueprint run id — its second legitimate
 	// run-tree key. A cold rehydrate rebuilds the worktree at
-	// RunTreeRoot(memoryNamespace) rather than RunTreeRoot(RunID), so the
+	// RunTreeRoot(memoryNamespace) rather than RunTreeRoot(ConversationID), so the
 	// launch-time worktree pin (worktreeScope) accepts either. Empty for a run
-	// with no blueprint, where RunID is the only key.
+	// with no blueprint, where ConversationID is the only key.
 	MemoryNamespace string
 
 	// Worktree is the host path bind-mounted at /work inside the
@@ -186,14 +186,14 @@ type Rlimit struct {
 // network/bundle/subnet teardown; the run process and its memory cgroup
 // are owned by the LaunchedRun.
 //
-// Fields are read-only from outside the package. RunID, Subnet,
+// Fields are read-only from outside the package. ConversationID, Subnet,
 // HostIP, NetnsPath are exposed for logs + the proxy wiring point
 // (proxies bind on HostIP).
 type Sandbox struct {
-	RunID     string // sandbox.Config.RunID, preserved for telemetry
-	Subnet    string // e.g. "10.42.7.0/24"
-	HostIP    string // host-side veth IP, e.g. "10.42.7.1" — proxies bind here
-	NetnsPath string // /var/run/netns/tf-<runID>-<idx>
+	ConversationID string // sandbox.Config.ConversationID, preserved for telemetry
+	Subnet         string // e.g. "10.42.7.0/24"
+	HostIP         string // host-side veth IP, e.g. "10.42.7.1" — proxies bind here
+	NetnsPath      string // /var/run/netns/tf-<conversationID>-<idx>
 
 	// SubnetIdx is the allocator index Wrap claimed for this run (the same
 	// index Subnet/HostIP/NetnsPath are all derived from). Exposed so a
@@ -205,7 +205,7 @@ type Sandbox struct {
 	// ContainerID is the runsc container id Wrap minted for this launch —
 	// unique per live Wrap, and the name of the run's cgroup under tf-runs/.
 	// Exposed so a caller can OBSERVE the live jail (SampleRunCgroup) without
-	// re-deriving the id from RunID + SubnetIdx and silently drifting from
+	// re-deriving the id from ConversationID + SubnetIdx and silently drifting from
 	// whatever Wrap actually passed the broker. Observation only: the group's
 	// lifecycle and limits stay the cap-broker's monopoly. Empty on non-Linux,
 	// where Wrap launches nothing.
@@ -326,7 +326,7 @@ func Wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 }
 
 // SetupRunNetwork allocates a subnet index and stands up the per-run network
-// (netns + veth + iptables MASQUERADE + egress allowlist) for runID, ahead of
+// (netns + veth + iptables MASQUERADE + egress allowlist) for conversationID, ahead of
 // Wrap, returning a RunNetwork the caller passes as Config.Network and whose
 // Close it owns. It is the executor path's hook for bringing proxies + the
 // credential sidecar up on HostIP before the pre-sandbox clone runs; the
@@ -337,8 +337,8 @@ func Wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 // index released — the caller does not Close a nil return.
 //
 // Non-Linux: returns ErrUnsupportedPlatform, like Wrap.
-func SetupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
-	return setupRunNetwork(ctx, runID)
+func SetupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, error) {
+	return setupRunNetwork(ctx, conversationID)
 }
 
 // ReapOrphans scans /var/run/netns for tf-<id>-<idx> entries and

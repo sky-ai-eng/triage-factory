@@ -24,14 +24,14 @@ func TestStagedInjectionStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.StagedInjectionSeeder{
-			Run: func(t *testing.T, suffix string) string {
+			Conversation: func(t *testing.T, suffix string) string {
 				t.Helper()
-				return seedSQLiteRunForStagedInjection(t, conn, suffix)
+				return seedSQLiteConversationForStagedInjection(t, conn, suffix)
 			},
-			DeleteRun: func(t *testing.T, runID string) {
+			DeleteConversation: func(t *testing.T, conversationID string) {
 				t.Helper()
-				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
-					t.Fatalf("delete run: %v", err)
+				if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
+					t.Fatalf("delete conversation: %v", err)
 				}
 			},
 		}
@@ -46,7 +46,7 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{RunID: "r", Producer: "p", Body: "b"}); err == nil {
+	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{ConversationID: "r", Producer: "p", Body: "b"}); err == nil {
 		t.Error("AppendSystem(non-local org) should error")
 	}
 	if _, err := stores.StagedInjections.FlushPendingSystem(ctx, badOrg, "r"); err == nil {
@@ -54,15 +54,16 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForStagedInjection inserts a bare run row (origin='interactive', so no
-// blueprint_run FK chain is required) the staged_agent_injections FK needs.
-func seedSQLiteRunForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
+// seedSQLiteConversationForStagedInjection inserts a bare conversation row
+// (origin='interactive', so no blueprint_run FK chain is required) for the
+// staged injection's messages.conversation_id FK to land on.
+func seedSQLiteConversationForStagedInjection(t *testing.T, conn *sql.DB, suffix string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
-		t.Fatalf("seed run %s (%s): %v", id, fmt.Sprintf("staged-%s", suffix), err)
+		t.Fatalf("seed conversation %s (%s): %v", id, fmt.Sprintf("staged-%s", suffix), err)
 	}
 	return id
 }

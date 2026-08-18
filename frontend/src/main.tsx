@@ -153,7 +153,7 @@ function LocalRoutes() {
         <Route path="/" element={<Factory />} />
         <Route path="/triage" element={<Cards />} />
         <Route path="/board" element={<Board />} />
-        <Route path="/runs/:runID" element={<RunDetail />} />
+        <Route path="/runs/:conversationID" element={<RunDetail />} />
         <Route path="/prs" element={<PRDashboard />} />
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
@@ -239,7 +239,7 @@ function MultiRoutes() {
             <Route index element={<Factory />} />
             <Route path="triage" element={<Cards />} />
             <Route path="board" element={<Board />} />
-            <Route path="runs/:runID" element={<RunDetail />} />
+            <Route path="runs/:conversationID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
             {/* Prompts is the /team Prompts tab in multi mode (TFAC-445). The
                 top-level Prompts nav deep-links straight there; this redirect

@@ -16,10 +16,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskStore_CloseWithRunCancelIntent_SQLite runs the shared close-carries-
+// TestTaskStore_CloseWithConversationCancelIntent_SQLite runs the shared close-carries-
 // stop-intent suite against the SQLite impl. Each subtest gets a fresh
 // in-memory DB, so the exact-count assertions can't pick up a sibling's rows.
-func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
+func TestTaskStore_CloseWithConversationCancelIntent_SQLite(t *testing.T) {
 	dbtest.RunTaskCloseCancelIntentConformance(t, func(t *testing.T) (db.TaskStore, string, dbtest.TaskCloseCancelIntentSeeder) {
 		t.Helper()
 		conn, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -56,7 +56,7 @@ func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
 				}
 				return eventID
 			},
-			Run: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
 				t.Helper()
 				brID := seedSQLiteBlueprintRun(t, conn, taskID, blueprintStatus)
 				convID := uuid.New().String()
@@ -68,7 +68,7 @@ func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
 				})
 				return brID, convID
 			},
-			BareRun: func(t *testing.T, taskID, convStatus string) string {
+			BareConversation: func(t *testing.T, taskID, convStatus string) string {
 				t.Helper()
 				convID := uuid.New().String()
 				// origin='interactive': the origin CHECK demands the blueprint
@@ -114,7 +114,7 @@ func TestTaskStore_CloseWithRunCancelIntent_SQLite(t *testing.T) {
 }
 
 // seedSQLiteBlueprintRun mints a blueprint + blueprint_run on the task in the
-// named status. seedBlueprintRunForRun (the shared FK-target fixture) always
+// named status. seedBlueprintRunForConversation (the shared FK-target fixture) always
 // writes 'running'; this suite needs a finished one too, since "a blueprint
 // that already ended is never stamped" is half of what it asserts.
 func seedSQLiteBlueprintRun(t *testing.T, conn *sql.DB, taskID, status string) string {

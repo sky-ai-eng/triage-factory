@@ -36,23 +36,23 @@ var liveNetns = struct {
 	byName map[string]string // netns name → the run id it was created for
 }{byName: make(map[string]string)}
 
-// markNetnsLive records that this process created name for runID. Called once
+// markNetnsLive records that this process created name for conversationID. Called once
 // the namespace actually exists, so the ledger never claims one that failed to
 // come up.
-func markNetnsLive(name, runID string) {
+func markNetnsLive(name, conversationID string) {
 	if name == "" {
 		return
 	}
 	liveNetns.mu.Lock()
 	defer liveNetns.mu.Unlock()
-	liveNetns.byName[name] = runID
+	liveNetns.byName[name] = conversationID
 }
 
 // forgetNetns drops name from the ledger. Called from teardown BEFORE the
 // delete is attempted, and unconditionally: a teardown whose `ip netns delete`
 // fails is exactly how a namespace leaks, and that leak is what a later
 // bring-up must be free to reclaim. Keeping a failed teardown "live" would
-// wedge that (runID, index) pair until the process restarted.
+// wedge that (conversationID, index) pair until the process restarted.
 func forgetNetns(name string) {
 	if name == "" {
 		return
@@ -67,6 +67,6 @@ func forgetNetns(name string) {
 func netnsLiveRun(name string) (string, bool) {
 	liveNetns.mu.Lock()
 	defer liveNetns.mu.Unlock()
-	runID, live := liveNetns.byName[name]
-	return runID, live
+	conversationID, live := liveNetns.byName[name]
+	return conversationID, live
 }

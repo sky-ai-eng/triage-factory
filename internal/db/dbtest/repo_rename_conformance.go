@@ -114,7 +114,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The worktree ledger.
-		worktrees, err := s.RunWorktrees.ListSystem(ctx, orgID, fx.conversationID)
+		worktrees, err := s.ConversationWorktrees.ListSystem(ctx, orgID, fx.conversationID)
 		if err != nil {
 			t.Fatalf("worktrees ListSystem: %v", err)
 		}
@@ -750,8 +750,8 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 
 	conversationID := seed.Conversation(t, suffix)
-	if _, _, err := s.RunWorktrees.Insert(ctx, orgID, domain.RunWorktree{
-		RunID: conversationID, RepoID: renameOldSlug, Ref: "pr-18",
+	if _, _, err := s.ConversationWorktrees.Insert(ctx, orgID, domain.ConversationWorktree{
+		ConversationID: conversationID, RepoID: renameOldSlug, Ref: "pr-18",
 		Path: "/tmp/wt/" + conversationID + "/octo/api/pr-18",
 	}); err != nil {
 		t.Fatalf("seed worktree: %v", err)

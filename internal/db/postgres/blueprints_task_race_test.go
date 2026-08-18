@@ -100,7 +100,7 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 }
 
 // TestBlueprintStore_Postgres_OneActiveAutoRunPerTask: the task gate
-// (HasActiveAutoRunForTaskSystem) is check-then-act, so two different
+// (HasActiveAutoConversationForTaskSystem) is check-then-act, so two different
 // (event, trigger) pairs racing to auto-fire on the SAME task could both
 // pass the check and each mint an active blueprint_run —
 // blueprint_runs_one_active_auto_run_per_task is the DB-enforced backstop.
@@ -234,7 +234,7 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 // TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim is the Postgres
 // twin of the SQLite test of the same shape: the fenced insert is a
 // delegation's commitment point, so the task's agent claim commits in the same
-// transaction as the run row. Without that, a failed stamp leaves the board
+// transaction as the blueprint run row. Without that, a failed stamp leaves the board
 // showing a free task under a live run and no replay can repair it — the
 // (triggering_event_id, trigger_id) fence closes first.
 func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {

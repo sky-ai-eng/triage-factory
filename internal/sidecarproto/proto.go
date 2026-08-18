@@ -46,7 +46,7 @@ const (
 	KindHello Kind = "hello"
 
 	// KindSealedBundle relays one run's opaque sealed credential bundle from
-	// the orchestrator (which read it out of run_credentials but cannot open
+	// the orchestrator (which read it out of claim_credentials but cannot open
 	// it) to the sidecar (which holds the private key). Repeatable: the
 	// orchestrator re-sends whenever the brain re-seals (refresh sweep), and
 	// the sidecar's proxies pick up the newer material. A Call so the sidecar
@@ -66,7 +66,7 @@ const (
 	// DB-backed read + authz the relocated agenthost needs — the git proxy's
 	// push authorization, the exec verb-trace reads, a provider's policy
 	// lookup — rides this one Kind; identity is bound orchestrator-side from
-	// the supervised run's RunInfo, so the body carries no org id and a
+	// the supervised run's ConversationInfo, so the body carries no org id and a
 	// sidecar cannot address another org's data.
 	KindRelayCall Kind = "relay_call"
 

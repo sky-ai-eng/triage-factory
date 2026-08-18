@@ -21,10 +21,10 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	in := domain.Artifact{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		OrgID:          runmode.LocalDefaultOrgID,
 		TeamID:         runmode.LocalDefaultTeamID,
 		Provider:       domain.ArtifactProviderGitHub,
@@ -46,7 +46,7 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 	if out.CreatedAt.IsZero() || out.UpdatedAt.IsZero() {
 		t.Error("expected created_at/updated_at populated")
 	}
-	if out.ConversationID != runID || out.Provider != "github" || out.Kind != "pull_request" ||
+	if out.ConversationID != conversationID || out.Provider != "github" || out.Kind != "pull_request" ||
 		out.Target != "octo/repo#123" || out.ExternalID != "123" ||
 		out.URL != in.URL || out.State != "open" || out.DedupKey != in.DedupKey ||
 		out.DetailsJSON != `{"draft":false}` {
@@ -66,14 +66,14 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 		t.Fatalf("Upsert branch: %v", err)
 	}
 	var extID, url, details sql.NullString
-	var nullRun sql.NullString
+	var nullConversation sql.NullString
 	if err := conn.QueryRow(
 		`SELECT conversation_id, external_id, url, details_json FROM artifacts WHERE dedup_key = 'git:branch:octo/repo:refs/heads/x'`,
-	).Scan(&nullRun, &extID, &url, &details); err != nil {
+	).Scan(&nullConversation, &extID, &url, &details); err != nil {
 		t.Fatalf("read back branch: %v", err)
 	}
-	if nullRun.Valid || extID.Valid || url.Valid || details.Valid {
-		t.Errorf("empty optionals should be NULL: run=%v ext=%v url=%v details=%v", nullRun, extID, url, details)
+	if nullConversation.Valid || extID.Valid || url.Valid || details.Valid {
+		t.Errorf("empty optionals should be NULL: conversation=%v ext=%v url=%v details=%v", nullConversation, extID, url, details)
 	}
 }
 
@@ -84,11 +84,11 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	first, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRDraft, DedupKey: key,
 	})
@@ -97,7 +97,7 @@ func TestArtifactStore_SQLite_UpsertDedup(t *testing.T) {
 	}
 
 	second, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#7",
 		ExternalID: "7", URL: "https://github.com/octo/repo/pull/7",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -133,11 +133,11 @@ func TestArtifactStore_SQLite_InsertIfAbsent(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
 	base := domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
 		DedupKey: key,
 	}
@@ -188,13 +188,13 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// The branch ref is the stable anchor across the transition.
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 
 	pending, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRPending, DedupKey: key,
 		// No external_id / url yet — the PR doesn't exist.
@@ -207,7 +207,7 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 	}
 
 	real, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#42",
 		ExternalID: "42", URL: "https://github.com/octo/repo/pull/42",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -234,17 +234,17 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 // TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL pins that an
 // upsert leaving external_id/url empty does NOT blank values an earlier upsert
 // stored — they only ever fill in (PR number / issue key, html link). A
-// reconciliation pass, or a Jira mutation whose run can't compute the browse
-// URL, must not erase them. State/target still follow the latest writer.
+// reconciliation pass, or a Jira mutation whose conversation can't compute the
+// browse URL, must not erase them. State/target still follow the latest writer.
 func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
 		State: domain.ArtifactStateIssueCreated, DedupKey: key,
@@ -254,7 +254,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	// A later mutation that can't supply external_id/url (both empty).
 	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
 	})
@@ -270,7 +270,7 @@ func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	// A non-empty value still overwrites (intentional change path).
 	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
@@ -292,11 +292,11 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	key := domain.ArtifactDedupKey("github", "comment", "555", "")
 	if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#7",
 		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
@@ -306,7 +306,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A comment-delete that only carries the id (empty target/url).
 	out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", ExternalID: "555",
 		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
 	})
@@ -322,7 +322,7 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A non-empty target still overwrites (migration path).
 	out, err = stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#8",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
 	})
@@ -334,17 +334,17 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_SQLite_ListByRunAndTeam pins the two read paths and
-// their newest-first ordering + the team Limit. TFAC-455.
-func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
+// TestArtifactStore_SQLite_ListByConversationAndTeam pins the two read paths
+// and their newest-first ordering + the team Limit. TFAC-455.
+func TestArtifactStore_SQLite_ListByConversationAndTeam(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	for i, k := range []string{"a", "b", "c"} {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: "k" + k,
 		}); err != nil {
@@ -352,12 +352,12 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 		}
 	}
 
-	byRun, err := stores.Artifacts.ListByRun(ctx, runmode.LocalDefaultOrgID, runID)
+	byConversation, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
-	if len(byRun) != 3 {
-		t.Errorf("ListByRun len = %d, want 3", len(byRun))
+	if len(byConversation) != 3 {
+		t.Errorf("ListByConversation len = %d, want 3", len(byConversation))
 	}
 
 	byTeam, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
@@ -377,123 +377,126 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_SQLite_CountByRun pins the batched per-run count the run
-// list path uses for artifact_count (TFAC-465): counts keyed by run id, a run
-// with no artifacts absent from the map (not 0-valued), unknown ids absent, and
-// an empty runIDs a no-op returning an empty map.
-func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
+// TestArtifactStore_SQLite_CountByConversation pins the batched
+// per-conversation count the conversation-list path uses for artifact_count
+// (TFAC-465): counts keyed by conversation id, a conversation with no artifacts
+// absent from the map (not 0-valued), unknown ids absent, and
+// an empty conversationIDs a no-op returning an empty map.
+func TestArtifactStore_SQLite_CountByConversation(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactConversationWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
-	seed := func(runID, key string) {
+	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runA, "a3")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convA, "a3")
+	seed(convB, "b1")
 
-	counts, err := stores.Artifacts.CountByRun(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC, "nonexistent"})
+	counts, err := stores.Artifacts.CountByConversation(ctx, runmode.LocalDefaultOrgID, []string{convA, convB, convC, "nonexistent"})
 	if err != nil {
-		t.Fatalf("CountByRun: %v", err)
+		t.Fatalf("CountByConversation: %v", err)
 	}
-	if counts[runA] != 3 {
-		t.Errorf("runA count = %d, want 3", counts[runA])
+	if counts[convA] != 3 {
+		t.Errorf("convA count = %d, want 3", counts[convA])
 	}
-	if counts[runB] != 1 {
-		t.Errorf("runB count = %d, want 1", counts[runB])
+	if counts[convB] != 1 {
+		t.Errorf("convB count = %d, want 1", counts[convB])
 	}
-	if _, ok := counts[runC]; ok {
-		t.Errorf("runC (no artifacts) should be absent from the map, got %d", counts[runC])
+	if _, ok := counts[convC]; ok {
+		t.Errorf("convC (no artifacts) should be absent from the map, got %d", counts[convC])
 	}
 	if _, ok := counts["nonexistent"]; ok {
-		t.Error("unknown run id should be absent from the map")
+		t.Error("unknown conversation id should be absent from the map")
 	}
 
-	// Empty runIDs is a no-op — empty, non-nil map, no query.
-	empty, err := stores.Artifacts.CountByRun(ctx, runmode.LocalDefaultOrgID, nil)
+	// Empty conversationIDs is a no-op — empty, non-nil map, no query.
+	empty, err := stores.Artifacts.CountByConversation(ctx, runmode.LocalDefaultOrgID, nil)
 	if err != nil {
-		t.Fatalf("CountByRun(nil): %v", err)
+		t.Fatalf("CountByConversation(nil): %v", err)
 	}
 	if empty == nil || len(empty) != 0 {
-		t.Errorf("CountByRun(nil) = %v, want empty non-nil map", empty)
+		t.Errorf("CountByConversation(nil) = %v, want empty non-nil map", empty)
 	}
 }
 
-// TestArtifactStore_SQLite_ListByRuns pins the batched multi-run read the
-// run-list path uses for pending_kind (TFAC-465): artifacts for the given runs
-// come back in one slice, each carrying its RunID for grouping; a run with no
-// artifacts contributes nothing and an empty runIDs is a no-op.
-func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
+// TestArtifactStore_SQLite_ListByConversations pins the batched
+// multi-conversation read the conversation-list path uses for pending_kind
+// (TFAC-465): artifacts for the given conversations come back in one slice,
+// each carrying its ConversationID for grouping; a conversation with no
+// artifacts contributes nothing and an empty conversationIDs is a no-op.
+func TestArtifactStore_SQLite_ListByConversations(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runA := seedArtifactRun(t, conn)
-	runB := seedArtifactRunWithID(t, conn, "88888888-8888-8888-8888-888888888888")
-	runC := seedArtifactRunWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
+	convA := seedArtifactConversation(t, conn)
+	convB := seedArtifactConversationWithID(t, conn, "88888888-8888-8888-8888-888888888888")
+	convC := seedArtifactConversationWithID(t, conn, "77777777-7777-7777-7777-777777777777") // no artifacts
 
-	seed := func(runID, key string) {
+	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	arts, err := stores.Artifacts.ListByRuns(ctx, runmode.LocalDefaultOrgID, []string{runA, runB, runC})
+	arts, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, []string{convA, convB, convC})
 	if err != nil {
-		t.Fatalf("ListByRuns: %v", err)
+		t.Fatalf("ListByConversations: %v", err)
 	}
-	byRun := map[string]int{}
+	byConversation := map[string]int{}
 	for _, a := range arts {
 		if a.ConversationID == "" {
-			t.Errorf("artifact %s came back without its RunID (can't group)", a.ID)
+			t.Errorf("artifact %s came back without its ConversationID (can't group)", a.ID)
 		}
-		byRun[a.ConversationID]++
+		byConversation[a.ConversationID]++
 	}
-	if byRun[runA] != 2 || byRun[runB] != 1 {
-		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	if byConversation[convA] != 2 || byConversation[convB] != 1 {
+		t.Errorf("grouped counts = %v, want convA=2 convB=1", byConversation)
 	}
-	if byRun[runC] != 0 {
-		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	if byConversation[convC] != 0 {
+		t.Errorf("convC (no artifacts) contributed %d rows, want 0", byConversation[convC])
 	}
 
-	empty, err := stores.Artifacts.ListByRuns(ctx, runmode.LocalDefaultOrgID, nil)
+	empty, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, nil)
 	if err != nil {
-		t.Fatalf("ListByRuns(nil): %v", err)
+		t.Fatalf("ListByConversations(nil): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("ListByRuns(nil) = %v, want empty", empty)
+		t.Errorf("ListByConversations(nil) = %v, want empty", empty)
 	}
 }
 
 // TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: an artifact whose run was purged (conversation_id NULL)
-// is still the team's and must come back from ListByTeam. Guards against a
-// future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
+// audit-ledger invariant: an artifact whose conversation was purged
+// (conversation_id NULL) is still the team's and must come back from
+// ListByTeam. Guards against a future `AND conversation_id IS NOT NULL`
+// creeping into the query. TFAC-455.
 func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	art, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 		Provider: "git", Kind: "branch", Target: "octo/repo",
 		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
 	})
@@ -501,17 +504,17 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
-	// run detaches the artifact rather than cascading it away.
-	if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, runID); err != nil {
-		t.Fatalf("purge run: %v", err)
+	// Simulate a conversation purge: the FK is ON DELETE SET NULL, so deleting
+	// the conversation detaches the artifact rather than cascading it away.
+	if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
+		t.Fatalf("purge conversation: %v", err)
 	}
-	var nullRun sql.NullString
-	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullRun); err != nil {
+	var nullConversation sql.NullString
+	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullConversation); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if nullRun.Valid {
-		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
+	if nullConversation.Valid {
+		t.Fatalf("conversation_id should be NULL after conversation purge, got %q", nullConversation.String)
 	}
 
 	rows, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
@@ -522,7 +525,7 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Errorf("ListByTeam dropped the detached artifact: %+v", rows)
 	}
 	if rows[0].ConversationID != "" {
-		t.Errorf("detached row RunID = %q, want empty", rows[0].ConversationID)
+		t.Errorf("detached row ConversationID = %q, want empty", rows[0].ConversationID)
 	}
 }
 
@@ -559,7 +562,7 @@ func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// (kind, state) across the whole lifecycle space.
 	seeds := []struct{ kind, state string }{
@@ -580,7 +583,7 @@ func TestArtifactStore_SQLite_ListNonTerminal(t *testing.T) {
 	for i, s := range seeds {
 		key := "k" + string(rune('a'+i)) // unique dedup_key per seed
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: "github", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
@@ -623,7 +626,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	conn := newSQLiteForArtifactTestTimed(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	// (provider, kind, state, created_at) across the lifecycle, including
 	// terminal rows the reconciler set would hide.
@@ -638,7 +641,7 @@ func TestArtifactStore_SQLite_ListByOrgSystem(t *testing.T) {
 	}
 	for i, s := range seeds {
 		out, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: s.provider, Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: "k" + string(rune('a'+i)),
 		})
 		if err != nil {
@@ -741,11 +744,11 @@ func TestArtifactStore_SQLite_ListByTeam_Filters(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	seed := func(provider, kind, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-			ConversationID: runID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
 			Provider: provider, Kind: kind, Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
@@ -801,20 +804,20 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	mk := func(kind, state, target, dedup string) {
 		if _, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-			ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+			ConversationID: conversationID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 			Provider: domain.ArtifactProviderGitHub, Kind: kind, State: state,
 			Target: target, DedupKey: dedup,
 		}); err != nil {
 			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
 		}
 	}
-	// Two pending reviews on the target PR (different runs in reality → different
-	// dedup keys), plus noise that must NOT match.
+	// Two pending reviews on the target PR (different conversations in reality →
+	// different dedup keys), plus noise that must NOT match.
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-a")
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-b")
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", "rev-7-submitted")
@@ -844,11 +847,11 @@ func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
@@ -857,7 +860,7 @@ func TestArtifactStore_SQLite_TransitionReviewState(t *testing.T) {
 		t.Fatalf("seed review: %v", err)
 	}
 	pr, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
 	})
@@ -918,11 +921,11 @@ func TestArtifactStore_SQLite_UpdateReviewDetailsIfPending(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 	org := runmode.LocalDefaultOrgID
 
 	rev, err := stores.Artifacts.Upsert(ctx, org, domain.Artifact{
-		ConversationID: runID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: conversationID, OrgID: org, TeamID: runmode.LocalDefaultTeamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,
@@ -975,23 +978,24 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedArtifactRun inserts a minimal run the artifacts FK (conversation_id →
-// conversations(id)) can point at. origin is set non-'blueprint' so the
+// seedArtifactConversation inserts a minimal conversation the artifacts FK
+// (conversation_id → conversations(id)) can point at. origin is set non-'blueprint' so the
 // conversations_origin_requires_parents CHECK doesn't demand a parent chain; the
 // org/team/creator columns default to the local sentinels.
-func seedArtifactRun(t *testing.T, conn *sql.DB) string {
+func seedArtifactConversation(t *testing.T, conn *sql.DB) string {
 	t.Helper()
-	return seedArtifactRunWithID(t, conn, "99999999-9999-9999-9999-999999999999")
+	return seedArtifactConversationWithID(t, conn, "99999999-9999-9999-9999-999999999999")
 }
 
-// seedArtifactRunWithID is seedArtifactRun parameterized on the run id, for
-// tests that need more than one run (CountByRun batches across runs).
-func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
+// seedArtifactConversationWithID is seedArtifactConversation parameterized on
+// the conversation id, for tests that need more than one conversation
+// (CountByConversation batches across conversations).
+func seedArtifactConversationWithID(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
-		t.Fatalf("seed run %s: %v", id, err)
+		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id
 }
@@ -1000,23 +1004,23 @@ func seedArtifactRunWithID(t *testing.T, conn *sql.DB, id string) string {
 // the auto-posting review posture claims with: exactly one caller moves the row
 // out of pending, and the loser learns it lost rather than silently proceeding
 // to a second SubmitReview. Same contract as the app-pool twin the approve
-// handler uses — the two are what stop a run and a human from both publishing
-// one drafted review.
+// handler uses — the two are what stop a conversation and a human from both
+// publishing one drafted review.
 func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
-	runID := seedArtifactRun(t, conn)
+	conversationID := seedArtifactConversation(t, conn)
 
 	draft, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Artifact{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		OrgID:          runmode.LocalDefaultOrgID,
 		TeamID:         runmode.LocalDefaultTeamID,
 		Provider:       domain.ArtifactProviderGitHub,
 		Kind:           domain.ArtifactKindReview,
 		Target:         "octo/repo#7",
 		State:          domain.ArtifactStateReviewPending,
-		DedupKey:       domain.ReviewDedupKey("octo/repo", 7, runID),
+		DedupKey:       domain.ReviewDedupKey("octo/repo", 7, conversationID),
 		DetailsJSON:    `{"review_event":"COMMENT"}`,
 	})
 	if err != nil {
@@ -1028,8 +1032,8 @@ func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 	if err != nil || !won {
 		t.Fatalf("first claim = %v, %v; want it to win", won, err)
 	}
-	// The second caller — a human approve racing the run's auto-post, or vice
-	// versa — must lose, having made no GitHub call on the strength of it.
+	// The second caller — a human approve racing the conversation's auto-post,
+	// or vice versa — must lose, having made no GitHub call on the strength of it.
 	lost, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
 	if err != nil {

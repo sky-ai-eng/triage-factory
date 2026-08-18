@@ -74,7 +74,7 @@ func (s outageTaskStore) FindOrCreateAtSystem(ctx context.Context, orgID, teamID
 
 // outageDelegator fails the fire itself, standing in for the delegation tail
 // behind fireMatchedTriggers. Delegating for real is fenceStubDelegator's job
-// — it mints the fenced blueprint_run + run rows the replay assertions read.
+// — it mints the fenced blueprint_run + conversation rows the replay assertions read.
 type outageDelegator struct {
 	*fenceStubDelegator
 	o *outage
@@ -200,8 +200,9 @@ func TestProcessQueuedEvent_ObligationFailure_RequeuesThenRoutesOnRecovery(t *te
 // TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce covers the
 // obligation stage the other three can't reach: the task is already minted
 // when the trigger's fire fails, so the retry runs against existing state.
-// It must still end at exactly one task AND exactly one run — the task
-// dedup index and the (event, trigger) replay fence each doing their half.
+// It must still end at exactly one task AND exactly one conversation — the
+// task dedup index and the (event, trigger) replay fence each doing their
+// half.
 func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	database := newTestDB(t)
 	entityID := setupFenceScenario(t, database)
@@ -241,12 +242,12 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	if lastErr == "" {
 		t.Error("last_error is empty; a requeued row must record why it did not route")
 	}
-	if n := fenceRunCount(t, database, entityID); n != 0 {
-		t.Fatalf("runs after the failed fire = %d, want 0", n)
+	if n := fenceConversationCount(t, database, entityID); n != 0 {
+		t.Fatalf("conversations after the failed fire = %d, want 0", n)
 	}
 
 	// The spawner recovers: the replay re-runs every stage against the
-	// task the first pass created, and fires the run that was owed.
+	// task the first pass created, and fires the conversation that was owed.
 	if err := r.drainEventQueue(context.Background()); err != nil {
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
@@ -256,15 +257,15 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	if n := activeTaskCount(t, database, entityID); n != 1 {
 		t.Errorf("tasks = %d, want exactly 1 — the replay must not mint a second", n)
 	}
-	if n := fenceRunCount(t, database, entityID); n != 1 {
-		t.Errorf("runs = %d, want exactly 1", n)
+	if n := fenceConversationCount(t, database, entityID); n != 1 {
+		t.Errorf("conversations = %d, want exactly 1", n)
 	}
 
-	// Now the negative space, with the run terminal so the task's auto-run
-	// gate is OPEN — otherwise a busy gate, not the fence, would be what
-	// stopped the second run and this would prove nothing. Re-arm the row and
-	// route the same event a third time.
-	fenceCompleteRuns(t, database, entityID)
+	// Now the negative space, with the conversation terminal so the task's
+	// auto-run gate is OPEN — otherwise a busy gate, not the fence, would be
+	// what stopped the second conversation and this would prove nothing.
+	// Re-arm the row and route the same event a third time.
+	fenceCompleteConversations(t, database, entityID)
 	if _, err := database.Exec(`UPDATE event_queue SET status = 'pending', attempts = 0`); err != nil {
 		t.Fatalf("re-arm the row: %v", err)
 	}
@@ -274,8 +275,8 @@ func TestProcessQueuedEvent_FireFailure_RequeuesThenFiresOnce(t *testing.T) {
 	if n := activeTaskCount(t, database, entityID); n != 1 {
 		t.Errorf("tasks after replay = %d, want 1", n)
 	}
-	if n := fenceRunCount(t, database, entityID); n != 1 {
-		t.Errorf("runs after replay = %d, want 1 (the (event, trigger) fence collapses it)", n)
+	if n := fenceConversationCount(t, database, entityID); n != 1 {
+		t.Errorf("conversations after replay = %d, want 1 (the (event, trigger) fence collapses it)", n)
 	}
 }
 
@@ -420,7 +421,8 @@ func (visibilityFailingTaskStore) SetVisibilityTeamsSystem(ctx context.Context, 
 // TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit pins that a
 // failing trigger doesn't cancel the others. Both teams match; team A's
 // fire is broken. The replay the error asks for is fenced, so letting team
-// B commit now costs nothing and losing its run would cost a run.
+// B commit now costs nothing and losing its conversation would cost a
+// conversation.
 func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
@@ -440,7 +442,7 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 
 	// Fail the first Delegate call only: the pool model orders teams
 	// deterministically, so exactly one team's trigger hits the outage and
-	// the other must still get its run.
+	// the other must still get its conversation.
 	stub := outageDelegator{fenceStubDelegator: &fenceStubDelegator{db: database}, o: &outage{remaining: 1}}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities,
@@ -453,12 +455,12 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 		OrgID:        runmode.LocalDefaultOrgID,
 	})
 	if err == nil {
-		t.Fatal("HandleEvent returned nil though a trigger's fire failed; the worker would consume the event and the run would never happen")
+		t.Fatal("HandleEvent returned nil though a trigger's fire failed; the worker would consume the event and the conversation would never happen")
 	}
 	if n := activeTaskCount(t, database, entity.ID); n != 1 {
 		t.Errorf("tasks = %d, want 1 (the upsert stage completed)", n)
 	}
-	if n := fenceRunCount(t, database, entity.ID); n != 1 {
-		t.Errorf("runs = %d, want 1 — the sibling trigger must commit even though its neighbour failed", n)
+	if n := fenceConversationCount(t, database, entity.ID); n != 1 {
+		t.Errorf("conversations = %d, want 1 — the sibling trigger must commit even though its neighbour failed", n)
 	}
 }

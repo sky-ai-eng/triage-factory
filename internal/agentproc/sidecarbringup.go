@@ -23,8 +23,8 @@ const sidecarHelloTimeout = 30 * time.Second
 // brain wrote for it, plus the boot epoch it was sealed under. The
 // orchestrator relays those bytes to the sidecar without ever opening them —
 // only the sidecar holds the matching private key. Provided by the delegate
-// (which owns the run-queue + run_credentials stores); the returned bytes are
-// ciphertext the orchestrator cannot read.
+// (which owns the conversation-queue + claim_credentials stores); the
+// returned bytes are ciphertext the orchestrator cannot read.
 type SidecarProvisionFunc func(ctx context.Context, sidecarPubKeyB64 string) (sealed []byte, bootEpoch int64, err error)
 
 // sidecarSupervisor is the orchestrator's end of the supervision channel: it
@@ -119,7 +119,7 @@ type SidecarBringUpParams struct {
 	// Relay is the org-bound op server the supervisor routes the sidecar's
 	// relay envelope to (the git proxy's authorize/audit, and — once the
 	// agenthost is relocated — the exec verb trace and provider policy ops).
-	// The delegate builds it from the run's stores + RunInfo + git gate. nil
+	// The delegate builds it from the run's stores + ConversationInfo + git gate. nil
 	// only in a test fixture, where a relayed op fails closed.
 	Relay RelayDispatcher
 
