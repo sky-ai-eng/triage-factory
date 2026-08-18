@@ -750,7 +750,7 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 //
 // The blueprint run row and the task's agent claim commit together — see
 // db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
-// error and leaves the run committed.
+// error and leaves the blueprint run committed.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, false, err
