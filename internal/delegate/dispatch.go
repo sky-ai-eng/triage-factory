@@ -47,7 +47,7 @@ const maxClaimAttempts = 5
 // Default cadences for RunDispatcher, exported so main can tune them and tests
 // can drive the loop fast. The scan is the correctness backstop (a dropped wake
 // only defers a claim to the next tick); the wake channel is the latency nudge.
-const DefaultRunScanInterval = 2 * time.Second
+const DefaultDispatchScanInterval = 2 * time.Second
 
 // WakeDispatcher is the exported form of wakeDispatcher, for callers outside
 // this package — the tf_wake NOTIFY listener (internal/app, TFAC-586) nudges

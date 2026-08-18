@@ -88,7 +88,7 @@ func BranchArtifactWebURL(base, repoPath, ref string) (string, bool) {
 // ParseBranchArtifactSHA extracts the pushed commit SHA from a branch artifact's
 // DetailsJSON (the {"sha":...,"new":...} payload), or "" when it's absent or
 // unparseable. The external-action audit log keys a branch push on
-// (run, ref, sha) — the ref is the artifact's ExternalID and the sha lives here —
+// (conversation, ref, sha) — the ref is the artifact's ExternalID and the sha lives here —
 // so the git hook+proxy twin (identical sha) collapses to one row while a new
 // push (different sha) is recorded distinctly. Best-effort: an empty sha just
 // yields a less-specific dedup key, never a dropped audit row.

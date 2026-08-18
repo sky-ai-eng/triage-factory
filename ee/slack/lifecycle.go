@@ -389,9 +389,9 @@ func isTerminalConversationStatus(status string) bool {
 // the brief failure reply).
 //
 // Terminal statuses here are not necessarily final for the conversationID: a parked
-// ("open") run is resumable, and so is a completed+abort conversation
+// ("open") conversation is resumable, and so is a completed+abort conversation
 // (internal/delegate/resume.go rebroadcasts "running" for the same conversationID on
-// resume). So terminal→running for one run is a legitimate sequence, and
+// resume). So terminal→running for one conversation is a legitimate sequence, and
 // the retiring worker's trailing setStatus("") must not race the successor's
 // initial status call. That ordering is enforced per conversation, in the worker
 // succession itself — the terminal branch records the retiring worker's
@@ -475,10 +475,11 @@ func (a *lifecycleAdapter) handleConversationStatus(ctx context.Context, evt dom
 	}
 }
 
-// handleConversationActivity forwards a tool-activity sentinel to its run's live
+// handleConversationActivity forwards a tool-activity sentinel to its
+// conversation's live
 // worker, if any. A conversation with no cached entry yet (activity arrived before
 // this adapter ever saw a system:conversation:status for it) or no active worker
-// (not "running", or not a Slack run at all) is silently ignored — the
+// (not "running", or not a Slack conversation at all) is silently ignored — the
 // verdict-priming event is always system:conversation:status, per the cache contract
 // above.
 func (a *lifecycleAdapter) handleConversationActivity(ctx context.Context, evt domain.Event, conversations map[string]*conversationEntry) {
@@ -628,7 +629,7 @@ var initialIndicatorText = indicatorText{
 	loading: slackLifecycleInitialLoadingText,
 }
 
-// preRunIndicatorText maps the pre-"running" progress statuses a run walks
+// preRunIndicatorText maps the pre-"running" progress statuses a conversation walks
 // through (queue dwell, credential handoff, source-context fetch, worktree
 // build, process spawn) to indicator texts, so the thread shows real progress
 // from the moment the dispatcher touches the conversation instead of nothing until the
@@ -784,7 +785,7 @@ func (w *conversationStatusWorker) sendActivity(text indicatorText) {
 }
 
 // keepAlive resets the worker's idle timer without changing its displayed
-// text — sent on a repeated "running" status for a run whose worker already
+// text — sent on a repeated "running" status for a conversation whose worker already
 // exists, so a resumed conversation's redundant status event doesn't blow away a more
 // specific activity-derived text. Non-blocking: a dropped keepalive is
 // harmless, the next status/activity event (or the idle reap itself) covers
@@ -817,10 +818,10 @@ func (w *conversationStatusWorker) stop(failed bool) {
 // loop is the worker's whole lifecycle. ctx cancellation (adapter shutdown)
 // and an explicit stop() both end it the same way: clear the status, close
 // done. Only an explicit stop(true) additionally posts the failure reply —
-// a shutdown mid-run is not a conversation failure.
+// a shutdown mid-engagement is not a conversation failure.
 //
 // Activity debounce is pure trailing-edge: the first activity event in a
-// quiet run opens a slackLifecycleActivityDebounce window; every further
+// quiet conversation opens a slackLifecycleActivityDebounce window; every further
 // event before it elapses just updates the pending text (coalesce, latest
 // wins) WITHOUT restarting the window, so a rapid burst — however many
 // events — always collapses to exactly one setStatus call, fired once the

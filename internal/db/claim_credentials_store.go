@@ -17,7 +17,7 @@ type SealedBundle struct {
 	BootEpoch  int64
 
 	// Sealed is the ciphertext. Only the holder of the matching private key
-	// (the run's credential sidecar) can open it.
+	// (the claim's per-run credential sidecar) can open it.
 	Sealed []byte
 
 	// SealedAt is claim_credentials.created_at. Put replaces it on every
@@ -26,7 +26,7 @@ type SealedBundle struct {
 	// orchestrator can use without holding any unseal authority: "this bundle
 	// was sealed after event X" is decidable from a timestamp alone. The
 	// relayed `workspace add` gate is the caller that needs exactly that (the
-	// provisioner recomputes a run's authorized repo set from scratch on
+	// provisioner recomputes a conversation's authorized repo set from scratch on
 	// every pass, so a bundle sealed after a conversation_worktrees row
 	// covers that row's repo by construction). Zero in local mode, which has
 	// no sealed bundles at all.
@@ -34,11 +34,11 @@ type SealedBundle struct {
 }
 
 // ClaimCredentialsStore owns the claim_credentials table — the sealed
-// per-claim credential bundle channel. An executor parks a claimed run's
-// active claim in phase='awaiting_credentials'; the brain resolves that
-// run's LLM/GitHub/
+// per-claim credential bundle channel. An executor parks a claimed
+// conversation's active claim in phase='awaiting_credentials'; the brain
+// resolves that conversation's LLM/GitHub/
 // Jira credentials, seals them to the claimant's published instances
-// pubkey, and writes exactly one row keyed by the run's ACTIVE claim id.
+// pubkey, and writes exactly one row keyed by the conversation's ACTIVE claim id.
 // Method signatures still take conversationID (the conversation id) — the impl
 // resolves the active claim internally, so callers never handle claim ids.
 // Admin-pool-only in Postgres, same posture as InstanceStore/ConversationSignalStore:
@@ -48,7 +48,7 @@ type SealedBundle struct {
 //
 // One row per claim (a re-claim after a crash is a NEW claim with its own
 // fresh seal), replaced wholesale on every write (Put is an upsert) — a
-// refresh (re-minted git tokens for a long-running run) simply overwrites
+// refresh (re-minted git tokens for a long-lived claim) simply overwrites
 // the prior bundle, never merges into it.
 //
 // Postgres-only in substance: local mode reads the live secret store
@@ -57,8 +57,8 @@ type SealedBundle struct {
 type ClaimCredentialsStore interface {
 	// Put seals sealed (already-encrypted by the caller via credseal) into
 	// claim_credentials for conversationID's active claim, replacing any existing
-	// row wholesale. A run with no active claim is a silent no-op — there
-	// is no engagement to seal for. executorID/bootEpoch identify the
+	// row wholesale. A conversation with no active claim is a silent no-op —
+	// there is no engagement to seal for. executorID/bootEpoch identify the
 	// claiming executor this bundle was sealed for — the boot_epoch travels
 	// in cleartext specifically so a reader can compare it against its own
 	// current epoch BEFORE calling credseal.Open (see Get's doc).
@@ -81,7 +81,7 @@ type ClaimCredentialsStore interface {
 	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false
-	// when none has been provisioned yet (or the run has no active claim).
+	// when none has been provisioned yet (or the conversation has no active claim).
 	// Callers MUST compare the returned BootEpoch against their own
 	// current boot_epoch before attempting to unseal — a bundle sealed for
 	// an earlier boot must never be handed to credseal.Open, even though a

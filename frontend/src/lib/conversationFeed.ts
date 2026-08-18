@@ -1,17 +1,17 @@
 import type { Message } from '../types'
 import { isSystemNotice } from './messageVoice'
 
-// conversationFeed — the bounded per-run projection the board's AgentCards render from.
+// conversationFeed — the bounded per-conversation projection the board's AgentCards render from.
 //
-// The board used to hold every run's FULL message array in top-level state and
+// The board used to hold every conversation's FULL message array in top-level state and
 // hand it to each card, which then derived a token tally and the last five
 // ticker lines on every render. That meant unbounded memory growth per
-// live run AND a whole-board re-render doing O(all messages) work for every
+// live conversation AND a whole-board re-render doing O(all messages) work for every
 // streamed `message` event. The card only ever displays aggregates + the tail,
 // so this module keeps exactly that: running stats plus the last few feed
 // lines, updated incrementally as messages arrive.
 //
-// The full transcript still lives where it's actually shown — the run detail
+// The full transcript still lives where it's actually shown — the conversation detail
 // page (useConversationDetail / ScreenTranscript).
 
 export interface FeedLine {
@@ -63,7 +63,7 @@ export function appendToFeed(
 
 // linesForMessage flattens one message into compact one-liners — the agent's
 // actions (tool calls) and its prose turns — for the card's live ticker. The
-// full, nested transcript lives in the expanded run view.
+// full, nested transcript lives in the expanded conversation view.
 function linesForMessage(msg: Message): FeedLine[] {
   const out: FeedLine[] = []
   const time = new Date(msg.created_at).toLocaleTimeString([], {
@@ -73,7 +73,7 @@ function linesForMessage(msg: Message): FeedLine[] {
     hour12: false,
   })
   // Operator steers show on the ticker too — the card should reflect that
-  // someone redirected the run. A system-authored user row (a stop note, an
+  // someone redirected the conversation. A system-authored user row (a stop note, an
   // executor-changed notice) rides the same role and is NOT that: it shows
   // without the attribution, because prefixing the machine's own words with
   // "you:" tells the reader they said something they never said.
@@ -86,7 +86,7 @@ function linesForMessage(msg: Message): FeedLine[] {
   // Skip the raw JSON completion message (the agent's structured output).
   if (msg.content && msg.content.trimStart().startsWith('{"status":')) return out
   // Reasoning stays off the ticker — it's a verbose stream; the expanded
-  // run view renders it under its own THINKING rows.
+  // conversation view renders it under its own THINKING rows.
   if (msg.subtype === 'thinking') return out
   if (msg.content) out.push({ id: `txt-${msg.id}`, time, text: clip(msg.content, 70) })
   if (msg.tool_calls?.length) {

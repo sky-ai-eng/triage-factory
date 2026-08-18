@@ -104,7 +104,7 @@ type slackDownloadArgs struct {
 }
 
 // slackDownloadResult carries the downloaded file's name + base64 body back
-// to the CLI, which decodes and writes it to the run's cwd (or --out) and
+// to the CLI, which decodes and writes it to the agent's cwd (or --out) and
 // prints only {"path":...} — the base64 payload never reaches stdout.
 type slackDownloadResult struct {
 	Name   string `json:"name"`

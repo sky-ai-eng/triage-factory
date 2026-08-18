@@ -19,8 +19,8 @@ import (
 //
 //   - app: ListSpend + SpendByCategory. The view is defined
 //     WITH (security_invoker = true), so SELECTing it under tf_app evaluates the
-//     base tables' RLS (runs/curator_requests org+team, system_llm_runs org) as
-//     the querying user — a team member sees their team's runs but not a sibling
+//     base tables' RLS (messages/conversations org+team, system_llm_runs org) as
+//     the querying user — a team member sees their team's spend but not a sibling
 //     team's, with system/curator rows visible at org scope.
 //   - admin: SpendByCategorySystem. The org-wide aggregate a claims-less system
 //     caller needs — the TFAC-477 safety cap reads it from a Spawner.Delegate

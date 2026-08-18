@@ -285,7 +285,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
   // A write Triage Factory refused before it reached GitHub. Deliberately not
   // in the neutral tint the two fallbacks above sit in: those say a write
   // happened and could not be named, this says one was stopped, and someone
-  // scanning a run's actions should be able to see the difference without
+  // scanning a conversation's actions should be able to see the difference without
   // reading labels.
   gh_write_denied: {
     icon: ShieldBan,
@@ -293,11 +293,11 @@ export const ACTION_META: Record<string, ActionMeta> = {
     text: 'text-text-tertiary',
     tone: 'attention',
   },
-  // The other two per-run gates, sharing gh_write_denied's shield and tone
+  // The other two per-conversation gates, sharing gh_write_denied's shield and tone
   // because a reader scanning for "what did we stop" wants all three to answer
   // to the same shape. They keep separate labels because the boundary that
   // refused each one is different, and so is what to do about it: a git denial
-  // is a repo/ref outside the run's grant, an egress denial is a host outside
+  // is a repo/ref outside the conversation's grant, an egress denial is a host outside
   // its allowlist.
   git_denied: {
     icon: ShieldBan,
@@ -313,7 +313,7 @@ export const ACTION_META: Record<string, ActionMeta> = {
   },
   // Its GraphQL sibling. Separate because the two rows know different things —
   // this one's details carry the mutation names rather than a path — and
-  // because a run whose unnamed writes are all GraphQL is a different signal
+  // because a conversation whose unnamed writes are all GraphQL is a different signal
   // from one whose writes are raw REST calls.
   graphql_write: {
     icon: Terminal,

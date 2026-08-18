@@ -67,7 +67,8 @@ func ParseMaxAttempts(raw string) (int, error) {
 	return n, nil
 }
 
-// RunReaper is the leader reaper's tick loop: every interval, sweep runs
+// RunReaper is the leader reaper's tick loop: every interval, sweep
+// conversations
 // whose owning executor's heartbeat has gone stale past staleThreshold,
 // requeuing or terminal-failing them (attempts-capped at maxAttempts) or
 // finalizing them cancelled (blueprint already cancel-requested) — see
@@ -97,13 +98,14 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				continue
 			}
 			if counts.Requeued > 0 || counts.Failed > 0 || counts.Cancelled > 0 {
-				reaperLog.Info("reaped dead-executor runs",
+				reaperLog.Info("reaped dead-executor conversations",
 					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
 			}
 			// Curator homing (spec §6.3): retire turns stranded on a dead home so
 			// they stop showing in-flight — the user's next turn re-homes.
-			// Separate from ReapDeadExecutors: curator turns are curator_requests
-			// rows, not runs, and the recovery is retire-only (no requeue).
+			// Separate from ReapDeadExecutors: a stranded curator turn re-homes
+			// on the user's next message, so the recovery is retire-only (no
+			// requeue).
 			if n, cerr := store.CancelStrandedCuratorTurns(ctx, staleThreshold); cerr != nil {
 				reaperLog.Warn("curator stranded-home sweep failed; retrying next tick", "error", cerr)
 			} else if n > 0 {
@@ -115,7 +117,7 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 			if released, herr := store.HealClaimDesyncs(ctx); herr != nil {
 				reaperLog.Warn("claim-desync sweep failed; retrying next tick", "error", herr)
 			} else if released > 0 {
-				reaperLog.Info("healed run↔claim desyncs", "released_claims", released)
+				reaperLog.Info("healed conversation↔claim desyncs", "released_claims", released)
 			}
 			// Mint-crash orphans: a 'running' blueprint with no child
 			// conversation, which every arm above looks past because they all

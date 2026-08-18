@@ -198,7 +198,7 @@ describe('AgentCard failure-kind rendering', () => {
     // an infrastructure failure writes no ResultSummary — the kind alone must surface the block.
     renderCard({ Status: 'failed', ResultSummary: '', FailureKind: 'memory_limit' })
     expect(screen.getByText('Killed: memory limit')).toBeInTheDocument()
-    expect(screen.getByText(/TF_RUN_MEMORY_LIMIT_MB/)).toBeInTheDocument()
+    expect(screen.getByText(/TF_CLAIM_MEMORY_LIMIT_MB/)).toBeInTheDocument()
   })
 
   it('keeps the generic Failed verdict for an unclassified failure with a summary', () => {
@@ -217,7 +217,7 @@ describe('AgentCard queued rendering', () => {
     expect(screen.getByText(/queued — starts when a run slot frees up/)).toBeInTheDocument()
     // The tooltip names the knob, so a stalled-looking burst of delegations
     // traces back to the concurrency cap without reading the docs.
-    expect(screen.getByTitle(/TF_MAX_CONCURRENT_RUNS/)).toBeInTheDocument()
+    expect(screen.getByTitle(/TF_MAX_CONCURRENT_CLAIMS/)).toBeInTheDocument()
   })
 
   it('keeps the queued notice off active and terminal cards', () => {

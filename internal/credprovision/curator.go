@@ -48,7 +48,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	}
 	// Seal to the home's current boot epoch directly: a curator turn runs on the
 	// live home's per-project session loop, so there is no separate claim epoch
-	// to reconcile the way ProvisionForConversation guards against (a run parked under an
+	// to reconcile the way ProvisionForConversation guards against (a conversation parked under an
 	// earlier claim than the instance's current boot). The executor-side Get
 	// epoch check plus Put's never-regress guard cover a home restart mid-flight.
 	pubBytes, err := base64.StdEncoding.DecodeString(turn.CredPubKey)
@@ -61,8 +61,8 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	bundle := &credbundle.Bundle{BootEpoch: inst.BootEpoch}
 
 	// LLM — the conversation id becomes the STS RoleSessionName for per-turn
-	// CloudTrail attribution, exactly like runs; fall back to raw-secret
-	// resolution when no llmcred resolver is wired.
+	// CloudTrail attribution, exactly like delegated conversations; fall back
+	// to raw-secret resolution when no llmcred resolver is wired.
 	if m.llm != nil {
 		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
 		if err != nil && !llmcred.IsNoCredentials(err) {
@@ -108,7 +108,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	}
 
 	// Providers resolve their own sealed sets. A curator turn has no task, so
-	// TaskID is empty; the built-in resolvers key on org/team/run and tolerate it.
+	// TaskID is empty; the built-in resolvers key on org/team/conversation and tolerate it.
 	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
 		OrgID: orgID, TeamID: turn.TeamID, TaskID: "", ConversationID: conversationID,
 	}); err != nil {
@@ -135,7 +135,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 // resolveGitHubForCuratorTurn is the curator-turn analog of resolveGitHub: the
 // authorized repo set is the project's pinned repos ∩ the team's tracked set,
 // and it mints one repo-scoped installation token per member. Deliberately
-// parallel to (rather than a refactor of) resolveGitHub so the delegated-run
+// parallel to (rather than a refactor of) resolveGitHub so the delegation
 // path stays byte-identical. nil when the org has no usable GitHub credential
 // (a Jira-only org — no regression, its curator does no git).
 func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID string, pinnedRepos []string) (*credbundle.GitHubCreds, error) {
@@ -172,7 +172,7 @@ func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID
 			continue
 		}
 		// pinned ∩ tracked: mint only for a repo the team actually tracks, the
-		// same filter authorizedRepos applies on the run path. A nil store or a
+		// same filter authorizedRepos applies on the delegation path. A nil store or a
 		// lookup error drops the repo closed (better no token than an
 		// unauthorized one).
 		if m.stores.TeamGitHubRepos == nil {
@@ -198,8 +198,8 @@ func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID
 		authorized = append(authorized, repoID)
 	}
 
-	// The real-gh channel's single team-set-scoped token, same as the delegated
-	// run path (see resolveGitHub's CLIToken block, including why every failure
+	// The real-gh channel's single team-set-scoped token, same as the
+	// delegation path (see resolveGitHub's CLIToken block, including why every failure
 	// here is non-fatal). A curator turn has no single "primary repo", so the
 	// primary owner is chosen from the pinned set alone.
 	if owner, names := cliChannelScope("", authorized); owner != "" {

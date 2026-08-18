@@ -17,7 +17,7 @@ import (
 // "let it finish" option by design. Org-admin only (matches the org-admin-only
 // teams_delete RLS); multi-mode only (local is N=1 and never archives its sole
 // team). Restore flips the tombstone back but deliberately does NOT resurrect
-// the runs / curator sessions that archive force-stopped.
+// the conversations / curator sessions that archive force-stopped.
 
 // teamArchivePreviewJSON is the shared count shape: the preview reports the work
 // an archive WOULD stop; the archive response reports what it DID stop. Field
@@ -119,8 +119,8 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 
 // handleTeamArchive soft-deletes the team and force-stops its in-flight work.
 // Order: stamp deleted_at FIRST (so no further team-scoped writes can land —
-// new runs / curator turns are blocked), THEN enumerate and cancel the active
-// runs + curator sessions. Enumerating after the tombstone keeps the cascade
+// new conversations / curator turns are blocked), THEN enumerate and cancel the active
+// conversations + curator sessions. Enumerating after the tombstone keeps the cascade
 // from missing work that started in the window between the read and the stamp.
 // The cascade runs on the admin pool (spawner.Cancel with an empty userID,
 // curator.CancelProject) so the now-archived team's write RLS doesn't block the
@@ -163,7 +163,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 
 	// Enumerate the work to stop now that the tombstone blocks new writes. The
 	// curator in-flight count is a point-in-time read taken before CancelProject
-	// clears the in-flight marker; the run ids are stable (cancellation only moves
+	// clears the in-flight marker; the conversation ids are stable (cancellation only moves
 	// them to terminal).
 	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
@@ -180,17 +180,17 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 
-	// Force-stop the runs. StopAndCancelBlueprint("" userID) hard-kills a live
+	// Force-stop the conversations. StopAndCancelBlueprint("" userID) hard-kills a live
 	// process or parks one that has none, and cancels the blueprint behind it —
 	// an archived team's work is over, so a frozen 'running' blueprint would
-	// hold a worktree nobody can resume. All on the admin pool. A per-run error
-	// is a benign race (the run reached terminal on its own) — log and keep going
-	// so one stuck run can't strand the rest; count only the ones we stopped.
+	// hold a worktree nobody can resume. All on the admin pool. A per-conversation error
+	// is a benign race (the conversation reached terminal on its own) — log and keep going
+	// so one stuck conversation can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
 		for _, conversationID := range conversationIDs {
 			if cErr := sp.StopAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseTeamArchived); cErr != nil {
-				teamsLog.Warn("archive: run stop failed", "team", teamID, "conversation", conversationID, "error", cErr)
+				teamsLog.Warn("archive: conversation stop failed", "team", teamID, "conversation", conversationID, "error", cErr)
 				continue
 			}
 			cancelledRuns++
@@ -215,7 +215,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 }
 
 // handleTeamRestore clears the team's tombstone so it's visible + writable
-// again. Killed runs and curator sessions are NOT resurrected — archive's
+// again. Killed conversations and curator sessions are NOT resurrected — archive's
 // teardown is terminal by design. Org-admin only, multi-mode only.
 //
 // POST /api/teams/{team_id}/restore
@@ -326,8 +326,9 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 	httpx.WriteList(w, page, out, total)
 }
 
-// teamActiveWork returns the count of active runs + in-flight curator sessions
-// for the team — the preview's two numbers. Runs are read on the admin pool
+// teamActiveWork returns the count of active conversations + in-flight curator
+// sessions for the team — the preview's two numbers (the active_runs /
+// active_curator_sessions wire fields). Conversations are read on the admin pool
 // (ActiveIDsForTeamSystem); curator sessions are the in-flight count over the
 // team's projects.
 func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs, curatorSessions int, err error) {

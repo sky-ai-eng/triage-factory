@@ -648,7 +648,7 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 
 // slackMessagePromptName/Body are the shipped-content for the default
 // slack:message blueprint seeded on a team's first tracked channel. The
-// message's channel/thread_ts/sender/text reach the run through the task
+// message's channel/thread_ts/sender/text reach the conversation through the task
 // context's raw event metadata — a task itself carries only its title — so the
 // body points there rather than interpolating anything. Deliberately doesn't
 // hinge on whether the triggering message was an explicit @-mention or an

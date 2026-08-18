@@ -1,8 +1,8 @@
 import type { Conversation } from '../types'
 
-// Derived-approval helpers. A run never parks for
+// Derived-approval helpers. A conversation never parks for
 // approval; the "needs approval" state is a *view* over the
-// run's unresolved-artifact set, projected onto the run as has_unresolved_artifacts
+// conversation's unresolved-artifact set, projected onto the conversation as has_unresolved_artifacts
 // + pending_artifact_ids + the per-kind counts. These helpers keep the
 // count-aware labels and the resolve-all copy in one place so the dock, the board
 // card, and the confirmation modal stay in lockstep.
@@ -13,16 +13,16 @@ export interface ApprovalCounts {
   total: number
 }
 
-// artifactSetKey derives a cheap change-key for a run's artifact set from the
-// projections that ride the run row (websocket-fresh), so an always-mounted
-// ArtifactList can refetch when the set changes shape — a live run minting a
+// artifactSetKey derives a cheap change-key for a conversation's artifact set from the
+// projections that ride the conversation row (websocket-fresh), so an always-mounted
+// ArtifactList can refetch when the set changes shape — a live conversation minting a
 // new PR, a resolve landing from another surface or tab — without polling.
 export function artifactSetKey(conversation: Conversation): string {
   return `${conversation.artifact_count ?? 0}:${(conversation.pending_artifact_ids ?? []).join(',')}`
 }
 
-// approvalCounts reads the run projection's per-kind unresolved counts. Absent
-// fields (the server's transient-failure guard, or a run with no artifacts) read
+// approvalCounts reads the conversation projection's per-kind unresolved counts. Absent
+// fields (the server's transient-failure guard, or a conversation with no artifacts) read
 // as 0 — a card only surfaces approval affordances when has_unresolved_artifacts
 // is true, where the counts are guaranteed present.
 export function approvalCounts(conversation: Conversation): ApprovalCounts {
@@ -32,7 +32,7 @@ export function approvalCounts(conversation: Conversation): ApprovalCounts {
 }
 
 // hasUnresolvedArtifacts is the single predicate every approval surface keys
-// off — approval is never a run status. The flag is three-valued: the
+// off — approval is never a conversation status. The flag is three-valued: the
 // server emits an explicit true/false only when the answer is definitive (the
 // artifact set was read), and OMITS it (undefined) under its transient-failure
 // guard. So honor the authoritative boolean directly when present — a definitive
@@ -50,8 +50,8 @@ export function hasUnresolvedArtifacts(conversation: Conversation | null | undef
 
 // approvalAction is the trailing verb on the "your move" affordance — count-aware:
 // a single item opens its editor directly ("Open PR" / "Review"), and any
-// plural / mixed set opens the run's artifact list to choose from ("Review N
-// items"). Used by the run-station dock and the board card so both read
+// plural / mixed set opens the conversation's artifact list to choose from ("Review N
+// items"). Used by the RunStation dock and the board card so both read
 // identically.
 export function approvalAction({ pr, review, total }: ApprovalCounts): string {
   if (total === 0) return 'Review'
@@ -75,7 +75,7 @@ export function approvalKicker({ pr, review, total }: ApprovalCounts): string {
 // resolveAllSummary is the resolve-all confirmation copy (drag-to-Done /
 // Return-to-queue): "Close 2 draft PRs and discard 1 pending review? Pushed
 // branches are kept." A clause is dropped when its count is 0; the live note is
-// appended only when the run is still executing (the teardown cancels it).
+// appended only when the conversation is still executing (the teardown cancels it).
 export function resolveAllSummary(pr: number, review: number, isLive: boolean): string {
   const parts: string[] = []
   if (pr > 0) parts.push(`close ${pr} draft PR${pr === 1 ? '' : 's'}`)

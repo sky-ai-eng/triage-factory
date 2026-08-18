@@ -187,7 +187,7 @@ func seedLifecycleWorkspace(t *testing.T, stores db.Stores, orgID, userID, works
 }
 
 // seedSlackMessageEvent seeds a bare entity + slack:message event (no task,
-// no run) — enough for the disposition consumer, which only ever reads
+// no conversation) — enough for the disposition consumer, which only ever reads
 // event metadata.
 func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, apiAppID, channel, ts, threadTS string, mentioned bool) (eventID string, meta SlackMessageMetadata) {
 	t.Helper()
@@ -228,7 +228,7 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 }
 
 // slackConversationFixture is what seedSlackMessageConversation returns: the ids a
-// run-status test needs to fire synthetic sentinels against.
+// conversation-status test needs to fire synthetic sentinels against.
 type slackConversationFixture struct {
 	EventID, TaskID, ConversationID string
 	Meta                            SlackMessageMetadata
@@ -236,12 +236,13 @@ type slackConversationFixture struct {
 
 // seedSlackMessageConversation seeds the full chain resolveConversationEntry walks: entity
 // (source='slack') -> event (slack:message, carrying SlackMessageMetadata)
-// -> task (event_type=slack:message, primary_event_id=event) -> run
+// -> task (event_type=slack:message, primary_event_id=event) -> conversation
 // (task_id=task). Mirrors exec_host_pg_test.go's seedNonSlackTask/seedConversation
 // shape, but for the Slack-sourced case those tests deliberately avoid.
 func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID, workspaceID, apiAppID, channel, ts, threadTS string) slackConversationFixture {
 	t.Helper()
-	// A run exists because the bot was engaged; the run-status tests that use
+	// A conversation exists because the bot was engaged; the
+	// conversation-status tests that use
 	// this fixture don't depend on the mention flag, so seed the explicit-
 	// mention case (Mentioned=true) as the representative one.
 	eventID, meta := seedSlackMessageEvent(t, h, orgID, workspaceID, apiAppID, channel, ts, threadTS, true)
@@ -272,7 +273,7 @@ func seedSlackMessageConversation(t *testing.T, h *pgtest.Harness, orgID, creato
 	return slackConversationFixture{EventID: eventID, TaskID: taskID, ConversationID: conversationID, Meta: meta}
 }
 
-// seedGitHubTaskAndConversation seeds a plain GitHub-sourced task + run — the
+// seedGitHubTaskAndConversation seeds a plain GitHub-sourced task + conversation — the
 // non-Slack shape the cache tests need.
 func seedGitHubTaskAndConversation(t *testing.T, h *pgtest.Harness, orgID, creatorID, teamID string) (taskID, conversationID string) {
 	t.Helper()
@@ -361,7 +362,7 @@ func waitForCondition(t *testing.T, timeout time.Duration, cond func() bool) {
 	}
 }
 
-// stopAllLifecycleWorkers stops every live worker in runs and joins both it
+// stopAllLifecycleWorkers stops every live worker in convs and joins both it
 // and any still-retiring predecessor (stop is fire-and-forget, so the join
 // is explicit here) — test cleanup so a worker goroutine doesn't keep
 // calling into a closed httptest server after the test itself has ended.
@@ -417,9 +418,9 @@ func TestLifecycleAdapter_Disposition_ExplicitMention_ReactsWithEyes(t *testing.
 
 // TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoReaction pins that an
 // un-mentioned follow-up in a thread the bot already owns (Mentioned=false)
-// folds into the live run WITHOUT a 👀 reaction — reacting to every message in
+// folds into the live conversation WITHOUT a 👀 reaction — reacting to every message in
 // an engaged thread is noise. Holds for both task_bumped (the common case:
-// absorbed into the active run) and task_created (the thread's prior task had
+// absorbed into the active conversation) and task_created (the thread's prior task had
 // closed, so the follow-up minted a fresh one).
 func TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoReaction(t *testing.T) {
 	for _, disp := range []string{events.DispositionTaskCreated, events.DispositionTaskBumped} {
@@ -580,7 +581,7 @@ func TestLifecycleAdapter_Disposition_NonSlackEventType_Ignored(t *testing.T) {
 	}
 }
 
-// ---------- run-status consumer: setStatus lifecycle ----------
+// ---------- conversation-status consumer: setStatus lifecycle ----------
 
 func TestLifecycleAdapter_ConversationStatus_RunningThenActivity_SetsDescriptionDerivedText(t *testing.T) {
 	withFastLifecycleTimings(t)
@@ -760,7 +761,7 @@ func TestLifecycleAdapter_ConversationStatus_Failed_ClearsAndPostsFailureReplyWi
 		t.Errorf("failure reply = %q, want the failure copy + %q", last.Text, wantURL)
 	}
 	if entry := convs[fx.ConversationID]; entry.worker != nil {
-		t.Error("worker should have been cleared from the run entry on terminal status")
+		t.Error("worker should have been cleared from the conversation entry on terminal status")
 	}
 }
 
@@ -824,7 +825,7 @@ func TestLifecycleAdapter_ConversationStatus_Parked_ClearsWithoutFailureReply(t 
 // direct regression test for the park→resume ordering guarantee, and pins
 // BOTH halves of the design at once:
 //
-//  1. Ordering: a resumed run's successor worker must not make its initial
+//  1. Ordering: a resumed conversation's successor worker must not make its initial
 //     setStatus call until the retiring worker's trailing setStatus("") has
 //     fully resolved (the predecessor gate in conversationStatusWorker.loop) — else
 //     the stale clear can land last and wipe the fresh indicator.
@@ -968,7 +969,8 @@ func TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn(t *test
 
 	// Resolve-order assertion: W1's delayed clear must resolve BEFORE W3's
 	// probe — never after. A broken chain lets W3 sail through its gate
-	// (and W2's, transitively) before W1's clear ever resolves, so the run
+	// (and W2's, transitively) before W1's clear ever resolves, so the
+	// conversation
 	// ends with a stale empty clear as the LAST recorded call despite W3
 	// being alive.
 	calls := fake.statusCalls()
@@ -992,10 +994,11 @@ func TestLifecycleAdapter_ConversationStatus_GatedStopChainSurvivesChurn(t *test
 	}
 }
 
-// ---------- run-status consumer: non-Slack cache ----------
+// ---------- conversation-status consumer: non-Slack cache ----------
 
 // TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFirstLookup pins the
-// per-conversationID cache: after the first system:conversation:status resolves a run as
+// per-conversationID cache: after the first system:conversation:status resolves
+// a conversation as
 // non-Slack, the underlying data is mutated to look Slack-shaped (entity
 // source flipped to 'slack', task's event_type flipped to slack:message) —
 // if resolution were re-run on a later sentinel for the SAME conversationID, it would
@@ -1018,7 +1021,7 @@ func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFir
 		t.Fatal("expected isSlack=false for a GitHub-sourced task")
 	}
 	if len(fake.statusCalls()) != 0 {
-		t.Fatalf("must not call Slack for a non-Slack run, got %+v", fake.statusCalls())
+		t.Fatalf("must not call Slack for a non-Slack conversation, got %+v", fake.statusCalls())
 	}
 
 	// Mutate the underlying rows so a FRESH lookup would now resolve Slack.
@@ -1041,11 +1044,11 @@ func TestLifecycleAdapter_ConversationStatus_NonSlackConversation_CachedAfterFir
 		t.Errorf("cached isSlack=false must not be re-resolved, got Slack calls: %+v", fake.statusCalls())
 	}
 	if convs[conversationID].worker != nil {
-		t.Error("no worker should ever start for a cached non-Slack run")
+		t.Error("no worker should ever start for a cached non-Slack conversation")
 	}
 }
 
-// ---------- run-activity consumer: unknown run ----------
+// ---------- conversation-activity consumer: unknown conversation ----------
 
 // TestLifecycleAdapter_ConversationActivity_UnknownConversation_Ignored covers activity
 // arriving for a conversationID this adapter has never seen a system:conversation:status for
@@ -1056,10 +1059,10 @@ func TestLifecycleAdapter_ConversationActivity_UnknownConversation_Ignored(t *te
 	adapter := newTestLifecycleAdapter(stores, staticURL(""))
 	convs := map[string]*conversationEntry{}
 
-	adapter.dispatch(context.Background(), conversationActivityEvent(orgID, "unseen-run-id", []events.ConversationActivityTool{{Name: "Bash"}}), convs)
+	adapter.dispatch(context.Background(), conversationActivityEvent(orgID, "unseen-conv-id", []events.ConversationActivityTool{{Name: "Bash"}}), convs)
 
-	if _, ok := convs["unseen-run-id"]; ok {
-		t.Error("run-activity must not prime the cache — only run-status does")
+	if _, ok := convs["unseen-conv-id"]; ok {
+		t.Error("conversation-activity must not prime the cache — only conversation-status does")
 	}
 	if len(fake.statusCalls()) != 0 {
 		t.Errorf("expected no Slack calls, got %+v", fake.statusCalls())

@@ -14,7 +14,8 @@
 //     no long-lived Bedrock secret at all in this mode.
 //
 // Two mint flavors, deliberately not merged: executor-bound mints (the
-// per-run bundle) carry the network condition and a per-run RoleSessionName;
+// per-claim bundle) carry the network condition and a per-conversation
+// RoleSessionName;
 // brain-bound mints (scorer / profiler / connect probe) carry NO network
 // condition (they run from control-process egress) and a stable session
 // name. A merged implementation would ship a scorer that 403s only in fleet
@@ -101,11 +102,12 @@ type mintOptions struct {
 	networkBound bool
 }
 
-// ResolveForBundle resolves executor-bound Material for run conversationID. Role
+// ResolveForBundle resolves executor-bound Material for the conversation. Role
 // mode carries the network condition (TF_EXECUTOR_EGRESS_CIDRS /
-// TF_EXECUTOR_VPCE_IDS) and RoleSessionName = the run id (per-run CloudTrail
-// attribution on the customer's side). Passthrough modes ignore conversationID and
-// return the stored material unchanged.
+// TF_EXECUTOR_VPCE_IDS) and RoleSessionName = the conversation id
+// (per-conversation CloudTrail attribution on the customer's side).
+// Passthrough modes ignore conversationID and return the stored material
+// unchanged.
 func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, conversationID string) (Material, error) {
 	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForConversation(conversationID), networkBound: true})
 }
@@ -253,7 +255,8 @@ func (r *Resolver) mint(ctx context.Context, orgID, roleARN string, opts mintOpt
 }
 
 // cacheKey scopes a mint cache entry. Executor-bound mints key on the
-// per-run session name (one live credential per run → O(runs)); brain-bound
+// per-conversation session name (one live credential per conversation →
+// O(conversations)); brain-bound
 // mints key on the stable session name (one per org → O(orgs)). The
 // networkBound flag is folded in so the two flavors never share a cached
 // credential (they carry different session policies).

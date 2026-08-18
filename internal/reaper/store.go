@@ -1,5 +1,5 @@
 // Package reaper is the leader-elected fleet reaper (TFAC-586, spec §4.3):
-// requeue-or-terminal-fail runs whose owning executor's registry heartbeat
+// requeue-or-terminal-fail conversations whose owning executor's registry heartbeat
 // has gone stale, and tombstone registry rows abandoned long enough that
 // they can never come back. Postgres only — mirrors internal/lease's
 // independence from db.Stores (a raw admin *sql.DB, no SQLite twin): a
@@ -18,7 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// Counts is the outcome of one ReapDeadExecutors sweep — how many runs the
+// Counts is the outcome of one ReapDeadExecutors sweep — how many conversations the
 // reaper requeued, terminal-failed, or cancel-finalized. Logged by
 // RunReaper on every non-empty tick.
 type Counts struct {
@@ -29,10 +29,10 @@ type Counts struct {
 
 // Store is the reaper's persistence seam.
 type Store interface {
-	// ReapDeadExecutors sweeps every run claimed/running under an executor
+	// ReapDeadExecutors sweeps every conversation claimed/running under an executor
 	// whose registry heartbeat is missing or older than staleThreshold (own
 	// DB time — now() - make_interval, never Go's wall clock, matching
-	// internal/lease's discipline), restricted to runs whose owning
+	// internal/lease's discipline), restricted to conversations whose owning
 	// blueprint_run is still 'running' (spec §4.3's candidate predicate — a
 	// row under an already-terminal blueprint_run belongs to
 	// ConversationQueueStore.ReconcileOrphanedConversations, not here). A draining-but-
@@ -48,7 +48,7 @@ type Store interface {
 	// shares rather than re-derives).
 	//
 	// Three disjoint outcomes per candidate:
-	//   - blueprint_run.cancel_requested: finalize cancelled (run +
+	//   - blueprint_run.cancel_requested: finalize cancelled (conversation +
 	//     blueprint_run), regardless of attempts — the existing
 	//     cancel-finalization semantics, just with no live owner to signal.
 	//   - not cancel-requested, episode below maxAttempts: requeue with the
@@ -56,7 +56,7 @@ type Store interface {
 	//     'reaped' release below is what carries this attempt into the next
 	//     claim's count.
 	//   - not cancel-requested, episode at maxAttempts: terminal-fail the
-	//     run with failure_kind='executor_lost' and finalize the owning
+	//     conversation with failure_kind='executor_lost' and finalize the owning
 	//     blueprint_run failed.
 	ReapDeadExecutors(ctx context.Context, staleThreshold time.Duration, maxAttempts int) (Counts, error)
 
@@ -109,7 +109,7 @@ type Store interface {
 	// ReapDeadExecutors. Failing rather than re-minting the step is what makes
 	// it self-healing: the terminal write frees the index, and the firing
 	// intent already queued for the task drains into a fresh, fully-minted
-	// run. The same arm runs at boot inside
+	// blueprint run. The same arm runs at boot inside
 	// ConversationQueueStore.ReconcileOrphanedConversations (both dialects — local mode has the
 	// same crash window and no reaper); the periodic repeat here bounds an
 	// orphan's lifetime to a reaper tick instead of the next restart.

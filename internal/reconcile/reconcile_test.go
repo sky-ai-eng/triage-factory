@@ -463,13 +463,13 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 			t.Fatalf("seed entity: %v", err)
 		}
 		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, conversationID); err != nil {
-			t.Fatalf("seed run: %v", err)
+			t.Fatalf("seed conversation: %v", err)
 		}
 		if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, "", content); err != nil {
 			t.Fatalf("seed memory: %v", err)
 		}
-		// The primary join row a real run's completion will carry once the
-		// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
+		// The primary join row a real conversation's completion will carry once
+		// the run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
 		// join-based read (TFAC-622) needs it to find anything.
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
 			t.Fatalf("seed join row: %v", err)
@@ -504,9 +504,10 @@ func getConversationMemory(t *testing.T, stores db.Stores, ctx context.Context, 
 
 // TestReconcile_TransitionsAndFinalMemory is the headline end-to-end: a draft PR
 // that merged and a pushed branch that was deleted reflect their new state; the
-// run's post-run memory is ONE composed note covering both (proving multi-artifact
-// runs accumulate, not clobber), with the merged PR diffed against the agent's
-// draft; and a terminal artifact already in the set is never re-queried. A
+// conversation's outcome memory is ONE composed note covering both (proving
+// multi-artifact conversations accumulate, not clobber), with the merged PR
+// diffed against the agent's draft; and a terminal artifact already in the set
+// is never re-queried. A
 // review-draft artifact is seeded too and must stay pending — reviews are staged
 // TF-side and never reconciled (TFAC-494 §8).
 func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
@@ -558,8 +559,8 @@ func TestReconcile_TransitionsAndFinalMemory(t *testing.T) {
 	}
 
 	// ONE composed note covering all three artifacts, after the agent narrative
-	// (which is untouched). Overwrite, not append — but composed over the run's
-	// whole set, so nothing is clobbered.
+	// (which is untouched). Overwrite, not append — but composed over the
+	// conversation's whole set, so nothing is clobbered.
 	mem := getConversationMemory(t, stores, ctx, runmode.LocalDefaultOrgID, "ent-1", conversationID)
 	if mem == nil {
 		t.Fatalf("getConversationMemory: nil")
@@ -680,9 +681,10 @@ func TestReconcile_UnknownBranchNotDeleted(t *testing.T) {
 	assertState(t, stores, runmode.LocalDefaultOrgID, branchArt.DedupKey, domain.ArtifactStateBranchPushed)
 }
 
-// TestReconcile_SingleRunScope pins the Tier-2 shape: Reconcile over just one
-// run's artifacts transitions exactly those (the run-scoped refresh path).
-func TestReconcile_SingleRunScope(t *testing.T) {
+// TestReconcile_SingleConversationScope pins the Tier-2 shape: Reconcile over
+// just one conversation's artifacts transitions exactly those (the
+// conversation-scoped refresh path).
+func TestReconcile_SingleConversationScope(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
 	const convA = "55555555-5555-5555-5555-555555555555"
@@ -697,7 +699,7 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 	seedArt(prA)
 	seedArt(prB)
 
-	// Both PRs merged on GitHub, but we reconcile only run A's set.
+	// Both PRs merged on GitHub, but we reconcile only conversation A's set.
 	stub := &stubGH{prs: map[string]string{
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
@@ -713,21 +715,21 @@ func TestReconcile_SingleRunScope(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	if len(updated) != 1 {
-		t.Fatalf("expected 1 transition (run A only), got %d", len(updated))
+		t.Fatalf("expected 1 transition (conversation A only), got %d", len(updated))
 	}
 	assertState(t, stores, runmode.LocalDefaultOrgID, prA.DedupKey, domain.ArtifactStatePRMerged)
-	// Run B untouched — only PR_7 was fetched.
+	// Conversation B untouched — only PR_7 was fetched.
 	assertState(t, stores, runmode.LocalDefaultOrgID, prB.DedupKey, domain.ArtifactStatePROpen)
 	if stub.prCalls["PR_8"] {
-		t.Error("run B's PR_8 was queried during a run-A-scoped reconcile")
+		t.Error("conversation B's PR_8 was queried during a conversation-A-scoped reconcile")
 	}
 }
 
-// TestReconcile_OutcomeSupersedesVerdict pins the overwrite semantics: a run
-// approved through TF carries a human verdict in human_content; when its PR
-// later merges on GitHub, the reconciler's post-run outcome OVERWRITES that
-// verdict (the final state is the authoritative divergence account), while the
-// agent's own narrative is untouched.
+// TestReconcile_OutcomeSupersedesVerdict pins the overwrite semantics: a
+// conversation approved through TF carries a human verdict in human_content;
+// when its PR later merges on GitHub, the reconciler's outcome note OVERWRITES
+// that verdict (the final state is the authoritative divergence account), while
+// the agent's own narrative is untouched.
 func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	ctx := context.Background()
@@ -756,7 +758,7 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 		t.Fatalf("getConversationMemory: nil")
 	}
 	if strings.Contains(mem.Content, "Human approved with a tweaked body.") {
-		t.Errorf("the approval verdict should have been superseded by the post-run outcome; got:\n%s", mem.Content)
+		t.Errorf("the approval verdict should have been superseded by the outcome note; got:\n%s", mem.Content)
 	}
 	if !strings.HasPrefix(mem.Content, "agent narrative") {
 		t.Errorf("agent narrative was trampled: %q", mem.Content)

@@ -15,31 +15,31 @@ export interface ConversationDetailState {
   conversation: Conversation | null
   task: Task | null
   messages: Message[]
-  /** Every artifact this run produced (branch / PR / review / issue / comment),
+  /** Every artifact this conversation produced (branch / PR / review / issue / comment),
    *  newest first — the same set GET /api/agent/conversations/{id}/artifacts returns.
-   *  Kept live alongside `run` so the approval list + resolve-all confirmation
+   *  Kept live alongside `conversation` so the approval list + resolve-all confirmation
    *  repaint when an approve/dismiss in another tab changes the set (TFAC-384 §6).
-   *  Cross-reference run.pending_artifact_ids to get the *unresolved* subset
-   *  (the ready-review predicate needs the run projection, not just artifact.state). */
+   *  Cross-reference conversation.pending_artifact_ids to get the *unresolved* subset
+   *  (the ready-review predicate needs the conversation projection, not just artifact.state). */
   artifacts: Artifact[]
   loading: boolean
   notFound: boolean
   error: string | null
   refetch: () => void
-  /** Queue of unanswered tool-permission prompts for this run, head-first. */
+  /** Queue of unanswered tool-permission prompts for this conversation, head-first. */
   pendingPermissions: PendingPermission[]
   /** Answer a pending prompt; clears it from the queue on a definitive
    *  response (200 resolved, or 404 already-resolved / timed-out). The
    *  promise settles when the POST round-trip finishes — callers may await
    *  it (e.g. to disable buttons) or fire-and-forget. */
   resolvePermission: (toolCallID: string, decision: PermissionDecisionInput) => Promise<void>
-  /** Silently re-pull the run row + its artifact set (no loading flash, unlike
+  /** Silently re-pull the conversation row + its artifact set (no loading flash, unlike
    *  refetch). Used after a per-item approve/dismiss so the derived approval
    *  surface (has_unresolved_artifacts + the list) updates in place without
    *  blanking the whole station to a spinner mid-resolve. */
   softRefresh: () => void
   /** True while history remains behind the held transcript. The transcript
-   *  read is bounded, so a long run opens on its tail; this is what tells a
+   *  read is bounded, so a long conversation opens on its tail; this is what tells a
    *  surface to offer the way back instead of presenting the tail as the
    *  whole conversation. */
   hasOlderMessages: boolean
@@ -90,7 +90,7 @@ function tokenDelta(msg: Message): TokenDelta | null {
   return { input, output, cacheRead, cacheWrite }
 }
 
-// useConversationDetail loads a single agent run, its messages, and the parent
+// useConversationDetail loads a single agent conversation, its messages, and the parent
 // task, then subscribes to live websocket updates so the page stays
 // fresh while the agent works. We fetch the task separately because
 // Conversation only carries TaskID, and the detail page wants the title +
@@ -106,7 +106,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   const [refetchTick, setRefetchTick] = useState(0)
   // The token addressing the page of history OLDER than the held transcript,
   // or '' when the held copy reaches the beginning. The transcript read is
-  // bounded (500 rows), so a long run opens on its tail and this is the only
+  // bounded (500 rows), so a long conversation opens on its tail and this is the only
   // way back — without it everything before the newest page is unreachable,
   // with nothing on screen to say history was cut.
   const [olderToken, setOlderToken] = useState('')
@@ -119,30 +119,30 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   const refetch = useCallback(() => setRefetchTick((n) => n + 1), [])
 
   // Track the conversationID the current state belongs to so we can distinguish a
-  // same-run refetch (merge messages) from a navigation to a different
-  // run (reset, otherwise message IDs from two runs would interleave). It also
-  // gates the async setters below so a fetch for the previous run can't land
-  // after navigation and overwrite the new run's state.
+  // same-conversation refetch (merge messages) from a navigation to a different
+  // conversation (reset, otherwise message IDs from two conversations would interleave). It also
+  // gates the async setters below so a fetch for the previous conversation can't land
+  // after navigation and overwrite the new conversation's state.
   const lastConversationIDRef = useRef<string | undefined>(conversationID)
 
   // Mirrors of the two states the reconcile tick reads. That interval is
-  // created once per run, so it cannot close over `conversation` / `messages`
+  // created once per conversation, so it cannot close over `conversation` / `messages`
   // directly: a dep on either would tear the timer down and rebuild it on every
-  // streamed row (foldMessageUsage writes `conversation` per stamped message), and on a busy run
+  // streamed row (foldMessageUsage writes `conversation` per stamped message), and on a busy conversation
   // the 5s tick would never come due. Written after commit, so by the time a
   // tick fires they hold what the view is showing.
   const conversationRef = useRef<Conversation | null>(null)
   const messagesRef = useRef<Message[]>([])
 
-  // Whether this run has been seen live since the last repair, which is what
-  // buys the settled run one closing read instead of none.
+  // Whether this conversation has been seen live since the last repair, which is what
+  // buys the settled conversation one closing read instead of none.
   //
-  // Gating the repair on "live right now" leaves the last row of a run
+  // Gating the repair on "live right now" leaves the last row of a conversation
   // unreachable: status and transcript arrive as separate frames, so the hub
   // can drop the final `message` and deliver the `conversation_update` that
-  // settles the run, and by the next tick the gate is shut on a transcript
+  // settles the conversation, and by the next tick the gate is shut on a transcript
   // that is still missing a row. Set here rather than at tick time so it
-  // reflects every run row observed — a run that settles between two ticks
+  // reflects every conversation row observed — a conversation that settles between two ticks
   // still leaves the flag up for the tick that follows.
   const sawActiveRef = useRef(false)
   useEffect(() => {
@@ -168,13 +168,13 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // over the dropped rows permanently, which is the bug rather than the fix.
   //
   // The price of the sound watermark is that a repair re-sends whatever the
-  // socket delivered since the previous one, so an open station on a live run
+  // socket delivered since the previous one, so an open station on a live conversation
   // carries each row twice. That is what verifying instead of assuming costs,
   // and it is bounded by a single tick of streaming.
   const completeThroughRef = useRef(0)
 
   // The ids whose cost stamp the displayed total already counts: seeded from the
-  // fetched transcript (those stamps are inside the run row's SUM) and extended
+  // fetched transcript (those stamps are inside the conversation row's SUM) and extended
   // by every row foldMessageUsage adds. An id enters it only once a non-null
   // stamp has been seen for it, so a row that streamed unstamped can still be
   // folded if a stamp arrives later.
@@ -191,21 +191,21 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   const tokenBaseline = useRef<Set<number> | null>(null)
 
   // foldMessageUsage accumulates a streamed row's settled cost and its token
-  // usage into the held run's rollups. The run row is re-read only on a status
+  // usage into the held conversation's rollups. The conversation row is re-read only on a status
   // flip or an artifact transition, so on a long engagement with neither, both
   // readouts would otherwise sit at whatever the SUMs were when the page loaded
   // — a runtime that stamps every assistant row as it streams reads badly low
-  // for most of the run. Each id is folded at most once per rollup (a
-  // refetch/websocket race replays rows), and the next run refetch replaces the
+  // for most of the conversation. Each id is folded at most once per rollup (a
+  // refetch/websocket race replays rows), and the next conversation refetch replaces the
   // accumulation with the server's authoritative SUMs, so drift self-corrects
   // rather than compounding. A row carrying neither figure — every SDK-runtime
   // row's cost until it settles at terminal time — is a no-op for that rollup.
   //
-  // A fold needs both halves of the baseline in hand — the run row's SUM and the
+  // A fold needs both halves of the baseline in hand — the conversation row's SUM and the
   // ids inside it — so it holds while a load is in flight. Both windows are one
-  // round trip wide and each fails a different way: before the run row lands
+  // round trip wide and each fails a different way: before the conversation row lands
   // there is no object to fold into, and marking the id anyway would strand its
-  // figures for good (counted, never added); between the run row and the
+  // figures for good (counted, never added); between the conversation row and the
   // transcript the ids inside the SUM aren't known yet, so a row already counted
   // there would be folded a second time. Holding costs at worst under-reporting
   // until the next read, which is the bounded drift the rest of this accepts.
@@ -236,12 +236,12 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     }
   }, [])
 
-  // Pull the run's artifact set fresh. Shared by the initial load, the WS
+  // Pull the conversation's artifact set fresh. Shared by the initial load, the WS
   // handlers, and the reconcile poll so an approve/dismiss anywhere (this tab or
   // another) repaints the approval list. Best-effort: a transient failure leaves
   // the prior set in place rather than blanking the surface mid-resolve. Guards
-  // on lastConversationIDRef so a slow fetch for a since-navigated-away run is discarded
-  // rather than clobbering the current run's artifacts.
+  // on lastConversationIDRef so a slow fetch for a since-navigated-away conversation is discarded
+  // rather than clobbering the current conversation's artifacts.
   const refetchArtifacts = useCallback((id: string) => {
     apiJSON<Artifact[]>(`/api/agent/conversations/${id}/artifacts`)
       .then((data) => {
@@ -250,7 +250,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       .catch(() => {})
   }, [])
 
-  // softRefresh re-pulls the run row + artifact set without the loading toggle
+  // softRefresh re-pulls the conversation row + artifact set without the loading toggle
   // (refetch sets loading=true → the full-screen spinner). A per-item resolve
   // must update the derived approval surface in place, not flash the station.
   // Same stale-navigation guard as refetchArtifacts.
@@ -266,14 +266,14 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   }, [conversationID, refetchArtifacts])
 
   // Permission prompts run through the shared queue core (the same one the
-  // board uses), filtered to this single run so the two surfaces can't diverge
-  // on fetch/TTL behavior. A run with no prompts is absent from the map.
+  // board uses), filtered to this single conversation so the two surfaces can't diverge
+  // on fetch/TTL behavior. A conversation with no prompts is absent from the map.
   const { queues, refresh: refreshPermissions, resolve, dropConversation } = usePermissionQueues()
   const pendingPermissions = conversationID ? (queues[conversationID] ?? []) : []
 
-  // Read the pending set on mount and on every navigation to a different run.
+  // Read the pending set on mount and on every navigation to a different conversation.
   // This is the case a fire-once frame structurally could not serve: open (or
-  // reload) a run whose agent is already parked on a prompt and the prompt
+  // reload) a conversation whose agent is already parked on a prompt and the prompt
   // renders, instead of the page looking idle until the server-side timeout
   // silently denied it.
   useEffect(() => {
@@ -283,7 +283,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // loadOlderMessages walks one page further back through history.
   //
   // The rows it brings back are OLDER than everything held, so they carry no
-  // usage the run row's SUM doesn't already count — they are seeded into the
+  // usage the conversation row's SUM doesn't already count — they are seeded into the
   // baselines exactly as the first page's rows are, and deliberately not
   // folded. Folding them would add dollars to a total that already includes
   // them, and over-reporting compounds where the under-reporting the load
@@ -300,7 +300,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       const page = await apiJSON<TranscriptPage>(
         `/api/agent/conversations/${conversationID}/messages?page_token=${encodeURIComponent(token)}`,
       )
-      // A run switch (or a refetch) while the page was in flight retires this
+      // A conversation switch (or a refetch) while the page was in flight retires this
       // answer: its rows belong to a transcript the hook no longer holds, and
       // the token it carries was minted against that read.
       if (conversationID !== lastConversationIDRef.current || olderTokenRef.current !== token)
@@ -323,7 +323,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     }
   }, [conversationID])
 
-  // resolvePermission answers a prompt for this run via the shared resolver,
+  // resolvePermission answers a prompt for this conversation via the shared resolver,
   // which drops it on a definitive response (200/404) and toasts a transient
   // failure (prompt stays up to retry).
   const resolvePermission = useCallback(
@@ -342,23 +342,23 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       setTask(null)
       setMessages([])
       setArtifacts([])
-      // Nothing has been read for this run yet, so it is complete through
-      // nothing — the load below re-establishes the watermark, and the run
+      // Nothing has been read for this conversation yet, so it is complete through
+      // nothing — the load below re-establishes the watermark, and the conversation
       // row it fetches decides whether this one is owed any repair at all.
       completeThroughRef.current = 0
       messagesRef.current = []
       sawActiveRef.current = false
-      // The back-page token belongs to the run that minted it, and the server
+      // The back-page token belongs to the conversation that minted it, and the server
       // rejects one presented against a different read. Clearing it here is
-      // also what hides the control until the new run's load says whether
+      // also what hides the control until the new conversation's load says whether
       // there is any history behind its first page.
       olderTokenRef.current = ''
       setOlderToken('')
-      // A new run starts with no prompts; drop the prior run's queue + timers.
+      // A new conversation starts with no prompts; drop the prior conversation's queue + timers.
       if (prevConversationID) dropConversation(prevConversationID)
     }
     // A load in flight invalidates both baselines until the seed below
-    // re-establishes them — for a same-run refetch as much as a navigation,
+    // re-establishes them — for a same-conversation refetch as much as a navigation,
     // since either way the totals are about to be replaced by SUMs whose
     // covered ids aren't known yet.
     costBaseline.current = null
@@ -380,11 +380,11 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         if (cancelled) return
         setConversation(conversationData)
         // The artifact set drives the approval list; pull it in the same load so
-        // the cards are ready when the run paints (best-effort, non-blocking).
+        // the cards are ready when the conversation paints (best-effort, non-blocking).
         refetchArtifacts(conversationID)
 
         // Parallel: messages + task. The task read carries its failure rather
-        // than throwing it, because the two are independent — a run whose task
+        // than throwing it, because the two are independent — a conversation whose task
         // row has gone still has a transcript worth rendering, and letting the
         // task 404 reject the pair would blank it.
         const [transcript, taskRow] = await Promise.all([
@@ -403,17 +403,17 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         // folded in a second time, and folding resumes from here.
         //
         // Treating the whole transcript as already covered is an
-        // approximation, not an identity. The run row is read first and the
+        // approximation, not an identity. The conversation row is read first and the
         // transcript second, so a row written between the two reads is in
-        // the transcript but outside the SUM the run row carries — seeding
+        // the transcript but outside the SUM the conversation row carries — seeding
         // it here means its figures are never folded, and the readouts sit
-        // that row low until the next run refetch replaces them with a
+        // that row low until the next conversation refetch replaces them with a
         // fresh SUM. That is the deliberate direction: reading the
         // transcript first would invert the race into a row the SUM covers
         // but the baseline doesn't, and a replay of it would fold dollars
         // and tokens that are already counted. Under-reporting for one
         // round trip self-corrects on the next read; over-reporting
-        // compounds. Closing it properly needs the run row to say which
+        // compounds. Closing it properly needs the conversation row to say which
         // message id its SUM runs through, which the wire doesn't carry.
         const seededCost = new Set<number>()
         const seededTokens = new Set<number>()
@@ -432,7 +432,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         olderTokenRef.current = transcript.next_page_token ?? ''
         setOlderToken(olderTokenRef.current)
         // Merge by id rather than replacing. If a websocket
-        // `message` event arrived between the run fetch starting and
+        // `message` event arrived between the conversation fetch starting and
         // the messages fetch resolving, a wholesale replace would
         // erase that newer row until the next refetch.
         setMessages((prev) => mergeMessages(prev, msgs))
@@ -441,7 +441,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         else if (taskRow) setTask(taskRow)
       } catch (err) {
         if (cancelled) return
-        // A 404 is this run's own not-found state, not a failed read — the
+        // A 404 is this conversation's own not-found state, not a failed read — the
         // station renders "no such run" rather than an error banner.
         if (err instanceof HttpError && err.status === 404) {
           setNotFound(true)
@@ -458,13 +458,13 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     }
   }, [conversationID, refetchTick, dropConversation, refetchArtifacts])
 
-  // Tier-2 artifact reconciliation (TFAC-464): while the run view is open, poll
-  // the run-scoped refresh endpoint so externally-changed artifacts (a PR
+  // Tier-2 artifact reconciliation (TFAC-464): while the conversation view is open, poll
+  // the conversation-scoped refresh endpoint so externally-changed artifacts (a PR
   // merged/closed on GitHub, a branch deleted, a review submitted) reflect
   // without waiting for the background per-org cycle. The backend bounds the
-  // work to this run's non-terminal artifacts — a cheap no-op once they're all
+  // work to this conversation's non-terminal artifacts — a cheap no-op once they're all
   // terminal — and broadcasts any transition as artifact_updated, which the
-  // websocket handler below turns into a run refetch. On a dropped frame the
+  // websocket handler below turns into a conversation refetch. On a dropped frame the
   // {updated} count drives a defensive refetch so the view can't go stale.
   //
   // The same tick also repairs the transcript. A `message` frame is the only
@@ -474,7 +474,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   // with nothing on screen to say so. Re-reading from the watermark turns the
   // frame back into what it should be: a hint that arrives faster than the
   // poll, rather than the sole path to the row. Bounded by construction — one
-  // request per tick while the run is live, answering with the rows written
+  // request per tick while the conversation is live, answering with the rows written
   // since the last one, plus a single closing read once it settles.
   useEffect(() => {
     if (!conversationID) return
@@ -482,9 +482,9 @@ export function useConversationDetail(conversationID: string | undefined): Conve
     const reconcileMessages = () => {
       const current = conversationRef.current
       if (!current) return
-      // A live run is repaired every tick. A settled one is repaired once —
+      // A live conversation is repaired every tick. A settled one is repaired once —
       // its transcript is final, so a single read closes it out and there is
-      // never a reason to ask again. A run already settled when the station
+      // never a reason to ask again. A conversation already settled when the station
       // opened never asks at all: the load read it whole.
       const settled = !isActiveConversation(current)
       if (settled && !sawActiveRef.current) return
@@ -528,7 +528,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
       )
         .then((data) => {
           if (cancelled || !data?.updated) return
-          // A transition landed — pull the run row + its artifact set fresh in
+          // A transition landed — pull the conversation row + its artifact set fresh in
           // case the websocket broadcast was missed (the WS handler does the same
           // on its event), so the derived approval surface can't go stale.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
@@ -548,7 +548,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
   }, [conversationID, refetchArtifacts, foldMessageUsage])
 
   // Live updates. A `message` event appends, and folds whatever cost and token
-  // usage the row carries into the held run's rollups so the spend and token
+  // usage the row carries into the held conversation's rollups so the spend and token
   // readouts track a long engagement; `conversation_update` refetches the
   // conversation row so status/duration and the authoritative SUMs flip
   // without a full reload. Permission prompts
@@ -565,7 +565,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           foldMessageUsage(event.data)
         }
         if (event.type === 'conversation_update' && event.conversation_id === conversationID) {
-          // A run that left the running state can't act on a parked prompt —
+          // A conversation that left the running state can't act on a parked prompt —
           // drop the queue so the dock doesn't keep a stale Allow/Deny up until
           // the client TTL fires (mirrors the board's terminal drop).
           if (isPermissionTerminalStatus(event.data.status ?? '')) {
@@ -585,7 +585,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
             .then((data) => {
               // Guard the async write against a navigation that landed while the
               // fetch was in flight (same guard refetchArtifacts uses), so an
-              // old run's row can't clobber the new run's state.
+              // old conversation's row can't clobber the new conversation's state.
               if (conversationID === lastConversationIDRef.current) setConversation(data)
             })
             .catch(() => {})
@@ -594,11 +594,11 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           refetchArtifacts(conversationID)
         }
         if (event.type === 'artifact_updated' && event.conversation_id === conversationID) {
-          // Reconciler (TFAC-464): an artifact this run produced changed state
-          // on GitHub (or another tab approved/dismissed it). Refetch the run so
+          // Reconciler (TFAC-464): an artifact this conversation produced changed state
+          // on GitHub (or another tab approved/dismissed it). Refetch the conversation so
           // its derived approval signal (has_unresolved_artifacts + counts)
           // updates, and the artifact set so the approval list repaints. The
-          // run's own status is unchanged, so no permission-queue drop here.
+          // conversation's own status is unchanged, so no permission-queue drop here.
           apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
             .then((data) => {
               if (conversationID === lastConversationIDRef.current) setConversation(data)
@@ -607,7 +607,7 @@ export function useConversationDetail(conversationID: string | undefined): Conve
           refetchArtifacts(conversationID)
         }
         // Both permission frames are refetch triggers, matching artifact_updated
-        // above: the socket says this run's pending set changed, the endpoint
+        // above: the socket says this conversation's pending set changed, the endpoint
         // says what it changed to.
         if (
           (event.type === 'permission_request' || event.type === 'permission_resolved') &&

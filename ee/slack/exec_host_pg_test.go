@@ -213,8 +213,8 @@ func newSlackExecRig(t *testing.T) *slackExecRig {
 // rt builds the direct runtime the handler methods run over in these
 // all/local-shaped tests: its relays dispatch the Slack policy ops locally
 // against the rig's real stores, and ProviderCredential live-resolves the
-// sealed bot-token set from those stores — the same path an all/local run
-// takes (the sidecar path relays instead, exercised in agenthost's relay
+// sealed bot-token set from those stores — the same path an all/local
+// conversation takes (the sidecar path relays instead, exercised in agenthost's relay
 // tests).
 func (r *slackExecRig) rt(info agenthost.ConversationInfo) agenthost.ExtensionRuntime {
 	return agenthost.NewDirectRuntime(r.stor, info)
@@ -370,7 +370,8 @@ func (r *slackExecRig) touchRole(conversationID, entityID string) string {
 	return role
 }
 
-// touchRowCount counts every conversation_memory_entities row for a run — a set-returning
+// touchRowCount counts every conversation_memory_entities row for a
+// conversation — a set-returning
 // read must leave this at 0.
 func (r *slackExecRig) touchRowCount(conversationID string) int {
 	r.t.Helper()
@@ -438,7 +439,8 @@ func TestSlackExecHandler_Send_RecordsArtifactAndAction(t *testing.T) {
 }
 
 // TestSlackExecHandler_Send_RootPostMintsThreadKind pins exec slack send's
-// thread-engagement half: a channel-root post (no --thread-ts) is the run's
+// thread-engagement half: a channel-root post (no --thread-ts) is the
+// conversation's
 // own thread, so its entity is minted kind="thread" — titled from the
 // posted text — the same engagement signal a root mention gets at ingest.
 func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
@@ -473,7 +475,7 @@ func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
 
 // TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind pins the negative
 // case: a reply into an existing thread (--thread-ts set) is a summons into
-// a thread this run did not root, so its entity falls to the generic
+// a thread this conversation did not root, so its entity falls to the generic
 // touched-entity default of kind="message" — recordThreadRoot never fires
 // for it.
 func TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind(t *testing.T) {
@@ -1120,7 +1122,7 @@ func TestSlackExecHandler_ReadChannel_AuthzRefusal(t *testing.T) {
 
 // TestSlackExecHandler_ReadThread_RecordsTouch pins the addressed-read half of
 // the touched-entity rule for Slack: `read thread` targets one thread by
-// (channel, root ts), so it records a durable run→entity touch keyed on the
+// (channel, root ts), so it records a durable conversation→entity touch keyed on the
 // same SlackSourceID the ingest pipeline uses — a bot read and a human mention
 // resolve to the identical entity.
 func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
@@ -1243,8 +1245,10 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-nochan")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
-	// The team tracks a home channel in T1 so the run holds a sealed token for
-	// that workspace (a run with NO tracked channel has no Slack authorization
+	// The team tracks a home channel in T1 so the claim's bundle holds a
+	// sealed token for
+	// that workspace (a conversation with NO tracked channel has no Slack
+	// authorization
 	// at all and is refused before files.info — a separate, stricter path). The
 	// file below is shared NOWHERE channel-scoped, so the file-channel gate is
 	// what must refuse it.
@@ -1265,7 +1269,7 @@ func TestSlackExecHandler_Download_NoChannels_Refused(t *testing.T) {
 }
 
 // TestSlackExecHandler_Download_FallbackPath_StillAuthorizes is the direct
-// regression test for the gap: a run with NO Slack task context (so
+// regression test for the gap: a conversation with NO Slack task context (so
 // opResolveWorkspaceForDownload takes the "org's sole connected workspace"
 // fallback, which — before this fix — returned a token with zero channel
 // authorization at all) must still be refused when the requested file
@@ -1275,9 +1279,10 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-dl-fallback")
 	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test") // exactly one connected workspace
 	r.seedChannel(orgID, "T1", "C-untracked")
-	// The team tracks a DIFFERENT (home) channel in T1, so the run holds a
+	// The team tracks a DIFFERENT (home) channel in T1, so the claim's bundle
+	// holds a
 	// sealed token for that workspace — but NOT for the file's channel. This
-	// run's seeded task is a plain GitHub task (seedNonSlackTask), so the
+	// conversation's seeded task is a plain GitHub task (seedNonSlackTask), so the
 	// resolve-workspace-for-download op reports "no Slack context" and falls
 	// through to the org-wide sole-workspace path; the file-channel gate is what
 	// must then refuse the download of a file in the untracked channel.
@@ -1301,7 +1306,7 @@ func TestSlackExecHandler_Download_FallbackPath_StillAuthorizes(t *testing.T) {
 
 func TestSlackExtension_RefusedWithoutEntitlement(t *testing.T) {
 	// The "slack" provider is registered from this package's init(); the gate
-	// checks the run's org entitlement (here: none), so the call is refused.
+	// checks the conversation's org entitlement (here: none), so the call is refused.
 	entitlements.RegisterProvider(entitlements.Static()) // nothing entitled
 	t.Cleanup(entitlements.Reset)
 
@@ -1345,8 +1350,8 @@ func TestSlackExtension_EntitledDispatchesToHandler(t *testing.T) {
 
 // TestSlackProviderCredential_SealsOnlyTrackedWorkspaces is the sealed-set
 // scoping guarantee: the brain seals a bot token ONLY for the workspaces of the
-// run's team's tracked channels — the authorizable set. A connected workspace
-// the team does not track never enters the run's bundle, so a compromised
+// conversation's team's tracked channels — the authorizable set. A connected workspace
+// the team does not track never enters the claim's bundle, so a compromised
 // sidecar cannot reach it (there is no token to select).
 func TestSlackProviderCredential_SealsOnlyTrackedWorkspaces(t *testing.T) {
 	r := newSlackExecRig(t)

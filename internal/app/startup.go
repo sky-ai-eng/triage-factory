@@ -91,7 +91,7 @@ func (a *App) startWorkers(ctx context.Context) {
 	// pod builds the spawner but never claims delegated runs, so neither
 	// runs there.
 	if a.plan.dispatcher {
-		go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
+		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
 	}
 

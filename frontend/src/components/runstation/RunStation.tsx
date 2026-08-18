@@ -550,7 +550,7 @@ function IntakeDock({
             completionGloss(conversation)
           : conversation.Status === 'failed'
             ? conversation.FailureKind === 'memory_limit'
-              ? 'killed — exceeded its memory limit (raise TF_RUN_MEMORY_LIMIT_MB if needed)'
+              ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
               : 'run failed'
             : conversation.Status
 

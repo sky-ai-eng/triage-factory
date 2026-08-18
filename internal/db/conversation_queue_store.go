@@ -46,7 +46,7 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 // SQLite collapses onto its single connection and asserts the local sentinel
 // org on the org-scoped methods.
 //
-// The claim fence here (one worker claims one queued run) is distinct from the
+// The claim fence here (one worker claims one queued conversation) is distinct from the
 // replay fence (one blueprint_run per (triggering_event_id, trigger_id), at the
 // firing boundary in BlueprintStore.CreateRunIfNotFiredSystem). The queue does
 // not subsume the replay fence — by the time a step is enqueued the blueprint_run
@@ -59,31 +59,31 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 // contract: every existing caller passes ClaimPlacement{} and sees no change.
 type ClaimPlacement struct {
 	// Enabled turns on the two-tier claim: tier 1 (preferred_executor_id =
-	// the claiming executor) plus tier 2 (any run aged past AgingInterval, or
-	// whose stamped preferred executor is not a live claimant). Disabled →
-	// the claim ignores preferred_executor_id entirely.
+	// the claiming executor) plus tier 2 (any conversation aged past
+	// AgingInterval, or whose stamped preferred executor is not a live
+	// claimant). Disabled → the claim ignores preferred_executor_id entirely.
 	Enabled bool
 
-	// AgingInterval is the tier-2 spillover delay: how long a queued run
-	// waits for its preferred owner before ANY executor may claim it (spec
-	// §6.2's ~15-30s). A run with no preferred (NULL) is claimable
-	// immediately regardless of this — NULL is "unowned", not "aging".
+	// AgingInterval is the tier-2 spillover delay: how long a queued
+	// conversation waits for its preferred owner before ANY executor may
+	// claim it (spec §6.2's ~15-30s). A conversation with no preferred (NULL)
+	// is claimable immediately regardless of this — NULL is "unowned", not
+	// "aging".
 	AgingInterval time.Duration
 
-	// Liveness is the heartbeat-staleness window past which a run's stamped
-	// preferred executor is treated as no longer a live claimant (dead), so
-	// the run spills immediately without waiting out AgingInterval. Draining
-	// and dispatch-gated preferreds spill the same way, read from the
-	// instances row.
+	// Liveness is the heartbeat-staleness window past which a conversation's
+	// stamped preferred executor is treated as no longer a live claimant
+	// (dead), so the conversation spills immediately without waiting out
+	// AgingInterval. Draining and dispatch-gated preferreds spill the same
+	// way, read from the instances row.
 	Liveness time.Duration
 }
 
 type ConversationQueueStore interface {
 	// EnqueueConversation mints a delegation conversation for a blueprint step with
 	// NO stored status — the absence of an outcome is what makes it
-	// claimable. It is the work-list write the dispatcher later claims. run
-	// carries the
-	// step's identity: ID, TaskID, PromptID, Model, TriggerType,
+	// claimable. It is the work-list write the dispatcher later claims. conv
+	// carries the step's identity: ID, TaskID, PromptID, Model, TriggerType,
 	// CreatorUserID, TriggerID, BlueprintRunID (required), BlueprintStepIndex.
 	// A blueprint conversation with no step index is refused — see
 	// ErrBlueprintStepUnindexed.
@@ -109,26 +109,27 @@ type ConversationQueueStore interface {
 	// driven" stay disjoint at every instant.
 	//
 	// placement (TFAC-587) selects the claim discipline. Disabled (the zero
-	// value): the globally-oldest claimable run, ORDER BY started_at, id — the
-	// original behavior every non-placement caller relies on. Enabled: the
-	// two-tier claim — tier 1 is this executor's own preferred runs (an
-	// indexed preferred_executor_id equality), tier 2 spills any run aged past
-	// placement.AgingInterval or whose stamped preferred is not a live
-	// claimant (dead/gated/draining). A run's own preferred owner sorts first
-	// (tier 1 before tier 2), so a fresh run with a live owner is exclusively
+	// value): the globally-oldest claimable conversation, ORDER BY
+	// started_at, id — the original behavior every non-placement caller
+	// relies on. Enabled: the two-tier claim — tier 1 is this executor's own
+	// preferred conversations (an indexed preferred_executor_id equality),
+	// tier 2 spills any conversation aged past placement.AgingInterval or
+	// whose stamped preferred is not a live claimant (dead/gated/draining). A
+	// conversation's own preferred owner sorts first
+	// (tier 1 before tier 2), so a fresh conversation with a live owner is exclusively
 	// its owner's until it ages — the warm-cache property — while a saturated
 	// or dead owner never head-of-line-blocks its shard. SQLite is N=1 and
 	// ignores placement entirely (one executor always self-hits tier 1).
 	//
 	// executorID/bootEpoch (the caller's persistent instance-registry
 	// identity, TFAC-577) are stamped atomically in the same claim statement
-	// — not later, once the run goes live — so there is never a window where
+	// — not later, once the engagement goes live — so there is never a window where
 	// a 'running' row's ownership is unknown to ResetProcessingConversations (TFAC-578):
 	// a crash during workspace setup, before the process ever goes live,
 	// still leaves the row correctly self-attributed.
 	//
 	// Cross-org by design: the dispatcher is a single system worker draining
-	// every tenant (the claimed run carries its org_id, which scopes all
+	// every tenant (the claimed conversation carries its org_id, which scopes all
 	// downstream work). Postgres uses FOR UPDATE SKIP LOCKED so a future
 	// multi-worker dispatcher never double-claims; SQLite is single-worker. A
 	// queued step of a cancel-requested or already-terminal blueprint is
@@ -148,7 +149,7 @@ type ConversationQueueStore interface {
 	// conversation is mid-flight, so the moment it has no claim it matches
 	// the needs-driving predicate again. The claim releases 'requeued', which
 	// is also what keeps the current queue episode open, so the next claim's
-	// Attempts counts this try and the dispatcher can stop retrying a run
+	// Attempts counts this try and the dispatcher can stop retrying a conversation
 	// that fails the same way every time. Guarded on a mid-flight
 	// conversation with a live claim, so a stale call can't act on a terminal
 	// or parked row.
@@ -159,7 +160,7 @@ type ConversationQueueStore interface {
 	// that claim released, which is all it takes for the dispatcher to
 	// re-claim and re-drive it. Parked (`open`) and terminal conversations
 	// are not mid-flight and stay put — they resume through their own paths.
-	// attempts is retained (mirrors EventQueue.ResetProcessing) so a run that
+	// attempts is retained (mirrors EventQueue.ResetProcessing) so a conversation that
 	// keeps hard-crashing the process eventually fails out rather than
 	// crash-looping the boot.
 	//
@@ -172,14 +173,14 @@ type ConversationQueueStore interface {
 	// still-live process owns. Returns the count reset.
 	ResetProcessingConversations(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
-	// MarkAwaitingCredentials parks a freshly-claimed run's ACTIVE claim in
+	// MarkAwaitingCredentials parks a freshly-claimed conversation's ACTIVE claim in
 	// phase='awaiting_credentials' (the conversation row is untouched)
 	// and — Postgres only — fires the tf_ctl cred_request doorbell so the
 	// brain's credential provisioner (internal/credprovision) resolves and
-	// seals this run's bundle without waiting for the backstop sweep.
+	// seals this claim's bundle without waiting for the backstop sweep.
 	// credPubKey (base64 X25519) is the per-run sidecar public key the
 	// brain seals the bundle to — recorded here, in the same statement as
-	// the phase stamp, so the provisioner never sees a parked run without
+	// the phase stamp, so the provisioner never sees a parked claim without
 	// the key it needs; empty stores NULL (a caller that has no sidecar
 	// key yet). Guarded on phase IS NULL, which gives the same protection
 	// window the former stored-status guard did: a stale/duplicate call
@@ -189,26 +190,26 @@ type ConversationQueueStore interface {
 	// one already carrying a phase).
 	MarkAwaitingCredentials(ctx context.Context, orgID, conversationID, credPubKey string) (matched bool, err error)
 
-	// GetClaim returns the run's current claim identity (team, claiming
+	// GetClaim returns the conversation's current claim identity (team, claiming
 	// executor, boot epoch) regardless of status — the brain's targeted,
-	// single-run read on a cred_request notification (TFAC-614): the
-	// notification carries only (org, run) IDs, so the brain re-reads the
+	// single-conversation read on a cred_request notification (TFAC-614): the
+	// notification carries only (org, conversation) IDs, so the brain re-reads the
 	// live claim rather than trusting a payload that could be stale by
 	// the time it's handled. Returns ok=false when conversationID is unknown.
 	GetClaim(ctx context.Context, orgID, conversationID string) (claim AwaitingCredentialsConversation, ok bool, err error)
 
-	// RequeueAwaitingCredentials releases a run whose active claim is parked
+	// RequeueAwaitingCredentials releases a conversation whose active claim is parked
 	// in phase='awaiting_credentials', clearing ownership — the executor-side
 	// timeout path. The release is the requeue. Guarded on that parked claim
 	// so a stale/duplicate timeout can't act on a row that already moved on.
 	// Returns matched=false when the guard didn't hold (bundle arrived just
-	// after the deadline check, or the run was reaped in the meantime).
+	// after the deadline check, or the conversation was reaped in the meantime).
 	RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (matched bool, err error)
 
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
 	// phase='awaiting_credentials'. One scan serves the whole provisioner:
-	// a curator turn parks its claim exactly like a delegated run does, so
+	// a curator turn parks its claim exactly like a delegated conversation does, so
 	// the phase column is the substrate and ConversationType is how the
 	// caller routes. The brain-side backstop sweep's input; primary
 	// provisioning happens synchronously off the executor's cred_request
@@ -220,18 +221,18 @@ type ConversationQueueStore interface {
 	// live engagement (an unreleased claim not parked in
 	// phase='awaiting_credentials') whose sealed bundle is older than
 	// olderThan — the brain-side refresh sweep's input: GitHub
-	// installation tokens are hour-lived, runs aren't, so a long-running
-	// run's git token needs periodic re-minting.
+	// installation tokens are hour-lived, engagements aren't, so a
+	// long-lived claim's git token needs periodic re-minting.
 	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]AwaitingCredentialsConversation, error)
 
-	// FleetQueueShares returns the run-queue occupancy of every org with any
+	// FleetQueueShares returns the conversation-queue occupancy of every org with any
 	// active or queued work, newest-pressure first — the per-org shares the
 	// operator fleet queue view (GET /api/fleet/queue) surfaces and
 	// the claim's fairness ordering acts on. Active counts unreleased claims
 	// (an engagement IS the occupied slot); Queued counts conversations
 	// matching the needs-driving predicate; MaxConcurrentRuns is the org's
 	// configured cap (nil = unlimited, also nil for a non-positive value). An
-	// org with neither active nor queued runs is omitted. Admin-pool,
+	// org with neither active claims nor queued conversations is omitted. Admin-pool,
 	// cross-org: this is a fleet/operator read with no per-user identity, the
 	// same posture as ClaimNextConversation (SQLite is N=1 — at most the one local org).
 	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
@@ -263,8 +264,9 @@ type ConversationQueueStore interface {
 	// recovers it, because every other arm (and the Postgres-only leader
 	// reaper) joins through conversations. Failing frees the
 	// one-active-auto-run index the orphan was holding, so the task's
-	// already-queued firing intent drains into a fresh, fully-minted run
-	// instead of retrying against the index forever. Both dialects: local mode
+	// already-queued firing intent drains into a fresh, fully-minted
+	// blueprint run instead of retrying against the index forever. Both
+	// dialects: local mode
 	// has the same crash window and no reaper.
 	//
 	// Cross-org system sweep; returns the total count of rows healed across
@@ -279,8 +281,9 @@ type ConversationQueueStore interface {
 	// number. Cross-org system read on the admin pool.
 	CountQueuedSystem(ctx context.Context) (int, error)
 
-	// RecentConversationTimingsSystem returns the timing projection of every run started
-	// at-or-after `since`, newest first, capped at `limit` rows — the fleet
+	// RecentConversationTimingsSystem returns the timing projection of every
+	// conversation started at-or-after `since`, newest first, capped at
+	// `limit` rows — the fleet
 	// dashboard's source for queue-wait and run-duration percentiles and
 	// failure-kind rates (TFAC-589). Percentiles are computed Go-side (portable
 	// across SQLite/Postgres, matching the usage handler's aggregation style),
@@ -300,7 +303,7 @@ type ConversationQueueStore interface {
 	// no cross-tenant machine truth. The window is half-open [since, until):
 	// unlike the fleet console's live "recent up to now" read this one honors an
 	// explicit upper bound so a past-window /usage query doesn't leak newer
-	// runs (a zero until drops the upper clause). Admin pool with org bound by
+	// conversations (a zero until drops the upper clause). Admin pool with org bound by
 	// argument, same posture as SpendByCategorySystem; the HTTP org-admin gate
 	// is the authorization to read it.
 	RecentConversationTimingsForOrgSystem(ctx context.Context, orgID string, since, until time.Time, limit int) ([]domain.ConversationTiming, error)
@@ -331,13 +334,13 @@ type ConversationQueueStore interface {
 	// ClaimByIDSystem returns one claim in the same projection, or (nil, nil)
 	// when no such claim exists. It exists so a per-claim operator surface can
 	// tell "unknown claim" (404) from "known claim that was never sampled"
-	// (an empty series, which is ordinary — a sub-minute run or pre-sampler
+	// (an empty series, which is ordinary — a sub-minute engagement or pre-sampler
 	// history). Same cross-org operator-surface posture as
 	// RecentClaimsForExecutorSystem.
 	ClaimByIDSystem(ctx context.Context, claimID string) (*domain.ExecutorClaim, error)
 }
 
-// OrgQueueShare is one org's run-queue occupancy from FleetQueueShares — the
+// OrgQueueShare is one org's conversation-queue occupancy from FleetQueueShares — the
 // shape the fleet queue view renders and the fairness claim reasons about.
 // Active + Queued are live counts at read time; a zero-of-both org is never
 // returned.
@@ -353,14 +356,14 @@ type OrgQueueShare struct {
 	// MaxConcurrentRuns is the org's configured concurrency cap, nil when
 	// unlimited (a NULL or non-positive max_concurrent_runs). When non-nil and
 	// Active >= *MaxConcurrentRuns the org is at its ceiling and its queued
-	// runs are invisible to claims until an active run finishes.
+	// conversations are invisible to claims until an active engagement finishes.
 	MaxConcurrentRuns *int
 }
 
 // AwaitingCredentialsConversation is one row from ListAwaitingCredentials /
 // ListActiveNeedingCredentialRefresh / GetClaim — the narrow shape the
-// brain's credential provisioner needs to resolve and seal a run's bundle:
-// enough to look up the org's credentials, the run's authorized repo set
+// brain's credential provisioner needs to resolve and seal a claim's bundle:
+// enough to look up the org's credentials, the conversation's authorized repo set
 // (via TeamID), and the key to seal to (CredPubKey, with the claiming
 // executor's published instance pubkey reachable via ExecutorID).
 type AwaitingCredentialsConversation struct {
@@ -376,6 +379,6 @@ type AwaitingCredentialsConversation struct {
 	BootEpoch        int64
 	ClaimedAt        time.Time
 	// CredPubKey is the per-run sidecar public key recorded by
-	// MarkAwaitingCredentials; empty when the run was parked without one.
+	// MarkAwaitingCredentials; empty when the claim was parked without one.
 	CredPubKey string
 }

@@ -12,7 +12,7 @@ import (
 )
 
 // spendStore is the SQLite impl of db.SpendStore — a read-only aggregation over
-// the llm_spend view (TFAC-472), the UNION-ALL of runs + curator_requests +
+// the llm_spend view (TFAC-472), the UNION-ALL of conversation messages +
 // system_llm_runs on the category axis. SQLite is N=1 (local mode) with no RLS,
 // so unlike the Postgres impl there is no app/admin pool split — the single
 // connection serves the read. assertLocalOrg pins orgID to the local sentinel.

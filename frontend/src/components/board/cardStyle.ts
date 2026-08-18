@@ -15,7 +15,7 @@ import { isActiveConversation } from '../../lib/conversationStatus'
 
 // Tone is the card's semantic color vocabulary, mapped to theme tokens so it
 // tracks light/dark automatically. `rust` is the resting accent (a plain task);
-// the rest encode run state.
+// the rest encode conversation state.
 export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutral'
 
 export const TONE_VAR: Record<Tone, string> = {
@@ -38,12 +38,12 @@ export const TONE_TEXT: Record<Tone, string> = {
 
 export interface Glow {
   tone: Tone
-  // Breathing = an actively-turning run (the lane is alive). Steady = a state
+  // Breathing = an actively-turning conversation (the lane is alive). Steady = a state
   // that wants attention but isn't moving (waiting on you, or it failed).
   breathing: boolean
 }
 
-// conversationGlow decides whether the card itself lights up. Only a LIVE run glows — a
+// conversationGlow decides whether the card itself lights up. Only a LIVE conversation glows — a
 // breathing "work is alive here" bloom. Everything else returns null: a steady
 // colored glow on a settled/cancelled/waiting card just reads as a tinted
 // drop-shadow under the card (and those states already announce themselves via

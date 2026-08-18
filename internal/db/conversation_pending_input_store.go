@@ -3,8 +3,8 @@ package db
 import "context"
 
 // ConversationPendingInputStore is the READ half of resume-by-enqueue (TFAC-585): the
-// messages (+ acting user) recorded before a parked run's continuation is
-// re-queued as ordinary claimable work, so a crash between "message recorded"
+// messages (+ acting user) recorded before a parked conversation's continuation
+// is re-queued as ordinary claimable work, so a crash between "message recorded"
 // and "process spawned" is recoverable by the standard boot sweep rather than
 // an ad-hoc path. See docs/for-agents/specs/horizontal-scaling/README.md §5.2.
 //
@@ -20,7 +20,7 @@ import "context"
 // conversations legitimately queue several).
 //
 // Both dialects (unlike ConversationSignalStore): local mode's dispatcher claims its
-// own resumed runs through the identical queue path — resume-by-enqueue
+// own resumed conversations through the identical queue path — resume-by-enqueue
 // applies in every mode, TF_ROLE=all included (decision log #7). Peek and
 // Consume run system-side off the top-level (admin-pool in Postgres) store:
 // the dispatcher's claim path is a goroutine with no request context.
@@ -42,7 +42,7 @@ import "context"
 // derivable from the call site — dispatchResumeClaim just receives a userID —
 // which is why the rule lives here.
 type ConversationPendingInputStore interface {
-	// Peek reads the queued input for a run WITHOUT flipping it, or
+	// Peek reads the queued input for a conversation WITHOUT flipping it, or
 	// ok=false when none exists. It returns exactly the text Consume would
 	// — every queued row, oldest first, joined by a blank line — so the
 	// routing decision (dispatchClaimedConversation) and the delivery
@@ -52,7 +52,7 @@ type ConversationPendingInputStore interface {
 	// message is actually delivered — so a crash between the claim and
 	// delivery (e.g. during a slow workspace rehydrate) leaves them for the
 	// next claim to re-deliver, rather than losing the message and
-	// re-driving the run as an ordinary blueprint step.
+	// re-driving the conversation as an ordinary blueprint step.
 	Peek(ctx context.Context, orgID, conversationID string) (message, userID string, ok bool, err error)
 
 	// Consume atomically flips every queued row delivered and returns them

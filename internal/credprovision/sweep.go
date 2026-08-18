@@ -62,7 +62,7 @@ func RunAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration)
 
 // sweepAwaiting drives ONE scan for every surface: parking a claim in
 // phase='awaiting_credentials' is a property of the engagement, not of the
-// conversation type, so both a delegated run's sidecar bring-up and a
+// conversation type, so both a delegated conversation's sidecar bring-up and a
 // curator turn's land in the same list. Only the resolution differs, and the
 // conversation type on each row is what selects it.
 func sweepAwaiting(ctx context.Context, mgr *Manager) {
@@ -86,8 +86,9 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 }
 
 // RunRefreshSweep re-mints and re-seals the GitHub tokens of every active
-// (claimed, non-terminal) run whose sealed bundle is older than
-// refreshAfter (TFAC-614) — GitHub installation tokens are hour-lived, runs
+// (claimed, non-terminal) conversation whose sealed bundle is older than
+// refreshAfter (TFAC-614) — GitHub installation tokens are hour-lived,
+// engagements
 // aren't. Piggybacks no new scheduler cadence beyond its own ticker, per the
 // same brain-unit shape as RunAwaitingSweep.
 func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter time.Duration) {
@@ -109,7 +110,7 @@ func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter t
 func sweepRefresh(ctx context.Context, mgr *Manager, refreshAfter time.Duration) {
 	convs, err := mgr.stores.ConversationQueue.ListActiveNeedingCredentialRefresh(ctx, time.Now().Add(-refreshAfter))
 	if err != nil {
-		log.Warn("list runs needing credential refresh failed; retrying next tick", "error", err)
+		log.Warn("list conversations needing credential refresh failed; retrying next tick", "error", err)
 		return
 	}
 	for _, r := range convs {

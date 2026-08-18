@@ -73,7 +73,7 @@ func TestArtifactStore_SQLite_RoundTrip(t *testing.T) {
 		t.Fatalf("read back branch: %v", err)
 	}
 	if nullConversation.Valid || extID.Valid || url.Valid || details.Valid {
-		t.Errorf("empty optionals should be NULL: run=%v ext=%v url=%v details=%v", nullConversation, extID, url, details)
+		t.Errorf("empty optionals should be NULL: conversation=%v ext=%v url=%v details=%v", nullConversation, extID, url, details)
 	}
 }
 
@@ -234,8 +234,8 @@ func TestArtifactStore_SQLite_PendingToReal(t *testing.T) {
 // TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL pins that an
 // upsert leaving external_id/url empty does NOT blank values an earlier upsert
 // stored — they only ever fill in (PR number / issue key, html link). A
-// reconciliation pass, or a Jira mutation whose run can't compute the browse
-// URL, must not erase them. State/target still follow the latest writer.
+// reconciliation pass, or a Jira mutation whose conversation can't compute the
+// browse URL, must not erase them. State/target still follow the latest writer.
 func TestArtifactStore_SQLite_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
@@ -334,9 +334,9 @@ func TestArtifactStore_SQLite_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_SQLite_ListByRunAndTeam pins the two read paths and
-// their newest-first ordering + the team Limit. TFAC-455.
-func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
+// TestArtifactStore_SQLite_ListByConversationAndTeam pins the two read paths
+// and their newest-first ordering + the team Limit. TFAC-455.
+func TestArtifactStore_SQLite_ListByConversationAndTeam(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -377,11 +377,12 @@ func TestArtifactStore_SQLite_ListByRunAndTeam(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_SQLite_CountByRun pins the batched per-run count the run
-// list path uses for artifact_count (TFAC-465): counts keyed by run id, a run
-// with no artifacts absent from the map (not 0-valued), unknown ids absent, and
+// TestArtifactStore_SQLite_CountByConversation pins the batched
+// per-conversation count the conversation-list path uses for artifact_count
+// (TFAC-465): counts keyed by conversation id, a conversation with no artifacts
+// absent from the map (not 0-valued), unknown ids absent, and
 // an empty conversationIDs a no-op returning an empty map.
-func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
+func TestArtifactStore_SQLite_CountByConversation(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -408,16 +409,16 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 		t.Fatalf("CountByConversation: %v", err)
 	}
 	if counts[convA] != 3 {
-		t.Errorf("runA count = %d, want 3", counts[convA])
+		t.Errorf("convA count = %d, want 3", counts[convA])
 	}
 	if counts[convB] != 1 {
-		t.Errorf("runB count = %d, want 1", counts[convB])
+		t.Errorf("convB count = %d, want 1", counts[convB])
 	}
 	if _, ok := counts[convC]; ok {
-		t.Errorf("runC (no artifacts) should be absent from the map, got %d", counts[convC])
+		t.Errorf("convC (no artifacts) should be absent from the map, got %d", counts[convC])
 	}
 	if _, ok := counts["nonexistent"]; ok {
-		t.Error("unknown run id should be absent from the map")
+		t.Error("unknown conversation id should be absent from the map")
 	}
 
 	// Empty conversationIDs is a no-op — empty, non-nil map, no query.
@@ -430,11 +431,12 @@ func TestArtifactStore_SQLite_CountByRun(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_SQLite_ListByRuns pins the batched multi-run read the
-// run-list path uses for pending_kind (TFAC-465): artifacts for the given runs
-// come back in one slice, each carrying its ConversationID for grouping; a run with no
+// TestArtifactStore_SQLite_ListByConversations pins the batched
+// multi-conversation read the conversation-list path uses for pending_kind
+// (TFAC-465): artifacts for the given conversations come back in one slice,
+// each carrying its ConversationID for grouping; a conversation with no
 // artifacts contributes nothing and an empty conversationIDs is a no-op.
-func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
+func TestArtifactStore_SQLite_ListByConversations(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -467,10 +469,10 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 		byConversation[a.ConversationID]++
 	}
 	if byConversation[convA] != 2 || byConversation[convB] != 1 {
-		t.Errorf("grouped counts = %v, want runA=2 runB=1", byConversation)
+		t.Errorf("grouped counts = %v, want convA=2 convB=1", byConversation)
 	}
 	if byConversation[convC] != 0 {
-		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byConversation[convC])
+		t.Errorf("convC (no artifacts) contributed %d rows, want 0", byConversation[convC])
 	}
 
 	empty, err := stores.Artifacts.ListByConversations(ctx, runmode.LocalDefaultOrgID, nil)
@@ -483,8 +485,9 @@ func TestArtifactStore_SQLite_ListByRuns(t *testing.T) {
 }
 
 // TestArtifactStore_SQLite_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: an artifact whose run was purged (conversation_id NULL)
-// is still the team's and must come back from ListByTeam. Guards against a
+// audit-ledger invariant: an artifact whose conversation was purged
+// (conversation_id NULL) is still the team's and must come back from
+// ListByTeam. Guards against a
 // future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
 func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
@@ -501,17 +504,17 @@ func TestArtifactStore_SQLite_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
-	// run detaches the artifact rather than cascading it away.
+	// Simulate a conversation purge: the FK is ON DELETE SET NULL, so deleting
+	// the conversation detaches the artifact rather than cascading it away.
 	if _, err := conn.Exec(`DELETE FROM conversations WHERE id = ?`, conversationID); err != nil {
-		t.Fatalf("purge run: %v", err)
+		t.Fatalf("purge conversation: %v", err)
 	}
 	var nullConversation sql.NullString
 	if err := conn.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = ?`, art.ID).Scan(&nullConversation); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
 	if nullConversation.Valid {
-		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullConversation.String)
+		t.Fatalf("conversation_id should be NULL after conversation purge, got %q", nullConversation.String)
 	}
 
 	rows, _, err := stores.Artifacts.ListByTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, db.ArtifactListOpts{})
@@ -813,8 +816,8 @@ func TestArtifactStore_SQLite_ListPendingReviewsByTarget(t *testing.T) {
 			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
 		}
 	}
-	// Two pending reviews on the target PR (different runs in reality → different
-	// dedup keys), plus noise that must NOT match.
+	// Two pending reviews on the target PR (different conversations in reality →
+	// different dedup keys), plus noise that must NOT match.
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-a")
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#7", "rev-7-b")
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewSubmitted, "octo/repo#7", "rev-7-submitted")
@@ -975,8 +978,8 @@ func newSQLiteForArtifactTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedArtifactConversation inserts a minimal run the artifacts FK (conversation_id →
-// conversations(id)) can point at. origin is set non-'blueprint' so the
+// seedArtifactConversation inserts a minimal conversation the artifacts FK
+// (conversation_id → conversations(id)) can point at. origin is set non-'blueprint' so the
 // conversations_origin_requires_parents CHECK doesn't demand a parent chain; the
 // org/team/creator columns default to the local sentinels.
 func seedArtifactConversation(t *testing.T, conn *sql.DB) string {
@@ -984,14 +987,15 @@ func seedArtifactConversation(t *testing.T, conn *sql.DB) string {
 	return seedArtifactConversationWithID(t, conn, "99999999-9999-9999-9999-999999999999")
 }
 
-// seedArtifactConversationWithID is seedArtifactConversation parameterized on the run id, for
-// tests that need more than one run (CountByConversation batches across runs).
+// seedArtifactConversationWithID is seedArtifactConversation parameterized on
+// the conversation id, for tests that need more than one conversation
+// (CountByConversation batches across conversations).
 func seedArtifactConversationWithID(t *testing.T, conn *sql.DB, id string) string {
 	t.Helper()
 	if _, err := conn.Exec(
 		`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, id,
 	); err != nil {
-		t.Fatalf("seed run %s: %v", id, err)
+		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id
 }
@@ -1000,8 +1004,8 @@ func seedArtifactConversationWithID(t *testing.T, conn *sql.DB, id string) strin
 // the auto-posting review posture claims with: exactly one caller moves the row
 // out of pending, and the loser learns it lost rather than silently proceeding
 // to a second SubmitReview. Same contract as the app-pool twin the approve
-// handler uses — the two are what stop a run and a human from both publishing
-// one drafted review.
+// handler uses — the two are what stop a conversation and a human from both
+// publishing one drafted review.
 func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 	conn := newSQLiteForArtifactTest(t)
 	stores := sqlitestore.New(conn)
@@ -1028,8 +1032,8 @@ func TestArtifactStore_SQLite_TransitionReviewStateSystem(t *testing.T) {
 	if err != nil || !won {
 		t.Fatalf("first claim = %v, %v; want it to win", won, err)
 	}
-	// The second caller — a human approve racing the run's auto-post, or vice
-	// versa — must lose, having made no GitHub call on the strength of it.
+	// The second caller — a human approve racing the conversation's auto-post,
+	// or vice versa — must lose, having made no GitHub call on the strength of it.
 	lost, err := stores.Artifacts.TransitionReviewStateSystem(ctx, runmode.LocalDefaultOrgID, draft.ID,
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
 	if err != nil {

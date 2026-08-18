@@ -187,19 +187,19 @@ export default function Board() {
 
   // Presence (TFAC-392): the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
-  // fall back to 'other' on unmount so an unattended run fast-denies once the
+  // fall back to 'other' on unmount so an unattended conversation fast-denies once the
   // operator leaves the board.
   useEffect(() => {
     setPresenceView('board')
     return () => setPresenceView('other')
   }, [])
 
-  // Agent run state — runs render on cards regardless of which column
+  // Agent conversation state — conversations render on cards regardless of which column
   // the card is in (a user-claimed in_progress task can also have a
-  // run; a bot-claimed in_review task definitely has one).
+  // conversation; a bot-claimed in_review task definitely has one).
   const [conversations, setConversations] = useState<Record<string, Conversation>>({})
-  // Per-run card feed (running stats + last few ticker lines), keyed by run
-  // ID. Bounded by construction — the board used to accumulate every run's
+  // Per-conversation card feed (running stats + last few ticker lines), keyed by conversation
+  // ID. Bounded by construction — the board used to accumulate every conversation's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
   const [conversationFeeds, setConversationFeeds] = useState<Record<string, ConversationCardFeed>>(
@@ -213,13 +213,13 @@ export default function Board() {
     chainStepConversationsRef.current = chainStepConversations
   }, [chainStepConversations])
 
-  // Tool-permission prompts for every run on the board, keyed by run ID. The
+  // Tool-permission prompts for every conversation on the board, keyed by conversation ID. The
   // shared queue core (same one useConversationDetail uses) owns dedup + per-prompt TTL
-  // timers; the board ingests `permission_request` and drops a run's queue when
+  // timers; the board ingests `permission_request` and drops a conversation's queue when
   // it finishes or leaves the board. A queuesRef mirrors the map so the
   // leave-the-board reconciliation effect can read it without re-running on
   // every ingest (which would race a just-ingested prompt against its
-  // not-yet-seeded run).
+  // not-yet-seeded conversation).
   const {
     queues: permQueueMap,
     refresh: refreshPermissions,
@@ -319,8 +319,8 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
-  // Tracks bot-claimed tasks where the delegate run failed
-  // to fire. Cleared when a run for the task lands.
+  // Tracks bot-claimed tasks where the delegate conversation failed
+  // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
   // Per-item approval overlay (open one unresolved artifact's editor).
@@ -332,7 +332,7 @@ export default function Board() {
 
   // Resolve-all confirmation (TFAC-384 §4): drag-to-Done (complete) and
   // Return-to-queue (requeue) force-resolve every unresolved artifact and cancel
-  // a live run. When the target task has unresolved artifacts we stash the
+  // a live conversation. When the target task has unresolved artifacts we stash the
   // intended action here and gate the request behind the confirmation modal.
   const [confirmResolve, setConfirmResolve] = useState<{
     taskId: string
@@ -344,8 +344,8 @@ export default function Board() {
   const [confirmBusy, setConfirmBusy] = useState(false)
 
   // Fetches a blueprint run's step structure and pads it into a length-N
-  // array of step runs — synthetic 'pending' placeholders for steps without
-  // a run yet — the shape the chain rail renders. Pure: returns the array
+  // array of step conversations — synthetic 'pending' placeholders for steps without
+  // a conversation yet — the shape the chain rail renders. Pure: returns the array
   // (null on error / empty) and writes no state, so fetchTasks can resolve
   // many chains in parallel and apply them in one batched setChainStepConversations.
   const fetchChainStepConversations = useCallback(
@@ -359,7 +359,7 @@ export default function Board() {
         return Array.from({ length: total }, (_, i) => {
           const existing = data.steps?.[i]?.run
           if (existing) return existing
-          // A step with no run yet. Its status is empty rather than a
+          // A step with no conversation yet. Its status is empty rather than a
           // made-up name: the classifiers read an unrecognized value as
           // nothing at all, and inventing one would put a word in the
           // conversation vocabulary that no conversation can carry. The
@@ -436,7 +436,7 @@ export default function Board() {
       // paints the previous page instead of blanking the lane.
       //
       // The queued page is loaded but not read here: an unclaimed task has no
-      // run, so it skips the enrichment pass below.
+      // conversation, so it skips the enrichment pass below.
       const [, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
         loadQueued(queueListBody(tf, showSnoozed)),
         // "claimed" is the claim axis, not a lifecycle status: a queued task
@@ -447,16 +447,16 @@ export default function Board() {
         loadDone(doneListBody(tf)),
       ])
 
-      // Paint the board as soon as the five columns are in state. The agent-run
+      // Paint the board as soon as the five columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
       // spinner — it used to: setLoading sat in `finally` after the whole serial
       // loop, so first paint waited on every per-task round-trip (TFAC-98).
       setLoading(false)
 
-      // Agent runs for any task that might carry one — claimed, in_progress,
-      // in_review, done can all have runs attached. Queued never does (claim
-      // cleared = no active run). ONE aggregated call returns every task's runs
-      // plus each task's primary-run transcript, replacing the old per-task
+      // Agent conversations for any task that might carry one — claimed, in_progress,
+      // in_review, done can all have conversations attached. Queued never does (claim
+      // cleared = no active conversation). ONE aggregated call returns every task's conversations
+      // plus each task's primary-conversation transcript, replacing the old per-task
       // serial loop of 2–3 round-trips each (TFAC-98).
       const withConversations: Task[] = [
         ...(claimedRes?.items ?? []),
@@ -465,10 +465,10 @@ export default function Board() {
         ...(doneRes?.items ?? []),
       ]
       if (withConversations.length === 0) return
-      // The window is over CONVERSATIONS, ordered so a task's runs stay
+      // The window is over CONVERSATIONS, ordered so a task's conversations stay
       // contiguous — so a board page's worth of tasks needs a page large
-      // enough to hold all their runs. The board reads the first page and
-      // paints what it has; a card whose run fell past the window fills in on
+      // enough to hold all their conversations. The board reads the first page and
+      // paints what it has; a card whose conversation fell past the window fills in on
       // the next refresh rather than blocking first paint on a second call.
       const agg = await apiJSON<{
         runs?: Record<string, Conversation[]>
@@ -506,7 +506,7 @@ export default function Board() {
             stepConversations.find((r) => isActiveStatus(r.Status)) ??
             stepConversations[stepConversations.length - 1]
           nextConversations[task.id] = activeStep
-          // messagesByConversation is keyed by each task's PRIMARY (newest-started) run.
+          // messagesByConversation is keyed by each task's PRIMARY (newest-started) conversation.
           // For a sequential chain the most recently started step IS the active
           // step, so activeStep.ID === taskConversations[0].ID and this lookup hits. If they
           // ever differ, the WS `message` handler seeds the active step
@@ -619,9 +619,9 @@ export default function Board() {
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
-        // conversation_update carries a conversation_id for a delegated run and
+        // conversation_update carries a conversation_id for a delegated conversation and
         // a project_id (no conversation_id) for a curator turn — the board only
-        // tracks delegated runs, so it ignores the curator variant.
+        // tracks delegated conversations, so it ignores the curator variant.
         if (event.type === 'conversation_update' && event.conversation_id) {
           const conversationID = event.conversation_id
           const status = event.data.status ?? ''
@@ -633,7 +633,7 @@ export default function Board() {
                 matched = true
                 // failure_kind rides the failed-status event so the card's
                 // kind-specific copy lands with the flip, not only after the
-                // full-run refetch below settles.
+                // full-conversation refetch below settles.
                 updated[taskId] = {
                   ...conversation,
                   Status: status,
@@ -668,12 +668,12 @@ export default function Board() {
 
           // A few server paths still mutate task state but
           // only emit conversation_update (review/PR approval flips
-          // task='done', then broadcasts the run completion). Without
+          // task='done', then broadcasts the conversation completion). Without
           // a refetch here the card stays in its old column until a
           // manual refresh. Cheap to re-pull all five buckets — the
           // queries are indexed and short.
           if (isPermissionTerminalStatus(status)) {
-            // The run is no longer running a turn, so any prompt parked on it is
+            // The conversation is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
             dropPermissionConversation(conversationID)
@@ -681,7 +681,7 @@ export default function Board() {
           }
 
           if (!matched) {
-            // Chain step run that isn't the active step: a new step
+            // Chain step conversation that isn't the active step: a new step
             // started or a prior one changed. Otherwise seed conversations
             // so auto-delegation / cross-tab / swipe responses we
             // haven't tracked yet render immediately.
@@ -711,10 +711,10 @@ export default function Board() {
             }
           }
         } else if (event.type === 'artifact_updated') {
-          // Reconciler (TFAC-464): an artifact this run produced changed state
-          // on GitHub. The run's own status is unchanged — only its
+          // Reconciler (TFAC-464): an artifact this conversation produced changed state
+          // on GitHub. The conversation's own status is unchanged — only its
           // artifact-derived surface (pending kind / approval card) — so refetch
-          // the run, with NO optimistic Status write (unlike conversation_update).
+          // the conversation, with NO optimistic Status write (unlike conversation_update).
           apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
             .then((fullConversation) => {
               setConversations((p) => {
@@ -731,8 +731,8 @@ export default function Board() {
             })
             .catch(() => {})
         } else if (event.type === 'message' && event.conversation_id) {
-          // Live run-log tick. AgentCard renders from the bounded per-run feed
-          // keyed by run.ID; without this, new agent output only surfaces
+          // Live conversation-log tick. AgentCard renders from the bounded per-conversation feed
+          // keyed by conversation ID; without this, new agent output only surfaces
           // after a status-change fetchTasks pass. Folding into the feed
           // (rather than appending to a full message array) keeps board state
           // bounded and the per-event work O(1). appendToFeed returns the same
@@ -762,9 +762,9 @@ export default function Board() {
           // priority_score it writes is what drives ordering here.
           scheduleFetchTasks()
         } else if (event.type === 'permission_request' || event.type === 'permission_resolved') {
-          // A run raised an Allow/Deny prompt, or one it had was answered
+          // A conversation raised an Allow/Deny prompt, or one it had was answered
           // (here or in another tab) / timed out. Either way the frame is only
-          // a hint that this run's pending set moved — re-read it, so the card
+          // a hint that this conversation's pending set moved — re-read it, so the card
           // lights up or clears from the server's view rather than from
           // whichever frames this tab happened to be around for.
           refreshPermissions(event.conversation_id)
@@ -780,12 +780,12 @@ export default function Board() {
   )
 
   // Cold-load reconstruction: a board opened after a prompt was raised never
-  // saw its frame, so ask for each live run's pending set the first time that
-  // run appears. Without this, a run parked on a human is indistinguishable
-  // from a run that is simply working, until it times out.
+  // saw its frame, so ask for each live conversation's pending set the first time that
+  // conversation appears. Without this, a conversation parked on a human is indistinguishable
+  // from a conversation that is simply working, until it times out.
   //
-  // Bounded to non-terminal runs (a finished run can't be waiting on anyone)
-  // and asked once per run per mount, so a board that refetches its columns on
+  // Bounded to non-terminal conversations (a finished conversation can't be waiting on anyone)
+  // and asked once per conversation per mount, so a board that refetches its columns on
   // every event doesn't turn into a request per card per event.
   const permissionsAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
@@ -797,10 +797,10 @@ export default function Board() {
     }
   }, [conversations, refreshPermissions])
 
-  // Drop a run's queue when the run leaves the board (its conversations entry was
+  // Drop a conversation's queue when the conversation leaves the board (its conversations entry was
   // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
   // Keyed on conversations only (not the queue map) so a freshly-ingested prompt
-  // isn't dropped in the window before its run's conversation_update seeds
+  // isn't dropped in the window before its conversation's conversation_update seeds
   // conversations. queuesRef gives the latest queue keys without that dependency.
   useEffect(() => {
     const live = new Set(Object.values(conversations).map((r) => r.ID))
@@ -809,8 +809,8 @@ export default function Board() {
     }
   }, [conversations, dropPermissionConversation])
 
-  // Sort tasks with active runs in a meaningful order. Used for
-  // In Progress and In Review where the run state matters for
+  // Sort tasks with active conversations in a meaningful order. Used for
+  // In Progress and In Review where the conversation state matters for
   // attention. Needs-you (a parked permission prompt or an unresolved
   // artifact) > failed > everything in flight > completed.
   const sortByConversationAttention = useCallback(
@@ -921,7 +921,7 @@ export default function Board() {
 
   // The raw task-level resolve-all requests. complete = drag-to-Done (keep the
   // card in Done); requeue = back to the queue. Both force-resolve every
-  // unresolved artifact server-side and cancel a live run; we only confirm first.
+  // unresolved artifact server-side and cancel a live conversation; we only confirm first.
   const fireComplete = useCallback(
     async (taskId: string) => {
       try {
@@ -953,7 +953,7 @@ export default function Board() {
   )
 
   // requestResolveAll gates a complete/requeue behind the confirmation modal when
-  // the task's run still has unresolved artifacts. Returns true when it deferred
+  // the task's conversation still has unresolved artifacts. Returns true when it deferred
   // to the modal (the caller must NOT fire its own request); false when there's
   // nothing to resolve and the caller should proceed directly.
   const requestResolveAll = useCallback(
@@ -1138,9 +1138,9 @@ export default function Board() {
         return
       }
 
-      // Any → Queued: requeue. Clears the claim and resets status. When the run
+      // Any → Queued: requeue. Clears the claim and resets status. When the conversation
       // still has unresolved artifacts this force-resolves them (+ cancels a live
-      // run), so confirm first; otherwise requeue straight away.
+      // conversation), so confirm first; otherwise requeue straight away.
       if (targetCol === 'queued') {
         if (requestResolveAll(taskId, 'requeue')) return
         await fireRequeue(taskId)
@@ -1228,7 +1228,7 @@ export default function Board() {
     setShowPromptPicker(true)
   }, [])
 
-  // Open a run's approval overlay (review or PR editor) by artifact id. Hoisted
+  // Open a conversation's approval overlay (review or PR editor) by artifact id. Hoisted
   // to a stable callback (rather than an inline closure in the column JSX) so
   // the memoized cards' props don't churn on every board render.
   const handleOpenApproval = useCallback(
@@ -1301,8 +1301,8 @@ export default function Board() {
         }
       } catch (err) {
         // Reason SPAWN_FAILED is the backend's "the claim stamped, only the
-        // run didn't fire" marker — the task is in the bot's lane with no
-        // run, so record the inline per-card failure the retry affordance
+        // conversation didn't fire" marker — the task is in the bot's lane with no
+        // conversation, so record the inline per-card failure the retry affordance
         // renders. Status alone can't be used here: pre-claim faults also
         // answer 500. Anything else means nothing landed; a toast is the
         // right surface. fetchTasks below reconciles either way.
@@ -1545,10 +1545,10 @@ interface PickerProps {
 
 // ColumnContents is the per-column body — handles empty state, the
 // SortableContext, and the per-task card-vs-agentcard branching. The card
-// wrappers it renders are memoized with identity-stable props (per-run slices
+// wrappers it renders are memoized with identity-stable props (per-conversation slices
 // of the board maps + useCallback'd handlers, with the per-card closures and
 // the AssigneePicker element built inside the wrapper, below its memo
-// boundary), so a live-feed tick for one run re-renders that run's card only —
+// boundary), so a live-feed tick for one conversation re-renders that conversation's card only —
 // not every card on the board.
 function ColumnContents({
   colId,
@@ -1608,7 +1608,7 @@ function ColumnContents({
       {tasks.map((task) => {
         // Queued tasks never render as AgentCards even if the
         // conversations map has a stale entry from a prior delegate.
-        // After requeue, the run row stays in the DB but the task
+        // After requeue, the conversation row stays in the DB but the task
         // is back in the team queue with claim cols cleared —
         // showing an AgentCard there would lie about who's working
         // on it. The map is cleaned up on the next WS update; this
@@ -1703,7 +1703,7 @@ const SortableTaskCard = memo(function SortableTaskCard({
   // assigneeSlot is forwarded into TaskCard's header instead
   // of overlaid via absolute positioning — the prior approach
   // collided with the bottom-row affordances on tall cards and with
-  // AgentCard's elapsed-time / expand cluster after a run completes.
+  // AgentCard's elapsed-time / expand cluster after a conversation completes.
   // Card owns its own layout; we just hand it the slot to render.
   return (
     <TaskCard
@@ -1724,10 +1724,10 @@ const SortableTaskCard = memo(function SortableTaskCard({
   )
 })
 
-// Run statuses where the AgentCard is safe to drag between columns: the
-// terminals, and nothing else. A run still setting up or executing stays
+// Conversation statuses where the AgentCard is safe to drag between columns: the
+// terminals, and nothing else. A conversation still setting up or executing stays
 // anchored — the cancel button is the right intent there, and dragging
-// mid-run would race with the spawner's status transitions.
+// mid-flight would race with the spawner's status transitions.
 const draggableConversationStatuses: ReadonlySet<string> = new Set(TERMINAL_CONVERSATION_STATUSES)
 
 const SortableAgentCard = memo(function SortableAgentCard({
@@ -1757,17 +1757,17 @@ const SortableAgentCard = memo(function SortableAgentCard({
   onArtifactResolved: () => void
 } & PickerProps) {
   // Bot-managed cards in in_progress / in_review are
-  // read-only — column placement is owned by the spawner's run-state
+  // read-only — column placement is owned by the spawner's conversation-state
   // mirror. The drop handler also short-circuits these drags, but
   // baking the guard into `disabled` here removes the misleading
   // grab cursor + drag preview so the user doesn't see a draggable
   // affordance that always snaps back.
   const botManaged =
     !!task.claimed_by_agent_id && (task.status === 'in_progress' || task.status === 'in_review')
-  // A terminal run is draggable; so is a settled run (idle/open) that still has
+  // A terminal conversation is draggable; so is a settled conversation (idle/open) that still has
   // unresolved artifacts — drag-to-Done / Return-to-queue is how you resolve them
   // (behind the confirmation). An actively-executing turn stays anchored (cancel
-  // is the right intent; dragging mid-run races the spawner).
+  // is the right intent; dragging mid-flight races the spawner).
   const draggable =
     (draggableConversationStatuses.has(conversation.Status) ||
       (hasUnresolvedArtifacts(conversation) && !isActiveConversation(conversation))) &&

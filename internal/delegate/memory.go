@@ -310,9 +310,10 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 		}
 	}
 
-	// teamID is THIS run's owning team. The System read scopes the prior
-	// memory to what that team can see, so a run never materializes another
-	// team's run narratives on a shared entity (TFAC-506).
+	// teamID is THIS conversation's owning team. The System read scopes the
+	// prior memory to what that team can see, so a conversation never
+	// materializes another team's conversation narratives on a shared entity
+	// (TFAC-506).
 	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID, teamID)
 	if err != nil {
 		delegateLog.Warn("load prior memories for entity failed", "entity", entityID, "error", err)

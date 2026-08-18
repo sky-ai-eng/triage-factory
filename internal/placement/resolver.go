@@ -40,8 +40,8 @@ type Config struct {
 	// in DB time.
 	Liveness time.Duration
 
-	// Aging is the tier-2 spillover delay: how long a queued run waits for
-	// its preferred owner before any executor may claim it. Not used by the
+	// Aging is the tier-2 spillover delay: how long a queued conversation waits
+	// for its preferred owner before any executor may claim it. Not used by the
 	// resolver's ranking — carried so the explainer can report the exact
 	// number the claim runs with.
 	Aging time.Duration
@@ -119,8 +119,8 @@ type Candidate struct {
 
 // Plan is the resolved placement for one key: the full candidate order
 // (eligible and not) and the preferred set that the enqueue stamp draws
-// from. Empty PreferredSet means no live owner — the run is stamped NULL and
-// claimable by anyone immediately.
+// from. Empty PreferredSet means no live owner — the conversation is stamped
+// NULL and claimable by anyone immediately.
 type Plan struct {
 	Enabled    bool
 	OrgID      string
@@ -136,11 +136,12 @@ type Plan struct {
 	Liveness time.Duration
 }
 
-// PreferredForConversation picks the single preferred_executor_id to stamp on a run
-// from the plan's preferred set. With one owner (the default and every pin)
-// it is that owner; with a hot-key replica count it spreads runs across the
-// top-K deterministically by run id, so all K caches stay warm and no single
-// replica head-of-line-blocks the key. Empty when there is no live owner.
+// PreferredForConversation picks the single preferred_executor_id to stamp on a
+// conversation from the plan's preferred set. With one owner (the default and
+// every pin) it is that owner; with a hot-key replica count it spreads
+// conversations across the top-K deterministically by conversation id, so all K
+// caches stay warm and no single replica head-of-line-blocks the key. Empty
+// when there is no live owner.
 func (p Plan) PreferredForConversation(conversationID string) string {
 	switch len(p.PreferredSet) {
 	case 0:
@@ -154,7 +155,7 @@ func (p Plan) PreferredForConversation(conversationID string) string {
 }
 
 // Resolve computes the Plan for (orgID, keyKind, keyValue), used at enqueue
-// to stamp a run. A disabled resolver short-circuits to a plan with no
+// to stamp a conversation. A disabled resolver short-circuits to a plan with no
 // preferred set (callers stamp nothing). Any store error is returned; the
 // caller decides whether to proceed with no affinity (enqueue does — a failed
 // placement read must never block minting work).

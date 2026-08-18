@@ -10,19 +10,20 @@ import (
 
 // ConversationWorktreeStore owns the conversation_worktrees table — one row per
 // (conversation_id, repository, ref) reservation tracking the lazy worktree
-// materializations a run accumulates as the agent calls
+// materializations a conversation accumulates as the agent calls
 // `triagefactory exec workspace add` against each repo it needs. The
-// ref discriminator (TFAC-502) lets a single run hold several worktrees
-// in one repo (e.g. two PRs reviewed in one interactive run): "@default",
-// "pr-<N>", or a slugified branch name.
+// ref discriminator (TFAC-502) lets a single conversation hold several
+// worktrees in one repo (e.g. two PRs reviewed in one interactive
+// conversation): "@default", "pr-<N>", or a slugified branch name.
 //
 // The row references the repository by its registry row id, so a rename moves
 // nothing here. Every method still takes and returns repoID as "owner/repo" —
 // the caller is an agent's argv — and the impls resolve it. Resolution is a
 // LOOKUP, never a create: in multi mode this runs on the executor, whose
 // Postgres role holds no INSERT on repositories at all. A worktree is reserved
-// for a repository the run was already authorized to clone, so the registry
-// row exists; Insert reports an error rather than minting one if it does not.
+// for a repository the conversation was already authorized to clone, so the
+// registry row exists; Insert reports an error rather than minting one if it
+// does not.
 //
 // Lifted out of the pre-D2 package-level functions in
 // internal/db/conversation_worktrees.go so multi-mode Postgres callers route
@@ -52,7 +53,7 @@ type ConversationWorktreeStore interface {
 	// Insert reserves a row for a worktree the caller is about to
 	// create on disk. Used as the cross-process serialization point:
 	// two concurrent `workspace add owner/repo` invocations for the
-	// same (run, repo, ref) that both passed the GetByRepoRef "not
+	// same (conversation, repo, ref) that both passed the GetByRepoRef "not
 	// found" check race here, and the PK conflict on (conversation_id, repo_id,
 	// ref) deterministically picks one winner.
 	//
@@ -69,7 +70,7 @@ type ConversationWorktreeStore interface {
 	// (repo, ref).
 	GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error)
 
-	// List returns every worktree materialized for a run, in
+	// List returns every worktree materialized for a conversation, in
 	// insertion order. The spawner's cleanup defer iterates this
 	// list and calls worktree.RemoveAt on each path before nuking
 	// the run-root.
@@ -100,9 +101,9 @@ type ConversationWorktreeStore interface {
 	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
 	//
 	// `triagefactory exec workspace add` invoked by an event-triggered
-	// agent run has no user identity to wrap synthetic claims around,
-	// so its reservation reads/writes route through the admin pool
-	// here. Manual runs go through SyntheticClaimsWithTx + the
+	// conversation's agent has no user identity to wrap synthetic claims
+	// around, so its reservation reads/writes route through the admin pool
+	// here. Manual conversations go through SyntheticClaimsWithTx + the
 	// non-System methods.
 	InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error)

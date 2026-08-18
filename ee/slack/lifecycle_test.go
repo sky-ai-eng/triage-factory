@@ -83,7 +83,7 @@ func TestPruneConversationCache_EvictsOldestDownToTarget(t *testing.T) {
 	base := time.Now()
 	convs := map[string]*conversationEntry{}
 	for i := 0; i < 6; i++ {
-		convs[fmt.Sprintf("run-%d", i)] = &conversationEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
+		convs[fmt.Sprintf("conv-%d", i)] = &conversationEntry{cachedAt: base.Add(time.Duration(i) * time.Minute)}
 	}
 
 	pruneConversationCache(convs)
@@ -92,21 +92,21 @@ func TestPruneConversationCache_EvictsOldestDownToTarget(t *testing.T) {
 		t.Fatalf("len(convs) = %d, want 3 (pruned down to target)", len(convs))
 	}
 	for i := 0; i < 3; i++ {
-		if _, ok := convs[fmt.Sprintf("run-%d", i)]; ok {
-			t.Errorf("run-%d should have been evicted (one of the 3 oldest)", i)
+		if _, ok := convs[fmt.Sprintf("conv-%d", i)]; ok {
+			t.Errorf("conv-%d should have been evicted (one of the 3 oldest)", i)
 		}
 	}
 	for i := 3; i < 6; i++ {
-		if _, ok := convs[fmt.Sprintf("run-%d", i)]; !ok {
-			t.Errorf("run-%d should have survived (one of the 3 newest)", i)
+		if _, ok := convs[fmt.Sprintf("conv-%d", i)]; !ok {
+			t.Errorf("conv-%d should have survived (one of the 3 newest)", i)
 		}
 	}
 }
 
-// TestPruneConversationCache_NeverEvictsLiveWorker pins that a run with a live
+// TestPruneConversationCache_NeverEvictsLiveWorker pins that a conversation with a live
 // worker is never evicted even when it's the OLDEST entry in the cache —
 // losing it would leak the worker, since the dispatcher would no longer
-// know to route that run's future sentinels to it.
+// know to route that conversation's future sentinels to it.
 func TestPruneConversationCache_NeverEvictsLiveWorker(t *testing.T) {
 	withLoweredLifecycleCacheBounds(t, 2, 1)
 
@@ -120,7 +120,7 @@ func TestPruneConversationCache_NeverEvictsLiveWorker(t *testing.T) {
 	pruneConversationCache(convs)
 
 	if _, ok := convs["old-with-worker"]; !ok {
-		t.Error("a run with a live worker must never be evicted, even when it's the oldest entry")
+		t.Error("a conversation with a live worker must never be evicted, even when it's the oldest entry")
 	}
 	if len(convs) != 1 {
 		t.Errorf("len(convs) = %d, want 1 (both idle entries evicted trying to reach target=1; the worker entry can't be evicted so the loop stops there)", len(convs))
@@ -146,7 +146,7 @@ func TestPruneConversationCache_UnderCap_NoOp(t *testing.T) {
 // TestPruneConversationCache_KeepsMidTeardownEntry pins that an entry whose prevDone
 // hasn't closed yet — a retiring worker still mid-flight on its trailing
 // setStatus("") — is never evicted, even as the oldest entry: evicting it
-// would drop the run's only reference to the ordering handle, so a resume
+// would drop the conversation's only reference to the ordering handle, so a resume
 // after eviction would rebuild the entry with a nil predecessor and skip
 // the gate, silently reintroducing the stale-clear-clobbers-resume race.
 // Once the teardown finishes (prevDone closes), the same entry becomes
@@ -187,9 +187,9 @@ func TestPruneConversationCache_KeepsMidTeardownEntry(t *testing.T) {
 }
 
 // TestHandleConversationStatus_CacheHit_RefreshesLRUStamp pins the LRU touch: a
-// run-status sentinel for an already-cached run bumps cachedAt (via
+// conversation-status sentinel for an already-cached conversation bumps cachedAt (via
 // slackLifecycleNow), so pruneConversationCache's oldest-first eviction tracks
-// sentinel activity, not just when the run was first resolved. Uses a
+// sentinel activity, not just when the conversation was first resolved. Uses a
 // non-Slack cached entry — the hit path touches no store and no Slack, so
 // no pg harness or fake server is needed.
 func TestHandleConversationStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
@@ -201,12 +201,12 @@ func TestHandleConversationStatus_CacheHit_RefreshesLRUStamp(t *testing.T) {
 
 	adapter := newLifecycleAdapter(db.Stores{}, slackHTTPClient, staticURL(""), nil)
 	convs := map[string]*conversationEntry{
-		"run-1": {isSlack: false, cachedAt: resolvedAt},
+		"conv-1": {isSlack: false, cachedAt: resolvedAt},
 	}
 
-	adapter.dispatch(context.Background(), conversationStatusEvent("org-1", "run-1", "running"), convs)
+	adapter.dispatch(context.Background(), conversationStatusEvent("org-1", "conv-1", "running"), convs)
 
-	if got := convs["run-1"].cachedAt; !got.Equal(touchedAt) {
+	if got := convs["conv-1"].cachedAt; !got.Equal(touchedAt) {
 		t.Errorf("cachedAt = %v, want the touch time %v (refreshed on cache hit)", got, touchedAt)
 	}
 }

@@ -107,7 +107,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		// mis-claim pass silently.
 		got, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != conversationID {
-			t.Fatalf("ClaimNextConversation (claim %d): got=%v err=%v, want run %s", i+1, got, err, conversationID)
+			t.Fatalf("ClaimNextConversation (claim %d): got=%v err=%v, want conversation %s", i+1, got, err, conversationID)
 		}
 		if i == len(priorOutcomes) {
 			break // the live claim — left held, for the reaper to find
@@ -150,7 +150,7 @@ func backdateHeartbeat(t *testing.T, h *pgtest.Harness, executorID string, age t
 }
 
 // TestReapDeadExecutors_RequeuesUnderAttemptBudget pins the primary
-// recovery path: a claimed run under a stale-heartbeat executor, its loss
+// recovery path: a claimed conversation under a stale-heartbeat executor, its loss
 // episode still under budget, is requeued (active claim released with
 // outcome 'reaped', no new claim minted) rather than failed.
 func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
@@ -174,7 +174,7 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT status FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status); err != nil {
-		t.Fatalf("read back run: %v", err)
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if status.Valid {
 		t.Errorf("status = %q, want none — releasing the claim IS the requeue", status.String)
@@ -209,7 +209,7 @@ func TestReapDeadExecutors_RequeuesUnderAttemptBudget(t *testing.T) {
 // TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget pins the
 // exhausted-episode path: a loss episode that reaches maxAttempts — a
 // genuine crash loop, one hand-back and then the death being reaped here —
-// terminal-fails the run with failure_kind='executor_lost' and finalizes the
+// terminal-fails the conversation with failure_kind='executor_lost' and finalizes the
 // owning blueprint_run failed, instead of requeuing it forever.
 func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing.T) {
 	h := pgtest.Shared(t)
@@ -232,10 +232,10 @@ func TestReapDeadExecutors_TerminalFailsExecutorLostPastAttemptBudget(t *testing
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT status, COALESCE(failure_kind, '') FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status, &failureKind); err != nil {
-		t.Fatalf("read back run: %v", err)
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if status != "failed" || failureKind != string(domain.ConversationFailureExecutorLost) {
-		t.Errorf("run (status=%q failure_kind=%q), want (failed, executor_lost)", status, failureKind)
+		t.Errorf("conversation (status=%q failure_kind=%q), want (failed, executor_lost)", status, failureKind)
 	}
 
 	var brStatus string
@@ -290,7 +290,7 @@ func TestReapDeadExecutors_RequeuesAfterEngagementsThatConcluded(t *testing.T) {
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT status, preferred_executor_id FROM conversations WHERE id = $1`, fx.conversationID,
 	).Scan(&status, &preferred); err != nil {
-		t.Fatalf("read back run: %v", err)
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if status.Valid {
 		t.Errorf("status = %q, want none — releasing the claim IS the requeue", status.String)
@@ -339,16 +339,16 @@ func TestReapDeadExecutors_TerminalFailsEpisodeBehindAConcludedEngagement(t *tes
 		   FROM conversations c JOIN blueprint_runs br ON br.id = c.blueprint_run_id
 		  WHERE c.id = $1`, fx.conversationID,
 	).Scan(&status, &failureKind, &brStatus); err != nil {
-		t.Fatalf("read back run: %v", err)
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if status != "failed" || failureKind != string(domain.ConversationFailureExecutorLost) || brStatus != "failed" {
-		t.Errorf("(run=%q failure_kind=%q blueprint_run=%q), want (failed, executor_lost, failed)", status, failureKind, brStatus)
+		t.Errorf("(conversation=%q failure_kind=%q blueprint_run=%q), want (failed, executor_lost, failed)", status, failureKind, brStatus)
 	}
 }
 
 // TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued pins
 // "cancel-requested rows go through the existing cancel finalization
-// instead of requeue" — even a run still within its attempt budget must
+// instead of requeue" — even a conversation still within its attempt budget must
 // finalize, never come back as queued work.
 //
 // The split is the one every cancel path uses: the blueprint takes the
@@ -372,24 +372,24 @@ func TestReapDeadExecutors_CancelRequestedFinalizesCancelledNotRequeued(t *testi
 		t.Fatalf("counts = %+v, want {Cancelled:1}", counts)
 	}
 
-	var runStatus, brStatus string
+	var convStatus, brStatus string
 	var parked bool
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, parked_at IS NOT NULL FROM conversations WHERE id = $1`, fx.conversationID).Scan(&runStatus, &parked); err != nil {
-		t.Fatalf("read back run: %v", err)
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status, parked_at IS NOT NULL FROM conversations WHERE id = $1`, fx.conversationID).Scan(&convStatus, &parked); err != nil {
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if err := h.AdminDB.QueryRowContext(ctx, `SELECT status FROM blueprint_runs WHERE id = $1`, fx.blueprintRunID).Scan(&brStatus); err != nil {
 		t.Fatalf("read back blueprint_run: %v", err)
 	}
-	if runStatus != "open" || brStatus != "cancelled" {
-		t.Errorf("(run=%q, blueprint_run=%q), want (open, cancelled)", runStatus, brStatus)
+	if convStatus != "open" || brStatus != "cancelled" {
+		t.Errorf("(conversation=%q, blueprint_run=%q), want (open, cancelled)", convStatus, brStatus)
 	}
 	if !parked {
-		t.Error("reaped run has no parked_at; the retention sweep keys a parked workspace off it")
+		t.Error("reaped conversation has no parked_at; the retention sweep keys a parked workspace off it")
 	}
 }
 
 // TestReapDeadExecutors_FreshHeartbeatNeverReaped pins the negative case a
-// draining executor relies on: a claimed run under an executor whose
+// draining executor relies on: a claimed conversation under an executor whose
 // heartbeat is still fresh is left completely untouched, regardless of
 // draining — the predicate is heartbeat-staleness only, so "draining is not
 // death" holds without the reaper needing to know about drain at all.
@@ -419,7 +419,7 @@ func TestReapDeadExecutors_FreshHeartbeatNeverReaped(t *testing.T) {
 	if err := h.AdminDB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID,
 	).Scan(&active); err != nil {
-		t.Fatalf("read back run: %v", err)
+		t.Fatalf("read back conversation: %v", err)
 	}
 	if active != 1 {
 		t.Errorf("active claims = %d, want 1 (the live engagement is untouched)", active)
@@ -484,7 +484,7 @@ func TestDeleteStaleInstances_DeletesOnlyStaleAndPreservesRunsExecutorID(t *test
 
 // TestHealClaimDesyncs_ReleasesTerminalDanglingClaims pins the periodic
 // janitor: a terminal conversation with a dangling active claim gets the
-// claim released (outcome mapped from status), while a healthy engaged run
+// claim released (outcome mapped from status), while a healthy engaged conversation
 // and a mid-flight claimless one are both untouched. That last shape used to
 // be the janitor's second arm — under the derived model a released claim on
 // a mid-flight conversation IS the requeue, so there is nothing left to heal
@@ -501,7 +501,7 @@ func TestHealClaimDesyncs_ReleasesTerminalDanglingClaims(t *testing.T) {
 
 	// Healthy: mid-flight with a live claim. Seeded BEFORE the claimless
 	// fixture below, because the claim is cross-org and takes the oldest
-	// eligible conversation — a run left claimable would be picked up by the
+	// eligible conversation — a conversation left claimable would be picked up by the
 	// next fixture's claim instead of its own.
 	healthy := seedReaperFixture(t, h)
 

@@ -25,10 +25,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// DefaultMaxConcurrentClaims is the process-wide cap on how many runs
+// DefaultMaxConcurrentClaims is the process-wide cap on how many claims
 // execute off the dispatcher at once, so a burst of queued steps doesn't
 // fan into an unbounded number of agent subprocesses. 8 comfortably fits
-// the ~256 MB/run planning budget on ordinary hardware while still
+// the ~256 MB/claim planning budget on ordinary hardware while still
 // throttling API spend. Tunable via SetMaxConcurrentClaims before the
 // dispatcher starts; deployments set it with the TF_MAX_CONCURRENT_CLAIMS
 // env var (see ParseMaxConcurrentClaims).

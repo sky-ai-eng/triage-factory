@@ -86,12 +86,15 @@ func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
 // is already in entitlements.AllFeatures() (TFAC-529), so the composition-
 // root parity test (TestRegisteredFeaturesAreDeclared) passes.
 //
-// A follow-up message on an entity whose task already has an active auto run
-// folds into that run instead of enqueueing a second pending_firing — but
+// A follow-up message on an entity whose task already has an active auto
+// conversation folds into that conversation instead of enqueueing a second
+// pending_firing — but
 // that is now the universal same-task absorption rule in internal/routing's
-// tryAutoDelegate (a firing whose own task holds the live run injects), not
-// a per-type declaration on this schema. A fresh message (no active run) is
-// unaffected — it still fires a new run exactly as before.
+// tryAutoDelegate (a firing whose own task holds the live conversation
+// injects), not
+// a per-type declaration on this schema. A fresh message (no active
+// conversation) is
+// unaffected — it still fires a new blueprint run exactly as before.
 func init() {
 	events.Register(events.NewSchema[SlackMessageMetadata, SlackMessagePredicate](
 		domain.EventSlackMessage, events.OwnershipOwned))

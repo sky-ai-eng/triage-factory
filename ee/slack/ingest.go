@@ -256,7 +256,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 		return dropMalformed, nil
 	}
 	// (3) bot/self-authored: TF's own thread posts (and any other bot's)
-	// arrive here too — never ingest them, or a run's own reply would feed
+	// arrive here too — never ingest them, or a conversation's own reply would feed
 	// itself back in.
 	if ev.BotID != "" || (ws.BotUserID != "" && ev.User == ws.BotUserID) {
 		slackLog.Debug("dropping self/bot-authored slack message", "workspace", ws.WorkspaceID)

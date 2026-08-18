@@ -1,5 +1,5 @@
-// Shared core for delegated-run tool-permission prompts (the `canUseTool`
-// round-trip). When a run hits an off-allowlist tool the backend records the
+// Shared core for delegated-conversation tool-permission prompts (the `canUseTool`
+// round-trip). When a conversation hits an off-allowlist tool the backend records the
 // prompt, broadcasts a `permission_request` WS event carrying only its
 // tool_call_id, and parks the agent's turn until the user answers via
 // POST .../permissions/{toolCallID} or a server-side timeout denies it.
@@ -10,10 +10,10 @@
 // the three cases a fire-once frame could never serve: a refresh, a second tab,
 // and a board loaded cold while an agent was already parked.
 //
-// Both the run-detail page (one run) and the board (many runs at once) surface
+// Both the RunDetail page (one conversation) and the board (many conversations at once) surface
 // prompts, so the queue/TTL/fetch/resolve logic lives here once —
 // `usePermissionQueues` builds on it; `useConversationDetail` consumes that hook filtered
-// to its single run. The UI lives in components/permissions/PermissionPrompt.
+// to its single conversation. The UI lives in components/permissions/PermissionPrompt.
 
 import { apiFetch, apiJSON, httpErrorMessage } from './apiClient'
 
@@ -69,14 +69,14 @@ export function ttlForPrompt(prompt: PendingPermission): number {
   return base + PERMISSION_TTL_GRACE_MS
 }
 
-// fetchPendingPermissions reads a run's currently-open prompts. Pending is
-// derived server-side against the run's active claim, so a prompt left behind
+// fetchPendingPermissions reads a conversation's currently-open prompts. Pending is
+// derived server-side against the conversation's active claim, so a prompt left behind
 // by a process that no longer exists is already absent here — the client never
 // has to reason about whether a parked agent is still parked.
 //
 // null means "couldn't ask" (non-2xx, network failure, or a body that isn't the
 // expected array) and is deliberately NOT the same value as []. An empty array
-// is the server stating this run has nothing outstanding, which the caller acts
+// is the server stating this conversation has nothing outstanding, which the caller acts
 // on by clearing the queue; treating a failed read the same way would blank a
 // live prompt off every surface on one transient 500 and leave it invisible
 // until some later frame happened to arrive — reintroducing exactly the
@@ -109,7 +109,7 @@ export type PermissionResolveResult =
   | { kind: 'error'; message: string }
 
 // resolvePermission answers a pending prompt by POSTing the decision to the
-// run-scoped endpoint. A 200 (resolved) or 404 (already answered / timed out)
+// conversation-scoped endpoint. A 200 (resolved) or 404 (already answered / timed out)
 // is definitive; anything else is a transient error the caller surfaces.
 export async function resolvePermission(
   conversationID: string,
