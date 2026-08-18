@@ -176,7 +176,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, runID, keyID, wt
 	if err != nil {
 		recordSpanError(archSpan, err)
 		archSpan.End()
-		return err
+		return fmt.Errorf("snapshot: archive: %w", err)
 	}
 	defer func() {
 		_ = f.Close()
@@ -235,7 +235,7 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) (_ *os.File, rawBytes, gzippedBytes int64, err error) {
 	f, err := os.CreateTemp("", "tf-snapshot-*.tar.gz")
 	if err != nil {
-		return nil, 0, 0, fmt.Errorf("snapshot: tempfile: %w", err)
+		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -249,15 +249,15 @@ func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, tr
 		return nil, 0, 0, err
 	}
 	if err = gzw.Close(); err != nil {
-		return nil, 0, 0, fmt.Errorf("snapshot: close gzip: %w", err)
+		return nil, 0, 0, fmt.Errorf("close gzip: %w", err)
 	}
 	fi, statErr := f.Stat()
 	if statErr != nil {
-		err = fmt.Errorf("snapshot: stat staged tar: %w", statErr)
+		err = fmt.Errorf("stat staged tar: %w", statErr)
 		return nil, 0, 0, err
 	}
 	if _, seekErr := f.Seek(0, io.SeekStart); seekErr != nil {
-		err = fmt.Errorf("snapshot: rewind tar: %w", seekErr)
+		err = fmt.Errorf("rewind tar: %w", seekErr)
 		return nil, 0, 0, err
 	}
 	return f, cw.n, fi.Size(), nil
@@ -301,7 +301,7 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 		}
 	}
 	if err := tarScratch(tw, wtPath); err != nil {
-		return fmt.Errorf("snapshot: tar scratch: %w", err)
+		return fmt.Errorf("tar scratch: %w", err)
 	}
 	if sessionID != "" {
 		if len(transcript) > 0 {
@@ -320,7 +320,7 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 	}
 	manBytes, err := json.Marshal(man)
 	if err != nil {
-		return fmt.Errorf("snapshot: marshal manifest: %w", err)
+		return fmt.Errorf("marshal manifest: %w", err)
 	}
 	if err := writeTarBytes(tw, snapManifest, manBytes); err != nil {
 		return err
