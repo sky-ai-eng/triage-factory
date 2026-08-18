@@ -4,19 +4,19 @@ import "time"
 
 // ConversationOutcome is the single terminal vocabulary an agent emits in its
 // completion envelope (the `outcome` field). It replaces the dual-channel
-// design where single runs used a completion `status` and blueprint steps
-// used a separate per-step verdict CLI:
+// design where single-step conversations used a completion `status` and
+// blueprint steps used a separate per-step verdict CLI:
 //
 //   - ConversationOutcomeContinue → hand off to the next blueprint stage. Non-terminal
 //     steps only; the overwhelmingly common, correct choice when a step's
 //     part is done.
 //   - ConversationOutcomeFinish   → end the whole blueprint successfully and close the
-//     task. On a single/terminal run this is normal completion.
+//     task. On a single/terminal step this is normal completion.
 //   - ConversationOutcomeAbort    → stop; leave the task open for a human. Carries a
 //     natural-language `reason` (the old `unsolvable` folds into this).
 //
 // A turn that ends without one of these (prose / nothing) is not an outcome at
-// all — the run is left `open` (not concluded, not executing); see
+// all — the conversation is left `open` (not concluded, not executing); see
 // internal/delegate. conversations.outcome persists the parsed value; the blueprint
 // orchestrator's step advancement and the later queue work read it.
 type ConversationOutcome string
@@ -36,8 +36,8 @@ func (o ConversationOutcome) Valid() bool {
 	return false
 }
 
-// ConversationFailureKind is the machine-readable discriminator for WHY a run
-// reached status='failed' — the same pattern as
+// ConversationFailureKind is the machine-readable discriminator for WHY a
+// conversation reached status='failed' — the same pattern as
 // repositories.clone_error_kind. It exists so the UI can render
 // specific failures specifically (a memory-limit kill points at the
 // knob to turn) without anything in the chain matching on message
@@ -56,7 +56,7 @@ const (
 	// specific classification (infra/setup errors, legacy rows).
 	// Stored as NULL; renders as today's generic failed state.
 	ConversationFailureUnclassified ConversationFailureKind = ""
-	// ConversationFailureMemoryLimit — the sandbox's per-run memory ceiling
+	// ConversationFailureMemoryLimit — the sandbox's per-claim memory ceiling
 	// killed the agent process (agentproc.ErrClaimMemoryLimit in the
 	// error chain). The UI pairs this with TF_CLAIM_MEMORY_LIMIT_MB
 	// guidance.
@@ -72,18 +72,19 @@ const (
 	// ConversationFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).
 	ConversationFailureAgentError ConversationFailureKind = "agent_error"
-	// ConversationFailureExecutorLost — the run's owning executor's registry
-	// heartbeat went stale past the leader reaper's threshold and the
-	// run had already exhausted TF_MAX_CLAIM_ATTEMPTS, so the reaper
+	// ConversationFailureExecutorLost — the conversation's owning executor's
+	// registry heartbeat went stale past the leader reaper's threshold and
+	// the conversation had already exhausted TF_MAX_CLAIM_ATTEMPTS, so the
+	// reaper
 	// terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
-	// A run that still had attempts left is requeued and re-claimed
+	// A conversation that still had attempts left is requeued and re-claimed
 	// instead — this kind only marks the case that ran out of retries.
 	ConversationFailureExecutorLost ConversationFailureKind = "executor_lost"
 	// ConversationFailureSessionLost — a resume could not continue because the
-	// run's Claude session transcript was not on disk after the workspace
+	// conversation's Claude session transcript was not on disk after the workspace
 	// rehydrate: the parking executor snapshotted without it, or nothing
 	// restored it (e.g. the executor was rebuilt and its warm copy was on
-	// wiped ephemeral storage). The run is failed with an actionable reason
+	// wiped ephemeral storage). The conversation is failed with an actionable reason
 	// rather than handed an opaque "No conversation found" from the SDK.
 	ConversationFailureSessionLost ConversationFailureKind = "session_lost"
 )
@@ -106,7 +107,8 @@ const (
 // One claim loop drives every one of them; the type is what selects the
 // execution arm once a claim is minted.
 const (
-	// ConversationTypeDelegation is a task run — every blueprint step today.
+	// ConversationTypeDelegation is a task-driven conversation — every
+	// blueprint step today.
 	ConversationTypeDelegation = "delegation"
 	// ConversationTypeCurator is a per-(project, creator) chat.
 	ConversationTypeCurator = "curator"
@@ -139,7 +141,7 @@ const (
 	MessageSubtypeInjectionNudge = "injection:nudge"
 	// MessageSubtypeInjectionWrapUp marks the one-call-left notice asking
 	// the model to write a wrap-up summary before the turn budget pauses
-	// the run.
+	// the conversation.
 	MessageSubtypeInjectionWrapUp = "injection:wrap-up"
 	// MessageSubtypeInjectionOutputLimit marks the notice written when a
 	// model turn hit the output-token limit before producing any text or
@@ -166,7 +168,7 @@ const (
 )
 
 // Conversation is the durable agent-context row: one row per transcript,
-// regardless of surface (a delegated task run, a curator chat, a future
+// regardless of surface (a delegated task conversation, a curator chat, a future
 // interactive session or subagent). Per-engagement execution state lives on
 // Claim. The status/summary projection is served through a handler-side map;
 // the transcript rows cross the wire as the snake_case MessageDTO.
@@ -198,7 +200,7 @@ type Conversation struct {
 
 	ID       string
 	TaskID   string
-	PromptID string // FK to prompts.id — which prompt was used for this run
+	PromptID string // FK to prompts.id — which prompt was used for this conversation
 	// Status is the DISPLAYED lifecycle: the stored column with the live
 	// claim's phase coalesced over it, so a hydrated DTO may carry a phase
 	// name here. The vocabulary and its classifiers live in conversation_status.go;
@@ -207,7 +209,7 @@ type Conversation struct {
 	Status    string
 	Model     string
 	StartedAt time.Time
-	// QueuedAt is when the run last entered the queue; ClaimedAt is when the
+	// QueuedAt is when the conversation last entered the queue; ClaimedAt is when the
 	// dispatcher last claimed it (work actually began). Together they carry
 	// the latest queue episode's dwell — the UI's queue timer — while
 	// StartedAt stays the mint stamp and DurationMs stays pure working time
@@ -226,7 +228,7 @@ type Conversation struct {
 	NumTurns     *int
 
 	// Token breakdown, derived at read time as the SUM over this
-	// conversation's messages (plain ints — 0 for a run that never
+	// conversation's messages (plain ints — 0 for a conversation that never
 	// streamed a usage-bearing message). Mirrors system_llm_runs' columns;
 	// snake_case json tags keep the frozen wire shape.
 	InputTokens         int `json:"input_tokens"`
@@ -244,7 +246,7 @@ type Conversation struct {
 
 	// Outcome is the parsed terminal envelope `outcome` (ConversationOutcome
 	// vocabulary), persisted by processCompletion. Empty string === SQL
-	// NULL: an infra-error run (status='failed') or a blueprint step whose
+	// NULL: an infra-error conversation (status='failed') or a blueprint step whose
 	// outcome gate exhausted its retries without a valid envelope. The
 	// orchestrator reads this to advance.
 	Outcome string
@@ -253,29 +255,30 @@ type Conversation struct {
 	// ResultSummary (the always-present "what I did"). Empty === NULL.
 	OutcomeReason string
 	// FailureKind is the machine-readable failure discriminator
-	// (ConversationFailureKind vocabulary) for a status='failed' run — see the
-	// type's doc. Empty string === SQL NULL: non-failed runs, legacy
-	// failed rows, and failures nothing classified.
+	// (ConversationFailureKind vocabulary) for a status='failed' conversation —
+	// see the type's doc. Empty string === SQL NULL: non-failed conversations,
+	// legacy failed rows, and failures nothing classified.
 	FailureKind   ConversationFailureKind
 	SessionID     string // Claude Code session_id captured from `claude -p --output-format json`, used for --resume
 	MemoryMissing bool   // true if the pre-complete memory-file gate was exhausted without the agent writing a memory file
 	TriggerType   string // "manual" | "event" (matches conversations.trigger_type / blueprint_runs.trigger_type vocabulary)
-	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step run so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual runs
+	TriggerID     string // FK to event_handlers.id — the firing trigger, inherited from the parent blueprint_run onto every step's conversation so the llm_spend view can attribute autonomous spend by rule (TFAC-478); empty/NULL for manual conversations
 
-	// TriggeringEventID is the event instance that auto-fired this run.
-	// Set only on the event path; empty (→ SQL NULL) for manual
-	// runs and blueprint-step runs. Paired with TriggerID it forms the
+	// TriggeringEventID is the event instance that auto-fired this
+	// conversation. Set only on the event path; empty (→ SQL NULL) for manual
+	// conversations and blueprint-step conversations. Paired with TriggerID it
+	// forms the
 	// conversations_event_trigger_fence partial unique index, which makes
 	// event-triggered auto-delegation exactly-once under the at-least-once
-	// router queue: a replayed event whose first run already committed
+	// router queue: a replayed event whose first conversation already committed
 	// conflicts on the fence and is skipped. Forward-only provenance —
 	// written via BlueprintStore.CreateRunIfNotFiredSystem, not hydrated by Get.
 	TriggeringEventID string
 
-	// ActorAgentID is the agents.id the spawner stamped at run start.
-	// Immutable audit pointer — survives later
+	// ActorAgentID is the agents.id the spawner stamped when the conversation
+	// started. Immutable audit pointer — survives later
 	// config edits and agent-row deletion (SET NULL on delete). Empty
-	// string = NULL on the row (run was spawned before the agent
+	// string = NULL on the row (conversation was spawned before the agent
 	// bootstrap completed, or after the agent was deleted).
 	ActorAgentID string
 
@@ -288,26 +291,26 @@ type Conversation struct {
 	ActorAgentName string
 
 	// CreatorUserID is the users.id of the human who initiated this
-	// run. Set for manual runs (swipe-delegate /
+	// conversation. Set for manual conversations (swipe-delegate /
 	// drag-to-Agent / factory drop); empty / NULL for trigger-
-	// spawned runs where no human asked for the work. The schema
+	// spawned conversations where no human asked for the work. The schema
 	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,
 	// 'event' ↔ NULL. Same shape the system_rows_nullable
 	// migration introduced for prompts / task_rules / etc.
 	CreatorUserID string
 
-	// TeamID is the run's owning team — conversations.team_id, NOT NULL (the
+	// TeamID is the conversation's owning team — conversations.team_id, NOT NULL (the
 	// LocalDefaultTeamID sentinel in local mode, the task-derived team in
 	// multi mode; EnqueueConversation / Create denormalize it from the parent task
 	// at insert, so it carries the team without a task hop at read time).
 	// Surfaced onto ConversationInfo (TFAC-458) so the capture writers can stamp
-	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the run.
+	// artifacts.team_id (NOT NULL, per TFAC-455 F1) directly off the conversation.
 	// Populated by the Get and ClaimNextConversation scan paths; empty on rows
 	// hydrated by projections that don't select it.
 	TeamID string
 
-	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for runs that are a step inside a multi-step blueprint
-	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step runs
+	BlueprintRunID     string `json:"blueprint_run_id,omitempty"`     // FK to blueprint_runs.id — populated for conversations that are a step inside a multi-step blueprint
+	BlueprintStepIndex *int   `json:"blueprint_step_index,omitempty"` // 0-based step index within the blueprint; nil for non-blueprint-step conversations
 
 	// Attempts counts this conversation's engagements — but WHICH engagements
 	// depends on which read filled it in, because the two producers answer
@@ -335,7 +338,7 @@ type Conversation struct {
 	// it.
 	Attempts int `json:"attempts,omitempty"`
 
-	// OrgID is the run's owning tenant. Populated only by
+	// OrgID is the conversation's owning tenant. Populated only by
 	// ConversationQueueStore.ClaimNextConversation (a cross-org system claim that returns the row
 	// it reserved); the dispatcher reads it to scope every downstream store
 	// call. Empty on rows hydrated by the per-org Get paths, which already
@@ -358,16 +361,16 @@ type Conversation struct {
 	// release. Empty on every read path that doesn't mint a claim.
 	ClaimID string `json:"-"`
 
-	// ExecutorID names the executor instance that owns this run's live
-	// process while it runs — stamped when the run goes live, NULL/empty
-	// otherwise. At N=1 it's a single per-process instance id; the
+	// ExecutorID names the executor instance that owns this conversation's
+	// live process while it runs — stamped when the conversation goes live,
+	// NULL/empty otherwise. At N=1 it's a single per-process instance id; the
 	// forward-compat ownership hook horizontal scaling turns into the
 	// lease the control plane signals an owning executor through. Empty
 	// string === SQL NULL.
 	ExecutorID string `json:"-"`
 
 	// PreferredExecutorID is the placement affinity stamp (TFAC-587): the
-	// capacity-weighted rendezvous winner for this run's (org, repo) key,
+	// capacity-weighted rendezvous winner for this conversation's (org, repo) key,
 	// computed at enqueue and re-stamped on each blueprint-step advance. The
 	// two-tier claim reads it (tier 1 = preferred equals the claiming
 	// executor). Advisory: empty (→ SQL NULL) means "unowned, claimable by
@@ -379,7 +382,7 @@ type Conversation struct {
 
 // SnapshotReapKey identifies a parked workspace snapshot eligible for retention
 // reaping: the owning org and the blueprint_run_id (which is the snapshot key
-// id — every run is a blueprint step, so one blueprint_run shares one workspace
+// id — every conversation is a blueprint step, so one blueprint_run shares one workspace
 // blob). The retention reaper enumerates these from the DB and discards each.
 type SnapshotReapKey struct {
 	OrgID          string
@@ -498,7 +501,7 @@ type Message struct {
 }
 
 // MessageDTO is the single snake_case wire shape for one transcript row,
-// shared by every surface: the delegated-run message read/stream and the
+// shared by every surface: the delegated conversation's message read/stream and the
 // curator chat both marshal this. It is the display projection of a Message
 // row — the assembly-only columns (delivered / window_state / seq) never
 // cross the wire. ConversationID links the row to its owning conversation;
@@ -714,7 +717,7 @@ type ExecutorClaim struct {
 
 	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the
 	// jail's cgroup at teardown. These are the billing-grade record; a
-	// sampled series over the same run legitimately reads under them, and the
+	// sampled series over the same engagement legitimately reads under them, and the
 	// two are never reconciled numerically.
 	PeakMemMB *int
 	CPUUsec   *int64

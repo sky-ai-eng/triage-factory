@@ -15,7 +15,7 @@ type PromptStats struct {
 	RunsPerDay    []DayCount `json:"runs_per_day"` // last 30 days, oldest first
 }
 
-// DayCount is a single day's run count for the prompts-page sparkline.
+// DayCount is a single day's conversation count for the prompts-page sparkline.
 type DayCount struct {
 	Date  string `json:"date"` // "2026-04-01"
 	Count int    `json:"count"`

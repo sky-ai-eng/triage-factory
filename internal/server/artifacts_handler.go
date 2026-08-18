@@ -741,10 +741,10 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Step 1: only a blueprint run is a task run, so only it can drive
-		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
-		// — a future interactive/ad-hoc run) is task-less by construction (NULL
-		// task_id), so there is nothing to close: leave taskID empty and no-op below.
+		// Step 1: only a blueprint run is task-linked, so only it can drive
+		// terminal-on-last task closure. A non-blueprint conversation (origin <>
+		// 'blueprint' — a future interactive/ad-hoc conversation) is task-less
+		// by construction (NULL task_id), so there is nothing to close: leave taskID empty and no-op below.
 		br, _, bpErr := tx.Blueprints.GetRunForConversation(ctx, orgID, conversationID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
@@ -759,15 +759,16 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		if !closeEligible {
 			return nil // no need to scan artifacts if we can't close anyway
 		}
-		// Step 2: unresolved check scoped to the TASK (all its runs), matching
-		// teardownTaskArtifacts — not just the current blueprint's step runs. A
+		// Step 2: unresolved check scoped to the TASK (all its conversations),
+		// matching teardownTaskArtifacts — not just the current blueprint's step
+		// conversations. A
 		// stranded artifact from a prior attempt (e.g. a teardown that partially
 		// failed on a network blip) must block closure rather than be silently
 		// skipped, so we never close the task with an unresolved draft PR / pending
 		// review sitting on GitHub.
 		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
-			return fmt.Errorf("list runs for task: %w", e)
+			return fmt.Errorf("list conversations for task: %w", e)
 		}
 		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, convs)
 		if e != nil {

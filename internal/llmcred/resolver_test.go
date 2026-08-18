@@ -262,7 +262,7 @@ func TestSessionPolicy_ResourceScoping(t *testing.T) {
 	}
 }
 
-func TestSessionNameForRun_Sanitizes(t *testing.T) {
+func TestSessionNameForConversation_Sanitizes(t *testing.T) {
 	if got := sessionNameForConversation("abc/def ghi"); got != "tf-abc-def-ghi" {
 		t.Errorf("got %q", got)
 	}

@@ -94,7 +94,7 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 // TestArtifactApprove pins the promote-on-approval flow: the body gets the
 // agentmeta footer (UpdatePR), the draft is marked ready (MarkPRReady via
 // GraphQL), the artifact flips to open, and the human verdict lands in conversation_memory.
-// Approval is a decoupled sidecar: it must NOT touch run status. The fixture
+// Approval is a decoupled sidecar: it must NOT touch conversation status. The fixture
 // pre-seeds the run as 'completed', and we assert it STAYS 'completed' (approve
 // didn't flip it). Task closure here is a no-op because the fixture blueprint_run
 // is still 'running' (not a clean completion); the terminal-on-last closure is
@@ -137,12 +137,12 @@ func TestArtifactApprove(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
 		t.Errorf("artifact state = %q, want open", got)
 	}
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
 	var human string
 	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
@@ -278,12 +278,12 @@ func TestArtifactDismiss_PR(t *testing.T) {
 		t.Errorf("artifact state = %q, want closed", got)
 	}
 	// The run lifecycle is untouched — dismiss is a decoupled sidecar.
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
 	}
 }
 

@@ -107,10 +107,11 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	}
 }
 
-// TestHandleAgentPermissions_EmptyForAQuietRun: a run nobody is waiting on
-// answers with an empty list, not a 404 — "nothing pending" and "no such run"
+// TestHandleAgentPermissions_EmptyForAQuietConversation: a conversation nobody is
+// waiting on answers with an empty list, not a 404 — "nothing pending" and "no
+// such conversation"
 // are different answers and the board reads both.
-func TestHandleAgentPermissions_EmptyForAQuietRun(t *testing.T) {
+func TestHandleAgentPermissions_EmptyForAQuietConversation(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 	conversationID := seedSteerConversation(t, s.db, "perms-quiet", "running")
@@ -124,11 +125,11 @@ func TestHandleAgentPermissions_EmptyForAQuietRun(t *testing.T) {
 	}
 }
 
-// TestHandleAgentPermissions_UnknownRunNotFound pins the authorization gate:
+// TestHandleAgentPermissions_UnknownConversationNotFound pins the authorization gate:
 // the pending set is only readable through a conversation the caller's org can
 // see, so an unknown/invisible id is 404 rather than an empty list that would
 // confirm nothing either way.
-func TestHandleAgentPermissions_UnknownRunNotFound(t *testing.T) {
+func TestHandleAgentPermissions_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
 

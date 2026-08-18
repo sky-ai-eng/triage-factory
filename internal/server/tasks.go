@@ -700,17 +700,17 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 // teardownTaskArtifacts is the task-level "force-resolve-all" gesture: the user
 // dragged a card to Done / dismissed it / claimed it / returned it to the queue
 // while it still had unresolved artifacts (draft PRs, pending reviews — same or
-// different repos). It resolves EVERY unresolved artifact the task's runs hold so
+// different repos). It resolves EVERY unresolved artifact the task's conversations hold so
 // nothing strands: each draft PR is closed on GitHub + flipped to closed; each
 // pending review (finalized or not) has its GitHub pending review deleted +
 // flipped to dismissed. Pushed branches are kept (retention is separate).
 //
-// Decoupled from run lifecycle (TFAC-379): this never flips
-// conversations.status. A live run is cancelled by the caller
-// (swipeTeardownConversations' spawner.Cancel pass) — the process teardown owns that
-// transition; a terminal run simply stays terminal. Keyed on the task's
-// runs (ListForTask spans the blueprint's step runs and any standalone run)
-// rather than on a run status.
+// Decoupled from conversation lifecycle (TFAC-379): this never flips
+// conversations.status. A live conversation is cancelled by the caller
+// (swipeTeardownConversations' spawner.Cancel pass) — the process teardown owns
+// that transition; a terminal conversation simply stays terminal. Keyed on the
+// task's conversations (ListForTask spans the blueprint's step conversations and
+// any standalone conversation) rather than on a conversation status.
 //
 // outcome shapes the discard note baked into conversation_memory.human_content so the next
 // agent reading memory can distinguish "still on the docket, the human just

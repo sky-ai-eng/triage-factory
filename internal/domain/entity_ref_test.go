@@ -3,7 +3,7 @@ package domain
 import "testing"
 
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
-// mapping shared by the exec-touch resolver and the run-end produced-artifact
+// mapping shared by the exec-touch resolver and the conversation-end produced-artifact
 // attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
 // map to nothing), Jira targets are issue keys, Slack targets are a
 // SlackSourceID, and every other provider or empty key is skipped (ok=false).

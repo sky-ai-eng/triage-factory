@@ -447,10 +447,10 @@ func TestNoWireProtocolCarriesTraceContext(t *testing.T) {
 }
 
 // TestEveryParkContextNamesItsRuntime pins the workspace.snapshot span
-// family's runtime attribute at its source. parkRunOpen threads
+// family's runtime attribute at its source. parkConversationOpen threads
 // park.runtime onto every snapshot span, and the attribute is load-bearing
 // there: transcript sizes without it read as a property of all snapshots
-// instead of delegated-SDK-run data. The field's zero value is a silent
+// instead of delegated-SDK-runtime data. The field's zero value is a silent
 // omission — a park built without it still compiles, parks, and snapshots,
 // just with the family unlabeled — and that is exactly how the resume
 // driver's park shipped without one. So: every liveParkContext composite

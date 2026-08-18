@@ -86,7 +86,7 @@ describe('status classification', () => {
 // the discriminator is POSITION, not outcome: `continue` is what an ordinary
 // completion records under the native loop (every step, last one included),
 // while the SDK's terminal step reports `finish`. Branching on the outcome
-// alone would label an ordinary single-prompt native run as handed off.
+// alone would label an ordinary single-prompt native conversation as handed off.
 describe('chain position and completion', () => {
   const step = (index: number, total: number, over: Partial<Conversation> = {}) =>
     base({
@@ -97,14 +97,14 @@ describe('chain position and completion', () => {
       ...over,
     })
 
-  it('reads a plan of one as no chain at all — that is the plain single-prompt run', () => {
+  it('reads a plan of one as no chain at all — that is the plain single-prompt conversation', () => {
     expect(chainPosition(step(0, 1))).toBeNull()
     expect(completionKind(step(0, 1, { Outcome: 'continue' }))).toBe('done')
   })
 
   it('treats an unresolved plan length as unknown position, not as step one of none', () => {
     // 0 is what the server sends when it could not read the blueprint row
-    // (a teammate's manual run under RLS); absent is a client predating it.
+    // (a teammate's manual blueprint run under RLS); absent is a client predating it.
     expect(chainPosition(step(0, 0))).toBeNull()
     expect(chainPosition(base({ Status: 'completed', blueprint_step_index: 0 }))).toBeNull()
     expect(completionKind(step(0, 0, { Outcome: 'continue' }))).toBe('done')
@@ -151,7 +151,7 @@ describe('chain position and completion', () => {
     )
   })
 
-  it('leaves the final step and the single-prompt run alone when the outcome is missing', () => {
+  it('leaves the final step and the single-prompt conversation alone when the outcome is missing', () => {
     // Same missing outcome, opposite disposition: decideBlueprintStep resolves
     // it to a finish once there is no step left to hand off to. This is the
     // arm that DOES branch on position.
@@ -195,7 +195,7 @@ describe('chain position and completion', () => {
 })
 
 describe('isResumableConversation', () => {
-  it('wakes a parked run and any conclusion, mirroring the backend resumableState', () => {
+  it('wakes a parked conversation and any conclusion, mirroring the backend resumableState', () => {
     expect(isResumableConversation(base({ Status: 'open' }))).toBe(true)
     expect(isResumableConversation(base({ Status: 'completed', Outcome: 'abort' }))).toBe(true)
     // Finished work is followed up on — outcome stopped discriminating when
@@ -224,7 +224,7 @@ describe('canResumeConversation', () => {
   })
 
   it('falls back to status when the server omitted the field', () => {
-    // Absent means "not answered" — an older response, or a run the detail read
+    // Absent means "not answered" — an older response, or a conversation the detail read
     // skips — never false.
     expect(canResumeConversation(base({ Status: 'open' }))).toBe(true)
     expect(canResumeConversation(base({ Status: 'failed' }))).toBe(false)
@@ -276,7 +276,7 @@ describe('workStartedAt', () => {
 })
 
 describe('queueDwellMs', () => {
-  it('ticks live from QueuedAt while the run is still queued', () => {
+  it('ticks live from QueuedAt while the conversation is still queued', () => {
     const conversation = base({ Status: 'queued', QueuedAt: '2026-07-16T10:00:00Z' })
     expect(queueDwellMs(conversation, T('2026-07-16T10:06:00Z'))).toBe(6 * 60_000)
   })
@@ -286,7 +286,7 @@ describe('queueDwellMs', () => {
     expect(queueDwellMs(conversation, T('2026-07-16T10:01:00Z'))).toBe(60_000)
   })
 
-  it('settles to ClaimedAt − QueuedAt once the run started', () => {
+  it('settles to ClaimedAt − QueuedAt once the conversation started', () => {
     const conversation = base({
       QueuedAt: '2026-07-16T10:00:00Z',
       ClaimedAt: '2026-07-16T10:06:00Z',

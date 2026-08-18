@@ -10,7 +10,7 @@ import type {
 // against internal/domain/conversation_status.go by a Go test. Adding a claim phase in
 // one place therefore lands in every predicate below at once.
 
-// ACTIVE_STATUSES — the run is claimed and occupying an executor slot: setting
+// ACTIVE_STATUSES — the conversation is claimed and occupying an executor slot: setting
 // up, or executing a turn. Mirrors domain.IsActiveConversationStatus, which is likewise
 // `running` plus every claim phase. `queued` is excluded (waiting, not
 // working) and so is `open` (parked between turns).
@@ -28,7 +28,7 @@ export function isTerminalStatus(
   return (TERMINAL_CONVERSATION_STATUSES as readonly string[]).includes(status)
 }
 
-// A run that reached a terminal is no longer executing a turn, so any
+// A conversation that reached a terminal is no longer executing a turn, so any
 // tool-permission prompt parked on it is stale and must be dropped — its
 // Allow/Deny would 404 or resolve a now-meaningless prompt. Its own name
 // because the question is about permission staleness, not lifecycle; the two
@@ -55,13 +55,13 @@ export function isFailedStatus(status: ConversationStatusValue): boolean {
 }
 
 // ChainPosition — where a conversation sits in its blueprint's frozen step
-// plan. Every delegated run belongs to a blueprint (the schema requires it), so
-// a plan of one step IS the plain single-prompt run: that reads as no chain at
+// plan. Every delegated conversation belongs to a blueprint (the schema requires
+// it), so a plan of one step IS the plain single-prompt case: that reads as no chain at
 // all, and returns null here.
 //
 // null also covers "position unknown": blueprint_step_count is 0 when the
 // server could not resolve the plan (a manual blueprint run belongs to its
-// creator under RLS, so a teammate reads 0), and a run predating the field
+// creator under RLS, so a teammate reads 0), and a conversation predating the field
 // carries neither. Callers fall back to the unqualified reading rather than
 // guessing a position.
 export interface ChainPosition {
@@ -88,7 +88,8 @@ export function chainPosition(conversation: Conversation): ChainPosition | null 
 //   - 'stopped' — the work stopped without finishing and the task stays open for
 //     a human: the agent aborted, or a non-final step ended with no usable
 //     hand-off.
-//   - 'done'    — the work is over. The chain's final step, a single-prompt run,
+//   - 'done'    — the work is over. The chain's final step, a single-prompt
+//     conversation,
 //     or a step that deliberately ended the whole workflow early ('finish').
 //
 // Position, not outcome, is what separates the first from the third, because
@@ -139,7 +140,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
 
 // completionGloss — the plain-language line for a settled conversation, in one
 // place so the run dock and the telemetry rail can't tell the viewer two
-// different stories about the same row. Empty for a run that hasn't completed.
+// different stories about the same row. Empty for a conversation that hasn't completed.
 export function completionGloss(conversation: Conversation): string {
   const kind = completionKind(conversation)
   if (!kind) return ''
@@ -166,7 +167,7 @@ export function completionGloss(conversation: Conversation): string {
 
 // PARK_REASON_LABELS glosses conversations.park_reason for display: WHY a
 // conversation stopped without concluding. The stored values are machine
-// vocabulary and printing one raw tells a viewer their run was `user_cancelled`
+// vocabulary and printing one raw tells a viewer their conversation was `user_cancelled`
 // — which reads as "cancelled", when a park cancels nothing: the conversation
 // keeps its workspace and can be picked back up. Every phrase below is written
 // to say that.
@@ -189,13 +190,13 @@ export const PARK_REASON_LABELS: Record<string, string> = {
 
 // parkReasonLabel is the gloss for one park reason. An unrecognized code
 // prints as stored rather than being hidden: a value this build has never
-// heard of is still the only account of why the run stopped.
+// heard of is still the only account of why the conversation stopped.
 export function parkReasonLabel(reason: string): string {
   return PARK_REASON_LABELS[reason] ?? reason
 }
 
 // isResumableConversation mirrors the backend resumableState gate — the STATUS half of
-// resumability, and the cheap first cut only. A run with no live turn can be
+// resumability, and the cheap first cut only. A conversation with no live turn can be
 // woken by a follow-up when it parked `open` or when it concluded: an abort is
 // work a human picks back up, a finish is work a human follows up on, and both
 // have a workspace to land in because every completed terminal snapshots.
@@ -212,11 +213,12 @@ export function isResumableConversation(conversation: Conversation): boolean {
   return conversation.Status === 'open' || conversation.Status === 'completed'
 }
 
-// canResumeConversation is the composer's gate for a run with no live turn: the cheap
+// canResumeConversation is the composer's gate for a conversation with no live
+// turn: the cheap
 // status cut above, then the server's answer, which is authoritative.
 //
 // `!== false` rather than `=== true` is the compatibility rule the field is
-// specified with: the run read omits `resumable` for rows it doesn't compute it
+// specified with: the conversation read omits `resumable` for rows it doesn't compute it
 // for (active, failed) and any response that predates the field carries none.
 // Absent means "the server didn't answer" — fall back to the status reading —
 // while an explicit false is a real refusal with a reason attached.
@@ -246,7 +248,7 @@ export function resumeBlockedCopy(conversation: Conversation): string {
   }
 }
 
-// workStartedAt — when the run actually began executing: the dispatcher's
+// workStartedAt — when the conversation actually began executing: the dispatcher's
 // claim stamp, falling back to the mint stamp for legacy rows that predate the
 // queue columns. Live elapsed readouts tick from here so queue dwell never
 // inflates working time.
@@ -257,10 +259,10 @@ export function workStartedAt(conversation: Conversation): string {
 // Settled queue dwell below this stays off the run surfaces (card footer,
 // telemetry rail): a couple of seconds is normal dispatch latency (the claim
 // scan tick), not a wait worth a readout. One constant so the two surfaces
-// can't drift; a live QUEUED run always shows its wait regardless.
+// can't drift; a live QUEUED conversation always shows its wait regardless.
 export const QUEUE_DWELL_VISIBLE_MS = 5000
 
-// queueDwellMs — how long the run waited in the queue: live (now − QueuedAt)
+// queueDwellMs — how long the conversation waited in the queue: live (now − QueuedAt)
 // while it is still queued, else the latest episode's settled dwell
 // (ClaimedAt − QueuedAt). null when the row predates the queue columns and the
 // dwell is unknowable.

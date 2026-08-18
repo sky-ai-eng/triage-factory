@@ -11,7 +11,7 @@ import (
 
 // Park is why a conversation is being parked `open` — the sole input to
 // ConversationStore.ParkOpen, and the sole thing that distinguishes the two
-// ways a run stops without concluding.
+// ways a conversation stops without concluding.
 //
 // It is a type rather than a pair of strings because the distinction is
 // load-bearing three times over (see ParkOpen) and was previously carried by
@@ -38,7 +38,7 @@ type Park struct {
 	// leaves whatever is already on the row.
 	//
 	// Every stop path passes it empty, and that is the point: the summary is
-	// what the run station renders as the conversation's verdict, and a stop
+	// what the RunStation renders as the conversation's verdict, and a stop
 	// reached no verdict. What happened is recorded on the transcript
 	// instead, as a stop-note row the agent reads on resume and a human reads
 	// in place. The field stays because a future deliberate park with an
@@ -57,7 +57,7 @@ func ParkIdle() Park {
 	return Park{Reason: domain.ParkReasonIdle}
 }
 
-// ParkStopped is a deliberate stop: someone or something ended this run.
+// ParkStopped is a deliberate stop: someone or something ended this conversation.
 // Records the reason, releases the claim 'cancelled', and re-parks an
 // already-parked row so the caller knows the stop landed and can finalize the
 // blueprint behind it.
@@ -95,7 +95,7 @@ func (p Park) ClaimOutcome() string {
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a delegate spawner
 // goroutine launched from a request handler. System-service reads
-// of run state are routed through the admin-pooled FactoryReadStore
+// of conversation state are routed through the admin-pooled FactoryReadStore
 // instead — that's the snapshot path; this store is for the actor
 // lifecycle. Claim writes always run on the admin pool (claims is a
 // system-written table); on the app-pool lifecycle variants the
@@ -134,7 +134,7 @@ type ConversationStore interface {
 	// engagement is live, so the claim locates them; the curator turn
 	// release settles the same way). An engagement can bill while
 	// recording no rows of its own (system-prompt/cache overhead on an
-	// errored run); a nonzero lump then settles, additively, onto the
+	// errored conversation); a nonzero lump then settles, additively, onto the
 	// conversation's newest existing message row (which may already carry
 	// an earlier invocation's lump) — the ledger is the only spend record.
 	// Totals stay exact; per-row time attribution smears in that corner.
@@ -143,7 +143,7 @@ type ConversationStore interface {
 	// is confidently wrong.
 	//
 	// outcome / outcomeReason persist the parsed terminal-envelope
-	// outcome and (abort-only) reason; pass "" for both on runs that
+	// outcome and (abort-only) reason; pass "" for both on conversations that
 	// have no agent outcome (cancellation, infra failure).
 	//
 	// failureKind is the machine-readable failure discriminator
@@ -157,7 +157,7 @@ type ConversationStore interface {
 	// over N turns.
 	Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 
-	// ParkOpen flips a run to `open`: it stopped without concluding. This is
+	// ParkOpen flips a conversation to `open`: it stopped without concluding. This is
 	// the ONLY writer of that state, and there is deliberately only one —
 	// an idle hibernation and a user's cancel produce the same row, because
 	// they are the same fact about the conversation. Stamps parked_at (only
@@ -192,7 +192,7 @@ type ConversationStore interface {
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.
-	// ok=false means the run is no longer resumable (a concurrent
+	// ok=false means the conversation is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.
 	//
@@ -209,14 +209,14 @@ type ConversationStore interface {
 	// WHICH step of a finished blueprint may be woken is still not checked
 	// here — only the last one may, and that gate needs an admin-pool read
 	// (blueprint_runs RLS hides another user's manual blueprint, and a
-	// teammate resuming a run must not be refused for a row they merely
+	// teammate resuming a conversation must not be refused for a row they merely
 	// cannot see), so it lives in the caller.
 	MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error)
 
 	// SetSession stores the Claude Code session id captured from
 	// the agent's init event into conversations.sdk_session_id.
-	// Persisted mid-run, before any terminal state, so the
-	// write-gate retry loop can resume a run whose initial
+	// Persisted mid-flight, before any terminal state, so the
+	// write-gate retry loop can resume a conversation whose initial
 	// invocation failed the memory check.
 	SetSession(ctx context.Context, orgID, conversationID, sessionID string) error
 
@@ -228,7 +228,7 @@ type ConversationStore interface {
 	// live process is never unattributed. Passing an empty executorID
 	// keeps the legacy clear semantics by releasing the active claim
 	// with outcome 'requeued'. Both identity columns always travel
-	// together. The admin pool is the right door because the run
+	// together. The admin pool is the right door because the spawner
 	// goroutine that stamps it holds no JWT claims. No app-pool variant —
 	// ownership is a system concern, never request-scoped.
 	SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) error
@@ -238,7 +238,7 @@ type ConversationStore interface {
 	// run-root creation).
 	SetWorktreePath(ctx context.Context, orgID, conversationID, path string) error
 
-	// MarkFailedIfActive flips a run to 'failed' iff it hasn't
+	// MarkFailedIfActive flips a conversation to 'failed' iff it hasn't
 	// already reached a terminal state, releasing the active claim (if
 	// any) with outcome 'failed'. The delegate spawner's
 	// failConversation path uses this so a racing terminal write
@@ -247,16 +247,17 @@ type ConversationStore interface {
 	// caller logs and continues — the racing path's terminal
 	// status stands.
 	//
-	// `open` is intentionally NOT in the protected set: an `open` run
+	// `open` is intentionally NOT in the protected set: an `open` conversation
 	// reaches failConversation only in the warm
 	// window after a no-conclusion turn flipped it open but before idle
 	// hibernation took its workspace snapshot (e.g. a proc.Send error on the
-	// next correction attempt). With no durable snapshot yet, the run can't be
-	// left resumably-open, so failing it is correct — and the per-run cleanup
-	// then tears the worktree down. A durably-parked open run (snapshot taken,
+	// next correction attempt). With no durable snapshot yet, the conversation
+	// can't be left resumably-open, so failing it is correct — and the
+	// conversation's cleanup then tears the worktree down. A durably-parked open
+	// conversation (snapshot taken,
 	// worktree kept) is only ever woken by a follow-up, which flips it to
 	// `running` before any failConversation could see it, so this never clobbers a
-	// resumable run.
+	// resumable conversation.
 	//
 	// failureKind is the machine-readable failure discriminator
 	// (domain.ConversationFailureKind vocabulary); "" → NULL (unclassified).
@@ -264,7 +265,7 @@ type ConversationStore interface {
 
 	// --- Queries ---
 
-	// Get returns a single agent run by ID, or nil if absent — any
+	// Get returns a single agent conversation by ID, or nil if absent — any
 	// conversation type, not just delegation (curator/subagent rows
 	// hydrate the same shape). MemoryMissing is derived from a LEFT JOIN
 	// to conversation_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
@@ -273,20 +274,20 @@ type ConversationStore interface {
 	// ledger, DurationMs/NumTurns SUMs over the claims' telemetry.
 	Get(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error)
 
-	// ListForTask returns all runs for a given task, ordered
+	// ListForTask returns all conversations for a given task, ordered
 	// started_at DESC. MemoryMissing + claim fields derived per Get.
 	ListForTask(ctx context.Context, orgID, taskID string) ([]domain.Conversation, error)
 
-	// ListForTasks is the batched form of ListForTask: one page of the runs
-	// for any of the given task IDs plus the unpaged total, ordered
-	// (task_id, started_at DESC, id). The Board's aggregated agent-run fetch
-	// groups the flat result by run.TaskID, so a board with N tasks costs one
+	// ListForTasks is the batched form of ListForTask: one page of the
+	// conversations for any of the given task IDs plus the unpaged total, ordered
+	// (task_id, started_at DESC, id). The Board's aggregated conversation fetch
+	// groups the flat result by TaskID, so a board with N tasks costs one
 	// read instead of N.
 	//
 	// The order is total, so a windowed read's pages partition the result set
-	// and each task's runs stay contiguous within it. A zero ListOpts.Limit
+	// and each task's conversations stay contiguous within it. A zero ListOpts.Limit
 	// means "no window", which is what the internal callers that need every
-	// run pass.
+	// conversation pass.
 	//
 	// SQLite chunks its IN-list to stay under the variable limit, so an
 	// UNWINDOWED read's order across distinct tasks is chunk order rather
@@ -299,7 +300,7 @@ type ConversationStore interface {
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts ListOpts) ([]domain.Conversation, int, error)
 
 	// HasActiveAutoConversationForTask returns true if the task has a non-terminal
-	// run with trigger_type='event'. Manual delegations are intentionally
+	// conversation with trigger_type='event'. Manual delegations are intentionally
 	// excluded (manual is decoupled from the queue). Used by the router's
 	// per-task firing gate.
 	//
@@ -311,16 +312,16 @@ type ConversationStore interface {
 	// situation on that entity.
 	HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
-	// ActiveIDsForTask returns the IDs of runs on the task that
+	// ActiveIDsForTask returns the IDs of conversations on the task that
 	// haven't reached a terminal state. Used by the swipe handler's
-	// disposition cascade to enumerate the runs to stop.
+	// disposition cascade to enumerate the conversations to stop.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// ListParkedWorktreePathsSystem returns the worktree_path of every run
-	// parked in `open` with a non-empty
+	// ListParkedWorktreePathsSystem returns the worktree_path of every
+	// conversation parked in `open` with a non-empty
 	// worktree_path, via the admin pool in Postgres (the startup sweep
 	// reads it before any JWT-claims context exists). Read at startup so
-	// the worktree-cleanup sweep preserves a parked run's warm workspace
+	// the worktree-cleanup sweep preserves a parked conversation's warm workspace
 	// (worktree dir + session JSONL) as the fast resume path. A swept
 	// entry still resumes via snapshot rehydrate, so this is an
 	// optimization, not a correctness gate.
@@ -333,14 +334,14 @@ type ConversationStore interface {
 	HasActiveAutoConversationForTaskSystem(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveAutoConversationIDForTaskSystem returns the ID of the task's active
-	// event-triggered run, or "" when none. Same predicate as
+	// event-triggered conversation, or "" when none. Same predicate as
 	// HasActiveAutoConversationForTaskSystem (trigger_type='event', non-terminal);
 	// if the at-most-one-active-auto-run-per-task invariant is ever
 	// violated, returns the most recently created. Admin pool only — the
 	// router's firing gate is the sole consumer, from the same claims-less
 	// background goroutine as the Has* sibling. It returns the id rather
 	// than a bool because a busy gate is the additive-injection path, which
-	// needs the run to fold the new event into.
+	// needs the conversation to fold the new event into.
 	ActiveAutoConversationIDForTaskSystem(ctx context.Context, orgID, taskID string) (conversationID string, err error)
 
 	// ActiveIDsForTaskSystem mirrors ActiveIDsForTask but routes through
@@ -348,25 +349,27 @@ type ConversationStore interface {
 	//
 	// No production caller today: the router's task-close cascade used to
 	// enumerate here, and now takes the same set from the close transaction
-	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the runs it stops
-	// are the runs it stamped. Kept as the admin-pool arm of a pair whose
+	// itself (TaskStore.CloseWithConversationCancelIntentSystem) so the
+	// conversations it stops are the conversations it stamped. Kept as the
+	// admin-pool arm of a pair whose
 	// app-pool half is live, and covered by the store conformance.
 	ActiveIDsForTaskSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 
-	// ActiveIDsForTeamSystem returns the IDs of every active run owned by the
+	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
 	// team (conversations.team_id = teamID), using the same active set as
 	// ActiveIDsForTask: status NOT IN ('completed','failed').
 	// This is the team-archive force-stop cascade's enumeration, the
 	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
 	// passed to spawner.StopAndCancelBlueprint(orgID, conversationID, ""), which
-	// hard-kills a live process or parks a run that has none. Admin pool / org-scoped: archive runs from an org-admin
+	// hard-kills a live process or parks a conversation that has none.
+	// Admin pool / org-scoped: archive runs from an org-admin
 	// handler whose caller may not be a member of the team, so the team-visibility
 	// RLS would hide the rows on the app pool.
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
 
 	// EntitiesWithOpenConversations returns the subset of entityIDs that have at
-	// least one run currently in the `open` state (a turn ended without a
-	// conclusion). Drives the factory snapshot's idle-run badge.
+	// least one conversation currently in the `open` state (a turn ended without
+	// a conclusion). Drives the factory snapshot's idle badge.
 	EntitiesWithOpenConversations(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
 
 	// --- Transcript / messages ---
@@ -386,7 +389,7 @@ type ConversationStore interface {
 	// endpoints, spend sums) and are unchanged in observable behavior.
 	// ListForAssemblySystem/MarkDeliveredForClaimSystem/SetWindowStateSystem
 	// exist for the native loop (P1+): assembly is a pure function of
-	// messages rows and nothing else — no run-level or process-level
+	// messages rows and nothing else — no conversation-level or process-level
 	// side-state may influence what a loop reconstructs from these methods,
 	// only the rows themselves.
 
@@ -414,7 +417,7 @@ type ConversationStore interface {
 	// what it always wrote (delivered=true, window_state='active').
 	InsertMessage(ctx context.Context, orgID string, msg *domain.Message) (int64, error)
 
-	// Messages returns the run's messages for display, ordered by the same
+	// Messages returns the conversation's messages for display, ordered by the same
 	// effective assembly key ListForAssembly uses (COALESCE(seq, id)) rather
 	// than by insertion id. A transcript that ordered on id alone would show
 	// a row placed by seq — a compaction summary written between two existing
@@ -432,7 +435,7 @@ type ConversationStore interface {
 	// MessagesSince is Messages restricted to rows above a watermark: the
 	// same display read with `id > sinceID`. It exists so a client holding a
 	// partial transcript can repair it — a websocket frame is a hint, never
-	// the only path to a row, and the run station's transcript is otherwise
+	// the only path to a row, and the RunStation's transcript is otherwise
 	// append-only from page load.
 	//
 	// Visibility is identical to Messages by construction (Messages is this
@@ -486,16 +489,17 @@ type ConversationStore interface {
 	MessagesWindow(ctx context.Context, orgID, conversationID string, w MessageWindow) ([]domain.Message, error)
 
 	// MessagesForConversations is the batched form of Messages: every message
-	// for any of the given run IDs as one flat slice, with the same
+	// for any of the given conversation IDs as one flat slice, with the same
 	// withdrawn-pending exclusion and the same COALESCE(seq, id) ordering.
-	// Each run's messages are contiguous, so the caller groups by ConversationID with
-	// per-run order preserved; order across distinct runs is unspecified (the
+	// Each conversation's messages are contiguous, so the caller groups by
+	// ConversationID with per-conversation order preserved; order across distinct
+	// conversations is unspecified (the
 	// SQLite read chunks its IN-list). Backs the Board's aggregated
 	// include=messages read. Empty conversationIDs returns nil.
 	MessagesForConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Message, error)
 
 	// ListForAssemblySystem returns every row a native loop needs to rebuild this
-	// run's exact LLM context, ordered by the effective assembly key
+	// conversation's exact LLM context, ordered by the effective assembly key
 	// COALESCE(seq, id). window_state='inactive' rows are excluded
 	// (superseded by compaction, permanently out of the window);
 	// 'elided' rows ARE included (the loop renders their deterministic stub
@@ -505,7 +509,7 @@ type ConversationStore interface {
 	// consumption at this call site.
 	//
 	// Assembly purity: this reads messages and nothing else. No caller
-	// may layer additional filtering that depends on run-level or
+	// may layer additional filtering that depends on conversation-level or
 	// process-level state — if a future rule needs to change what gets
 	// assembled, it must become a column on this table, per the epic's
 	// standing rule.
@@ -529,7 +533,7 @@ type ConversationStore interface {
 	// These mirror the per-method shape of the corresponding
 	// app-pool methods but route through the admin pool (BYPASSRLS)
 	// in Postgres. They exist for the delegate spawner goroutines —
-	// the run-lifecycle, transcript-streaming, and post-terminal
+	// the conversation-lifecycle, transcript-streaming, and post-terminal
 	// bookkeeping paths that start from a request handler but
 	// continue on detached contexts with no JWT-claims in scope.
 	//
@@ -541,9 +545,9 @@ type ConversationStore interface {
 	GetSystem(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error)
 	CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error
 	// LookupOrgForConversationSystem returns the owning orgID for the given
-	// conversationID, or the empty string with a nil error if no such run
-	// exists. Used by the cmd/exec convident helper to discover the
-	// run's tenant before any other read — at agent-subprocess cold
+	// conversationID, or the empty string with a nil error if no such
+	// conversation exists. Used by the cmd/exec convident helper to discover the
+	// conversation's tenant before any other read — at agent-subprocess cold
 	// start the orgID isn't yet known, only TRIAGE_FACTORY_CONVERSATION_ID
 	// has been passed in. Routes through the admin pool because the
 	// agent subprocess has no JWT-claims context yet.
@@ -578,7 +582,7 @@ type ConversationStore interface {
 	PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error)
 
 	// RecordClaimSandboxStatsSystem stamps one claim's measured sandbox cost
-	// — peak memory (MiB) and CPU time (µs), read from the run's cgroup at
+	// — peak memory (MiB) and CPU time (µs), read from the jail's cgroup at
 	// teardown. Keyed on the CLAIM ID, and deliberately valid on an
 	// already-released row: teardown runs after the completion bookkeeping
 	// releases the claim, so resolving "the active claim" here would race the
@@ -660,7 +664,7 @@ type ConversationStore interface {
 	//
 	// The unfenced twin resolves "the conversation's active claim" and mints
 	// one when there is none, which is what makes it unsafe for an engagement
-	// to call: setup can outlast a claim, so a run reaped mid-clone whose
+	// to call: setup can outlast a claim, so a conversation reaped mid-clone whose
 	// process then comes up would re-stamp the SUCCESSOR's claim with a dead
 	// executor's id and boot epoch. Nothing reads that column back to the
 	// process, so the corruption is silent until the reaper reads it and
@@ -686,7 +690,7 @@ type ConversationStore interface {
 	// landed, refused once it no longer owns the conversation. Same write as
 	// SetWorktreePathSystem.
 	//
-	// Setup is the slow part of a run — a clone or a cold rehydrate can outlast
+	// Setup is the slow part of an engagement — a clone or a cold rehydrate can outlast
 	// the claim that started it — so this is the write most likely to arrive
 	// late. The path is host-local and the successor may be running on a
 	// different host, so a zombie's stamp points the conversation's resume at a
@@ -759,13 +763,13 @@ type ConversationStore interface {
 	//
 	// The idle one has the weaker story and still needs the fence — a zombie
 	// idle-parking a conversation a successor is mid-turn on flips a running
-	// run to `open` and hands the queue a row somebody is already driving.
+	// conversation to `open` and hands the queue a row somebody is already driving.
 	//
 	// The unfenced twin stays, and is what a USER-initiated cancel uses. That
-	// distinction is the whole reason both exist: a person cancelling a run
+	// distinction is the whole reason both exist: a person cancelling a conversation
 	// is deliberately overriding whichever executor holds it, so their write
 	// must not be gated on ownership, while an executor parking itself is
-	// only entitled to end a run it still owns. Reaching for the unfenced
+	// only entitled to end a conversation it still owns. Reaching for the unfenced
 	// version from an engagement path is how the cancel route around this
 	// fence gets rebuilt.
 	ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park Park) (bool, error)
@@ -773,40 +777,43 @@ type ConversationStore interface {
 	// SetClaimPhaseSystem writes claims.phase on one named claim — the
 	// claim-keyed sibling of SetActiveClaimPhaseSystem, for the engagement
 	// reporting its own setup progress. Empty phase clears to NULL. The
-	// conversation is bound as well as the claim: the phase a run reports
+	// conversation is bound as well as the claim: the phase an engagement reports
 	// must not be able to land on an engagement driving a different one.
 	SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error
 
-	// LastAgentActivityAtSystem returns the created_at of the run's most
+	// LastAgentActivityAtSystem returns the created_at of the conversation's most
 	// recent non-user messages row (role <> 'user') — the "agent last
 	// ran" watermark the artifact-change feedback ledger derives
-	// against. ok=false (zero time) when the run has no agent messages yet,
-	// so the caller falls back to the run's start. User messages are excluded
+	// against. ok=false (zero time) when the conversation has no agent messages
+	// yet, so the caller falls back to the conversation's start. User messages
+	// are excluded
 	// so a just-recorded resume message can't poison the watermark, and the
 	// agent's own messages advance it past anything injected live. Admin pool:
 	// the resume path runs on a detached goroutine with no JWT claims.
 	LastAgentActivityAtSystem(ctx context.Context, orgID, conversationID string) (at time.Time, ok bool, err error)
 
 	// ListReapableSnapshotKeysSystem returns the (org, blueprint_run_id) of
-	// every blueprint_run all of whose snapshot-bearing runs — parked `open` or
+	// every blueprint_run all of whose snapshot-bearing conversations — parked `open` or
 	// any `completed` terminal, matching what the write side snapshots — last
 	// parked or concluded before cutoff. These are the workspace snapshot keys
-	// the retention reaper may safely drop. A blueprint_run with any such run
-	// still within the TTL is omitted (its shared blob is still wanted). The
+	// the retention reaper may safely drop. A blueprint_run with any such
+	// conversation still within the TTL is omitted (its shared blob is still
+	// wanted). The
 	// timestamp is COALESCE(parked_at, completed_at, started_at): parked_at tracks
-	// an open run's last park (stamped by MarkOpen, cleared by the resume flips, so
-	// a repeatedly-resumed long-lived run is keyed off its most recent park rather
+	// an open conversation's last park (stamped by MarkOpen, cleared by the
+	// resume flips, so a repeatedly-resumed long-lived conversation is keyed off
+	// its most recent park rather
 	// than its initial start), completed_at covers the terminals, and started_at
-	// is a legacy fallback. `failed` is absent on purpose — a failed run's blob is
+	// is a legacy fallback. `failed` is absent on purpose — a failed conversation's blob is
 	// dropped at the failure, not aged out. System-wide / no org scoping — the
 	// retention sweep is a maintenance job that spans tenants; the admin pool is
 	// the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
 
 	// TokenTotalsSystem sums token usage across all assistant messages
-	// in a run (Model is MAX(model), preserving last-wins-alphabetically),
+	// in a conversation (Model is MAX(model), preserving last-wins-alphabetically),
 	// via the admin pool in Postgres. Consumed by agentmeta.Build, which
-	// formats the run-metadata footer from contexts that don't carry
+	// formats the agent-metadata footer from contexts that don't carry
 	// JWT claims (delegate-spawned agent subprocesses calling
 	// `triagefactory exec gh pr-create`, server post-approval
 	// submit paths). The admin pool keeps the
@@ -815,18 +822,19 @@ type ConversationStore interface {
 	TokenTotalsSystem(ctx context.Context, orgID, conversationID string) (*domain.TokenTotals, error)
 
 	// BlueprintSiblingCostUSDSystem sums the messages ledger's cost_usd
-	// stamps across every run in blueprintRunID EXCEPT excludeConversationID.
-	// agentmeta.Build adds this to the authoring run's
-	// own cost so a multi-step blueprint's published review/PR discloses
+	// stamps across every conversation in blueprintRunID EXCEPT
+	// excludeConversationID. agentmeta.Build adds this to the authoring
+	// conversation's own cost so a multi-step blueprint's published review/PR
+	// discloses
 	// the total spend across all steps, not just the step that authored
 	// it. Routes through the admin pool in Postgres — the footer builds
 	// from claims-less contexts (agent subprocess, post-approval submit).
 	BlueprintSiblingCostUSDSystem(ctx context.Context, orgID, blueprintRunID, excludeConversationID string) (float64, error)
 
 	// BlueprintSiblingDurationMsSystem sums the claims' duration_ms
-	// telemetry across every run in blueprintRunID EXCEPT excludeConversationID.
-	// agentmeta.Build adds this to the authoring
-	// run's own duration so a multi-step blueprint's published review/PR
+	// telemetry across every conversation in blueprintRunID EXCEPT
+	// excludeConversationID. agentmeta.Build adds this to the authoring
+	// conversation's own duration so a multi-step blueprint's published review/PR
 	// discloses the total time spent across all steps, not just the step
 	// that authored it — the time analog of BlueprintSiblingCostUSDSystem.
 	// Routes through the admin pool in Postgres (footer builds from

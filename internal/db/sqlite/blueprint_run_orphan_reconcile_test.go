@@ -140,10 +140,10 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedRuns heals the exact desync: a child run
+// TestReconcileOrphanedConversations heals the exact desync: a child conversation
 // left 'running' under an already-terminal blueprint_run. The boot sweep must
 // cancel it (and only it), leaving children under a still-running parent alone.
-func TestReconcileOrphanedRuns(t *testing.T) {
+func TestReconcileOrphanedConversations(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -266,13 +266,13 @@ func TestReconcileOrphanedRuns(t *testing.T) {
 	}
 }
 
-// TestReconcileOrphanedRuns_HealsClaimDesyncs pins the janitor arm on the
+// TestReconcileOrphanedConversations_HealsClaimDesyncs pins the janitor arm on the
 // SQLite side: a terminal conversation with a dangling active claim gets the
 // claim released with the status-mapped outcome, while every healthy shape
 // is untouched. A mid-flight conversation with no active claim is NOT a
 // desync any more — that shape IS the claimable state — so nothing heals it
 // and it stays exactly as it is.
-func TestReconcileOrphanedRuns_HealsClaimDesyncs(t *testing.T) {
+func TestReconcileOrphanedConversations_HealsClaimDesyncs(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -390,7 +390,7 @@ func storedTimestampShape(t *testing.T, raw string) string {
 	return ""
 }
 
-// TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus pins that the
+// TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus pins that the
 // mint-crash arm writes completed_at in the SAME shape as MarkRunStatus, the
 // primary terminal writer of that column.
 //
@@ -403,7 +403,7 @@ func storedTimestampShape(t *testing.T, raw string) string {
 // datetime('now') would put a second shape into the column; this test is what
 // makes that show up here instead of in whatever later query reads the column
 // as text.
-func TestReconcileOrphanedRuns_MintCrashStampMatchesMarkRunStatus(t *testing.T) {
+func TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()

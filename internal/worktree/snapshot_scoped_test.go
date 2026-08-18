@@ -28,15 +28,15 @@ func gitIn(t *testing.T, dir string, args ...string) {
 // of tracked files, so mutation cases have tracked material to modify, delete,
 // and rename. The seed commit is local-only, which captureUncommitted never
 // looks at — it diffs against whatever HEAD is.
-func captureWorktree(t *testing.T, runID string) string {
+func captureWorktree(t *testing.T, rootKey string) string {
 	t.Helper()
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", runID)
+	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
-	t.Cleanup(func() { _ = RemoveAt(wtDir, runID) })
+	t.Cleanup(func() { _ = RemoveAt(wtDir, rootKey) })
 
 	for rel, content := range map[string]string{
 		"tracked.txt":              "tracked content\n",
@@ -241,15 +241,15 @@ func TestCaptureUncommitted_ScopedMatchesFullStage(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			wtDir := captureWorktree(t, "scoped-"+sanitizeRunID(tc.name))
+			wtDir := captureWorktree(t, "scoped-"+sanitizeRootKey(tc.name))
 			tc.mutate(t, wtDir)
 			assertScopedMatchesReference(t, wtDir)
 		})
 	}
 }
 
-// sanitizeRunID keeps subtest names usable as worktree run ids (dir names).
-func sanitizeRunID(name string) string {
+// sanitizeRootKey keeps subtest names usable as worktree root keys (dir names).
+func sanitizeRootKey(name string) string {
 	out := make([]rune, 0, len(name))
 	for _, r := range name {
 		switch r {

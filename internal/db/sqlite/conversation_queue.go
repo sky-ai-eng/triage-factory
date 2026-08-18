@@ -13,8 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// conversationQueueStore is the SQLite impl of db.ConversationQueueStore — the durable run
-// queue the delegation dispatcher drains. SQLite/local is single-worker (N=1),
+// conversationQueueStore is the SQLite impl of db.ConversationQueueStore — the
+// durable conversation queue the delegation dispatcher drains. SQLite/local is single-worker (N=1),
 // so ClaimNextConversation doesn't need the FOR UPDATE SKIP LOCKED the Postgres impl
 // uses; a short transaction pairing the status flip with the claims-row mint
 // is atomic enough with one dispatcher.
@@ -38,7 +38,7 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // Every exclusion predicate in this package interpolates this rather than
 // re-spelling the literals. That matters more than the saved keystrokes: these
 // guards are exclusions (`status NOT IN (…)`), so a status missing from one
-// doesn't fail closed — it readmits a finished run to parking, cancelling, or
+// doesn't fail closed — it readmits a finished conversation to parking, cancelling, or
 // the active-work counters. Sixteen hand-copied copies is how the set drifted
 // a value at a time.
 const conversationTerminalStatusesSQL = `'completed','failed'`
@@ -136,10 +136,10 @@ const episodeAttemptsSQL = `
 
 // conversationQueueClaimCols is the column list ClaimNextConversation returns, shared with the
 // scan helper. visibility is left at its row default on enqueue; team_id is
-// surfaced so the construction-path ConversationInfo built off a claimed run carries
-// the owning team for the capture writers. The claim identity fields
-// (ExecutorID/ClaimedAt/Attempts) are hydrated from the freshly minted
-// claims row, not this projection.
+// surfaced so the construction-path ConversationInfo built off a claimed
+// conversation carries the owning team for the capture writers. The claim
+// identity fields (ExecutorID/ClaimedAt/Attempts) are hydrated from the
+// freshly minted claims row, not this projection.
 const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
 	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
@@ -195,7 +195,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	//
 	// The ClaimPlacement arg is ignored: SQLite is N=1 (local mode, always
 	// role=all), so there is exactly one executor and the two-tier claim is
-	// vacuous — every queued run's preferred_executor_id is either this one
+	// vacuous — every queued conversation's preferred_executor_id is either this one
 	// instance (tier 1 self-hits) or NULL, and both resolve to "claim the
 	// oldest". Placement is a multi-executor concern, Postgres-only.
 	//
@@ -222,7 +222,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if err != nil || claimed == nil {
 			return err
 		}
-		// The claim id is minted here and handed back on the claimed run: the
+		// The claim id is minted here and handed back on the claimed conversation: the
 		// executor needs to name this engagement at teardown, when it has
 		// already been released and can no longer be found as the
 		// conversation's active claim.
@@ -235,8 +235,8 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// that bites if it doesn't: it answers "why is this parked", so on a
 		// row that is no longer parked it is not history, it is a wrong
 		// answer. Left behind, it rides through this engagement onto whatever
-		// terminal follows — and the run station prints it beside a failed
-		// run as "stopped by user" on a run nobody stopped.
+		// terminal follows — and the RunStation prints it beside a failed
+		// conversation as "stopped by user" on a conversation nobody stopped.
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL
 			WHERE id = ? AND status IS NOT NULL
@@ -306,7 +306,7 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 // can't re-park or overwrite the key. No ctlbus doorbell — the tf_ctl
 // fabric is Postgres-only (local mode has no LISTEN/NOTIFY), and never
 // reached in practice anyway: local mode is always role=all, which never
-// parks a run awaiting credentials.
+// parks a claim awaiting credentials.
 func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, conversationID, credPubKey string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -362,10 +362,10 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 	return r, true, nil
 }
 
-// RequeueAwaitingCredentials mirrors the Postgres impl: releases the claim
-// of a run parked in phase='awaiting_credentials', which leaves the
+// RequeueAwaitingCredentials mirrors the Postgres impl: releases the
+// conversation's claim parked in phase='awaiting_credentials', which leaves the
 // (still mid-flight) conversation claimable again. Never reached in
-// practice — local mode is always role=all, which never parks a run
+// practice — local mode is always role=all, which never parks a claim
 // awaiting credentials — but implemented for store-interface +
 // conformance-test symmetry.
 func (s *conversationQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (bool, error) {

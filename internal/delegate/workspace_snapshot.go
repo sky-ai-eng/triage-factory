@@ -104,9 +104,9 @@ func snapshotKey(orgID, keyID string) string {
 //
 // runtime is the conversation's engine (domain.ConversationRuntimeSDK |
 // ConversationRuntimeNative), carried onto the span family because the blob's
-// members are not runtime-agnostic: only a delegated SDK run snapshots a
-// session transcript, so transcript sizes read without the attribute would
-// look like a property of all snapshots. Empty is a caller that doesn't know
+// members are not runtime-agnostic: only a delegated SDK-runtime conversation
+// snapshots a session transcript, so transcript sizes read without the
+// attribute would look like a property of all snapshots. Empty is a caller that doesn't know
 // (a fixture), and simply omits the attribute.
 //
 // Best-effort by contract: callers log and proceed on error, because the warm

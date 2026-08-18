@@ -5,11 +5,12 @@ import (
 	"time"
 )
 
-// StagedInjection is one durably-queued agent-facing injection awaiting delivery on a run's
-// next resume/steer. It is the "terminal ledger" half of the artifact-sidecar
+// StagedInjection is one durably-queued agent-facing injection awaiting
+// delivery on a conversation's next resume/steer. It is the "terminal ledger"
+// half of the artifact-sidecar
 // feedback design (TFAC-493) made generic (TFAC-501): a producer that has no
 // durable row to re-derive its injection from (the new-commits notifier is the first
-// such producer) stages the injection here, and the spawner flushes the run's pending
+// such producer) stages the injection here, and the spawner flushes the conversation's pending
 // injections ahead of the user's text on the next ResumeWithMessage.
 //
 // Producer-agnostic by construction: Body is the already-rendered, bare injection
@@ -31,12 +32,13 @@ type StagedInjection struct {
 // future per-producer flush policy, never for control flow today.
 const (
 	// StagedInjectionProducerPRNewCommits — the head-SHA-change notifier (TFAC-501):
-	// a reviewed PR advanced under an in-progress/parked review run.
+	// a reviewed PR advanced under an in-progress/parked review conversation.
 	StagedInjectionProducerPRNewCommits = "pr_new_commits"
 )
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path
-// prepends ahead of a parked run's user message: every staged injection in the slice, one
+// prepends ahead of a parked conversation's user message: every staged
+// injection in the slice, one
 // bullet each, in the order given (the caller passes them oldest→newest, the
 // order the producers acted). Returns "" when the slice is empty, so a resume with
 // nothing staged prepends nothing.

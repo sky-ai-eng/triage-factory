@@ -38,7 +38,7 @@ func newTestDB(t *testing.T) *sql.DB {
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
 // and returns its id. conversations.blueprint_run_id is NOT NULL, so every
-// seeded run needs a parent blueprint_run. SQLite blueprint_runs has no
+// seeded conversation needs a parent blueprint_run. SQLite blueprint_runs has no
 // org_id/creator_user_id columns; org_id on blueprints takes its
 // local-sentinel DEFAULT.
 func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
@@ -60,8 +60,9 @@ func seedBlueprintRun(t *testing.T, database *sql.DB, taskID string) string {
 	return brID
 }
 
-// seedFooterConversation installs the entity → event → task → prompt → run
-// chain required for the footer's run read to find a row, carrying the
+// seedFooterConversation installs the entity → event → task → prompt →
+// conversation chain required for the footer's conversation read to find a
+// row, carrying the
 // columns the footer actually reads (model, started_at, completed_at,
 // duration_ms, total_cost_usd). Returns nothing — the test asserts via
 // Build.
@@ -110,7 +111,7 @@ type conversationFooterFixture struct {
 	CompletedAt  *time.Time
 	DurationMs   *int
 	TotalCostUSD *float64
-	// BlueprintRunID, when set, attaches the run to an existing
+	// BlueprintRunID, when set, attaches the conversation to an existing
 	// blueprint_run instead of minting a fresh one — so two fixtures can
 	// be seeded as sibling steps of the same blueprint for the
 	// cost-aggregation test. Empty mints a new single-step blueprint_run.
@@ -124,19 +125,19 @@ type conversationFooterFixture struct {
 func TestBuild_NoConversationID(t *testing.T) {
 	got := Build(nil, runmode.LocalDefaultOrgID, "", "review")
 	if got != "" {
-		t.Errorf("Build with empty conversationID = %q, want empty string (no AI disclosure when no run)", got)
+		t.Errorf("Build with empty conversationID = %q, want empty string (no AI disclosure when no conversation)", got)
 	}
 }
 
 // TestBuild_KindNounRendersInDisclaimer pins the noun parameterization
 // so a future "issue" or "comment" surface gets its own phrasing.
-// Requires a real run because the disclaimer is suppressed for
+// Requires a real conversation because the disclaimer is suppressed for
 // no-conversationID; we use the legacy-fallback fixture (TotalCostUSD nil) so
 // the body of the test isn't sensitive to the metrics.
 func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 	database := newTestDB(t)
 	for i, kind := range []string{"review", "PR", "issue"} {
-		conversationID := fmt.Sprintf("run-kind-%d", i)
+		conversationID := fmt.Sprintf("conv-kind-%d", i)
 		seedFooterConversation(t, database, conversationFooterFixture{
 			ID:        conversationID,
 			Model:     "claude-haiku-4-5",
@@ -151,7 +152,7 @@ func TestBuild_KindNounRendersInDisclaimer(t *testing.T) {
 }
 
 // TestBuild_HappyPath_UsesStoredCostAndDuration covers the canonical
-// post-run case: TotalCostUSD and DurationMs both resolved from settled
+// post-engagement case: TotalCostUSD and DurationMs both resolved from settled
 // ledger/telemetry rows. The footer reads them directly with no "~"
 // prefix.
 func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
@@ -179,7 +180,7 @@ func TestBuild_HappyPath_UsesStoredCostAndDuration(t *testing.T) {
 		t.Errorf("missing/wrong Cost (expected settled, no '~'): %q", got)
 	}
 	if strings.Contains(got, "Cost: ~$") {
-		t.Errorf("settled-cost run should NOT show '~' prefix: %q", got)
+		t.Errorf("settled-cost conversation should NOT show '~' prefix: %q", got)
 	}
 }
 
@@ -210,13 +211,13 @@ func TestBuild_LegacyFallback_FlagsApproximateCost(t *testing.T) {
 // TestBuild_SumsCostAcrossBlueprintSteps covers the multi-step case:
 // the footer for the step that authored the published review/PR sums
 // the cost of every step in the blueprint, not just its own. Two
-// sibling runs share one blueprint_run; the authoring run's footer
+// sibling steps share one blueprint_run; the authoring step's footer
 // reports their combined cost.
 func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 	database := newTestDB(t)
 
 	// Seed step 1 to mint the shared blueprint_run, then read its id back
-	// so step 2 (the authoring step) attaches to the same run.
+	// so step 2 (the authoring step) attaches to the same blueprint_run.
 	step1Cost := 0.01
 	seedFooterConversation(t, database, conversationFooterFixture{
 		ID:           "bp-step-1",
@@ -258,13 +259,13 @@ func TestBuild_SumsCostAcrossBlueprintSteps(t *testing.T) {
 // TestBuild_SumsTimeAcrossBlueprintSteps is the time analog of
 // TestBuild_SumsCostAcrossBlueprintSteps: the footer for the authoring
 // step reports the total time across every step of the blueprint, not
-// just its own. Two sibling runs share one blueprint_run; the authoring
-// run's footer reports their combined duration.
+// just its own. Two sibling steps share one blueprint_run; the authoring
+// step's footer reports their combined duration.
 func TestBuild_SumsTimeAcrossBlueprintSteps(t *testing.T) {
 	database := newTestDB(t)
 
 	// Step 1 mints the shared blueprint_run; read its id back so step 2
-	// (the authoring step) attaches to the same run.
+	// (the authoring step) attaches to the same blueprint_run.
 	step1Dur := 30_000 // 30s
 	seedFooterConversation(t, database, conversationFooterFixture{
 		ID:         "bpt-step-1",

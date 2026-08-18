@@ -6,11 +6,11 @@ import (
 )
 
 // Artifact-change agent feedback (TFAC-493). When a human resolves an artifact
-// a run produced — approving or dismissing a draft PR, submitting or dismissing
+// a conversation produced — approving or dismissing a draft PR, submitting or dismissing
 // a pending review — the agent that drafted it gets a concise, agent-facing note
 // referencing the id it already knows (the PR number / the review handle it spoke
 // to start-review/finalize-review). The note is delivered live (steered into a
-// warm process) or, for a terminal/paused run, bundled into the next resume from
+// warm process) or, for a terminal/paused conversation, bundled into the next resume from
 // the derived artifact-change ledger — but the *copy* lives here, in one place,
 // so both delivery paths and every resolve handler render the same four strings.
 //
@@ -69,7 +69,7 @@ func ArtifactResolutionNote(a Artifact) string {
 
 // IsResolutionNoteState reports whether (Kind, State) is one of the four human-
 // resolution states ArtifactResolutionNote renders copy for. The ledger
-// derivation uses it to filter a run's artifacts down to the resolved ones
+// derivation uses it to filter a conversation's artifacts down to the resolved ones
 // before formatting (equivalent to ArtifactResolutionNote(a) != "", named for
 // the predicate's intent).
 func IsResolutionNoteState(a Artifact) bool {

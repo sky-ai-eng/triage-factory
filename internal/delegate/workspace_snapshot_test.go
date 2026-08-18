@@ -196,7 +196,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
 	const sessionID = "sess-lost"
-	// Deliberately NO writeSession: the run carries a session id but its
+	// Deliberately NO writeSession: the conversation carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
@@ -616,9 +616,9 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	setupGitTestEnv(t)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-spans"
-	wtPath, _, _ := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-spans"
+	wtPath, _, _ := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
 	gitT(t, wtPath, "add", "agent.txt")
@@ -628,7 +628,7 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	const sessionID = "sess-spans"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"spans"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -705,8 +705,8 @@ func TestSnapshotWorkspace_PhaseSpans_NonGitNoSession(t *testing.T) {
 	wtPath := t.TempDir()
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
-	const runID = "wt-spans-native"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, "", domain.ConversationRuntimeNative); err != nil {
+	const conversationID = "wt-spans-native"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 

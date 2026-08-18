@@ -12,7 +12,7 @@ import (
 )
 
 // seedConversationAction appends one external action to conversationID on the local-default
-// org/team. RecordSystem mirrors how the exec choke point records a bot run's
+// org/team. RecordSystem mirrors how the exec choke point records a bot conversation's
 // writes in production.
 func seedConversationAction(t *testing.T, s *Server, conversationID string, a domain.ExternalAction) {
 	t.Helper()
@@ -24,11 +24,12 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 	}
 }
 
-// TestHandleAgentActions pins the run-scoped action read — the half of "what did
-// this run do" that the artifact list structurally cannot answer. The two rows
+// TestHandleAgentActions pins the conversation-scoped action read — the half
+// of "what did this conversation do" that the artifact list structurally
+// cannot answer. The two rows
 // here are exactly that case: a review-thread reply and a refused merge both
-// produce no artifact, so before this endpoint a run whose only external acts
-// were these read as a run that did nothing.
+// produce no artifact, so before this endpoint a conversation whose only external
+// acts were these read as a conversation that did nothing.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "acts", "completed")
@@ -44,7 +45,7 @@ func TestHandleAgentActions(t *testing.T) {
 		Target: "octo/repo", Credential: domain.CredentialGitHubPAT,
 		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
 	})
-	// A second run's action, to pin the scoping.
+	// A second conversation's action, to pin the scoping.
 	other := seedSteerConversation(t, s.db, "otheracts", "completed")
 	seedConversationAction(t, s, other, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
@@ -55,7 +56,7 @@ func TestHandleAgentActions(t *testing.T) {
 		"/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{}))
 	got := page.Items
 	if len(got) != 2 || page.Total() != 2 {
-		t.Fatalf("returned %d actions (total %d), want 2/2 (the other run's must not appear)",
+		t.Fatalf("returned %d actions (total %d), want 2/2 (the other conversation's must not appear)",
 			len(got), page.Total())
 	}
 
@@ -89,8 +90,9 @@ func TestHandleAgentActions(t *testing.T) {
 	}
 }
 
-// TestHandleAgentActions_Empty pins that a run that touched nothing outside the
-// box answers with an empty items array rather than null — the run view renders
+// TestHandleAgentActions_Empty pins that a conversation that touched nothing
+// outside the box answers with an empty items array rather than null — the
+// RunStation renders
 // "no external actions yet" off it, which is itself an answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
@@ -98,21 +100,22 @@ func TestHandleAgentActions_Empty(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})
 	page := decodeList[map[string]any](t, rec)
 	if len(page.Items) != 0 || page.Total() != 0 {
-		t.Errorf("empty run actions = %+v (total %d), want an empty page", page.Items, page.Total())
+		t.Errorf("empty conversation actions = %+v (total %d), want an empty page", page.Items, page.Total())
 	}
 	if !strings.Contains(rec.Body.String(), `"items":[]`) {
 		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
-// TestHandleAgentActions_RunNotFound pins that the run read is the authorization
-// gate here exactly as it is for artifacts: an unknown — or not-visible — run is
-// a 404, never an empty list that would confirm the id exists.
-func TestHandleAgentActions_RunNotFound(t *testing.T) {
+// TestHandleAgentActions_UnknownConversationNotFound pins that the conversation
+// read is the authorization gate here exactly as it is for artifacts: an unknown
+// — or not-visible — conversation is a 404, never an empty list that would
+// confirm the id exists.
+func TestHandleAgentActions_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/r_ghost/actions/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("GET missing run = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET missing conversation = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

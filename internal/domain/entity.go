@@ -56,8 +56,9 @@ func NormalizeJiraKey(key string) string {
 // creates, and records nothing.
 //
 // It is the single home of the (provider, target) → entity mapping shared by
-// the exec-funnel touch resolver (resolveTouchedEntityInfo) and the run-end
-// produced-artifact attach (the delegate spawner). GitHub targets must parse
+// the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
+// conversation-end produced-artifact attach (the delegate spawner). GitHub
+// targets must parse
 // as owner/repo#N; Jira targets are issue keys; Slack targets are a
 // SlackSourceID channel/root_ts.
 //
@@ -96,7 +97,7 @@ func EntityRefForExternal(provider, target string) (source, sourceID, kind strin
 }
 
 // Entity is a long-lived source object (PR, issue, epic, message). Lives from
-// first-poll until closed/merged. All events, tasks, and runs hang off it.
+// first-poll until closed/merged. All events, tasks, and conversations hang off it.
 // Mirrors the `entities` table in internal/db/db.go.
 type Entity struct {
 	ID       string `json:"id"`
@@ -104,7 +105,7 @@ type Entity struct {
 	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, etc.
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why
-	// the thread exists (its root message was a mention, or a run posted
+	// the thread exists (its root message was a mention, or a conversation posted
 	// the root itself), "message" when it's a mid-thread summons into
 	// someone else's thread. Set once at creation from whichever caller
 	// first resolves the entity (ingest.go's root-mention check, or exec

@@ -18,13 +18,13 @@ package domain
 //	completed | failed                               (terminal)
 //
 // The terminal half is deliberately two names with one owner each: the agent
-// concluded, or the infrastructure died. Stopping a run without concluding it
+// concluded, or the infrastructure died. Stopping a conversation without concluding it
 // is a park (`open`), not a third terminal — a park that is never resumed IS
 // the cancellation, and cancellation itself is already spelled at the task
 // layer (return-to-queue, drag-to-done) and the blueprint layer
 // (`cancel_requested` / BlueprintRunStatusCancelled).
 //
-// Keeping the sets here means "is this run active?" / "is this a phase?" has
+// Keeping the sets here means "is this conversation active?" / "is this a phase?" has
 // ONE definition, not a copy per handler that can drift from the model.
 //
 // SQL cannot import a Go const, so both dialects keep writing and scanning
@@ -53,7 +53,7 @@ package domain
 const (
 	// ClaimPhaseFetching — assembling the task context the agent starts from.
 	ClaimPhaseFetching = "fetching"
-	// ClaimPhaseCloning — building the run's worktree.
+	// ClaimPhaseCloning — building the conversation's worktree.
 	ClaimPhaseCloning = "cloning"
 	// ClaimPhaseAgentStarting — spawning the agent runtime.
 	ClaimPhaseAgentStarting = "agent_starting"
@@ -120,10 +120,10 @@ func AllConversationStatuses() []string {
 	return append(all, AllTerminalConversationStatuses()...)
 }
 
-// IsTerminalConversationStatus reports whether status is a terminal run state — one the
-// run never leaves.
+// IsTerminalConversationStatus reports whether status is a terminal
+// conversation state — one the conversation never leaves.
 //
-// NB failed runs are terminal regardless of failure_kind: failure_kind is a
+// NB failed conversations are terminal regardless of failure_kind: failure_kind is a
 // *classification* of the failure (memory_limit / crash / …) and is
 // legitimately empty on an unclassified or legacy failed row, so a failure
 // count keys on status=="failed", never on a non-empty failure_kind.
@@ -159,10 +159,10 @@ const (
 	// ParkReasonIdle — the turn simply ended and nothing more arrived. The
 	// live driver's no-conclusion turn and its idle close.
 	ParkReasonIdle ParkReason = "idle"
-	// ParkReasonUserCancelled — a person stopped this run.
+	// ParkReasonUserCancelled — a person stopped this conversation.
 	ParkReasonUserCancelled ParkReason = "user_cancelled"
 	// ParkReasonSystemCancelled — TF stopped it with no user asking: a task
-	// closing its runs, a team archive's force-stop cascade, the reaper
+	// closing its conversations, a team archive's force-stop cascade, the reaper
 	// finalizing a cancel-requested step under a dead executor.
 	ParkReasonSystemCancelled ParkReason = "system_cancelled"
 	// ParkReasonBlueprintCancelled — the blueprint behind the step was
@@ -172,14 +172,14 @@ const (
 	// its own (concluded, failed, aborted) while this child was still
 	// mid-flight. Distinct from the cancel above because nobody stopped this
 	// work: it was simply overtaken, which is a different thing to read on a
-	// run station and a different thing to go looking for.
+	// RunStation and a different thing to go looking for.
 	ParkReasonBlueprintTerminal ParkReason = "blueprint_terminal"
 	// ParkReasonLaunchFailed — the runtime never started, and the claim's
 	// retry budget for this loss episode is spent. The conversation parks
 	// rather than fails: nothing ran, so there is nothing to have failed, and
 	// a message wakes it to try again.
 	ParkReasonLaunchFailed ParkReason = "launch_failed"
-	// ParkReasonDrained — the executor holding this run is draining
+	// ParkReasonDrained — the executor holding this conversation is draining
 	// (scale-down). A forward seam: no writer yet, and the one that lands is
 	// the drain trigger internal/delegate/workspace_snapshot.go documents.
 	ParkReasonDrained ParkReason = "drained"
@@ -219,7 +219,7 @@ func IsParkReason(reason string) bool {
 	return false
 }
 
-// IsActiveConversationStatus reports whether a run is in flight — claimed and setting
+// IsActiveConversationStatus reports whether a conversation is in flight — claimed and setting
 // up or executing, occupying an executor slot. So: `running`, or any claim
 // phase. `queued` (waiting, counted as queue depth instead) and `open`
 // (parked) are excluded, as is every terminal.

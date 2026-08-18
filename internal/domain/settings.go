@@ -14,7 +14,7 @@ const DefaultModel = "sonnet"
 
 // DefaultBranchTemplate is the branch-name convention suggested to delegated
 // agents as envelope guidance (not enforced). The literal "<ticket-id>" is
-// substituted with the run's ticket id at prompt-render time.
+// substituted with the conversation's ticket id at prompt-render time.
 const DefaultBranchTemplate = "tfac/<ticket-id>"
 
 // Review-posting postures — how a delegated agent's finalized review reaches
@@ -76,11 +76,11 @@ func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostu
 const (
 	// BaseBranchPushNever refuses every push to a protected ref.
 	BaseBranchPushNever = "never"
-	// BaseBranchPushManualOnly permits it only when a human dispatched the run.
-	// An event-triggered run — one minted from a PR body, an issue comment or a
-	// label, all externally authored — is refused.
+	// BaseBranchPushManualOnly permits it only when a human dispatched the
+	// conversation. An event-triggered conversation — one minted from a PR
+	// body, an issue comment or a label, all externally authored — is refused.
 	BaseBranchPushManualOnly = "manual_only"
-	// BaseBranchPushAlways permits it on every run.
+	// BaseBranchPushAlways permits it on every conversation.
 	BaseBranchPushAlways = "always"
 )
 
@@ -150,7 +150,7 @@ type OrgSettings struct {
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
 	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
 	// summed across every category) is >= this value, the delegation choke
-	// point refuses all new agent runs. A runaway-spend fuse.
+	// point refuses all new agent conversations. A runaway-spend fuse.
 	MaxDailyCostUSD float64
 
 	// MaxConcurrentRuns is the org-wide ceiling on how many runs the org may
@@ -331,9 +331,9 @@ type TeamSettings struct {
 
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
-	// When the toggle is on and a delegated run raises an off-allowlist tool
-	// prompt with no answer-capable, focused tab present in the run's org, the
-	// backend denies after this grace window (ms) instead of waiting the full
+	// When the toggle is on and a delegated conversation raises an
+	// off-allowlist tool prompt with no answer-capable, focused tab present in
+	// the conversation's org, the backend denies after this grace window (ms) instead of waiting the full
 	// permTimeout(). When off, the prompt keeps the full-timeout behavior exactly.
 	// The grace is clamped at spawn to [1s, permTimeout()) so it can never invert
 	// the "total wait < idleTimeout()" invariant.
@@ -345,7 +345,7 @@ type TeamSettings struct {
 	// 0 ↔ NULL). When today's team spend (UTC calendar day, summed over the
 	// team's own rows — system overhead + non-team curator carry a NULL team_id
 	// and never count) is >= this value AND the governance entitlement is active,
-	// the delegation choke point refuses new agent runs for that team. Org-admin-
+	// the delegation choke point refuses new agent conversations for that team. Org-admin-
 	// configured: a team admin cannot set their own team's cap (the team-settings
 	// write path never touches this field — only the org-admin cap endpoint does),
 	// so a team-admin save round-trips the stored value untouched.
@@ -353,7 +353,7 @@ type TeamSettings struct {
 
 	// BranchTemplate is the team's branch-name convention (TFAC-498), rendered
 	// into the delegated agent's prompt as envelope guidance — it is NOT
-	// enforced. The literal "<ticket-id>" is substituted with the run's ticket
+	// enforced. The literal "<ticket-id>" is substituted with the conversation's ticket
 	// id at prompt-render time. NOT NULL with a schema DEFAULT; defaults to
 	// DefaultBranchTemplate. The write path coalesces an empty string to the
 	// default so a blank never persists.
@@ -365,7 +365,7 @@ type TeamSettings struct {
 	// DefaultReviewPosture ("identity" — derive from the acting credential).
 	// The write path coalesces an empty string to the default so a blank never
 	// persists. Deliberately team-grained, with no per-prompt override: a
-	// prompt author must not be able to opt their runs out of the team's gate.
+	// prompt author must not be able to opt their conversations out of the team's gate.
 	ReviewPosture string
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to

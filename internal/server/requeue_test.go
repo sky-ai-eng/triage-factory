@@ -145,12 +145,12 @@ func assertPendingApprovalCleanedUp(
 
 	// The run is untouched by the resolve — it stays terminal (completed). A
 	// resolve must never flip conversations.status.
-	var runStatus string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("scan run: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run.status = %q, want %q (teardown must not flip run lifecycle)", runStatus, "completed")
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want %q (teardown must not flip conversation lifecycle)", convStatus, "completed")
 	}
 
 	// The review artifact must be flipped to dismissed (its proposed snapshot is
@@ -1266,16 +1266,16 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
 
 	var humanContentAfter sql.NullString
-	var runStatusAfter string
+	var convStatusAfter string
 	if err := s.db.QueryRow(
 		`SELECT rm.human_content, r.status
 		 FROM conversation_memory rm JOIN conversations r ON r.id = rm.conversation_id
 		 WHERE rm.conversation_id = ?`, conversationID,
-	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
+	).Scan(&humanContentAfter, &convStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
-	if runStatusAfter != "completed" {
-		t.Errorf("run.status drifted after second call: %q (teardown must not flip run lifecycle)", runStatusAfter)
+	if convStatusAfter != "completed" {
+		t.Errorf("conversation status drifted after second call: %q (teardown must not flip conversation lifecycle)", convStatusAfter)
 	}
 	if humanContentAfter.String != humanContentBefore.String {
 		t.Errorf("human_content overwritten by second call:\n  before: %q\n  after:  %q",
@@ -1303,14 +1303,14 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
-	// Run is untouched (it was never flipped — teardown doesn't touch run status),
+	// The conversation is untouched (never flipped — teardown doesn't touch its status),
 	// and human_content was rolled back with the rest of the batch.
-	var runStatus string
-	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("scan run after sabotaged teardown: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
+	if convStatus != "completed" {
+		t.Fatalf("conversation status = %q after failure; want %q (conversation untouched)", convStatus, "completed")
 	}
 	var humanContent sql.NullString
 	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID).Scan(&humanContent); err != nil {

@@ -2,7 +2,7 @@ package domain
 
 // PendingTaskRef is the minimal projection of a task used by snapshot
 // surfaces that only need to know "this entity has an active task at
-// this event_type, with this dedup_key" — no priority, no run linkage,
+// this event_type, with this dedup_key" — no priority, no conversation linkage,
 // no entity-side metadata. Read-path equivalent of factoryEntityJSON's
 // pendingTaskRef on the wire.
 //

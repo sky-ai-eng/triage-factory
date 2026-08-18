@@ -114,12 +114,12 @@ func ReviewTarget(repoPath string, number int) string {
 	return fmt.Sprintf("%s#%d", repoPath, number)
 }
 
-// ReviewDedupKey is the stable key a run's review-draft upserts on:
+// ReviewDedupKey is the stable key a conversation's review-draft upserts on:
 // github:review:owner/repo#<number>:<conversation_id>. It is **conversation-scoped** (TFAC-494):
-// the review is staged entirely TF-side, so two runs (different teams, a
-// re-delegate, interactive steering) reviewing the same PR each own an
-// independent draft row instead of colliding on one org+PR-scoped row. A run
-// reviews a PR at most once, so (PR, run) is unique.
+// the review is staged entirely TF-side, so two conversations (different teams,
+// a re-delegate, interactive steering) reviewing the same PR each own an
+// independent draft row instead of colliding on one org+PR-scoped row. A
+// conversation reviews a PR at most once, so (PR, conversation) is unique.
 func ReviewDedupKey(repoPath string, number int, conversationID string) string {
 	return ArtifactDedupKey(ArtifactProviderGitHub, ArtifactKindReview, ReviewTarget(repoPath, number), conversationID)
 }
@@ -128,7 +128,7 @@ func ReviewDedupKey(repoPath string, number int, conversationID string) string {
 // — a fully TF-side draft, with zero GitHub writes (TFAC-494). repoPath is
 // "owner/repo"; number is the PR number; headSHA is the reviewed commit (pinned
 // into details and passed as commit_id at the atomic submit on approval); conversationID
-// scopes the dedup key so concurrent runs on one PR never collide.
+// scopes the dedup key so concurrent conversations on one PR never collide.
 //
 // The artifact starts state=pending with an empty ReviewEvent and an empty
 // ExternalID: nothing exists on GitHub yet (the submitted review's id + URL are
@@ -158,8 +158,9 @@ func NewReviewArtifact(repoPath string, number int, headSHA, conversationID stri
 // directly to GitHub via the real-gh channel — a single POST .../reviews with
 // no TF-side draft phase, so the review is already live: it carries the GitHub
 // review id (ExternalID), its web URL, and state=submitted. It shares
-// NewReviewArtifact's run-scoped dedup key, so if the same run had also staged a
-// TF-side draft for this PR the gh submit upserts onto that one row
+// NewReviewArtifact's conversation-scoped dedup key, so if the same
+// conversation had also staged a TF-side draft for this PR the gh submit
+// upserts onto that one row
 // (draft → submitted) instead of minting a second. conversationID scopes the key;
 // reviewID / state / htmlURL come from the POST response, number from its path.
 func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, htmlURL, conversationID string) Artifact {
@@ -189,7 +190,7 @@ func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, ht
 // comment forward to the PR's current head (TFAC-499) while details.HeadSHA stays
 // pinned to the start head — so a review whose comments already moved to headSHA
 // must read as current even though its start anchor didn't. This is the durable,
-// always-available stand-in for "the run's worktree HEAD": TF doesn't track the
+// always-available stand-in for "the conversation's worktree HEAD": TF doesn't track the
 // worktree's git HEAD as a column (and it may live on another executor), so the
 // review's own recorded anchors are the observable frame.
 //
@@ -253,9 +254,10 @@ func FirstPendingReviewArtifact(arts []Artifact) *Artifact {
 }
 
 // PendingReviewArtifactByID returns the pending review artifact in arts whose id
-// matches handle (Kind==review, State==pending), or nil. A single run can hold
-// several review drafts at once — dedup is run-scoped per PR (TFAC-494), so a run
-// reviewing multiple PRs gets one draft row each — so add-review-comment /
+// matches handle (Kind==review, State==pending), or nil. A single conversation
+// can hold several review drafts at once — dedup is conversation-scoped per PR
+// (TFAC-494), so a conversation reviewing multiple PRs gets one draft row each
+// — so add-review-comment /
 // finalize-review must locate the specific draft the agent named by its handle, not
 // just the first pending review (which could be a different PR's draft).
 func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
@@ -270,11 +272,11 @@ func PendingReviewArtifactByID(arts []Artifact, handle string) *Artifact {
 // FirstReadyReview returns the first *finalized* pending review artifact in arts
 // — Kind==review, State==pending, AND details.ReviewEvent != "" (the ready
 // sentinel set by finalize-review). Only a finalized review is an unresolved
-// artifact: a run that called start-review but never finalize-review has a pending
+// artifact: a conversation that called start-review but never finalize-review has a pending
 // artifact with an empty ReviewEvent and must NOT count (it would strand on an
 // approval card with nothing to approve). Mirrors FirstDraftPullRequest for the
-// review kind; shared by HasUnresolvedArtifacts so consumers agree on "the run
-// has a review awaiting approval".
+// review kind; shared by HasUnresolvedArtifacts so consumers agree on "the
+// conversation has a review awaiting approval".
 func FirstReadyReview(arts []Artifact) *Artifact {
 	for i := range arts {
 		if isReadyReview(arts[i]) {

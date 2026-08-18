@@ -31,7 +31,7 @@ describe('ArtifactList', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('fetches the run-scoped endpoint and renders each artifact (kind / state / link)', async () => {
+  it('fetches the conversation-scoped endpoint and renders each artifact (kind / state / link)', async () => {
     const fetchMock = mockArtifacts([
       art({
         id: 'b1',
@@ -56,7 +56,7 @@ describe('ArtifactList', () => {
     expect(screen.getByText('pushed')).toBeInTheDocument()
     expect(screen.getByText('draft')).toBeInTheDocument()
 
-    // The run-scoped read API was hit.
+    // The conversation-scoped read API was hit.
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/agent/conversations/r1/artifacts',
       expect.anything(),
@@ -187,7 +187,7 @@ describe('ArtifactList', () => {
       expect.objectContaining({ method: 'POST' }),
     )
     // The reloaded row shows its resolved state and, no longer actionable,
-    // loses the [x] even before the run projection catches up.
+    // loses the [x] even before the conversation projection catches up.
     expect(await screen.findByText('closed')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /dismiss pull request/i })).not.toBeInTheDocument()
   })
@@ -235,29 +235,29 @@ describe('ArtifactList', () => {
     expect(screen.queryByText(/Couldn't load this run's artifacts/)).not.toBeInTheDocument()
   })
 
-  it('ignores the previous run’s in-flight response after a run change', async () => {
+  it('ignores the previous conversation’s in-flight response after a conversation change', async () => {
     const oldRow = art({ id: 'a-old', kind: 'branch', target: 'old-run-row' })
     let resolveOld!: (v: unknown) => void
     const fetchMock = vi
       .fn()
-      // r1's GET hangs until we resolve it by hand, after the run has changed.
+      // r1's GET hangs until we resolve it by hand, after the conversation has changed.
       .mockImplementationOnce(() => new Promise((r) => (resolveOld = r)))
     vi.stubGlobal('fetch', fetchMock)
     const { rerender } = render(<ArtifactList conversationId="r1" />)
 
-    // The run goes away (a cleared selection) with r1's fetch still in flight;
+    // The conversation goes away (a cleared selection) with r1's fetch still in flight;
     // the falsy conversationId means no new load ever runs to supersede it.
     rerender(<ArtifactList conversationId="" />)
     resolveOld({ ok: true, ...jsonBody([oldRow]) })
     // Let the stale promise chain run to completion before asserting.
     await new Promise((r) => setTimeout(r, 0))
 
-    // The reset must hold: the old run's artifacts never land in the new state.
+    // The reset must hold: the old conversation's artifacts never land in the new state.
     expect(screen.queryByText('old-run-row')).not.toBeInTheDocument()
     expect(screen.getByText(/Loading artifacts/)).toBeInTheDocument()
   })
 
-  it('shows a quiet empty state when the run produced no artifacts', async () => {
+  it('shows a quiet empty state when the conversation produced no artifacts', async () => {
     mockArtifacts([])
     render(<ArtifactList conversationId="r1" />)
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()

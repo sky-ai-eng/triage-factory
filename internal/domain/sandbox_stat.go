@@ -2,11 +2,11 @@ package domain
 
 import "time"
 
-// SandboxStat is one in-run observation of a single sandbox's live resource
+// SandboxStat is one mid-engagement observation of a single sandbox's live resource
 // use, sampled from its cgroup while the jail is still running and keyed to
 // the claim that pays for it.
 //
-// This is the SHAPE of a run's consumption over time — the thing the claim's
+// This is the SHAPE of an engagement's consumption over time — the thing the claim's
 // teardown scalars (peak memory, cumulative CPU at exit) structurally cannot
 // give. The two disagree slightly by design: a periodic sampler misses the
 // sub-minute spikes the kernel's high-watermark catches, so the series is

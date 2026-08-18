@@ -155,12 +155,12 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if !strings.HasPrefix(art.URL, stub.URL+"/") || strings.Contains(art.URL, "github.com") {
 		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
 	}
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed", convStatus)
 	}
 	var human string
 	if err := srv.db.QueryRow(`SELECT COALESCE(human_content,'') FROM conversation_memory WHERE conversation_id=?`, conversationID).Scan(&human); err != nil {
@@ -504,12 +504,12 @@ func TestReviewArtifactDismiss(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewDismissed {
 		t.Errorf("artifact state = %q, want dismissed", got)
 	}
-	var runStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&runStatus); err != nil {
+	var convStatus string
+	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
 		t.Fatalf("read run: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run status = %q, want completed (dismiss must not flip run lifecycle)", runStatus)
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
 	}
 }
 

@@ -16,8 +16,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/wakebus"
 )
 
-// conversationQueueStore is the Postgres impl of db.ConversationQueueStore — the durable run
-// queue the delegation dispatcher drains. Wired against the admin pool in
+// conversationQueueStore is the Postgres impl of db.ConversationQueueStore —
+// the durable conversation queue the delegation dispatcher drains. Wired
+// against the admin pool in
 // postgres.New: the dispatcher is a system worker with no per-user identity.
 // The RLS policies are defense-in-depth (admin bypasses them) and org_id
 // is bound where it is known. Ownership state lives on claims: a claim row
@@ -44,7 +45,7 @@ var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 // Every exclusion predicate in this package interpolates this rather than
 // re-spelling the literals. That matters more than the saved keystrokes: these
 // guards are exclusions (`status NOT IN (…)`), so a status missing from one
-// doesn't fail closed — it readmits a finished run to parking, cancelling, or
+// doesn't fail closed — it readmits a finished conversation to parking, cancelling, or
 // the active-work counters. Sixteen hand-copied copies is how the set drifted
 // a value at a time.
 const conversationTerminalStatusesSQL = `'completed','failed'`
@@ -175,7 +176,7 @@ const undeliveredInputExistsSQL = `EXISTS (
 //
 // The NULL arm is what makes both reap cases work with no write beyond the
 // claim release: a claim reaped mid-setup still has its undelivered prompt
-// row (either arm matches), and a claim reaped mid-run has all its input
+// row (either arm matches), and a claim reaped mid-engagement has all its input
 // delivered and matches here.
 const needsDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
@@ -185,7 +186,7 @@ const needsDrivingSQL = `r.archived_at IS NULL
 // gate: a curator conversation has no autonomous work — its only unit of
 // work is a user turn — so "mid-flight with nothing queued" is a finished
 // transcript waiting for its next message, not work to pick up. It is also
-// what keeps curator crash recovery retire-only: a turn reaped mid-run has
+// what keeps curator crash recovery retire-only: a turn reaped mid-engagement has
 // its message delivered, so it is not re-driven.
 const curatorNeedsTurnSQL = `(r.type <> 'curator' OR ` + undeliveredInputExistsSQL + `)`
 
@@ -298,9 +299,9 @@ const handedBackOutcomesSQL = `'requeued','reaped'`
 // blueprint failed and the worktree went with it, on a conversation whose four
 // prior engagements had all been healthy.
 //
-// Reaps stay inside the episode deliberately. A run that hard-kills its
-// executor is handed back by the next boot's sweep looking exactly like a run
-// that was never claimed, so excluding them would let a process-killing
+// Reaps stay inside the episode deliberately. A conversation that hard-kills
+// its executor is handed back by the next boot's sweep looking exactly like a
+// conversation that was never claimed, so excluding them would let a process-killing
 // conversation crash-loop the dispatcher forever — the one thing the lifetime
 // count did get right.
 //
@@ -376,13 +377,13 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	//
 	// Per-org fairness + cap are ALWAYS applied here, independent of
 	// placement: the org_active CTE counts each org's active (slot-occupying)
-	// runs once per statement, the cap filter hides a queued run whose org is
+	// runs once per statement, the cap filter hides a queued conversation whose org is
 	// at or above its max_concurrent_runs, and the fairness key orders
 	// claimable rows fewest-active-org first. Both degrade to a no-op at N=1 /
 	// single org — the fairness key is constant across all candidates (so the
 	// order collapses to started_at, id — the old global-oldest) and the
 	// default NULL cap never filters — so existing single-org callers see the
-	// same run claimed. The active count reads committed state, so under a
+	// same conversation claimed. The active count reads committed state, so under a
 	// burst of concurrent claimers an org can momentarily exceed its cap by the
 	// number of in-flight claims (a soft ceiling); sequential claims are exact.
 	//
@@ -390,17 +391,17 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	// placement changes. Placement composes with fairness by
 	// prefixing the tier term to the ORDER BY — fairness then orders WITHIN
 	// each tier. Disabled: no tier term, no candidate predicate — the claim is
-	// the globally-oldest claimable run modulo fairness/cap. Enabled: the
+	// the globally-oldest claimable conversation modulo fairness/cap. Enabled: the
 	// two-tier claim (see the SQL below).
 	candidatePredicate := ""
 	tierPrefix := "" // placement tier ordering, prepended to the fairness key
 	args := []any{executorID, bootEpoch}
 	if placement.Enabled {
-		// $3 = aging seconds, $4 = liveness seconds. A run is claimable by me
+		// $3 = aging seconds, $4 = liveness seconds. A conversation is claimable by me
 		// when it is mine (tier 1), unowned, aged past the tier-2 window, or
 		// its stamped preferred is not a live claimant — dead (heartbeat
 		// stale past liveness), draining, or dispatch-gated. Tier 1 sorts
-		// first, so a fresh run with a live owner is exclusively that owner's
+		// first, so a fresh conversation with a live owner is exclusively that owner's
 		// until it ages (warm cache), while a saturated/dead owner never
 		// head-of-line-blocks its shard.
 		candidatePredicate = `
@@ -420,7 +421,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		args = append(args, placement.AgingInterval.Seconds(), placement.Liveness.Seconds())
 	}
 	// Fairness orders WITHIN each placement tier: fewest-active-org first, then
-	// oldest. COALESCE covers an org with zero active runs (no org_active row).
+	// oldest. COALESCE covers an org with zero active conversations (no org_active row).
 	orderBy := tierPrefix + "COALESCE(oa.active, 0), r.started_at, r.id"
 	// org_active counts engagements, not stored statuses: an unreleased claim
 	// IS an occupied slot, on either surface. Read straight off claims (whose
@@ -513,7 +514,7 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 	// 'requeued' (it already counted this try — Attempts is the claim count),
 	// so any owner-keyed reader sees an unowned, claimable row.
 	// preferred_executor_id is cleared for the same reason: a requeue's stamp
-	// likely points at the executor that just failed the run; NULL means
+	// likely points at the executor that just failed the conversation; NULL means
 	// "unowned, claimable by anyone now" — a live executor re-warms it with
 	// no aging delay, the correct placement-is-advisory answer on a recovery
 	// path (affinity is re-earned on the next enqueue, never carried stale).
@@ -533,7 +534,7 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 
 func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, conversationID, credPubKey string) (bool, error) {
 	// The sidecar pubkey lands on the ACTIVE claim in the same statement as
-	// the phase park, so the provisioner never sees a parked run without
+	// the phase park, so the provisioner never sees a parked conversation without
 	// the key it needs; the conversation row is untouched (it stays
 	// 'running'). Guarded on phase IS NULL — the same protection window
 	// the former stored-status guard gave: a duplicate can't re-park or
@@ -579,14 +580,14 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 	return r, true, nil
 }
 
-// RequeueAwaitingCredentials releases a run whose active claim is parked in
-// phase='awaiting_credentials' — the executor-side timeout path: the brain
-// never responded to this run's cred_request within the awaiting-credentials
-// deadline, so the claim is released and the (still mid-flight) conversation
+// RequeueAwaitingCredentials releases a conversation whose active claim is
+// parked in phase='awaiting_credentials' — the executor-side timeout path:
+// the brain never responded to this conversation's cred_request within the
+// awaiting-credentials deadline, so the claim is released and the (still mid-flight) conversation
 // is claimable again by the next dispatcher, this instance or a sibling.
 // Guarded on that parked claim so a stale/duplicate timeout can't act on a
 // row that already moved on (bundle arrived just after the deadline check,
-// or the run was reaped).
+// or the conversation was reaped).
 func (s *conversationQueueStore) RequeueAwaitingCredentials(ctx context.Context, orgID, conversationID string) (bool, error) {
 	var flipped int
 	err := s.conn.QueryRowContext(ctx, `

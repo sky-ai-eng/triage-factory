@@ -2,7 +2,7 @@ package domain
 
 // Unresolved-artifact derivation. A blueprint run never parks while a human
 // approves a queued draft PR / pending review; the approval state is *derived*
-// from the run's (blueprint's) artifact set instead. An artifact is
+// from the blueprint run's artifact set instead. An artifact is
 // "unresolved" when it still awaits a human verdict:
 //
 //   - a draft pull_request (state=draft) — FirstDraftPullRequest's predicate, or
@@ -16,7 +16,7 @@ package domain
 // still awaiting human resolution (a draft PR or a ready pending review). The
 // signal is derived, never stored: a task surfaces in the approval column
 // whenever its artifact set has ≥1 unresolved item, regardless of whether its
-// run is live or terminal.
+// conversation is live or terminal.
 func HasUnresolvedArtifacts(arts []Artifact) bool {
 	return FirstDraftPullRequest(arts) != nil || FirstReadyReview(arts) != nil
 }
@@ -44,7 +44,7 @@ func UnresolvedArtifactIDs(arts []Artifact) []string {
 // (finalized) pending reviews in arts are still awaiting resolution. Same
 // predicates as HasUnresolvedArtifacts, broken out per kind for the run
 // projection (unresolved_pr_count / unresolved_review_count). A set is plural in
-// each kind (multiple draft PRs / reviews per run), so this counts every match
+// each kind (multiple draft PRs / reviews per conversation), so this counts every match
 // rather than just the first.
 func UnresolvedArtifactCounts(arts []Artifact) (prCount, reviewCount int) {
 	// Go through the same single-artifact predicates FirstDraftPullRequest /

@@ -40,9 +40,10 @@ const maxCompletionRetries = 3
 // memoryNamespace is the key that groups everything one workflow run's steps
 // share: the run tree on disk, its workspace snapshot blob, and — as the value
 // materializePriorMemories compares against — which prior memories belong to
-// the current run rather than to history. It is the blueprint_run_id the run
-// belongs to. Every run is a blueprint step now (a single prompt is a 1-step
-// blueprint), so there is no run-id fallback — the value is always the
+// the current run rather than to history. It is the blueprint_run_id the
+// conversation belongs to. Every conversation is a blueprint step now (a
+// single prompt is a 1-step blueprint), so there is no conversation-id
+// fallback — the value is always the
 // blueprint_run_id.
 //
 // It stays a named function over an identity return because the name is what

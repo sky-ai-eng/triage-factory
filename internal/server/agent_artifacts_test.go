@@ -27,8 +27,9 @@ func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a 
 	return stored
 }
 
-// TestHandleAgentArtifacts pins the run-scoped artifact read (TFAC-465): every
-// artifact a run produced, across kinds, projected with its stable coordinates
+// TestHandleAgentArtifacts pins the conversation-scoped artifact read
+// (TFAC-465): every artifact a conversation produced, across kinds, projected
+// with its stable coordinates
 // and details parsed — an object for a PR, null for a detail-less comment.
 func TestHandleAgentArtifacts(t *testing.T) {
 	s := newTestServer(t)
@@ -121,7 +122,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 	}
 }
 
-// TestHandleAgentArtifacts_Empty pins that a run with no artifacts returns an
+// TestHandleAgentArtifacts_Empty pins that a conversation with no artifacts returns an
 // empty JSON array (200 []), never null — the board card can render a 0 count
 // without special-casing.
 func TestHandleAgentArtifacts_Empty(t *testing.T) {
@@ -132,24 +133,25 @@ func TestHandleAgentArtifacts_Empty(t *testing.T) {
 		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
-		t.Errorf("empty run artifacts body = %q, want []", body)
+		t.Errorf("empty conversation artifacts body = %q, want []", body)
 	}
 }
 
-// TestHandleAgentArtifacts_RunNotFound pins the 404 for an unknown (or
-// not-visible) run — the run read is the authorization gate, so a missing run
-// is indistinguishable from a cross-team one.
-func TestHandleAgentArtifacts_RunNotFound(t *testing.T) {
+// TestHandleAgentArtifacts_UnknownConversationNotFound pins the 404 for an
+// unknown (or not-visible) conversation — the conversation read is the
+// authorization gate, so a missing conversation is indistinguishable from a
+// cross-team one.
+func TestHandleAgentArtifacts_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/r_ghost/artifacts", nil)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("GET missing run = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET missing conversation = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestRunResponse_ArtifactCount pins artifact_count on the single-run response
+// TestConversationResponse_ArtifactCount pins artifact_count on the single-conversation response
 // (GET /api/agent/conversations/{id}).
-func TestRunResponse_ArtifactCount(t *testing.T) {
+func TestConversationResponse_ArtifactCount(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "cnt", "completed")
 	seedConversationArtifact(t, s, conversationID, domain.Artifact{
@@ -163,7 +165,7 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
@@ -174,11 +176,11 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 	}
 }
 
-// TestRunResponse_ArtifactCount_Unresolved pins that a completed run with an
+// TestConversationResponse_ArtifactCount_Unresolved pins that a completed conversation with an
 // unresolved draft PR reports the right artifact_count (from CountByConversation) and the
 // derived approval signal (has_unresolved_artifacts + unresolved_pr_count) — the
 // successor to the legacy pending_kind overlay.
-func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
+func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "park", "completed")
 	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
@@ -191,7 +193,7 @@ func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
@@ -208,11 +210,12 @@ func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 	}
 }
 
-// TestRunResponse_HasUnresolved_List pins that the derived approval signal
-// propagates through the run-LIST endpoint — the batched ListByConversations path,
-// distinct from the single-run path. Guards the list endpoint against a silent
+// TestConversationResponse_HasUnresolved_List pins that the derived approval
+// signal propagates through the conversation-LIST endpoint — the batched
+// ListByConversations path, distinct from the single-conversation path. Guards
+// the list endpoint against a silent
 // has_unresolved_artifacts regression.
-func TestRunResponse_HasUnresolved_List(t *testing.T) {
+func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
 	conversationID := seedSteerConversation(t, s.db, "pklist", "completed")
 	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
@@ -221,7 +224,7 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 
 	convs := listConversations(t, s, fixtureUUID("t_pklist"))
 	if len(convs) != 1 {
-		t.Fatalf("listed %d runs, want 1", len(convs))
+		t.Fatalf("listed %d conversations, want 1", len(convs))
 	}
 	if got := convs[0]["has_unresolved_artifacts"]; got != true {
 		t.Errorf("has_unresolved_artifacts = %v, want true", got)
@@ -231,13 +234,15 @@ func TestRunResponse_HasUnresolved_List(t *testing.T) {
 	}
 }
 
-// TestRunResponse_ArtifactCount_List pins that the batched count flows through
-// the run-list path (POST /api/agent/conversations/list): two runs on one task
+// TestConversationResponse_ArtifactCount_List pins that the batched count flows
+// through the conversation-list path (POST /api/agent/conversations/list): two
+// conversations on one task
 // get their own correct counts from the single CountByConversation batch.
-func TestRunResponse_ArtifactCount_List(t *testing.T) {
+func TestConversationResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
-	// seedSteerConversation mints task t_lst with run r_lst and prompt p_lst; add a
-	// second run on the same task so the list path counts more than one run.
+	// seedSteerConversation mints task t_lst with conversation r_lst and prompt
+	// p_lst; add a second conversation on the same task so the list path counts
+	// more than one conversation.
 	conv1 := seedSteerConversation(t, s.db, "lst", "completed")
 	taskID := fixtureUUID("t_lst")
 	conv2 := fixtureUUID("r_lst2")
@@ -256,13 +261,13 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 
 	convs := listConversations(t, s, taskID)
 	if len(convs) != 2 {
-		t.Fatalf("listed %d runs, want 2", len(convs))
+		t.Fatalf("listed %d conversations, want 2", len(convs))
 	}
 	want := map[string]float64{conv1: 2, conv2: 1}
 	for _, m := range convs {
 		id, _ := m["ID"].(string)
 		if got := m["artifact_count"]; got != want[id] {
-			t.Errorf("run %s artifact_count = %v, want %v", id, got, want[id])
+			t.Errorf("conversation %s artifact_count = %v, want %v", id, got, want[id])
 		}
 	}
 }

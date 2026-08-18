@@ -9,7 +9,7 @@ import { jsonBody } from '../test/apiResponse'
 // disappear from the UI, because a prompt nobody can see is the exact failure
 // this endpoint exists to close.
 
-const CONVERSATION = 'run-1'
+const CONVERSATION = 'conv-1'
 
 function prompt(toolCallID: string, extra: Record<string, unknown> = {}) {
   return {
@@ -44,7 +44,7 @@ afterEach(() => {
 })
 
 describe('usePermissionQueues', () => {
-  it('sources a run’s prompts from the endpoint', async () => {
+  it('sources a conversation’s prompts from the endpoint', async () => {
     stubPermissions([{ ok: true, body: [prompt('toolu_1')] }])
     const { result } = renderHook(() => usePermissionQueues())
 
@@ -53,7 +53,7 @@ describe('usePermissionQueues', () => {
     expect(result.current.queues[CONVERSATION][0].tool_call_id).toBe('toolu_1')
   })
 
-  it('clears a run’s queue when the server says nothing is pending', async () => {
+  it('clears a conversation’s queue when the server says nothing is pending', async () => {
     stubPermissions([
       { ok: true, body: [prompt('toolu_1')] },
       { ok: true, body: [] },
@@ -121,7 +121,7 @@ describe('usePermissionQueues', () => {
     expect(result.current.queues[CONVERSATION]).toBeUndefined()
   })
 
-  it('drops a run’s queue on dropConversation', async () => {
+  it('drops a conversation’s queue on dropConversation', async () => {
     stubPermissions([{ ok: true, body: [prompt('toolu_1')] }])
     const { result } = renderHook(() => usePermissionQueues())
 

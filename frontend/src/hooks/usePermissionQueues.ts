@@ -9,14 +9,14 @@ import {
 import { toast } from '../components/Toast/toastStore'
 
 export interface PermissionQueues {
-  /** conversationID → its unanswered prompts, head-first. A run with no prompts is
+  /** conversationID → its unanswered prompts, head-first. A conversation with no prompts is
    *  absent from the map (not an empty array), so `queues[conversationID] ?? []` is the
    *  canonical read. */
   queues: Record<string, PendingPermission[]>
-  /** Re-read a run's pending set from the server and replace its queue with it.
+  /** Re-read a conversation's pending set from the server and replace its queue with it.
    *  The single entry point for both WS triggers and cold load — a
    *  `permission_request` / `permission_resolved` frame is a hint that this
-   *  run's set changed, never the set itself. */
+   *  conversation's set changed, never the set itself. */
   refresh: (conversationID: string) => void
   /** Answer a prompt; drops it from the queue on a definitive response (200
    *  resolved / 404 already-resolved). A transient failure keeps it up + toasts. */
@@ -25,23 +25,24 @@ export interface PermissionQueues {
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
-  /** Drop a whole run's queue (its run finished or left the board). */
+  /** Drop a whole conversation's queue (it finished or left the board). */
   dropConversation: (conversationID: string) => void
 }
 
 // timerKey scopes a TTL timer by (conversationID, toolCallID). A tool_use id is unique
-// in practice, but keying by both makes two runs raising the same id a
-// non-event rather than a collision. The NUL separator can't appear in a run
-// uuid or a tool_use id (mirrors the backend's permKey).
+// in practice, but keying by both makes two conversations raising the same id a
+// non-event rather than a collision. The NUL separator can't appear in a
+// conversation uuid or a tool_use id (mirrors the backend's permKey).
 function timerKey(conversationID: string, toolCallID: string): string {
   return `${conversationID}\x00${toolCallID}`
 }
 
-// usePermissionQueues manages permission prompts for many runs at once: a
+// usePermissionQueues manages permission prompts for many conversations at once: a
 // conversationID→queue map sourced from the server, plus per-(conversationID,toolCallID) TTL
 // timers (arm-once, clear-on-resolve/drop/unmount). It's the single
-// implementation behind both the board (all visible runs) and useConversationDetail
-// (filtered to one run), so neither the fetch nor the TTL behavior can diverge
+// implementation behind both the board (all visible conversations) and
+// useConversationDetail (filtered to one conversation), so neither the fetch nor
+// the TTL behavior can diverge
 // between the two surfaces.
 //
 // The queue is a projection of the pending-set endpoint, not an accumulation of
@@ -57,10 +58,10 @@ export function usePermissionQueues(): PermissionQueues {
   // drop, and unmount so a fired timer never touches a stale queue.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
-  // Per-run refresh generation. Every local drop and every new fetch bumps it,
+  // Per-conversation refresh generation. Every local drop and every new fetch bumps it,
   // and only the newest fetch is allowed to write — so an in-flight refetch
   // that resolves late can never resurrect a prompt the user just answered or a
-  // run that just left the board.
+  // conversation that just left the board.
   const refreshSeq = useRef<Map<string, number>>(new Map())
   const bumpRefreshSeq = useCallback((conversationID: string) => {
     const next = (refreshSeq.current.get(conversationID) ?? 0) + 1
@@ -77,9 +78,10 @@ export function usePermissionQueues(): PermissionQueues {
     }
   }, [])
 
-  // dropPermission removes one prompt from a run's queue and cancels its timer.
-  // The run's key is removed entirely when its last prompt clears, so the map
-  // only ever holds runs with live prompts (and `conversationID in queues` reads true
+  // dropPermission removes one prompt from a conversation's queue and cancels
+  // its timer. The conversation's key is removed entirely when its last prompt
+  // clears, so the map only ever holds conversations with live prompts (and
+  // `conversationID in queues` reads true
   // exactly when a card should light up).
   const dropPermission = useCallback(
     (conversationID: string, toolCallID: string) => {
@@ -101,7 +103,7 @@ export function usePermissionQueues(): PermissionQueues {
 
   const dropConversation = useCallback(
     (conversationID: string) => {
-      // Cancel every timer for the run. Deleting the current entry mid-iteration
+      // Cancel every timer for the conversation. Deleting the current entry mid-iteration
       // is safe for a Map.
       const prefix = `${conversationID}\x00`
       for (const [key, t] of timers.current) {

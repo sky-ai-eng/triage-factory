@@ -214,14 +214,14 @@ type BlueprintRun struct {
 	// CreateRunIfNotFiredSystem, whose (triggering_event_id, trigger_id) unique
 	// index returns ErrAlreadyFired on an at-least-once event replay. The
 	// blueprint_run is the firing unit, so the fence lives here rather than on
-	// the per-step runs. Forward-only provenance — not read back into the run
+	// the per-step conversations. Forward-only provenance — not read back into the run
 	// projection.
 	TriggeringEventID string `json:"triggering_event_id,omitempty"`
 	// ActorAgentID is the agents.id of the bot executing this blueprint run
 	// (blueprint_runs.actor_agent_id). Resolved once at the
 	// delegation entry point — from the task's bot claim, or the org agent the
-	// router/handler already holds — and frozen here at mint. Every step run
-	// inherits it onto conversations.actor_agent_id, so execution attribution is stable
+	// router/handler already holds — and frozen here at mint. Every step's
+	// conversation inherits it onto conversations.actor_agent_id, so execution attribution is stable
 	// across steps and survives a mid-blueprint user takeover (which clears the
 	// task claim but not who ran the bot's steps). Empty = NULL (no actor: minted
 	// before agent bootstrap, or the agent row was later deleted → SET NULL).
