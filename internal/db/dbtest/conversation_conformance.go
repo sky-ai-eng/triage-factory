@@ -58,8 +58,8 @@ type ConversationSeeder struct {
 
 	// Task inserts a task row tied to the given entity and event.
 	// status defaults to "queued" — the factory's behavior tests
-	// don't care about the parent task status, only about the runs
-	// hanging off it.
+	// don't care about the parent task status, only about the
+	// conversations hanging off it.
 	Task func(t *testing.T, entityID, eventType, primaryEventID string) string
 
 	// Conversation inserts a conversations row directly and returns its id (conv.ID
@@ -89,16 +89,17 @@ type ConversationSeeder struct {
 	// given taskID and returns the blueprint_run id. Every conversation
 	// row carries a NOT NULL blueprint_run_id FK (a single prompt is a
 	// 1-step blueprint), so the conformance suite stages one of these
-	// per run it creates and sets domain.Conversation.BlueprintRunID. Each
-	// call mints a fresh independent blueprint_run — that matches the
+	// per conversation it creates and sets domain.Conversation.BlueprintRunID.
+	// Each call mints a fresh independent blueprint_run — that matches the
 	// real firing model (one delegation = one blueprint_run) and keeps
-	// multi-run-per-task subtests realistic.
+	// multi-conversation-per-task subtests realistic.
 	BlueprintRun func(t *testing.T, taskID string) string
 
 	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
-	// touching its child runs (a plain UPDATE, not BlueprintStore.MarkRunStatus,
+	// touching its child conversations (a plain UPDATE, not
+	// BlueprintStore.MarkRunStatus,
 	// which now cascades a terminal flip onto children). Used to stage the
-	// "parked run under an already-terminal parent" precondition the
+	// "parked conversation under an already-terminal parent" precondition the
 	// worktree-preserve filter must exclude.
 	SetBlueprintRunStatus func(t *testing.T, blueprintRunID, status string)
 
@@ -123,13 +124,13 @@ type ConversationSeeder struct {
 	SeedRawMessage func(t *testing.T, conversationID, column, rawJSON string) int64
 
 	// AgentID returns an identifier suitable for the
-	// StampAgentClaim agentID and the run row's actor_agent_id.
+	// StampAgentClaim agentID and the conversation row's actor_agent_id.
 	// Backends use this to thread their own seeded agent row (the
 	// Postgres path needs a real FK; SQLite is more relaxed).
 	AgentID string
 }
 
-// RunConversationStoreConformance covers the agent-run contract every
+// RunConversationStoreConformance covers the ConversationStore contract every
 // backend impl must hold:
 //
 //   - Lifecycle methods (Complete / SetSession / ParkOpen /
@@ -294,8 +295,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The native runtime settles spend per assistant row as it goes, and
 		// its terminal Complete reports zero — there is nothing left to
 		// settle. A zero lump must therefore stamp NOTHING: the first live
-		// native run lost its final row's stamp to the unconditional
-		// overwrite, and the run's total under-reported by exactly that row.
+		// native conversation lost its final row's stamp to the unconditional
+		// overwrite, and the conversation's total under-reported by exactly that
+		// row.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
@@ -705,8 +707,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// Tokens derive from the messages ledger at read time, so a run that
-	// ends by cancel or infra-failure still reflects the tokens it streamed
+	// Tokens derive from the messages ledger at read time, so a conversation
+	// that ends by cancel or infra-failure still reflects the tokens it streamed
 	// with no terminal roll-up at all.
 	t.Run("CancelAndFail_TokensStillDeriveFromLedger", func(t *testing.T) {
 		ptr := func(n int) *int { return &n }
@@ -771,7 +773,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
-			t.Fatalf("Get: run=%v err=%v", got, err)
+			t.Fatalf("Get: conversation=%v err=%v", got, err)
 		}
 		if got.FailureKind != domain.ConversationFailureMemoryLimit {
 			t.Errorf("FailureKind = %q, want %q", got.FailureKind, domain.ConversationFailureMemoryLimit)
@@ -802,7 +804,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
-			t.Fatalf("Get: run=%v err=%v", got, err)
+			t.Fatalf("Get: conversation=%v err=%v", got, err)
 		}
 		if got.Status != "failed" {
 			t.Errorf("status = %q, want failed", got.Status)
@@ -1010,8 +1012,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("MarkFailedIfActive_FailsOpen_RefusesTerminal", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		// `open` is intentionally failable (a warm open run has no durable
-		// snapshot, so an infra error reaching failConversation must terminate it).
+		// `open` is intentionally failable (a warm open conversation has no
+		// durable snapshot, so an infra error reaching failConversation must
+		// terminate it).
 		openConversation := seedConversationForTest(t, orgID, seed, "running")
 		if _, err := store.ParkOpen(ctx, orgID, openConversation, db.ParkIdle()); err != nil {
 			t.Fatalf("open: %v", err)
@@ -1367,8 +1370,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 		})
 		t.Run("RefusedWrite_LeavesClaimActive", func(t *testing.T) {
-			// A guarded no-op must not release: complete the run, re-mint a
-			// claim (simulating a racing engagement), then fail — the guard
+			// A guarded no-op must not release: complete the conversation,
+			// re-mint a claim (simulating a racing engagement), then fail — the
+			// guard
 			// refuses and the claim stays live.
 			conversationID := stage(t)
 			if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
@@ -1378,7 +1382,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				t.Fatalf("SetExecutorSystem: %v", err)
 			}
 			if ok, _ := store.MarkFailedIfActive(ctx, orgID, conversationID, ""); ok {
-				t.Fatalf("MarkFailedIfActive on completed run succeeded; want refused")
+				t.Fatalf("MarkFailedIfActive on completed conversation succeeded; want refused")
 			}
 			claims := seed.ClaimRows(t, conversationID)
 			last := claims[len(claims)-1]
@@ -1935,8 +1939,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("new claim = %+v, want both actuals NULL", claims[0])
 		}
 
-		// The live-claim stamp (the shape a hibernating run hits — its claim
-		// is parked, not yet released).
+		// The live-claim stamp (the shape a hibernating conversation hits — its
+		// claim is parked, not yet released).
 		peak, cpu := 731, int64(12_500_000)
 		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak, &cpu); err != nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem live: %v", err)
@@ -1950,7 +1954,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The load-bearing case: teardown runs AFTER the completion
 		// bookkeeping releases the claim, so the stamp must land on a
 		// released row. An active-claim predicate here would silently drop
-		// every run's actuals.
+		// every engagement's actuals.
 		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -1969,7 +1973,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Partial measurement (a kernel with no memory.peak): the CPU time
 		// records and the peak goes back to NULL rather than to a zero that
-		// would read as a measured 0 MB run.
+		// would read as a measured 0 MB engagement.
 		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, nil, &cpu2); err != nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem partial: %v", err)
 		}
@@ -1982,8 +1986,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// An unknown claim id is a no-op, not an error — the caller is on a
-		// best-effort teardown path and must never fail a finished run over
-		// accounting.
+		// best-effort teardown path and must never fail a finished conversation
+		// over accounting.
 		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, uuid.New().String(), &peak, &cpu); err != nil {
 			t.Errorf("RecordClaimSandboxStatsSystem unknown claim: %v, want a silent no-op", err)
 		}
@@ -2119,9 +2123,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ent := seed.Entity(t, "list")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// Two runs with a >1s sleep — SQLite's CURRENT_TIMESTAMP
+		// Two conversations with a >1s sleep — SQLite's CURRENT_TIMESTAMP
 		// default has 1-second granularity, so the gap is needed
-		// for ORDER BY to discriminate. Two runs is enough to pin
+		// for ORDER BY to discriminate. Two conversations are enough to pin
 		// "newest first"; three would risk landing in the same
 		// second slot without making the assertion stronger.
 		first := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
@@ -2143,7 +2147,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("ListForTask_PreservesTriggerType", func(t *testing.T) {
 		// The projection must round-trip trigger_type — when the column was
 		// missing, every caller saw "" and the resume goroutine treated
-		// event runs as manual on resume. Cover both branches across a
+		// event conversations as manual on resume. Cover both branches across a
 		// mixed list.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -2177,10 +2181,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	})
 
 	t.Run("ListForTasks_BatchedAcrossTasks", func(t *testing.T) {
-		// The batched twin of ListForTask: one query returns runs for
+		// The batched twin of ListForTask: one query returns conversations for
 		// many tasks, each attributed to its own TaskID, with unknown
 		// ids contributing nothing and empty input a no-op. Backs the
-		// Board's aggregated agent-run fetch.
+		// Board's aggregated conversation fetch.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 
@@ -2231,7 +2235,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("total = %d, want 3", total)
 		}
 		// The pages partition the (task_id, started_at DESC, id) order, and a
-		// task's runs stay contiguous inside it.
+		// task's conversations stay contiguous inside it.
 		page1, _, err := store.ListForTasks(ctx, orgID, []string{taskA, taskB}, db.ListOpts{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListForTasks page 1: %v", err)
@@ -2255,10 +2259,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ent := seed.Entity(t, "ha")
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
-		// No runs yet → empty.
+		// No conversations yet → empty.
 		ids, _ := store.ActiveIDsForTask(ctx, orgID, taskID)
 		if len(ids) != 0 {
-			t.Errorf("ActiveIDs with no runs: %v, want []", ids)
+			t.Errorf("ActiveIDs with no conversations: %v, want []", ids)
 		}
 		// One running + one terminal → ids=[running].
 		runningConversation := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
@@ -2270,10 +2274,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	})
 
 	t.Run("HasActiveAutoConversationForTask", func(t *testing.T) {
-		// Per-task gate: any non-terminal trigger_type='event' run on the
-		// task. Manual delegations are excluded (by design — manual is
-		// decoupled from the auto-queue gate); terminal runs don't count
-		// either. A sibling task on the same entity is invisible here, which
+		// Per-task gate: any non-terminal trigger_type='event' conversation on
+		// the task. Manual delegations are excluded (by design — manual is
+		// decoupled from the auto-queue gate); terminal conversations don't
+		// count either. A sibling task on the same entity is invisible here,
+		// which
 		// is the whole point of the unit being the task.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -2311,7 +2316,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Error("a busy sibling task on the same entity closed this task's gate")
 		}
 
-		// Terminate the event run; only terminal event-trigger rows
+		// Terminate the event conversation; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
 		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
@@ -2324,8 +2329,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 	t.Run("ActiveAutoConversationIDForTaskSystem", func(t *testing.T) {
 		// Same predicate as HasActiveAutoConversationForTask (non-terminal,
-		// trigger_type='event'), but returns the run ID instead of a bool —
-		// a busy gate is the additive-injection path, which needs the run to
+		// trigger_type='event'), but returns the conversation ID instead of a
+		// bool — a busy gate is the additive-injection path, which needs the
+		// conversation to
 		// fold the new event into.
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
@@ -2333,18 +2339,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// No runs → "".
+		// No conversations → "".
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
-			t.Errorf("with no runs: id=%q err=%v, want empty/nil", id, err)
+			t.Errorf("with no conversations: id=%q err=%v, want empty/nil", id, err)
 		}
 
-		// Manual run only — must NOT resolve.
+		// Manual conversation only — must NOT resolve.
 		_ = seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
 			t.Errorf("manual-only: id=%q err=%v, want empty (event-only)", id, err)
 		}
 
-		// Active event-trigger run → resolves to its run ID.
+		// Active event-trigger conversation → resolves to its conversation ID.
 		eventBR := seed.BlueprintRun(t, taskID)
 		eventConversationID := seed.Conversation(t, domain.Conversation{
 			TaskID: taskID, PromptID: conversationTestPrompt(t),
@@ -2364,8 +2370,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// The same answer for a conversation a user RESUMED. A resume keeps
 		// trigger_type='event' and puts the row back mid-flight, so it reads
-		// as a live auto run again — for its own task, and only its own. A
-		// human-paced follow-up on one card must never hold up automated
+		// as a live auto conversation again — for its own task, and only its
+		// own. A human-paced follow-up on one card must never hold up automated
 		// triage of a different card on the same entity.
 		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
@@ -2383,8 +2389,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("resumed conversation, sibling task on the same entity: id=%q err=%v, want empty", id, err)
 		}
 
-		// Terminate it — terminal-only, plus the still-active manual run,
-		// resolves back to "".
+		// Terminate it — terminal-only, plus the still-active manual
+		// conversation, resolves back to "".
 		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
@@ -2402,8 +2408,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err := store.SetWorktreePath(ctx, orgID, openConversation, "/tmp/triagefactory-runs/open"); err != nil {
 			t.Fatalf("set worktree (open): %v", err)
 		}
-		// completed WITH a worktree → excluded by the status filter. A completed run
-		// that left an unresolved artifact no longer parks, so its
+		// completed WITH a worktree → excluded by the status filter. A completed
+		// conversation that left an unresolved artifact no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
 		completed := seedConversationForTest(t, orgID, seed, "completed")
 		if err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
@@ -2417,7 +2423,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("set worktree (running): %v", err)
 		}
 		// open WITH a worktree but under an already-terminal blueprint_run →
-		// excluded: a parked run under a terminal parent is not resumable, so its
+		// excluded: a parked conversation under a terminal parent is not
+		// resumable, so its
 		// worktree must not be preserved (else the boot reconcile orphans the row
 		// and leaves its checked-out branch on disk).
 		orphanTaskID := seed.Task(t, seed.Entity(t, "parked-orphan"), domain.EventGitHubPROpened,
@@ -3104,7 +3111,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	})
 
 	t.Run("MessagesSince_ReturnsOnlyRowsAboveTheWatermark", func(t *testing.T) {
-		// Backs the run station's transcript repair: the client holds every
+		// Backs RunStation's transcript repair: the client holds every
 		// row up to the watermark and asks for what it missed while its
 		// websocket was down.
 		store, orgID, _, seed := mk(t)
@@ -3124,7 +3131,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		first := insert(conversationID, "first")
 		second := insert(conversationID, "second")
-		insert(otherID, "other-run")
+		insert(otherID, "other-conv")
 		third := insert(conversationID, "third")
 
 		contents := func(desc string, sinceID int) []string {
@@ -3152,7 +3159,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Below every id: the whole transcript, in id order — and only this
-		// conversation's rows, so a shared watermark can't leak a sibling run.
+		// conversation's rows, so a shared watermark can't leak a sibling
+		// conversation.
 		eq("0", contents("0", 0), []string{"first", "second", "third"})
 		// Strictly greater than: the row at the watermark is the last one the
 		// caller already holds, so re-sending it would be a duplicate.
@@ -3200,7 +3208,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Ask to flip id1 (belongs to conversationID) and idOther (belongs to a
-		// DIFFERENT run) via a call scoped to conversationID — idOther must NOT flip.
+		// DIFFERENT conversation) via a call scoped to conversationID — idOther
+		// must NOT flip.
 		if err := store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(id1), int(idOther)}, ""); err != nil {
 			t.Fatalf("MarkDelivered: %v", err)
 		}
@@ -3329,7 +3338,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 	t.Run("MessagesForConversations_BatchedAcrossConversations", func(t *testing.T) {
 		// The batched twin of Messages: one query returns every message
-		// for many runs, grouped by ConversationID with each run's messages still
+		// for many conversations, grouped by ConversationID with each
+		// conversation's messages still
 		// in insertion (id ASC) order. Empty input is a no-op. Backs the
 		// Board's aggregated include=messages read.
 		store, orgID, _, seed := mk(t)
@@ -3419,9 +3429,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "open")
 
-		// No agent message yet → ok=false, the caller falls back to run start.
+		// No agent message yet → ok=false, the caller falls back to the
+		// conversation's start.
 		if _, ok, err := store.LastAgentActivityAtSystem(ctx, orgID, conversationID); err != nil || ok {
-			t.Fatalf("empty run: got ok=%v err=%v, want ok=false err=nil", ok, err)
+			t.Fatalf("empty conversation: got ok=%v err=%v, want ok=false err=nil", ok, err)
 		}
 
 		// Insert in id order: an assistant turn, then a LATER user follow-up. The
@@ -3482,7 +3493,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			Status: "running", Model: "m", BlueprintRunID: brID,
 		})
 		// Each step streams a row and settles its cost lump on it — the
-		// sibling sum reads the ledger, not any run-level column.
+		// sibling sum reads the ledger, not any conversation-level column.
 		settle := func(stepID string, cost float64) {
 			t.Helper()
 			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Content: "work"}); err != nil {
@@ -3616,7 +3627,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		// One run per memory-content state. memory_missing should be
+		// One conversation per memory-content state. memory_missing should be
 		// true for no-row, NULL, "", whitespace; false for populated.
 		conversationNoRow := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
 		conversationNullContent := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
@@ -3658,9 +3669,9 @@ func reapKeysContain(keys []domain.SnapshotReapKey, blueprintRunID string) bool 
 	return false
 }
 
-// seedConversationForTest creates a fresh entity+event+task+run chain and
-// returns the run ID. status is what we want the conversation row to land
-// in; the seeder inserts the row with the status set directly rather
+// seedConversationForTest creates a fresh entity+event+task+conversation chain
+// and returns the conversation ID. status is what we want the conversation row
+// to land in; the seeder inserts the row with the status set directly rather
 // than driving the lifecycle methods (which is the conformance
 // suite's job to test).
 func seedConversationForTest(t *testing.T, orgID string, seed ConversationSeeder, status string) string {
@@ -3687,9 +3698,10 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 	}), brID
 }
 
-// seedConversationForTaskTest creates a run on an existing task, used
-// by tests that need multiple runs on the same parent. Each run gets
-// its own freshly-minted blueprint_run; independent firings on a shared
+// seedConversationForTaskTest creates a conversation on an existing task,
+// used by tests that need multiple conversations on the same parent. Each
+// conversation gets its own freshly-minted blueprint_run; independent
+// firings on a shared
 // task is the realistic shape.
 func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, seed ConversationSeeder) string {
 	t.Helper()
@@ -3702,7 +3714,7 @@ func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, see
 
 // conversationTestPromptID is the prompt-row id the backend test files
 // seed once per test factory call. Conformance subtests reference
-// it by this constant when creating runs; the seeder doesn't surface
+// it by this constant when creating conversations; the seeder doesn't surface
 // it as a field because every call uses the same value within one
 // subtest.
 const conversationTestPromptID = "p_conversation_test"

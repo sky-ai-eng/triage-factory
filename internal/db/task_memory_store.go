@@ -10,7 +10,7 @@ import (
 
 // TaskMemoryStore is the per-resource store for the conversation_memory table —
 // the durable agent-side narrative + the human's post-run verdict for
-// every run on every task. Lifted out of the pre-D2 package-level
+// every conversation on every task. Lifted out of the pre-D2 package-level
 // functions in internal/db/task_memory.go so multi-mode Postgres
 // callers route through $N placeholders + explicit org_id + the
 // dual-pool admin/app split.
@@ -29,7 +29,7 @@ import (
 //     CountMemoriesForEntitySystem) run on the admin pool (BYPASSRLS).
 //     The consumers are background goroutines without a JWT-claims
 //     context — the delegate spawner's post-completion gate teardown
-//     and the run-start materializer both fire from inside the
+//     and the engagement-start materializer both fire from inside the
 //     spawner's `runAgent` goroutine which has no request scope.
 //     org_id stays bound in the INSERT/SELECT as defense in depth.
 //
@@ -51,14 +51,15 @@ import (
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
 type TaskMemoryStore interface {
-	// UpsertAgentMemory writes the agent-side memory row for a run.
+	// UpsertAgentMemory writes the agent-side memory row for a conversation.
 	// Empty / whitespace-only content canonicalizes to SQL NULL on
 	// the way in so downstream consumers (factory's memory_missing
 	// derivation) get a single truth condition for "agent didn't
 	// comply with the gate."
 	//
-	// blueprintRunID is the run's blueprint run (denormalized from the
-	// run, like entityID); pass empty for a standalone run, where it
+	// blueprintRunID is the conversation's blueprint run (denormalized from
+	// the conversation, like entityID); pass empty for a standalone
+	// conversation, where it
 	// canonicalizes to SQL NULL. It groups one blueprint run's memory
 	// so the materializer can fold each step's file into a shared
 	// namespace folder.
@@ -77,7 +78,8 @@ type TaskMemoryStore interface {
 	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
 
 	// UpdateConversationMemoryHumanContent records the human's verdict on a
-	// run's agent draft into the conversation_memory row keyed by conversationID. The
+	// conversation's agent draft into the conversation_memory row keyed by
+	// conversationID. The
 	// gate-teardown upsert at termination guarantees the row exists
 	// by the time the human writes a verdict, so this is a plain
 	// UPDATE with no INSERT-or-UPDATE branching.
@@ -98,28 +100,29 @@ type TaskMemoryStore interface {
 	// UpdateConversationMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
 	// of UpdateConversationMemoryHumanContent for the artifact reconciler (TFAC-464 β),
 	// which has no JWT-claims context. It overwrites human_content with the
-	// run's post-run outcome — how the run's artifacts resolved on GitHub
+	// conversation's post-run outcome — how its artifacts resolved on GitHub
 	// (merged/closed/deleted/submitted) vs. what the agent drafted — so the
 	// next agent on the entity reads the final state.
 	//
 	// Overwrite, not append: human_content is the single "how reality diverged
 	// from your draft" slot, and the terminal outcome is its most authoritative
 	// version, superseding any approval-time account. The reconciler composes
-	// the note over the run's WHOLE artifact set each time one resolves, so a
-	// branch-then-PR run accumulates correctly without an append and a repeated
+	// the note over the conversation's WHOLE artifact set each time one
+	// resolves, so a branch-then-PR conversation accumulates correctly without
+	// an append and a repeated
 	// cycle is idempotent. Same empty→NULL + missing-row-logged-not-fatal
 	// contract as the app-pool variant. org_id stays bound as defense in depth;
 	// SQLite collapses onto the one connection.
 	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
-	// this entity through conversation_memory_entities — the run touched,
-	// produced for, or was primarily about this entity — oldest
+	// this entity through conversation_memory_entities — the conversation
+	// touched, produced for, or was primarily about this entity — oldest
 	// first. The returned TaskMemory.Content is materialized from
 	// agent_content + human_content via the stable separator format
 	// the next agent's prompt context parses. Each row carries its
-	// BlueprintRunID so the materializer can tell this workflow run's
-	// own steps from prior separate runs, plus the producing
+	// BlueprintRunID so the materializer can tell this blueprint run's
+	// own steps from prior separate conversations, plus the producing
 	// conversation's step index and prompt name so it can name the
 	// materialized file after the work it records rather than after a
 	// row id.
@@ -127,20 +130,22 @@ type TaskMemoryStore interface {
 
 	// GetMemoriesForEntitySystem mirrors GetMemoriesForEntity but
 	// routes through the admin pool. The consumer is the delegate
-	// spawner's run-start materializer (materializePriorMemories),
+	// spawner's engagement-start materializer (materializePriorMemories),
 	// which fires inside the runAgent goroutine with no JWT-claims
 	// context. org_id stays in the WHERE clause as defense in depth.
 	//
-	// teamID is the materializing run's owning team (conversations.team_id).
+	// teamID is the materializing conversation's owning team
+	// (conversations.team_id).
 	// The admin pool bypasses RLS, so the app-pool variant's team
 	// scoping (conversation_memory_all → conversations_select) is
 	// hand-rolled here: the result is restricted to memory whose parent
-	// run that team can see — team-visible runs owned by teamID plus
-	// any org-visible run —
+	// conversation that team can see — team-visible conversations owned by
+	// teamID plus any org-visible conversation —
 	// matching what a member of that team sees in the UI (TFAC-506).
 	// Without this, the System path returned ALL of the org's memory
-	// for the entity, leaking other teams' run narratives into a run
-	// they don't own. Private-visibility runs are excluded: they're
+	// for the entity, leaking other teams' conversation narratives into a
+	// conversation they don't own. Private-visibility conversations are
+	// excluded: they're
 	// creator-scoped and the System path carries no user to match.
 	// SQLite (N=1, single team) ignores teamID — no cross-team bleed is
 	// possible locally.
@@ -149,7 +154,8 @@ type TaskMemoryStore interface {
 	// GetRecentMemoriesForEntitySystem is GetMemoriesForEntitySystem capped to
 	// the most recent `limit` rows, with the cap pushed INTO the query (ORDER BY
 	// created_at DESC LIMIT) rather than fetched-all-then-sliced — so an
-	// on-demand read on an entity with a long run history doesn't transfer and
+	// on-demand read on an entity with a long conversation history doesn't
+	// transfer and
 	// materialize its entire memory just to keep the tail. Returns oldest-first
 	// (ASC), identical to the unbounded read's ordering, so callers compose the
 	// same way. Same team-visibility scope as GetMemoriesForEntitySystem. limit

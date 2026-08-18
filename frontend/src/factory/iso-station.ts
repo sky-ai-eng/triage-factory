@@ -3,7 +3,7 @@
 // Aesthetic: liquid glass + Halo Reach + Transcendence — a warm
 // ceramic chassis with two flat working surfaces on top: a small
 // intake tray on the left where queued entities wait, and a larger
-// work tray on the right where active runs sit. Both trays are
+// work tray on the right where active conversations sit. Both trays are
 // shallow CSG-cut insets framed by glowing LED perimeters; chips
 // sit flat on the tray floors. A laser scanner bar slowly
 // translates across the work tray to sell "machine doing work".
@@ -15,12 +15,12 @@
 //   ┌──────────────────────────────────────────┐
 //   │ ┌──────┐  ┌──[ STATION LABEL ]────────┐  │
 //   │ │ ▢ ▢  │  │   ════════════════════    │  │  ← scanner bar
-//   │ │ ▢ ▢  │  │   ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢      │  │  ← run chips
+//   │ │ ▢ ▢  │  │   ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢      │  │  ← conversation chips
 //   │ │ ▢ ▢  │  │   ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢ ▢      │  │
 //   │ └──────┘  └───────────────────────────┘  │
 //   └──────────────────────────────────────────┘
 //      INTAKE        MAIN WORK TRAY           (heatsink/etc)
-//      TRAY            (active runs)
+//      TRAY            (active conversations)
 //
 // Both trays are carved from the body via CSG.subtract, so each
 // lip is a real geometric step on a single mesh. Chip pools are
@@ -68,8 +68,9 @@ export interface Station {
    *  at MAX_QUEUED). The handle's setQueuedCount can update this
    *  later. */
   queuedCount?: number
-  /** Initial visible run chips on the main tray floor (capped at
-   *  MAX_RUNS). One per active run; setConversationCount updates dynamically. */
+  /** Initial visible conversation chips on the main tray floor (capped at
+   *  MAX_CONVERSATIONS). One per active conversation; setConversationCount
+   *  updates dynamically. */
   conversationCount?: number
   /** Etched identity label rendered along the back of the main tray
    *  floor. Empty/undefined → no label plate. */
@@ -94,7 +95,7 @@ export interface StationHandle {
   /** Show n queued chips. n is clamped to MAX_QUEUED; chips above
    *  the cap are not rendered (caller surfaces overflow elsewhere). */
   setQueuedCount(n: number): void
-  /** Show n run chips. n clamped to MAX_RUNS. */
+  /** Show n conversation chips. n clamped to MAX_CONVERSATIONS. */
   setConversationCount(n: number): void
   /** Update the lifetime counter rendered on the station's front-face
    *  status screen. Diff-gated internally — calling with the same
@@ -105,7 +106,7 @@ export interface StationHandle {
 
 // ─── Tray fractions ─────────────────────────────────────────────────────────
 
-/** Main work tray — right portion of the top, holds run chips. */
+/** Main work tray — right portion of the top, holds conversation chips. */
 const MAIN_TRAY_X_FRAC: readonly [number, number] = [0.3, 0.95]
 const MAIN_TRAY_Y_FRAC: readonly [number, number] = [0.15, 0.85]
 
@@ -179,7 +180,7 @@ const RUN_CORE_H = 3.5
  *  toggled visible based on counts. Sized to the grid that fits
  *  on each tray floor with the chosen chip dimensions. */
 const MAX_QUEUED = 10 // intake tray: 2 cols × 5 rows
-const MAX_RUNS = 36 // main tray: 9 cols × 4 rows
+const MAX_CONVERSATIONS = 36 // main tray: 9 cols × 4 rows
 
 // ─── Etched label ─────────────────────────────────────────────────────────
 
@@ -205,8 +206,8 @@ const SCANNER_LIFT_ABOVE_CHIP = 4
 const SCANNER_PERIOD_SECONDS = 2.4
 
 // ─── Chip pulse ───────────────────────────────────────────────────────────
-// Each run chip's mesh scale oscillates with a slight phase offset
-// per chip — reads as "each run is alive at its own rhythm" without
+// Each conversation chip's mesh scale oscillates with a slight phase offset
+// per chip — reads as "each conversation is alive at its own rhythm" without
 // per-chip materials.
 
 const PULSE_AMPLITUDE = 0.04 // ±4% scale oscillation
@@ -1097,7 +1098,7 @@ export function buildStationMesh(
   }
 
   // ─── Run chip pool (main tray) ───────────────────────────────────────
-  // Pre-build MAX_RUNS chips arrayed in a grid in the front portion
+  // Pre-build MAX_CONVERSATIONS chips arrayed in a grid in the front portion
   // of the main tray (label takes the back). setConversationCount toggles
   // visibility on the first n.
 
@@ -1113,7 +1114,7 @@ export function buildStationMesh(
   })
   const runShells: Mesh[] = []
   const runCores: Mesh[] = []
-  for (let i = 0; i < MAX_RUNS; i++) {
+  for (let i = 0; i < MAX_CONVERSATIONS; i++) {
     const pos = runLayout[i]
     if (!pos) break
     const chipZCenter = mainTray.floorZ + RUN_CHIP_H / 2
@@ -1147,7 +1148,7 @@ export function buildStationMesh(
 
   // ─── Scanner laser ───────────────────────────────────────────────────
   // Spans the main tray width along x; animates y-position front to
-  // back, snaps back, repeats. Hidden when no runs are active so
+  // back, snaps back, repeats. Hidden when no conversations are active so
   // empty stations look idle.
 
   const scannerW = mainTray.x1 - mainTray.x0 - 2 * (trayFloorInset + 4)

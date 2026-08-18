@@ -96,7 +96,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 	})
 
-	t.Run("Flush_is_per_run_isolated", func(t *testing.T) {
+	t.Run("Flush_is_per_conversation_isolated", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		convA := seed.Conversation(t, "iso-a")
 		convB := seed.Conversation(t, "iso-b")
@@ -166,7 +166,8 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 			t.Fatalf("append: %v", err)
 		}
 		seed.DeleteConversation(t, conversationID)
-		// FlushPending filters only by (org_id, run_id), so a non-empty result here
+		// FlushPending filters only by (org_id, conversation_id), so a non-empty
+		// result here
 		// would mean the rows survived the conversation deletion — i.e. the
 		// cascade didn't fire. Empty proves the FK ON DELETE CASCADE took them.
 		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)

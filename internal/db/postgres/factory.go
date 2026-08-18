@@ -31,8 +31,8 @@ var _ db.FactoryReadStore = (*factoryReadStore)(nil)
 func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error) {
 	// Scoped to the viewer's teams by the same tracked-set semi-join the
 	// entity belt uses (factoryEventTrackedExists). The station header's
-	// other counters — Triggered24h (tasks) and ActiveConversations (runs) — are
-	// team-scoped because tasks/runs RLS is team-bound; events RLS is
+	// other counters — Triggered24h (tasks) and ActiveConversations — are
+	// team-scoped because tasks/conversations RLS is team-bound; events RLS is
 	// org-wide (events_all keys on org_id only), so without this an event
 	// on a PR outside the viewer's tracked set would inflate this team's
 	// "items at station" count even though that PR never appears on the

@@ -15,7 +15,7 @@ import (
 //   - the wired FactoryReadStore impl,
 //   - the orgID to pass to every call,
 //   - a FactorySeeder the harness uses to drop entities/events/
-//     tasks/runs/memory rows without coupling to per-backend INSERT
+//     tasks/conversations/memory rows without coupling to per-backend INSERT
 //     shapes (SQLite has no org_id column; Postgres has FK chains
 //     into orgs+users+teams).
 type FactoryStoreFactory func(t *testing.T) (store db.FactoryReadStore, orgID string, seed FactorySeeder)
@@ -56,7 +56,7 @@ type FactorySeeder struct {
 	// engagement is driving the conversation, so the seeder writes a NULL
 	// stored status and mints an active claim, exactly as a real claim
 	// would. Every other value is written to the column verbatim. Returns
-	// the run ID. Tests covering memory_missing pair this with
+	// the conversation ID. Tests covering memory_missing pair this with
 	// SetConversationMemory; tests covering status filtering do not.
 	Conversation func(t *testing.T, taskID, status string) string
 
@@ -229,7 +229,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		evID := seed.Event(t, ent, domain.EventGitHubPROpened, "", now, time.Time{})
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, "", evID, "queued", now)
 
-		// One run per memory state we need to cover.
+		// One conversation per memory state we need to cover.
 		conversationNoRow := seed.Conversation(t, taskID, "running")
 		conversationNullContent := seed.Conversation(t, taskID, "running")
 		conversationEmptyContent := seed.Conversation(t, taskID, "running")

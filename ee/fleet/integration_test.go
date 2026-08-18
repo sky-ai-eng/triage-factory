@@ -190,8 +190,9 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 
 // seedSandboxClaim stages one conversation and one claims row against it, in
 // whatever end state the case needs. Production accumulates these across a
-// run's whole life (enqueue → claim → complete → teardown stamp), and no
-// single store call reaches a chosen combination, so the fixture writes the
+// conversation's whole life (enqueue → claim → complete → teardown stamp),
+// and no single store call reaches a chosen combination, so the fixture
+// writes the
 // claim directly.
 func seedSandboxClaim(
 	t *testing.T, conn *sql.DB,

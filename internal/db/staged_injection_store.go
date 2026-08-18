@@ -12,8 +12,9 @@ import (
 // producer tag rides metadata). It is the terminal/parked half of the
 // staged-injection delivery seam: a producer that can't re-derive its
 // injection from a durable row of its own (the new-commits notifier)
-// appends here when the target run has no warm process, and the delegate
-// spawner flushes the run's pending injections ahead of the user's text on
+// appends here when the target conversation has no warm process, and the
+// delegate spawner flushes the conversation's pending injections ahead of the
+// user's text on
 // the next resume.
 //
 // All methods are admin-pool (`...System`) only, mirroring the read/write
@@ -23,8 +24,8 @@ import (
 // SQLite is N=1 and asserts LocalDefaultOrgID. There is no app-pool
 // variant — no request handler reads or writes the queue.
 type StagedInjectionStore interface {
-	// AppendSystem enqueues one injection for a run. The impl writes an
-	// undelivered message row and writes the row id back to n.ID (a
+	// AppendSystem enqueues one injection for a conversation. The impl writes
+	// an undelivered message row and writes the row id back to n.ID (a
 	// decimal string — messages ids are integers); CreatedAt is stamped by
 	// the DB default. The injection's Body is the bare, already-rendered
 	// line — the flush wraps and bundles. A failure to append is the one
@@ -36,7 +37,7 @@ type StagedInjectionStore interface {
 	AppendSystem(ctx context.Context, orgID string, n *domain.StagedInjection) error
 
 	// FlushPendingSystem atomically claims and returns every pending
-	// injection for the run, oldest-first (id ASC — insertion order),
+	// injection for the conversation, oldest-first (id ASC — insertion order),
 	// flipping delivered=true in the same statement (UPDATE ... RETURNING)
 	// so an injection is delivered exactly once even if two resumes race.
 	// Returns an empty slice (no error) when nothing is staged. The
@@ -46,10 +47,10 @@ type StagedInjectionStore interface {
 
 	// DeleteSystem withdraws one staged injection by id (the decimal
 	// message row id AppendSystem returned). Used to clean up a row staged
-	// onto a run that a post-stage recheck then decided wasn't (or is no
-	// longer) resumable after all — the caller falls through to a normal
+	// onto a conversation that a post-stage recheck then decided wasn't (or is
+	// no longer) resumable after all — the caller falls through to a normal
 	// deferral instead, and the staged row would otherwise be orphaned (or,
-	// worse, double-deliver if the run is later boot-recovered and
+	// worse, double-deliver if the conversation is later boot-recovered and
 	// resumed). The impl retires the row (window_state 'inactive', delivered
 	// KEPT false — withdrawn means "never happened", so it must not read as
 	// delivered transcript history) rather than deleting it — the executor's

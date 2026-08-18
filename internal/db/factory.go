@@ -15,7 +15,7 @@ import (
 //
 // Wired against the admin pool in Postgres: the factory snapshot is
 // a system-level view (no per-user identity required) and needs to
-// see every in-flight run regardless of which user kicked it off.
+// see every in-flight conversation regardless of which user kicked it off.
 // SQLite is single-tenant so the pool distinction collapses to "the
 // one connection."
 //
@@ -31,7 +31,7 @@ type FactoryReadStore interface {
 	// teams by the same tracked-set semi-join the entity belt uses, so
 	// the station header agrees with the belt and doesn't report
 	// activity on entities outside the team's tracked repos/projects
-	// (events RLS is org-wide, unlike tasks/runs). Local mode (SQLite)
+	// (events RLS is org-wide, unlike tasks/conversations). Local mode (SQLite)
 	// is unscoped — see Entities.
 	EventCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
@@ -63,7 +63,8 @@ type FactoryReadStore interface {
 	// belt. Local mode (SQLite) is unscoped.
 	TaskCountsSince(ctx context.Context, orgID string, since time.Time) (map[string]int, error)
 
-	// ActiveConversations returns every run currently in-flight (exactly those an
+	// ActiveConversations returns every conversation currently in-flight
+	// (exactly those an
 	// unreleased claim is driving) joined with its
 	// task and entity. Ordered by started_at DESC so the overlay can
 	// render most-recent-first without client-side sorting.

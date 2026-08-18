@@ -15,7 +15,7 @@ import (
 
 // humanFeedbackHeader marks the start of the human verdict in
 // materialized memory. Stable so the next agent's prompt context can
-// parse the boundary regardless of which run wrote which half.
+// parse the boundary regardless of which conversation wrote which half.
 const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
 
 // humanFeedbackSeparator is the divider rendered when both halves of
@@ -91,7 +91,7 @@ func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Conte
 			// Matching row exists; the UPDATE was a no-op.
 		case sql.ErrNoRows:
 			// Logged-and-returned-nil: if the conversation_memory row genuinely
-			// doesn't exist (cleanup race, taken-over run, etc.), the
+			// doesn't exist (cleanup race, taken-over conversation, etc.), the
 			// human's submit shouldn't fail. The agent-side upsert path
 			// will surface its own warning if it failed earlier.
 			memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
@@ -119,9 +119,10 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 
 // GetMemoriesForEntitySystem ignores teamID: local mode is single-tenant
 // (N=1, one team), so there is no cross-team memory to scope out — every
-// run on the entity belongs to the lone team. The param exists for parity
-// with the Postgres store, where the admin pool bypasses RLS and must
-// hand-roll the team filter off the materializing run's team_id (TFAC-506).
+// conversation on the entity belongs to the lone team. The param exists for
+// parity with the Postgres store, where the admin pool bypasses RLS and must
+// hand-roll the team filter off the materializing conversation's team_id
+// (TFAC-506).
 func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	_ = teamID
 	return s.GetMemoriesForEntity(ctx, orgID, entityID)

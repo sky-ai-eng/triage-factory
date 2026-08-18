@@ -39,8 +39,8 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	err := inTx(ctx, s.q, func(q queryer) error {
 		// The dedup target includes 'draining': a firing mid-drain is still
 		// queued intent for (task, trigger), and a duplicate enqueued during
-		// the drain window would fire a second run for the same intent as
-		// soon as the first one's run terminates.
+		// the drain window would fire a second blueprint run for the same intent
+		// as soon as the first one's conversation terminates.
 		res, err := q.ExecContext(ctx, `
 			INSERT INTO pending_firings (entity_id, task_id, trigger_id, triggering_event_id, status, queued_at)
 			VALUES (?, ?, ?, ?, 'pending', ?)

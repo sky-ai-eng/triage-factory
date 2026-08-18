@@ -150,7 +150,7 @@ residual; it does not make a shared executor equivalent to a dedicated one.
 - **TFAC-614 (sealed bundles)** is the substrate. This epic changes the
   recipient key (per-instance → per-run) and the unseal location
   (orchestrator → sidecar); the bundle format and the delivery table
-  (`run_credentials`) are unchanged.
+  (`claim_credentials`) are unchanged.
 - **TFAC-609 (control-plane App-token minting)** and **TFAC-616 (Bedrock STS
   session creds)** govern what goes *into* the bundle. They are orthogonal to
   where it is unsealed — the sidecar consumes whatever the bundle carries.

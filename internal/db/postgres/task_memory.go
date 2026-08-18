@@ -15,7 +15,7 @@ import (
 
 // humanFeedbackHeader marks the start of the human verdict in
 // materialized memory. Stable so the next agent's prompt context can
-// parse the boundary regardless of which run wrote which half.
+// parse the boundary regardless of which conversation wrote which half.
 const humanFeedbackHeader = "## Human feedback (post-run)\n\n"
 
 // humanFeedbackSeparator is the divider rendered when both halves of
@@ -37,7 +37,7 @@ const humanFeedbackSeparator = "\n\n---\n" + humanFeedbackHeader
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
 //     spawner's runAgent goroutine routes here for both the
-//     post-completion UpsertAgentMemorySystem and the run-start
+//     post-completion UpsertAgentMemorySystem and the engagement-start
 //     GetMemoriesForEntitySystem materialization. org_id stays bound
 //     in the INSERT/SELECT as defense in depth.
 type taskMemoryStore struct {
@@ -66,8 +66,8 @@ func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, co
 // intact across retries.
 //
 // created_at is bound from Go-side time.Now() rather than the schema
-// DEFAULT now() so multi-run bursts within the same Postgres tx don't
-// tie on the tx-start timestamp — matches the EventStore pattern.
+// DEFAULT now() so multi-conversation bursts within the same Postgres tx
+// don't tie on the tx-start timestamp — matches the EventStore pattern.
 // Empty / whitespace-only content canonicalizes to SQL NULL so
 // downstream consumers (factory's memory_missing derivation) see a
 // single truth condition for "agent didn't comply with the gate."
@@ -143,8 +143,9 @@ func (s *taskMemoryStore) GetMemoriesForEntity(ctx context.Context, orgID, entit
 
 // GetMemoriesForEntitySystem reads on the admin pool (BYPASSRLS), so the
 // team scoping the app-pool variant inherits from RLS (conversation_memory_all
-// delegates to conversations_select) is hand-rolled here off the materializing
-// run's owning team_id. See getMemoriesForEntityTeamScoped + TFAC-506.
+// delegates to conversations_select) is hand-rolled here off the
+// materializing conversation's owning team_id. See
+// getMemoriesForEntityTeamScoped + TFAC-506.
 func (s *taskMemoryStore) GetMemoriesForEntitySystem(ctx context.Context, orgID, entityID, teamID string) ([]domain.TaskMemory, error) {
 	return getMemoriesForEntityTeamScoped(ctx, s.admin, orgID, entityID, teamID)
 }
@@ -164,13 +165,14 @@ func getMemoriesForEntity(ctx context.Context, q queryer, orgID, entityID string
 
 // getMemoriesForEntityTeamScoped is the admin-pool (BYPASSRLS) read that
 // reproduces, without RLS, the team scoping the app-pool path gets for
-// free: a JOIN to the parent run plus the visibility branches of
-// conversations_select. The materializing run has no JWT-claims context, so we
-// scope by its owning team_id directly — return the memory whose parent
-// run that team can see: any org-visible run, plus team-visible runs the
-// team owns. Private-visibility runs are excluded (creator-scoped, no
-// user to match here; every run is visibility='team' today, so the 'org'
-// arm is forward-compat). teamID binds through NULLIF(...)::uuid so an
+// free: a JOIN to the parent conversation plus the visibility branches of
+// conversations_select. The engagement-start materializer has no JWT-claims
+// context, so we scope by the materializing conversation's owning team_id
+// directly — return the memory whose parent conversation that team can see:
+// any org-visible conversation, plus team-visible conversations the team
+// owns. Private-visibility conversations are excluded (creator-scoped, no
+// user to match here; every conversation is visibility='team' today, so the
+// 'org' arm is forward-compat). teamID binds through NULLIF(...)::uuid so an
 // (in practice impossible) empty team_id degrades to "org-visible only"
 // rather than a uuid cast error. org_id stays in the WHERE clause and on
 // the JOIN as defense in depth alongside the now-bypassed RLS policy.

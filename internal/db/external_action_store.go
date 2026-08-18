@@ -17,14 +17,15 @@ import (
 //
 //   - Record runs on the APP pool (RLS-active). It composes inside the
 //     claims-bearing WithTx that runs the action it audits — the manual bot
-//     runs (under synthetic claims) and the server approval/board handlers
+//     conversations (under synthetic claims) and the server approval/board
+//     handlers
 //     (under the approver/dragger's claims) — so the external_actions_all RLS
 //     policy's WITH CHECK is exercised and the row commits or rolls back
 //     atomically with the action's own DB state change.
 //   - RecordSystem runs on the ADMIN pool (BYPASSRLS) for writers that hold a
-//     real (org_id) identity but no JWT-claims context: the event-triggered bot
-//     runs and the Jira board mirror, neither of which has a user to bind claims
-//     for. Mirrors the `...System` admin halves on Artifacts / Reviews.
+//     real (org_id) identity but no JWT-claims context: the event-triggered
+//     bot conversations and the Jira board mirror, neither of which has a
+//     user to bind claims for. Mirrors the `...System` admin halves on Artifacts / Reviews.
 //
 // Both Record paths use ON CONFLICT(org_id, dedup_key) DO NOTHING — append-only,
 // never a mutation. An empty entry.DedupKey is filled with a uuid (a unique,
@@ -70,15 +71,17 @@ type ExternalActionStore interface {
 	// authorization is enforced at the HTTP handler. Bounded + filtered by opts.
 	ListByTeam(ctx context.Context, orgID, teamID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
-	// ListByConversation returns one conversation's actions, newest first — what a single
-	// run did to the outside world, the sibling of Artifacts.ListByConversation. App pool
+	// ListByConversation returns one conversation's actions, newest first —
+	// what a single conversation did to the outside world, the sibling of
+	// Artifacts.ListByConversation. App pool
 	// in Postgres under the same org-scoped policy as ListByTeam; the handler
-	// reads the conversation first, so a run the caller's team cannot see is a
+	// reads the conversation first, so a conversation the caller's team cannot
+	// see is a
 	// 404 before this runs. Bounded + filtered by opts.
 	//
 	// It is a separate read rather than a filter on ListByTeam because the two
 	// answer different questions and are reached from different surfaces: this
 	// one needs no governance entitlement, since a member of the owning team is
-	// already reading that run's transcript and artifacts.
+	// already reading that conversation's transcript and artifacts.
 	ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 }

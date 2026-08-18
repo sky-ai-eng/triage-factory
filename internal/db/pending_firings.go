@@ -12,8 +12,8 @@ import (
 // PendingFiringsStore owns the pending_firings table — the FIFO queue
 // of "intent to auto-delegate" rows the router enqueues whenever an
 // event matches a trigger but the task already has an active auto
-// run (or earlier queued firings ahead of it). The drain loop pops
-// them in queue order as auto runs terminate.
+// conversation (or earlier queued firings ahead of it). The drain loop pops
+// them in queue order as auto conversations terminate.
 //
 // The queue drains per TASK, matching the gate that fills it. An
 // entity-shaped queue under a task-shaped gate would reintroduce the
@@ -31,7 +31,7 @@ import (
 //
 // The per-task firing gate is composed at the call site (router)
 // from HasPendingForTask here + ConversationStore.HasActiveAutoConversationForTask
-// — strict ownership rather than threading a runs-shaped predicate
+// — strict ownership rather than threading a conversation-shaped predicate
 // through this store.
 type PendingFiringsStore interface {
 	// Enqueue inserts a pending firing for (entity, task, trigger).
@@ -52,8 +52,8 @@ type PendingFiringsStore interface {
 	// userID — the local schema has no creator column.
 	//
 	// claim rides the same transaction as the insert: a queued firing is a
-	// real commitment (the bot has taken the task, the run just hasn't
-	// started), so the claim lands with the row or not at all — see
+	// real commitment (the bot has taken the task, the conversation just
+	// hasn't started), so the claim lands with the row or not at all — see
 	// AgentClaimStamp. It is skipped on the collapse path, where the
 	// already-queued duplicate's own enqueue stamped it. Returns
 	// claimed=true only when the stamp actually moved the claim; a refusal
@@ -99,7 +99,7 @@ type PendingFiringsStore interface {
 	// This is the crash recovery for the claiming pop: a drainer that
 	// died between PopForTask and MarkFired/MarkSkipped/Release leaves
 	// a row nothing else will ever touch. Deliberately staleness-based
-	// rather than ownership-scoped (contrast runs/event_queue):
+	// rather than ownership-scoped (contrast conversations/event_queue):
 	// a firing claim is a milliseconds-scale DB transaction, not
 	// long-lived owned work, and redelivery is safe — the (event,
 	// trigger) fence and the one-active-per-task index absorb a
@@ -128,7 +128,7 @@ type PendingFiringsStore interface {
 	// pending_firings row in 'pending' OR 'draining' status. The router
 	// composes this with ConversationStore.HasActiveAutoConversationForTask to
 	// enforce FIFO drainage — a new firing must queue behind older
-	// queued rows OR an active auto run on the same task. 'draining'
+	// queued rows OR an active auto conversation on the same task. 'draining'
 	// counts as queued intent: a drain mid-flight (popped but not yet
 	// fired) must still close the gate, or a fresh event in that window
 	// would fire immediately and jump the queue.

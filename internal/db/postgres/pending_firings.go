@@ -20,7 +20,8 @@ import (
 // kept honest by the explicit filter here in case the policy is ever
 // loosened).
 //
-// The per-task firing gate's runs-shaped half lives on ConversationStore —
+// The per-task firing gate's conversation-shaped half lives on
+// ConversationStore —
 // strict ownership. The router composes the gate from this store's
 // HasPendingForTask + ConversationStore's HasActiveAutoConversationForTask.
 type pendingFiringsStore struct{ q queryer }
@@ -63,9 +64,9 @@ func (s *pendingFiringsStore) Enqueue(ctx context.Context, orgID, userID, entity
 	err := inTx(ctx, s.q, func(q queryer) error {
 		// The dedup target includes 'draining': a firing mid-drain is still
 		// queued intent for (task, trigger), and a duplicate enqueued during
-		// the drain window would fire a second run for the same intent as
-		// soon as the first one's run terminates. The predicate must stay
-		// textually equivalent to idx_pending_firings_dedup for conflict
+		// the drain window would fire a second blueprint run for the same intent
+		// as soon as the first one's conversation terminates. The predicate must
+		// stay textually equivalent to idx_pending_firings_dedup for conflict
 		// inference.
 		res, err := q.ExecContext(ctx, `
 			INSERT INTO pending_firings
