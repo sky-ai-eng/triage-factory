@@ -224,6 +224,134 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 	return os.ReadFile(name)
 }
 
+// skillsExcludePath is the capture's git-pathspec spelling of the skills path
+// — forward slashes always, unlike skillsLinkRel's OS-path form, because it
+// is handed to git as a pathspec rather than resolved on the filesystem.
+const skillsExcludePath = ".claude/skills"
+
+// changeScopedPathspecLimit caps how many changed paths the scoped stage in
+// captureUncommitted will name before falling back to the full `add -A`.
+// Pathspec matching is a per-index-entry scan over the pathspec set, so a
+// change set in the thousands against a large index turns the scoped stage
+// quadratic — and a tree where thousands of paths changed is one where the
+// full re-hash was never the wasteful part. A var, not a const, so the
+// fallback arm is testable without minting a thousand files.
+var changeScopedPathspecLimit = 1000
+
+// changedPathsVsHEAD is the read-only pre-pass that makes captureUncommitted
+// change-scoped: `git status` against the worktree's REAL index, whose stat
+// cache answers "what differs?" from lstat alone — the throwaway index below
+// has no stat cache, so staging through it re-reads and re-hashes every file
+// in the tree, a fixed O(tree) cost per park even when nothing changed.
+//
+// Returns the union of paths from both status columns (index-vs-HEAD and
+// worktree-vs-index, both sides of a rename record, untracked entries). That
+// union is a superset of every path where the worktree differs from HEAD:
+// worktree≠HEAD implies worktree≠index or index≠HEAD, so a path in neither
+// column cannot contribute to the patch. Staging only these paths into the
+// HEAD-seeded temp index therefore yields the same diff the full stage
+// would.
+//
+// ok=false means the pre-pass is unusable — status failed, produced a record
+// this parser does not recognize, or the change set is past
+// changeScopedPathspecLimit — and the caller takes the full `add -A` path,
+// which remains the semantics of record. ok=true with no paths means the
+// tree matches HEAD exactly: nothing uncommitted to capture.
+//
+// Two flags keep the read honest. --no-optional-locks stops status from
+// opportunistically refreshing the real index, so the agent's staging (which
+// a warm resume reads back) is untouched even at the stat-cache level. An
+// explicit --untracked-files=normal overrides any status.showUntrackedFiles
+// config in the run root — the repo's (or agent's) display preference must
+// not hide untracked files from the capture.
+func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok bool) {
+	out, err := gitCapture(ctx, wtPath, nil, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal")
+	if err != nil {
+		return nil, false
+	}
+	tokens := strings.Split(string(out), "\x00")
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		if tok == "" {
+			continue // the trailing terminator
+		}
+		if len(tok) < 4 || tok[2] != ' ' {
+			// Not a record this parser recognizes — refuse to guess what a
+			// future porcelain emits and take the full path instead.
+			return nil, false
+		}
+		xy := tok[:2]
+		// A collapsed untracked-directory record ends in "/". The pathspec is
+		// written under :(literal) magic, which keeps that slash literally and
+		// then matches no path at all (nothing ends in a slash) — strip it, so
+		// the pathspec names the directory and directory-prefix matching
+		// covers its contents.
+		paths = append(paths, strings.TrimSuffix(tok[3:], "/"))
+		// A rename/copy record carries its second pathname as the following
+		// token. Both sides belong in the set (one holds the content, the
+		// other the deletion), which also makes the parse indifferent to
+		// which of the two git printed first.
+		if strings.ContainsAny(xy, "RC") && i+1 < len(tokens) {
+			i++
+			if other := tokens[i]; other != "" {
+				paths = append(paths, strings.TrimSuffix(other, "/"))
+			}
+		}
+		if len(paths) > changeScopedPathspecLimit {
+			return nil, false
+		}
+	}
+	return paths, true
+}
+
+// stageChangedPaths stages the pre-pass's changed paths into the temp index.
+// The pathspecs travel by file, NUL-separated — never argv, so the set can't
+// hit a command-length limit and a path is arbitrary bytes. Each changed path
+// is written under `:(literal)` magic, because these are filenames, not
+// patterns: a name containing a glob metacharacter must match itself, and
+// must not be re-interpreted into a wildcard that could explicitly name an
+// ignored file (which `git add` refuses outright, where recursing past one is
+// silent). Per-entry magic rather than the --literal-pathspecs global flag
+// because the same set carries the capture's exclusions as `:(exclude)`
+// specs, and the global flag would strip that magic too.
+//
+// Carrying the exclusions here — instead of add-then-`reset` the way the full
+// stage does — is load-bearing for performance, not tidiness. `git reset`
+// ends by refreshing the index it touched, and refreshing this HEAD-seeded
+// temp index (whose entries carry no stat information) re-hashes every file
+// in the tree: the exact O(tree) cost the scoped stage exists to avoid, paid
+// right back by the cleanup. Never staging the excluded paths reaches the
+// same index state — the read-tree seed already holds HEAD's entries for
+// them — with no reset to trigger the refresh. It also handles the collapsed
+// untracked-dir case (`?? .claude/` when nothing under it is tracked): the
+// exclusion applies inside the recursive add, so a skills tree under an
+// otherwise-captured directory still stays out.
+func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths []string) error {
+	f, err := os.CreateTemp("", "tf-pathspec-*")
+	if err != nil {
+		return fmt.Errorf("pathspec tempfile: %w", err)
+	}
+	name := f.Name()
+	defer func() { _ = os.Remove(name) }()
+	for _, p := range paths {
+		if _, err := f.WriteString(":(literal)" + p + "\x00"); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write pathspec: %w", err)
+		}
+	}
+	for _, excl := range []string{ScratchDir, skillsExcludePath} {
+		if _, err := f.WriteString(":(exclude)" + excl + "\x00"); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("write exclude pathspec: %w", err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("flush pathspec: %w", err)
+	}
+	_, err = gitCapture(ctx, wtPath, env, "add", "-A", "--pathspec-from-file="+name, "--pathspec-file-nul")
+	return err
+}
+
 // captureUncommitted produces one binary patch of every uncommitted change in
 // wtPath via a throwaway index seeded from HEAD: stage everything (add -A
 // records modifications, deletions, and untracked additions alike), drop the
@@ -231,6 +359,13 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // GIT_INDEX_FILE keeps the worktree's real index untouched so a warm-path
 // resume still sees the agent's staging exactly as it left it. Returns
 // (nil, nil) for a clean tree.
+//
+// The stage is change-scoped when changedPathsVsHEAD can say what changed: a
+// clean tree skips the temp index entirely (the common idle-park case), and a
+// dirty one stages only the changed paths, so the capture's cost follows the
+// size of the delta rather than the size of the repository. The full `add -A`
+// survives as the fallback and the semantics of record — the scoped stage
+// must produce a byte-identical patch or not run at all.
 //
 // _tfac is removed from the staged set explicitly rather than left to the
 // worktree's excludes: snapshot owns the _tfac capture separately (skipping
@@ -250,6 +385,13 @@ func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, err
 // either way, but carries them so no diff here reads as license for a flag-less
 // one.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
+	changed, scoped := changedPathsVsHEAD(ctx, wtPath)
+	if scoped && len(changed) == 0 {
+		// The real index's stat cache says the tree matches HEAD exactly —
+		// nothing uncommitted to carry, and no temp index to build.
+		return nil, nil
+	}
+
 	idx, err := os.CreateTemp("", "tf-index-*")
 	if err != nil {
 		return nil, fmt.Errorf("temp index: %w", err)
@@ -265,40 +407,68 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
 		return nil, fmt.Errorf("seed temp index: %w", err)
 	}
-	if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
-		return nil, fmt.Errorf("stage worktree: %w", err)
+	if scoped {
+		// A scoped stage can fail legitimately: a pathspec can match nothing
+		// in the temp-index world — a file staged in the REAL index and then
+		// deleted from the worktree exists in neither HEAD nor the tree — and
+		// `git add` treats an unmatched pathspec as fatal. Any failure here
+		// demotes to the full stage rather than failing the capture, after
+		// re-seeding the index: the failed add may have staged part of the
+		// set before it stopped.
+		if sErr := stageChangedPaths(ctx, wtPath, env, changed); sErr != nil {
+			scoped = false
+			if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
+				return nil, fmt.Errorf("re-seed temp index: %w", err)
+			}
+		}
 	}
-	// `reset` rather than `rm --cached`, for the reason spelled out at the
-	// `.claude/skills` drop below: reset restores HEAD's entry for the path, so a
-	// repo that legitimately TRACKS files under our directory doesn't come back
-	// from the snapshot with them recorded as deletions. For the ordinary
-	// untracked case it drops the entry outright, which is what we want — the
-	// working-tree files stay on disk either way, only the temp index changes.
-	if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
-		return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
-	}
-	// Keep `.claude/skills` out of the delta for the same reason: it is TF
-	// mechanism, not the agent's work. In a sandboxed tree the path is our symlink
-	// to the read-only skills mount, and in local mode it's the materialized
-	// SKILL.md — carrying either would persist TF plumbing into a snapshot that a
-	// future restore re-establishes for itself.
-	//
-	// `reset` rather than `rm --cached`: reset restores HEAD's entry for the path,
-	// so a repo that legitimately TRACKS `.claude/skills` doesn't come back from
-	// the snapshot with those files recorded as deletions (which is exactly what
-	// dropping them from the staged set would produce, since HEAD still has them).
-	//
-	// Guarded on the path actually appearing in the diff so the reset only ever
-	// runs with a matching pathspec. Most captures — every non-blueprint run, and
-	// any repo without a `.claude` — have nothing there at all, and `git reset`'s
-	// treatment of a pathspec that matches neither the index nor HEAD is not a
-	// contract worth betting EVERY snapshot capture on. When the diff is empty the
-	// reset would be a no-op anyway, so the guard costs nothing but the read.
-	if changed, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); err != nil {
-		return nil, fmt.Errorf("check .claude/skills in temp index: %w", err)
-	} else if len(bytes.TrimSpace(changed)) > 0 {
-		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ".claude/skills"); err != nil {
-			return nil, fmt.Errorf("drop .claude/skills from temp index: %w", err)
+	if !scoped {
+		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
+			return nil, fmt.Errorf("stage worktree: %w", err)
+		}
+		// The full stage's exclusions are add-then-reset; the scoped stage
+		// carries them as `:(exclude)` pathspecs instead and MUST NOT run
+		// these resets — `git reset` ends by refreshing the index, and
+		// refreshing the temp index's zero-stat entries re-hashes the whole
+		// tree, the exact cost the scoped stage exists to avoid. After the
+		// full `add -A` the refresh is cheap (add just wrote fresh stat
+		// information for everything it touched), so the resets stay here.
+		//
+		// `reset` rather than `rm --cached`, for the reason spelled out at the
+		// `.claude/skills` drop below: reset restores HEAD's entry for the path,
+		// so a repo that legitimately TRACKS files under our directory doesn't
+		// come back from the snapshot with them recorded as deletions. For the
+		// ordinary untracked case it drops the entry outright, which is what we
+		// want — the working-tree files stay on disk either way, only the temp
+		// index changes.
+		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
+			return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
+		}
+		// Keep `.claude/skills` out of the delta for the same reason: it is TF
+		// mechanism, not the agent's work. In a sandboxed tree the path is our
+		// symlink to the read-only skills mount, and in local mode it's the
+		// materialized SKILL.md — carrying either would persist TF plumbing into
+		// a snapshot that a future restore re-establishes for itself.
+		//
+		// `reset` rather than `rm --cached`: reset restores HEAD's entry for the
+		// path, so a repo that legitimately TRACKS `.claude/skills` doesn't come
+		// back from the snapshot with those files recorded as deletions (which is
+		// exactly what dropping them from the staged set would produce, since
+		// HEAD still has them).
+		//
+		// Guarded on the path actually appearing in the diff so the reset only
+		// ever runs with a matching pathspec. Most captures — every
+		// non-blueprint run, and any repo without a `.claude` — have nothing
+		// there at all, and `git reset`'s treatment of a pathspec that matches
+		// neither the index nor HEAD is not a contract worth betting EVERY
+		// snapshot capture on. When the diff is empty the reset would be a
+		// no-op anyway, so the guard costs nothing but the read.
+		if staged, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", skillsExcludePath); err != nil {
+			return nil, fmt.Errorf("check %s in temp index: %w", skillsExcludePath, err)
+		} else if len(bytes.TrimSpace(staged)) > 0 {
+			if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", skillsExcludePath); err != nil {
+				return nil, fmt.Errorf("drop %s from temp index: %w", skillsExcludePath, err)
+			}
 		}
 	}
 	patch, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD")
@@ -521,12 +691,14 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // gitOutputCtx, which combines the two. env, when non-nil, replaces the
 // child's environment (used to point GIT_INDEX_FILE at a throwaway index).
 //
-// captureUncommitted's `git add -A` / `git diff` go through here. Unlike the
-// push-gate's metadata reads (a byte read of HEAD, and config read from OUTSIDE
-// any repository — neither of which lets an agent-writable config run
-// anything), add/diff DO consult the repository's own (agent-writable, once
-// chowned to the sandbox uid) `.gitattributes` + `.git/config` to decide
-// whether to invoke an external clean/smudge filter or diff driver.
+// captureUncommitted's `git status` / `git add -A` / `git diff` go through
+// here. Unlike the push-gate's metadata reads (a byte read of HEAD, and config
+// read from OUTSIDE any repository — neither of which lets an agent-writable
+// config run anything), status/add/diff DO consult the repository's own
+// (agent-writable, once chowned to the sandbox uid) `.gitattributes` +
+// `.git/config` to decide whether to invoke an external clean/smudge filter
+// or diff driver (status runs clean filters when a racy-stat file forces a
+// content compare).
 //
 // In multi mode this no longer runs as host root: captureWorkspaceGit's
 // dispatcher (internal/delegate/capture_isolated.go) routes every multi-mode
