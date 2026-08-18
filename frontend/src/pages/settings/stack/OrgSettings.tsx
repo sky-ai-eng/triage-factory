@@ -15,14 +15,15 @@
 //
 // What Settings adds over /setup is the per-section Save model (the approved
 // design): expand a section, edit its draft, Save (or Cancel/discard). The
-// org-form sections all persist through the single org-settings PATCH, so
-// each saves {...baseline.org, ...ownFields} against the LIVE baseline — saving
-// one never flushes another's unsaved edits. Selector/panel sections (the
-// GitHub access control, the App register panel) carry no Save footer, and Jira
-// disconnect commits inline on its own button. The Jira *credential* is the
-// exception that proves the rule it used to break: its Save footer ("Connect" /
-// "Replace credential") drives PUT /api/orgs/{org}/jira/access/credential rather
-// than the org POST, but it's a footer all the same.
+// org-form sections all persist through the single org-settings PATCH, each
+// sending ONLY its own fields — so saving one section never flushes another's
+// unsaved edits, and never carries a value its user wasn't looking at.
+// Selector/panel sections (the GitHub access control, the App register panel)
+// carry no Save footer, and Jira disconnect commits inline on its own button.
+// The Jira *credential* is the exception that proves the rule it used to
+// break: its Save footer ("Connect" / "Replace credential") drives
+// PUT /api/orgs/{org}/jira/access/credential rather than the org POST, but
+// it's a footer all the same.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
@@ -54,8 +55,10 @@ import {
   dailyCapError,
   concurrentRunsError,
   MAX_CONCURRENT_RUNS_CEILING,
-  saveOrgConfig,
+  fetchOrgSettings,
+  patchOrgSettings,
   type OrgConfigForm,
+  type OrgSettingsPatch,
 } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
 import { disconnectGitHubPAT, disconnectJira } from '../orgCredentials'
@@ -166,10 +169,11 @@ export default function OrgSettings({
     return cancel
   }, [load])
 
-  // commitOrgSlice persists one section's fields merged onto the LIVE baseline
-  // org form (the single org-settings PATCH), folding the slice back in on
-  // success. github_pat is always sent blank in the baseline (the stored token
-  // never round-trips); a section that owns it passes the typed value in `slice`.
+  // commitOrgSlice persists one section's fields through the org-settings
+  // PATCH, folding the slice back into the baseline on success. Only the
+  // slice's own fields ride the wire — the PATCH's absent-means-keep contract
+  // covers the rest — so a section can never carry a neighbour's draft or
+  // clobber a concurrent change to fields it doesn't own.
   //
   // The baseline carries the row's concurrency token, so the fold-back has to
   // include the version the save just produced — the next section's save
@@ -178,16 +182,11 @@ export default function OrgSettings({
   // reloads the whole group rather than reporting a retryable error: the draft
   // the user is looking at was assembled from a row that no longer exists.
   const commitOrgSlice = useCallback(
-    async (key: string, slice: Partial<OrgConfigForm>, label: string): Promise<boolean> => {
+    async (key: string, slice: OrgSettingsPatch, label: string): Promise<boolean> => {
       if (!orgId) return false
       setSavingKey(key, true)
       try {
-        const next: OrgConfigForm = {
-          ...baseline.org,
-          ...slice,
-          github_pat: slice.github_pat ?? '',
-        }
-        const res = await saveOrgConfig(orgId, next)
+        const res = await patchOrgSettings(orgId, baseline.org.version, slice)
         if (!res.ok) {
           toast.error(res.error)
           if (res.conflict) load()
@@ -195,7 +194,7 @@ export default function OrgSettings({
         }
         setBaseline((b) => ({
           ...b,
-          org: { ...b.org, ...slice, github_pat: '', version: res.settings.version },
+          org: { ...b.org, ...slice, version: res.settings.version },
         }))
         if (res.settings.warning) toast.info(res.settings.warning)
         toast.success(`${label} saved`)
@@ -204,8 +203,24 @@ export default function OrgSettings({
         setSavingKey(key, false)
       }
     },
-    [baseline.org, orgId, load],
+    [baseline.org.version, orgId, load],
   )
+
+  // refreshOrgVersion folds the settings row's current concurrency token into
+  // the live baseline + draft after a write that lands OUTSIDE the settings
+  // PATCH: the credential binds and unbinds persist their host / key-ref
+  // columns on the same row server-side, which bumps the token, so the one
+  // this screen holds goes stale the moment a connect succeeds — and the next
+  // section's save would 409 against a change this same screen just made.
+  // Best-effort: on a failed re-read the held token stands, and the save
+  // path's conflict → reload recovers.
+  const refreshOrgVersion = useCallback(async () => {
+    if (!orgId) return
+    const fresh = await fetchOrgSettings(orgId)
+    if (!fresh) return
+    setBaseline((b) => ({ ...b, org: { ...b.org, version: fresh.version } }))
+    setDraft((d) => ({ ...d, org: { ...d.org, version: fresh.version } }))
+  }, [orgId])
 
   // revertOrg resets the named org fields in the draft back to the baseline —
   // a section's Cancel, scoped so it never touches a neighbour's edits.
@@ -470,6 +485,8 @@ export default function OrgSettings({
                 jiraDeployment: null,
                 org: { ...b.org, jira_url: '' },
               }))
+              // The disconnect also cleared the URL on the settings row.
+              void refreshOrgVersion()
             }}
             bare
           />
@@ -520,6 +537,8 @@ export default function OrgSettings({
                 toast.error(result.error)
                 return false
               }
+              // The bind also persisted the URL onto the settings row.
+              await refreshOrgVersion()
               setDraft((d) => ({
                 ...d,
                 jiraConnected: true,
@@ -807,6 +826,8 @@ export default function OrgSettings({
                 toast.error(r.error)
                 return false
               }
+              // The bind persisted its key ref onto the settings row.
+              await refreshOrgVersion()
               const clearSecrets = {
                 bedrock_bearer_token: '',
                 aws_access_key_id: '',
@@ -857,6 +878,8 @@ export default function OrgSettings({
               toast.error(r.error)
               return false
             }
+            // Bind and removal alike rewrite the key refs on the settings row.
+            await refreshOrgVersion()
             const nowConfigured = !useSystem
             const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
             const apply = (s: WizardState): WizardState => ({

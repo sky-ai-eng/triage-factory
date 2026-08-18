@@ -74,7 +74,7 @@ export interface JiraConnectCreds {
 // against that deployment's struct alone, so the other one's fields are a 400
 // rather than something quietly dropped; sending only the chosen pair is
 // therefore a requirement, not a tidiness. Returns a discriminated result
-// mirroring saveOrgConfig — the caller surfaces the error inline (wizard error
+// mirroring patchOrgSettings — the caller surfaces the error inline (wizard error
 // line) or as a toast (Settings).
 export async function connectJira(
   orgId: string,

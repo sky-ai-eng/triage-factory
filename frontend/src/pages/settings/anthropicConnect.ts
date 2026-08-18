@@ -11,7 +11,7 @@
 // Bedrock secret too", which is why "use system credentials" is now two
 // explicit disconnects (disconnectLLM below) rather than one overloaded write.
 //
-// Returns a discriminated result mirroring connectJira / saveOrgConfig — the
+// Returns a discriminated result mirroring connectJira / patchOrgSettings — the
 // caller surfaces the error inline (wizard error line) or as a toast (Settings).
 
 // CLAUDE_SOURCE_OPTIONS is the shared label set for the "system creds vs BYOK"

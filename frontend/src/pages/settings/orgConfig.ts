@@ -1,9 +1,9 @@
 // Shared types + persistence helpers for the org-level configuration
 // surface (GitHub + Jira access, poller timing, model cap). The same
 // helpers back the Settings workspace tab and the create-time setup wizard
-// (both modes) — every surface round-trips the identical org_settings
-// shape via the existing endpoints, so there is no parallel persistence path
-// to drift.
+// (both modes) — every surface saves through the one field-scoped settings
+// PATCH below, naming only the fields it edited, so there is no parallel
+// persistence path to drift and no save that round-trips a whole form.
 
 import { apiJSON, httpErrorMessage, HttpError } from '../../lib/apiClient'
 
@@ -41,21 +41,21 @@ export interface OrgConfigForm {
   // Org-wide daily LLM spend cap (TFAC-477), held as the raw text input. Empty =
   // "no cap"; a numeric string is the per-day USD ceiling. Stored as a string
   // (not a number) so the input can be cleared to "" cleanly and partial typing
-  // works; saveOrgConfig converts it to the wire number.
+  // works; patchOrgSettings converts it to the wire number.
   max_daily_cost_usd: string
   // Org-wide concurrent-run limit, held as the raw text input. Empty (or 0) =
   // "unlimited"; a positive integer string is the ceiling on runs executing at
   // once across the fleet. Held as a string for the same reasons as
-  // max_daily_cost_usd; saveOrgConfig converts it to the wire number.
+  // max_daily_cost_usd; patchOrgSettings converts it to the wire number.
   max_concurrent_runs: string
   // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
   // leaves the vault, like jira_pat. It is captured ONLY via the validated
-  // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
-  // the bulk settings POST can't be an unvalidated write path.
+  // connectAnthropic endpoint and is not part of OrgSettingsPatch, so the
+  // settings PATCH can't be an unvalidated write path.
   anthropic_api_key: string
   // ── Amazon Bedrock (alternative Claude provider) ── Captured ONLY via the
-  // validated connectBedrock endpoint, never sent by saveOrgConfig — same rule
-  // as anthropic_api_key. The secret fields (bearer token / key pair / session
+  // validated connectBedrock endpoint, never part of OrgSettingsPatch — same
+  // rule as anthropic_api_key. The secret fields (bearer token / key pair / session
   // token) stay blank on load; presence rides has_bedrock_credentials +
   // bedrock_auth_method. The non-secret config (method, region, model,
   // endpoint) round-trips so the form shows current values.
@@ -124,7 +124,7 @@ export interface OrgSettingsData {
   bedrock_model_id?: string
   bedrock_base_url?: string
   member_count: number
-  // The row's concurrency token. saveOrgConfig sends it back and the server
+  // The row's concurrency token. patchOrgSettings sends it back and the server
   // 409s a save whose token is stale, so two admins editing different sections
   // can't silently undo each other.
   version: number
@@ -288,46 +288,71 @@ function blankAsNull(v: string): string | null {
   return v.trim() === '' ? null : v
 }
 
-// saveOrgConfig persists the org-level CONFIG via
-// PATCH /api/orgs/{org}/settings.
+// OrgSettingsPatch names the fields a caller may send to the settings PATCH,
+// in form shape (patchOrgSettings owns the conversion to wire values). A
+// caller passes exactly the fields it edited and the PATCH's absent-means-keep
+// contract does the rest, so one surface's save can never carry — or clobber —
+// a value its user wasn't looking at. Credentials aren't representable here at
+// all: the GitHub PAT, the Jira service credential and the LLM provider
+// material each bind through their own validated resource.
+export type OrgSettingsPatch = Partial<
+  Pick<
+    OrgConfigForm,
+    | 'github_url'
+    | 'github_poll_interval'
+    | 'github_clone_protocol'
+    | 'jira_url'
+    | 'jira_poll_interval'
+    | 'max_llm_model_tier'
+    | 'max_daily_cost_usd'
+    | 'max_concurrent_runs'
+  >
+>
+
+// patchOrgSettings persists org-level CONFIG via PATCH /api/orgs/{org}/settings,
+// sending ONLY the fields the caller names. Base URLs stay on this route —
+// they're host config the GitHub App path needs before any credential exists —
+// and clearing one no longer destroys the matching credential.
 //
-// It sends no secrets. The GitHub PAT, the Jira service credential and the LLM
-// provider material each have their own resource, so there is no "leave blank
-// to keep current" dance on the wire: a credential you didn't retype simply
-// isn't part of this request. Base URLs stay here — they're host config the
-// GitHub App path needs before any credential exists — and clearing one no
-// longer destroys the matching credential.
-//
-// `form.version` is the token the form was loaded at. A concurrent admin save
-// makes this one a 409, reported as `conflict` so the caller can reload rather
-// than telling the user to retry a write that will keep failing.
+// `version` is the token the caller's copy of the row was loaded (or last
+// saved) at. A write that lost a race makes this a 409, reported as `conflict`
+// so the caller can re-read rather than telling the user to retry a write that
+// will keep failing.
 //
 // Returns the post-save settings so the caller can refresh its baseline —
 // crucially including the new version, without which the next save would 409
 // against its own write.
-export async function saveOrgConfig(
+export async function patchOrgSettings(
   orgId: string,
-  form: OrgConfigForm,
+  version: number,
+  fields: OrgSettingsPatch,
 ): Promise<
   { ok: true; settings: OrgSettingsData } | { ok: false; error: string; conflict: boolean }
 > {
+  const body: Record<string, unknown> = { version }
+  if (fields.github_url !== undefined) body.github_base_url = blankAsNull(fields.github_url)
+  if (fields.github_poll_interval !== undefined)
+    body.github_poll_interval = fields.github_poll_interval
+  if (fields.github_clone_protocol !== undefined)
+    body.github_clone_protocol = fields.github_clone_protocol
+  if (fields.jira_url !== undefined) body.jira_base_url = blankAsNull(fields.jira_url)
+  if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
+  if (fields.max_llm_model_tier !== undefined)
+    body.max_llm_model_tier = blankAsNull(fields.max_llm_model_tier)
+  if (fields.max_daily_cost_usd !== undefined)
+    body.max_daily_cost_usd = numericOrNull(fields.max_daily_cost_usd)
+  if (fields.max_concurrent_runs !== undefined)
+    body.max_concurrent_runs = numericOrNull(fields.max_concurrent_runs)
   try {
-    const body = await apiJSON<OrgSettingsData>(`/api/orgs/${encodeURIComponent(orgId)}/settings`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        version: form.version,
-        github_base_url: blankAsNull(form.github_url),
-        github_poll_interval: form.github_poll_interval,
-        github_clone_protocol: form.github_clone_protocol,
-        jira_base_url: blankAsNull(form.jira_url),
-        jira_poll_interval: form.jira_poll_interval,
-        max_llm_model_tier: blankAsNull(form.max_llm_model_tier),
-        max_daily_cost_usd: numericOrNull(form.max_daily_cost_usd),
-        max_concurrent_runs: numericOrNull(form.max_concurrent_runs),
-      }),
-    })
-    return { ok: true, settings: body }
+    const settings = await apiJSON<OrgSettingsData>(
+      `/api/orgs/${encodeURIComponent(orgId)}/settings`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    return { ok: true, settings }
   } catch (e) {
     return {
       ok: false,
