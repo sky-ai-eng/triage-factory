@@ -65,7 +65,7 @@ func TestArtifactLedgerForResume_DerivesResolvedSinceWatermark(t *testing.T) {
 
 	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-led")
 	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 
 	block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv)
@@ -103,7 +103,7 @@ func TestArtifactLedgerForResume_ExcludesPreWatermark(t *testing.T) {
 
 	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-pre")
 	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 	if block := s.artifactLedgerForResume(context.Background(), runmode.LocalDefaultOrgID, conv); block != "" {
 		t.Errorf("expected empty ledger (resolution predates the watermark), got %q", block)
@@ -150,7 +150,7 @@ func TestArtifactLedgerForResume_FallsBackToStartedAt(t *testing.T) {
 
 	conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg")
 	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 	// Sanity: this run genuinely has no agent message, so we exercise the fallback.
 	if _, ok, err := s.conversations.LastAgentActivityAtSystem(context.Background(), runmode.LocalDefaultOrgID, "r-nomsg"); err != nil || ok {

@@ -133,7 +133,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 
 	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
 	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
 
@@ -159,7 +159,7 @@ func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	ctx := context.Background()
 	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
 	if err != nil || conv == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, conv)
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
 	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
 		t.Errorf("want empty prefix when nothing pending, got %q", got)

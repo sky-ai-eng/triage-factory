@@ -17,21 +17,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// fakeRunSignalStore is an in-memory db.ConversationSignalStore for exercising the
-// cross-pod control seam without Postgres. Mirrors the outbox semantics
+// fakeConversationSignalStore is an in-memory db.ConversationSignalStore for
+// exercising the cross-pod control seam without Postgres. Mirrors the outbox semantics
 // the real store's tests already pin: ascending ids, idempotent Ack,
 // AckStatus reads "" for an unacked/unknown id.
-type fakeRunSignalStore struct {
+type fakeConversationSignalStore struct {
 	mu      sync.Mutex
 	nextID  int64
 	signals map[int64]*domain.ConversationSignal
 }
 
-func newFakeRunSignalStore() *fakeRunSignalStore {
-	return &fakeRunSignalStore{signals: map[int64]*domain.ConversationSignal{}}
+func newFakeConversationSignalStore() *fakeConversationSignalStore {
+	return &fakeConversationSignalStore{signals: map[int64]*domain.ConversationSignal{}}
 }
 
-func (f *fakeRunSignalStore) Insert(_ context.Context, orgID, conversationID string, kind domain.ConversationSignalKind, payload, target string) (int64, error) {
+func (f *fakeConversationSignalStore) Insert(_ context.Context, orgID, conversationID string, kind domain.ConversationSignalKind, payload, target string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.nextID++
@@ -40,7 +40,7 @@ func (f *fakeRunSignalStore) Insert(_ context.Context, orgID, conversationID str
 	return id, nil
 }
 
-func (f *fakeRunSignalStore) ListUnackedForTarget(_ context.Context, target string) ([]domain.ConversationSignal, error) {
+func (f *fakeConversationSignalStore) ListUnackedForTarget(_ context.Context, target string) ([]domain.ConversationSignal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ids := make([]int64, 0, len(f.signals))
@@ -58,7 +58,7 @@ func (f *fakeRunSignalStore) ListUnackedForTarget(_ context.Context, target stri
 	return out, nil
 }
 
-func (f *fakeRunSignalStore) Ack(_ context.Context, id int64, result string) error {
+func (f *fakeConversationSignalStore) Ack(_ context.Context, id int64, result string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.signals[id]
@@ -71,7 +71,7 @@ func (f *fakeRunSignalStore) Ack(_ context.Context, id int64, result string) err
 	return nil
 }
 
-func (f *fakeRunSignalStore) AckStatus(_ context.Context, id int64) (bool, string, error) {
+func (f *fakeConversationSignalStore) AckStatus(_ context.Context, id int64) (bool, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	s, ok := f.signals[id]
@@ -81,7 +81,7 @@ func (f *fakeRunSignalStore) AckStatus(_ context.Context, id int64) (bool, strin
 	return true, s.AckResult, nil
 }
 
-func (f *fakeRunSignalStore) PurgeAcked(_ context.Context, olderThan time.Duration) (int, error) {
+func (f *fakeConversationSignalStore) PurgeAcked(_ context.Context, olderThan time.Duration) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cutoff := time.Now().Add(-olderThan)
@@ -97,7 +97,7 @@ func (f *fakeRunSignalStore) PurgeAcked(_ context.Context, olderThan time.Durati
 
 // findUnacked polls the fake store until a signal targeting target appears,
 // or fails the test after a bounded wait.
-func (f *fakeRunSignalStore) findUnacked(t *testing.T, target string) domain.ConversationSignal {
+func (f *fakeConversationSignalStore) findUnacked(t *testing.T, target string) domain.ConversationSignal {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -135,7 +135,7 @@ func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, er
 	return false, nil
 }
 
-// taskIDForConversation reads the task_id a seedConversation fixture's run row belongs to.
+// taskIDForConversation reads the task_id a seedConversation fixture's conversation row belongs to.
 func taskIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var taskID string
@@ -145,7 +145,7 @@ func taskIDForConversation(t *testing.T, database *sql.DB, conversationID string
 	return taskID
 }
 
-// entityIDForConversation reads the entity_id of a seedConversation fixture's run's task.
+// entityIDForConversation reads the entity_id of a seedConversation fixture's conversation's task.
 func entityIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var entityID string
@@ -202,7 +202,7 @@ func TestCrossPodController_Interrupt_RoutesRemoteAndAwaitsAck(t *testing.T) {
 	seedConversation(t, database, "r-remote", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-remote", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -229,7 +229,7 @@ func TestCrossPodController_Steer_CarriesTextInPayload(t *testing.T) {
 	seedConversation(t, database, "r-remote2", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-remote2", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -260,7 +260,7 @@ func TestCrossPodController_Steer_StaleAckSurfacesAsNoLiveProcess(t *testing.T) 
 	seedConversation(t, database, "r-remote-stale", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-remote-stale", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -288,7 +288,7 @@ func TestCrossPodController_Interrupt_TimesOutWhenOwnerNeverAcks(t *testing.T) {
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
-	s.SetConversationSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 	s.SetSignalAckTimeout(50 * time.Millisecond)
 
 	err := s.Interrupt(context.Background(), "r-timeout")
@@ -308,7 +308,7 @@ func TestCrossPodController_Interrupt_NoLiveOwnerFallsBackToNotLive(t *testing.T
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-dead": {ID: "executor-dead", LastHeartbeatAt: time.Now().Add(-time.Hour)},
 	}}
-	s.SetConversationSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
 	err := s.Interrupt(context.Background(), "r-stale")
 	if !errors.Is(err, ErrNoLiveProcess) {
@@ -329,7 +329,7 @@ func TestCrossPodController_LocalHitNeverGoesRemote(t *testing.T) {
 	seedConversation(t, database, "r-local", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.controller = crossPodController{inProcessController: inProcessController{s: s}}
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-local", &agentproc.LiveRun{})
 
@@ -352,7 +352,7 @@ func TestStop_SignalsRemoteOwnerBestEffort(t *testing.T) {
 	seedConversation(t, database, "r-cancel", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-cancel", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -384,7 +384,7 @@ func TestStop_SignalsRemoteOwnerBestEffort_NilInstancesDoesNotPanic(t *testing.T
 	seedConversation(t, database, "r-cancel-noinst", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-cancel-noinst", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = nil
 	s.SetConversationSignals(fakeSignals, nil)
 
@@ -415,7 +415,7 @@ func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 	seedConversation(t, database, "r-perm", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-perm", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -441,7 +441,7 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-perm2", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-perm2", &agentproc.LiveRun{})
 
@@ -463,7 +463,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 	seedConversation(t, database, "r-inj", "sess", "/tmp/wt")
 	dbtest.SeedActiveClaim(t, database, "r-inj", "executor-2", 0)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
 		"executor-2": {ID: "executor-2", LastHeartbeatAt: time.Now()},
 	}}
@@ -491,7 +491,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 		t.Fatalf("park run: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	s.SetConversationSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", AdditiveFiringRef{})
 	if outcome != InjectStagedResumable {
@@ -519,7 +519,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	}
 	stores := testSpawnerStores(database)
 	s := NewSpawner(database, stores, nil, nil, "m")
-	s.SetConversationSignals(newFakeRunSignalStore(), nil)
+	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
 	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", AdditiveFiringRef{})
 	if outcome != InjectNotDelivered {
@@ -576,7 +576,7 @@ func TestApplySignal_Inject_LiveDeliversAndRecords(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-owner-inj", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-owner-inj", &agentproc.LiveRun{})
 
@@ -619,7 +619,7 @@ func TestApplySignal_Inject_GoneCompensatesWithPendingFiring(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-owner-gone", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.SetConversationSignals(fakeSignals, nil)
 	// Deliberately no registerProc — the run isn't live here.
 
@@ -652,7 +652,7 @@ func TestApplySignal_Inject_GoneCompensatesWithPendingFiring(t *testing.T) {
 // TestConversationSignalPurgeReaper_RemovesOldAckedRows: the reaper deletes acked
 // rows past the age cutoff and leaves fresher ones alone.
 func TestConversationSignalPurgeReaper_RemovesOldAckedRows(t *testing.T) {
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	id1, _ := fakeSignals.Insert(context.Background(), "org", "run", domain.ConversationSignalCancel, "", "t")
 	id2, _ := fakeSignals.Insert(context.Background(), "org", "run", domain.ConversationSignalCancel, "", "t")
 	_ = fakeSignals.Ack(context.Background(), id1, domain.ConversationSignalAckOK)
@@ -704,7 +704,7 @@ func TestConversationSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testin
 	seedConversation(t, database, "r-apply", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.SetExecutorID("me", 1)
-	fakeSignals := newFakeRunSignalStore()
+	fakeSignals := newFakeConversationSignalStore()
 	s.SetConversationSignals(fakeSignals, nil)
 
 	// Register a cancel handle so the apply loop's local Cancel() finds it.

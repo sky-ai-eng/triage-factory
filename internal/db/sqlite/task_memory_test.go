@@ -227,7 +227,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 		t.Fatalf("seed task: %v", err)
 	}
 	// conversations.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
-	// for this task so the run row satisfies the FK.
+	// for this task so the conversation row satisfies the FK.
 	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	conversationID = uuid.New().String()
 	if _, err := conn.Exec(`

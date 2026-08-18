@@ -80,7 +80,7 @@ of what this design **reuses rather than builds**:
 
 | Piece | Where | State |
 | --- | --- | --- |
-| Durable run queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/conversation_queue.go` (`ClaimNextConversation`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
+| Durable conversation queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/conversation_queue.go` (`ClaimNextConversation`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
 | `Delegate()` = pure DB enqueue | `internal/delegate/delegate.go` → `EnqueueConversation` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the enqueue site. |
 | Durable event queue for router-bound events | `internal/ingest/ingest.go`, `internal/db/postgres/event_queue.go` | Built. Single drain worker; `SKIP LOCKED` claim exists. |
 | Executor-ownership stamp (the active claim's `claims.executor_id`/`boot_epoch`) | pg baseline (`claims`), stamped by `stampExecutor` (`process_registry.go`) | Written, consumed by nothing — the intended lease hook. |
@@ -797,7 +797,7 @@ underlying write so a reader can always fetch what the ref points to);
 every control pod LISTENs and fans-in remote events to its local
 sockets through the existing per-`(org,user)` scope filter. Origin-pod
 id in the envelope prevents double-delivery to the producer's own
-clients. Per-connection NOTIFY ordering keeps per-run message order.
+clients. Per-connection NOTIFY ordering keeps per-conversation message order.
 
 (Run sentinels deliberately do **not** ride this channel — they are
 brain-bound, not socket-bound; see §5.3 and the `tf_bus` channel.)
@@ -900,7 +900,7 @@ original enqueue time makes it oldest-first, so wakes claim
 promptly); the claiming executor's resume path rehydrates, spawns
 with `--resume <session_id>`, and delivers the recorded message as
 the turn input. No second runs row, and — keeping the standing
-invariant — no new run status.
+invariant — no new conversation status.
 
 Acked signal rows are purged after 24 h (audit convenience window);
 stale unacked signals expire harmlessly (the reaper owns the run's fate if the
@@ -1093,7 +1093,7 @@ are exactly what "counts + memory" fails to capture:
 - **Admission becomes budget-based the day two resource classes
   exist.** Today's `max_runs` and the ~512 MB/run rule assume uniform
   runs; a browser profile is several × that. The profile carries a
-  `mem_budget_mb`, the run row is stamped with it at enqueue, the
+  `mem_budget_mb`, the conversation row is stamped with it at enqueue, the
   claim admits on `reserved_mb + budget ≤ capacity` (keeping
   `max_runs` as an absolute ceiling and the TFAC-552 floor as the
   actual-memory backstop), and the heartbeat reports `reserved_mb`
@@ -1254,7 +1254,7 @@ capacity envelope is per-host and work-source-agnostic: a curator turn
 executing on its home is admitted through the same memory guardrail and
 concurrency semaphore as a dispatched run
 (`Spawner.AcquireTurnSlot`), so heartbeat occupancy reports the host's
-true sandbox load, not just the run queue's share of it.
+true sandbox load, not just the conversation queue's share of it.
 
 ---
 
@@ -1306,7 +1306,7 @@ Node invocation** — a plain Go web tier that runs anywhere,
 managed-k8s included. `syslimit` survives unchanged (the jobs stay
 leader-only and in-process; exactly one process still runs them);
 what disappears is the per-job sandbox cost, not their placement. The
-original alternative — generalize the run queue with a job class so
+original alternative — generalize the conversation queue with a job class so
 system jobs become claimable executor work — is retired: it moved the
 sandbox dependency around instead of deleting it, and its secondary
 payoffs (fleet-wide accounting, fairness for system jobs) don't bind

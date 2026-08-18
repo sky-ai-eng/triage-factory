@@ -30,9 +30,9 @@ func seedDraftPRArtifact(t *testing.T, s *Spawner, conversationID string) {
 // --- blueprintDecisionForStepConversation: the advancement decision matrix -----------
 
 // TestBlueprintDecisionForStepConversation pins the position-gated mapping from a
-// completed step run's conversations.outcome to the orchestrator's next move —
-// the logic that replaced the chain-verdict switch. It is the single place
-// advancement / finish / abort flow through conversations.outcome, so the whole
+// completed step conversation's conversations.outcome to the orchestrator's
+// next move — the logic that replaced the chain-verdict switch. It is the single
+// place advancement / finish / abort flow through conversations.outcome, so the whole
 // matrix is covered here without spawning an agent.
 func TestBlueprintDecisionForStepConversation(t *testing.T) {
 	cases := []struct {
@@ -231,10 +231,10 @@ func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testi
 	}
 }
 
-// makeConversationBlueprintStep turns the fixture's run into a blueprint step: it seeds
-// a blueprint + blueprint_runs row and points the run at it so
-// processCompletion's isBlueprintStep branch trips. Mirrors the setup the
-// advance-task chain-step guard test uses.
+// makeConversationBlueprintStep turns the fixture's conversation into a
+// blueprint step: it seeds a blueprint + blueprint_runs row and points the
+// conversation at it so processCompletion's isBlueprintStep branch trips.
+// Mirrors the setup the advance-task chain-step guard test uses.
 func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationID, taskID string) {
 	t.Helper()
 	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{

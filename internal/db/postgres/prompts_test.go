@@ -178,7 +178,7 @@ func seedPgOrgAndUserForPrompts(t *testing.T, h *pgtest.Harness) (orgID, userID 
 	return orgID, userID
 }
 
-// seedPgConversationsForStats inserts entity + task + run rows so Stats has
+// seedPgConversationsForStats inserts entity + task + conversation rows so Stats has
 // data to aggregate. All rows hold the conformance org_id so RLS-aware
 // reads (when the test uses the app pool) see them.
 //

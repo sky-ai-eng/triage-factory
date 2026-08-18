@@ -155,7 +155,7 @@ func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
 		t.Errorf("relayed egress row mismatch: %+v", a)
 	}
 	if a.ConversationID != info.ConversationID {
-		t.Errorf("conversation = %q, want the server's own run %q (never the wire)", a.ConversationID, info.ConversationID)
+		t.Errorf("conversation = %q, want the server's own conversation %q (never the wire)", a.ConversationID, info.ConversationID)
 	}
 }
 

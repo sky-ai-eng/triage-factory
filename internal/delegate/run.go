@@ -1,10 +1,11 @@
 // Generic agent execution loop and the post-stream branching that turns a
 // terminal completion into the right DB state — record the parsed outcome,
-// finalize the run row, and snapshot a voluntarily-aborted run for resume. A
-// queued draft PR / pending review is an async sidecar artifact that never parks
-// the run — the step completes with its real outcome and the
-// orchestrator advances. Shared between the initial Delegate path and the
-// resume-with-message flow. The concluded-vs-open turn classification and the
+// finalize the conversation row, and snapshot a voluntarily-aborted
+// conversation for resume. A queued draft PR / pending review is an async
+// sidecar artifact that never parks the conversation — the step completes with
+// its real outcome and the orchestrator advances. Shared between the initial
+// Delegate path and the resume-with-message flow. The concluded-vs-open turn
+// classification and the
 // invalid-envelope re-prompt live on the live driver (live.go); by the time a
 // result reaches processCompletion it is a conclusion (or an IsError / crash
 // result), never an open turn-end.

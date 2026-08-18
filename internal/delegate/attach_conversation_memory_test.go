@@ -51,7 +51,7 @@ func attachRoleFor(t *testing.T, database *sql.DB, conversationID, entityID stri
 	return role
 }
 
-// attachMemoryConversationIDs returns the set of run ids whose memory the entity-scoped
+// attachMemoryConversationIDs returns the set of conversation ids whose memory the entity-scoped
 // read surfaces — the through-the-join reachability the attach pass creates.
 func attachMemoryConversationIDs(t *testing.T, s *Spawner, entityID string) map[string]bool {
 	t.Helper()
@@ -317,9 +317,10 @@ func TestAttachConversationMemoryEntities_MotivatingCase(t *testing.T) {
 	}
 }
 
-// TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep: two step-runs on one task
+// TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep: two step
+// conversations on one task
 // each write their own primary join row for the shared entity, so the entity's
-// memory read surfaces both runs.
+// memory read surfaces both conversations.
 func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-step1", "sess", "/tmp/wt")
@@ -331,7 +332,7 @@ func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) 
 	// A second step-run on the same task (same entity).
 	conv1, err := s.conversations.GetSystem(ctx, org, "r-step1")
 	if err != nil || conv1 == nil {
-		t.Fatalf("GetSystem(r-step1): err=%v run=%v", err, conv1)
+		t.Fatalf("GetSystem(r-step1): err=%v conversation=%v", err, conv1)
 	}
 	brID := seedConversationBlueprint(t, database, "r-step2", conv1.TaskID)
 	stepIdx := 1
@@ -356,6 +357,6 @@ func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) 
 	}
 	conversationIDs := attachMemoryConversationIDs(t, s, entA.ID)
 	if !conversationIDs["r-step1"] || !conversationIDs["r-step2"] {
-		t.Errorf("entity should reach both step-runs, got %v", conversationIDs)
+		t.Errorf("entity should reach both step conversations, got %v", conversationIDs)
 	}
 }

@@ -137,7 +137,7 @@ export default function RunDetail() {
 
   // Steer a conversation: a free-form message lands on the live process (or
   // wakes an `open` conversation via resume). The backend records +
-  // broadcasts it as an `message` event, so useConversationDetail's append
+  // broadcasts it as a `message` event, so useConversationDetail's append
   // renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {

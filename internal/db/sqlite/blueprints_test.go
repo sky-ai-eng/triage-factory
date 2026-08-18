@@ -503,7 +503,7 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 	})
 	// Persist a terminal outcome the way processCompletion does.
 	if err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "did the thing", "continue", "", ""); err != nil {
-		t.Fatalf("complete step run: %v", err)
+		t.Fatalf("complete step conversation: %v", err)
 	}
 
 	convs, err := blueprints.ConversationsForBlueprint(ctx, org, "op-blueprint-run")
@@ -511,10 +511,10 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
 	if len(convs) != 1 {
-		t.Fatalf("ConversationsForBlueprint returned %d runs, want 1", len(convs))
+		t.Fatalf("ConversationsForBlueprint returned %d conversations, want 1", len(convs))
 	}
 	if convs[0].Outcome != "continue" {
-		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", convs[0].Outcome)
+		t.Errorf("step conversation outcome = %q, want continue (the orchestrator advances on this)", convs[0].Outcome)
 	}
 }
 

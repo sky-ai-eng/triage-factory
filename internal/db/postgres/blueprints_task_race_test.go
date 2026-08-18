@@ -234,7 +234,7 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 // TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim is the Postgres
 // twin of the SQLite test of the same shape: the fenced insert is a
 // delegation's commitment point, so the task's agent claim commits in the same
-// transaction as the run row. Without that, a failed stamp leaves the board
+// transaction as the blueprint run row. Without that, a failed stamp leaves the board
 // showing a free task under a live run and no replay can repair it — the
 // (triggering_event_id, trigger_id) fence closes first.
 func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {

@@ -540,7 +540,7 @@ func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID
 }
 
 // seedPgTeamConversationOnEntity seeds the event + task + blueprint + blueprint_run +
-// run FK chain for a run owned by teamID on a PRE-EXISTING entity, returning
+// conversation FK chain for a conversation owned by teamID on a PRE-EXISTING entity, returning
 // the conversationID. Unlike seedPgConversationForTaskMemory (which mints a fresh entity and
 // defaults to the org's first team), this takes the entity + team explicitly
 // so two teams can own runs on the same shared entity. suffix discriminates
@@ -641,7 +641,7 @@ func seedPgTaskMemoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID strin
 	return promptID
 }
 
-// seedPgConversationForTaskMemory seeds the entity + event + task + run FK
+// seedPgConversationForTaskMemory seeds the entity + event + task + conversation FK
 // chain conversation_memory needs. Returns (conversationID, entityID).
 func seedPgConversationForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, userID, promptID, suffix string) (string, string) {
 	t.Helper()

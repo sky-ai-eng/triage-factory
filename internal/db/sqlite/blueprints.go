@@ -748,7 +748,7 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 // single connection, so there is no admin/app split; the contract matches the
 // Postgres impl.
 //
-// The run row and the task's agent claim commit together — see
+// The blueprint run row and the task's agent claim commit together — see
 // db.AgentClaimStamp for why they are inseparable. A stamp refusal is not an
 // error and leaves the run committed.
 func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim db.AgentClaimStamp) (bool, bool, error) {
