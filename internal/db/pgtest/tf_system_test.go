@@ -159,7 +159,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	const executorID = "conformance-executor"
 
-	t.Run("run_queue_enqueue_and_claim", func(t *testing.T) {
+	t.Run("conversation_queue_enqueue_and_claim", func(t *testing.T) {
 		conversationID := newUUID(t, h)
 		step0 := 0
 		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{

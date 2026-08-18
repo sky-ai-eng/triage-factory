@@ -5,9 +5,10 @@
 //   - Live run (a warm, steerable process): StageOrDeliverInjection steers a single
 //     <system-note> into it immediately, fire-and-forget (deliverInjectionLive).
 //   - Terminal / paused run: the bare injection is persisted to the durable
-//     staged_agent_injections queue (db.StagedInjectionStore) and flushed — bundled into
-//     one <system-note> ahead of the user's message — on the next resume
-//     (stagedInjectionsForResume, wired into SendMessage).
+//     staged-injection queue (db.StagedInjectionStore, backed by undelivered
+//     messages rows) and flushed — bundled into one <system-note> ahead of the
+//     user's message — on the next resume (stagedInjectionsForResume, wired
+//     into SendMessage).
 //
 // Unlike the artifact-change ledger (which DERIVES its terminal injections from the
 // artifact rows, so it needs no queue), a producer here has no durable row of its

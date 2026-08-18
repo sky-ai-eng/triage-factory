@@ -732,7 +732,7 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 		ORDER BY (counts.active + counts.queued) DESC, counts.org_id
 	`)
 	if err != nil {
-		return nil, wrapAdminPoolPermErr(err, "run_queue.FleetQueueShares")
+		return nil, wrapAdminPoolPermErr(err, "conversation_queue.FleetQueueShares")
 	}
 	defer rows.Close()
 	return scanOrgQueueShares(rows)

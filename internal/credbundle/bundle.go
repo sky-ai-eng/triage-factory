@@ -25,7 +25,7 @@ import (
 // Bundle is the resolved credential material for one run. BootEpoch is the
 // executor boot epoch this bundle was sealed for — the executor compares it
 // against its own current epoch BEFORE attempting to unseal (never Open a
-// bundle sealed for an earlier boot; see the run_credentials store doc).
+// bundle sealed for an earlier boot; see the claim_credentials store doc).
 type Bundle struct {
 	BootEpoch int64 `json:"boot_epoch"`
 
