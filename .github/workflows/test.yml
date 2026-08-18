@@ -178,39 +178,64 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Detect docs-only change
-        id: docs
+      # Narrower than the docs-only gate the other jobs use, and inverted:
+      # this one asks whether the PR touches anything a timezone regression
+      # could arrive through — Go, a migration, the module graph, or this
+      # workflow. A frontend-only PR — the whole of frontend/, which the
+      # docs-only gate happily lets through — has nothing here to regress, and
+      # was paying for two extra full-suite runs to prove it.
+      #
+      # .sql is on the list for a concrete reason rather than for symmetry:
+      # the defect that created this matrix was fixed partly by a migration
+      # that rewrites every stored timestamp, and a migration is SQL that
+      # compares and rewrites timestamps with no Go file in the diff at all.
+      - name: Detect Go-relevant change
+        id: gate
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "only=false" >> "$GITHUB_OUTPUT"
+            echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           changed=$(git diff --name-only HEAD^1 HEAD)
-          if [ -z "$changed" ] || echo "$changed" | grep -qvE '(^docs/|^harness/|\.md$)'; then
-            echo "only=false" >> "$GITHUB_OUTPUT"
+          # An empty diff is not a situation this gate understands, so it runs
+          # rather than guesses — the same conservative default the docs-only
+          # gate takes.
+          if [ -z "$changed" ] || echo "$changed" | grep -qE '(\.go$|\.sql$|^go\.mod$|^go\.sum$|^\.github/workflows/test\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "only=true" >> "$GITHUB_OUTPUT"
+            echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/setup-go@v5
-        if: steps.docs.outputs.only != 'true'
+        if: steps.gate.outputs.run == 'true'
         with:
           go-version-file: go.mod
           cache: true
 
       - name: Stub frontend/dist for go:embed
-        if: steps.docs.outputs.only != 'true'
+        if: steps.gate.outputs.run == 'true'
         run: mkdir -p frontend/dist && echo "not built for the timezone job" > frontend/dist/index.html
 
+      # No -race here, deliberately. A data race does not depend on the
+      # process's timezone, and the `test` job above already runs the detector
+      # over identical code — so every second spent on it here is the same
+      # check paid for twice. It is not a small second either: the detector
+      # costs ~9.5x on internal/db/sqlite, which is precisely the package this
+      # matrix exists to exercise.
+      #
+      # -timeout stays as the deadlock backstop (a package that hangs should
+      # fail rather than burn the job's wall clock), but the 20m the `test` job
+      # needs is sized for -race on shared cores; without it these runs are far
+      # under that, and 10m is still generous headroom.
       - name: Go test (TZ=${{ matrix.tz }})
-        if: steps.docs.outputs.only != 'true'
+        if: steps.gate.outputs.run == 'true'
         env:
           TZ: ${{ matrix.tz }}
-        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race -timeout 20m
+        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -timeout 10m
 
-      - name: Docs-only change, timezone tests skipped
-        if: steps.docs.outputs.only == 'true'
-        run: echo "All changed files are documentation or harness/; skipping the timezone matrix."
+      - name: Nothing timezone-relevant changed, matrix skipped
+        if: steps.gate.outputs.run != 'true'
+        run: echo "No .go / .sql / go.mod / go.sum / workflow change in this PR; a timezone regression cannot arrive through the changed files. Skipping the timezone matrix."
 
   # Rust workspace under harness/ (the in-sandbox agent tools). Mirrors the
   # skip pattern above: the job always runs and reports success so it can be
