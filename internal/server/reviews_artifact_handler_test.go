@@ -16,13 +16,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedReviewArtifactWithConversation mints a completed (terminal) run chain and a
-// finalized review-draft artifact hung off it (TFAC-494): state=pending, ready
-// sentinel set, the head SHA pinned, one staged inline comment, and the agent's
-// draft snapshotted into proposed. The whole review is staged TF-side — no GitHub
-// object exists until approval. The run is completed because approval/dismiss are
-// decoupled sidecars that never flip run lifecycle (TFAC-379). Returns
-// (artifactID, conversationID, taskID).
+// seedReviewArtifactWithConversation mints a completed (terminal) conversation
+// chain and a finalized review-draft artifact hung off it (TFAC-494):
+// state=pending, ready sentinel set, the head SHA pinned, one staged inline
+// comment, and the agent's draft snapshotted into proposed. The whole review is
+// staged TF-side — no GitHub object exists until approval. The conversation is
+// completed because approval/dismiss are decoupled sidecars that never flip
+// conversation lifecycle (TFAC-379). Returns (artifactID, conversationID,
+// taskID).
 func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, conversationID, taskID string) {
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
@@ -94,8 +95,9 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 
 // TestReviewArtifactApprove pins the atomic submit-on-approval flow: SubmitReview
 // POSTs the staged body+event+footer+comments to GitHub, the artifact flips
-// pending → submitted and gains the submitted review's id + URL, the run
-// completes, and the human verdict lands in conversation_memory.
+// pending → submitted and gains the submitted review's id + URL, the
+// conversation stays completed (approval never flips it), and the human verdict
+// lands in conversation_memory.
 //
 // The POST asserted here is composed by review.SubmitStaged — the same function
 // the auto-post posture calls from the agent's finalize, whose test
@@ -157,7 +159,7 @@ func TestReviewArtifactApprove(t *testing.T) {
 	}
 	var convStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+		t.Fatalf("read conversation: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed", convStatus)
@@ -448,7 +450,8 @@ func TestReviewArtifactCommentDelete(t *testing.T) {
 
 // TestReviewArtifactUpdate_InvalidEvent_400 pins early validation of the staged
 // verdict: an invalid (or empty) review_event is rejected at PATCH time and the
-// stored sentinel is left unchanged (an empty event would otherwise un-park the run).
+// stored sentinel is left unchanged (an empty event would otherwise un-park the
+// conversation).
 func TestReviewArtifactUpdate_InvalidEvent_400(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -490,8 +493,8 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 
 // TestReviewArtifactDismiss pins the per-artifact dismiss for reviews: POST
 // /api/artifacts/{id}/dismiss flips the artifact pending → dismissed with NO
-// GitHub call (the review is staged TF-side, TFAC-494) and never touches the run
-// lifecycle (the decoupled sidecar, TFAC-379).
+// GitHub call (the review is staged TF-side, TFAC-494) and never touches the
+// conversation lifecycle (the decoupled sidecar, TFAC-379).
 func TestReviewArtifactDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -506,7 +509,7 @@ func TestReviewArtifactDismiss(t *testing.T) {
 	}
 	var convStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+		t.Fatalf("read conversation: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)

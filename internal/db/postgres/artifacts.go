@@ -9,19 +9,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// artifactStore is the Postgres impl of db.ArtifactStore. The artifacts_*
-// RLS policies scope reads/writes by team_id exactly like runs; org_id stays
-// in every WHERE/INSERT clause as defense in depth. Mirrors the runs store
-// (conversation.go) for $N placeholders + scan conventions. See TFAC-455.
+// artifactStore is the Postgres impl of db.ArtifactStore. The artifacts_* RLS
+// policies scope reads/writes by team_id exactly like conversations; org_id
+// stays in every WHERE/INSERT clause as defense in depth. Mirrors the
+// conversations store (conversation.go) for $N placeholders + scan conventions.
+// See TFAC-455.
 //
 // Holds two pools, the same split Conversations / ConversationWorktrees use:
 //
-//   - q: app pool (tf_app, RLS-active). Manual-run exec writes (under
-//     synthetic claims) and run-detail / C2 reads route here.
+//   - q: app pool (tf_app, RLS-active). Manual conversations' exec writes
+//     (under synthetic claims) and conversation-detail / C2 reads route here.
 //
 //   - admin: admin pool (BYPASSRLS). UpsertSystem routes here for the exec
-//     choke point on an event-triggered run, whose insert is unreachable
-//     through tf_app — the run carries no creator user, so the
+//     choke point on an event-triggered conversation, whose insert is
+//     unreachable through tf_app — the conversation carries no creator user,
+//     so the
 //     artifacts_insert policy's team-write check can never pass. See
 //     TFAC-459.
 type artifactStore struct {
@@ -115,7 +117,7 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// link) — once known they only ever fill in or migrate to a more specific
 	// value (pending PR owner/repo → owner/repo#123), never legitimately clear.
 	// A later upsert that can't supply them — a reconciliation pass, a Jira
-	// mutation whose run can't compute the browse URL, or a GitHub
+	// mutation whose conversation can't compute the browse URL, or a GitHub
 	// comment-update/delete that only knows the comment id, not its PR number —
 	// must not blank a value an earlier writer already stored. external_id/url
 	// are NULLIFed to NULL on insert, so COALESCE preserves them; target is NOT
@@ -125,10 +127,11 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// (state tracks the latest action).
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
-	// the artifact belongs to its CREATING run (domain.Artifact's doc), and
-	// team_id is denormalized off THAT SAME run — not off whichever writer
+	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
+	// and team_id is denormalized off THAT SAME conversation — not off whichever
+	// writer
 	// happens to touch the row later — so a later writer touching the same
-	// dedup key (e.g. a different run editing a Slack message, or a
+	// dedup key (e.g. a different conversation editing a Slack message, or a
 	// re-delegate updating a GitHub comment) must not reassign either. Letting
 	// team_id follow the last writer while conversation_id stayed pinned to the first
 	// would desync the two and mis-scope the artifact out of its owning
@@ -231,8 +234,8 @@ func (s *artifactStore) updateReviewDetailsIfPending(ctx context.Context, q quer
 
 func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Artifact, error) {
 	// App pool (RLS-active): every caller is an HTTP handler under request
-	// claims. RLS scopes the row to the caller's team exactly like runs; org_id
-	// stays bound as defense in depth.
+	// claims. RLS scopes the row to the caller's team exactly like
+	// conversations; org_id stays bound as defense in depth.
 	row := s.q.QueryRowContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
@@ -261,10 +264,10 @@ func (s *artifactStore) ListByConversation(ctx context.Context, orgID, conversat
 	return scanArtifactRows(rows)
 }
 
-// ListByConversationSystem runs ListByConversation's query on the admin pool (BYPASSRLS) for the
-// spawner's park check, which reads a completed run's artifacts from a goroutine
-// with no JWT-claims context. org_id stays in the WHERE clause as defense in
-// depth.
+// ListByConversationSystem runs ListByConversation's query on the admin pool
+// (BYPASSRLS) for the spawner's park check, which reads a completed
+// conversation's artifacts from a goroutine with no JWT-claims context. org_id
+// stays in the WHERE clause as defense in depth.
 func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
@@ -333,11 +336,12 @@ func (s *artifactStore) ListByConversations(ctx context.Context, orgID string, c
 	if len(conversationIDs) == 0 {
 		return nil, nil
 	}
-	// App pool (RLS-active): the caller is the run-list handler under request
-	// claims, so rows are team-scoped exactly like ListByConversation. conversation_id is a uuid
-	// column, so the slice goes through pgUUIDArray (a Postgres array literal),
-	// not a raw []string bind — see CountByConversation. A NULL conversation_id never matches ANY,
-	// so detached artifacts are excluded.
+	// App pool (RLS-active): the caller is the conversation-list handler
+	// under request claims, so rows are team-scoped exactly like
+	// ListByConversation. conversation_id is a uuid column, so the slice
+	// goes through pgUUIDArray (a Postgres array literal), not a raw
+	// []string bind — see CountByConversation. A NULL conversation_id never
+	// matches ANY, so detached artifacts are excluded.
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts

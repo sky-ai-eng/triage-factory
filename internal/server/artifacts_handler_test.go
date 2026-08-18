@@ -93,12 +93,13 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 
 // TestArtifactApprove pins the promote-on-approval flow: the body gets the
 // agentmeta footer (UpdatePR), the draft is marked ready (MarkPRReady via
-// GraphQL), the artifact flips to open, and the human verdict lands in conversation_memory.
-// Approval is a decoupled sidecar: it must NOT touch conversation status. The fixture
-// pre-seeds the run as 'completed', and we assert it STAYS 'completed' (approve
-// didn't flip it). Task closure here is a no-op because the fixture blueprint_run
-// is still 'running' (not a clean completion); the terminal-on-last closure is
-// covered by the dedicated dismiss/closure tests.
+// GraphQL), the artifact flips to open, and the human verdict lands in
+// conversation_memory. Approval is a decoupled sidecar: it must NOT touch
+// conversation status. The fixture pre-seeds the conversation as 'completed',
+// and we assert it STAYS 'completed' (approve didn't flip it). Task closure
+// here is a no-op because the fixture blueprint_run is still 'running' (not a
+// clean completion); the terminal-on-last closure is covered by the dedicated
+// dismiss/closure tests.
 func TestArtifactApprove(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -139,7 +140,7 @@ func TestArtifactApprove(t *testing.T) {
 	}
 	var convStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+		t.Fatalf("read conversation: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed", convStatus)
@@ -153,9 +154,10 @@ func TestArtifactApprove(t *testing.T) {
 	}
 }
 
-// TestArtifactAbandon_ClosesDraftPR pins the "Return to queue" path: requeueing a
-// task whose run opened a draft PR closes that PR on GitHub (ClosePR → state
-// closed) and flips its artifact to closed. The pushed branch is untouched.
+// TestArtifactAbandon_ClosesDraftPR pins the "Return to queue" path: requeueing
+// a task whose conversation opened a draft PR closes that PR on GitHub (ClosePR
+// → state closed) and flips its artifact to closed. The pushed branch is
+// untouched.
 func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -185,10 +187,11 @@ func TestArtifactAbandon_ClosesDraftPR(t *testing.T) {
 }
 
 // TestArtifactTeardown_ResolvesAllArtifacts pins the task-level resolve-all
-// gesture (Return-to-queue): a task whose run holds MULTIPLE unresolved artifacts
-// — a draft PR and a pending review — has them ALL resolved. The draft PR is
-// closed on GitHub; the review is flipped to dismissed with NO GitHub call (it
-// was staged TF-side, TFAC-494). Branches are kept.
+// gesture (Return-to-queue): a task whose conversation holds MULTIPLE
+// unresolved artifacts — a draft PR and a pending review — has them ALL
+// resolved. The draft PR is closed on GitHub; the review is flipped to
+// dismissed with NO GitHub call (it was staged TF-side, TFAC-494). Branches are
+// kept.
 func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -212,9 +215,9 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	// seedClaimedPRApprovalFixture hangs a draft PR (#7) off run r_ab; add a
-	// finalized review draft on the same run so the task holds two unresolved
-	// artifacts of different kinds.
+	// seedClaimedPRApprovalFixture hangs a draft PR (#7) off conversation
+	// r_ab; add a finalized review draft on the same conversation so the
+	// task holds two unresolved artifacts of different kinds.
 	taskID, conversationID, prArtID := seedClaimedPRApprovalFixture(t, srv, "acme", "api", 7)
 	rv := domain.NewReviewArtifact("acme/api", 7, "headsha7", conversationID)
 	rv.ConversationID = conversationID
@@ -250,7 +253,7 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 // TestArtifactDismiss_PR pins the per-artifact dismiss sidecar: POST
 // /api/artifacts/{id}/dismiss closes the draft PR on GitHub (ClosePR → state
 // closed), flips the artifact to closed, and — crucially — never touches the
-// run's lifecycle. The pushed branch is untouched (we send only state=closed).
+// conversation's lifecycle. The pushed branch is untouched (we send only state=closed).
 func TestArtifactDismiss_PR(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
@@ -277,10 +280,10 @@ func TestArtifactDismiss_PR(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRClosed {
 		t.Errorf("artifact state = %q, want closed", got)
 	}
-	// The run lifecycle is untouched — dismiss is a decoupled sidecar.
+	// The conversation lifecycle is untouched — dismiss is a decoupled sidecar.
 	var convStatus string
 	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read run: %v", err)
+		t.Fatalf("read conversation: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
@@ -378,15 +381,17 @@ func TestArtifactDismiss_AbortedBlueprintLeavesTaskOpen(t *testing.T) {
 	}
 }
 
-// TestArtifactDismiss_TaskLessRunClosesNoTask pins the non-blueprint branch
-// against the actual model: a future user-triggered run (origin='interactive') is
-// neither a blueprint nor a task run — it carries a NULL blueprint_run_id AND a
-// NULL task_id (both allowed once origin <> 'blueprint'). Resolving an artifact on
-// such a run must be a clean no-op for task closure: GetRunForConversation routes to the
-// standalone branch, the run has no task, and the taskID == "" guard short-circuits
-// — no task is closed, no error. (No such run exists in production today; this
-// pins the forward-compat path so it can't regress into closing a phantom task.)
-func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
+// TestArtifactDismiss_TaskLessConversationClosesNoTask pins the non-blueprint branch
+// against the actual model: a future user-triggered conversation
+// (origin='interactive') is neither blueprint- nor task-linked — it carries a
+// NULL blueprint_run_id AND a NULL task_id (both allowed once origin <>
+// 'blueprint'). Resolving an artifact on such a conversation must be a clean
+// no-op for task closure: GetRunForConversation routes to the standalone
+// branch, the conversation has no task, and the taskID == "" guard short-
+// circuits — no task is closed, no error. (No such conversation exists in
+// production today; this pins the forward-compat path so it can't regress into
+// closing a phantom task.)
+func TestArtifactDismiss_TaskLessConversationClosesNoTask(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	mux := newAppAPIMux()
@@ -397,7 +402,8 @@ func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	// A task-less, blueprint-less interactive run: origin='interactive' with
+	// A task-less, blueprint-less interactive conversation: origin='interactive'
+	// with
 	// NULL task_id and NULL blueprint_run_id (tolerated by
 	// conversations_origin_requires_parents only for origin <> 'blueprint').
 	execSQL(t, srv.db, `INSERT INTO conversations (id, status, trigger_type, origin, outcome, team_id, visibility) VALUES ('r_int', 'completed', 'manual', 'interactive', 'abort', ?, 'team')`, runmode.LocalDefaultTeamID)
@@ -415,7 +421,7 @@ func TestArtifactDismiss_TaskLessRunClosesNoTask(t *testing.T) {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	// The artifact resolved (the load-bearing effect), and the closure check no-oped
-	// cleanly — a task-less run has no task to close.
+	// cleanly — a task-less conversation has no task to close.
 	if got := getArtifact(t, srv, stored.ID).State; got != domain.ArtifactStatePRClosed {
 		t.Errorf("artifact state = %q, want closed", got)
 	}
@@ -624,8 +630,9 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 	}
 }
 
-// seedDraftPRArtifactWithConversation mints a completed (terminal) run chain (entity → … →
-// run) and a draft pull_request artifact hung off it, returning all three ids.
+// seedDraftPRArtifactWithConversation mints a completed (terminal) conversation
+// chain (entity → … → conversation) and a draft pull_request artifact hung off
+// it, returning all three ids.
 func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, conversationID, taskID string) {
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
@@ -647,8 +654,9 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	return stored.ID, conversationID, taskID
 }
 
-// seedClaimedPRApprovalFixture builds a claimed task (the shape /requeue expects)
-// whose completed run opened a draft PR. Returns (taskID, conversationID, artifactID).
+// seedClaimedPRApprovalFixture builds a claimed task (the shape /requeue
+// expects) whose completed conversation opened a draft PR. Returns (taskID,
+// conversationID, artifactID).
 func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, number int) (taskID, conversationID, artifactID string) {
 	t.Helper()
 	const eventType = "github:pr:ci_check_passed"

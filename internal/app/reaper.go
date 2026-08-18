@@ -47,7 +47,7 @@ func (a *App) buildReaper() error {
 	}
 	maxAttempts, err := reaper.ParseMaxAttempts(os.Getenv("TF_MAX_CLAIM_ATTEMPTS"))
 	if err != nil {
-		return fmt.Errorf("run max attempts: %w", err)
+		return fmt.Errorf("claim max attempts: %w", err)
 	}
 
 	a.spawner.SetSelfFenceDeadline(selfFence)

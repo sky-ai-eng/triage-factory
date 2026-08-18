@@ -243,7 +243,7 @@ export default function AgentCard({
             up; a terminal conversation shows its outcome; a live conversation shows a
             flush, borderless feed of one-liners (no window-into-the-agent; the
             expanded view is for that). A memory-limit kill has no
-            ResultSummary (infra failures write run_messages, not a summary)
+            ResultSummary (infra failures write messages rows, not a summary)
             but still gets the ResultBlock — its kind carries the copy. */}
         {isQueued ? (
           <QueuedBlock />

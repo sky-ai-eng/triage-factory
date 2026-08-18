@@ -17,7 +17,7 @@ import (
 // through Claimed → In Progress → In Review via /advance. Bot-claimed
 // tasks transition automatically via the spawner (see
 // internal/delegate/spawner.go recomputeTaskBoardColumn); allowing
-// the user to flip them by hand would race the run lifecycle.
+// the user to flip them by hand would race the conversation lifecycle.
 func TestHandleAdvance_RejectsBotClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	taskID := seedAdvanceTask(t, s.db, "bot-claimed", advanceTaskOpts{
@@ -195,7 +195,7 @@ type advanceTaskOpts struct {
 
 // seedAdvanceTask inserts a task row directly. Mirrors the
 // pendingApprovalFixture pattern in requeue_test.go but without the
-// run / review / memory machinery — /advance tests only touch the
+// conversation / review / memory machinery — /advance tests only touch the
 // task row. Each call uses a unique suffix to dodge the dedup index.
 //
 // taskID uses a real UUID since the /advance handler validates the

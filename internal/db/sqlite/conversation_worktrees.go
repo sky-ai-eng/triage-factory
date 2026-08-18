@@ -38,8 +38,8 @@ func (s *conversationWorktreeStore) Insert(ctx context.Context, orgID string, w 
 	// INSERT — a repository is brought into the registry by the side that polls
 	// and tracks, never by a running agent's pod — and the two dialects agree on
 	// the contract rather than diverging where only one of them is enforced. A
-	// worktree is reserved for a repository the run was already authorized to
-	// clone, so the row exists; an absent one is a broken caller.
+	// worktree is reserved for a repository the conversation was already
+	// authorized to clone, so the row exists; an absent one is a broken caller.
 	owner, repo := splitRepoSlug(w.RepoID)
 	if owner == "" || repo == "" {
 		return false, "", fmt.Errorf("conversation_worktree repo id %q is not an owner/repo slug", w.RepoID)

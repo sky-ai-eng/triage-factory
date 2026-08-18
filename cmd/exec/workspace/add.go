@@ -25,12 +25,13 @@ import (
 // layer would test less of the actual code than exercising LocalClient
 // end-to-end.
 type addDeps struct {
-	// create materializes the checkout for spec into the run's HOST run root
-	// and returns the created path in host view. Nil in defaultAddDeps;
-	// materializeWorkspace wires it to host.CreateWorkspaceCheckout when unset
-	// (TFAC-546: the git work runs host-side in both transports — the daemon
-	// in sandbox mode, in-process in local mode), so tests stub the git
-	// mutation while production routes through the agenthost seam.
+	// create materializes the checkout for spec into the conversation's
+	// HOST run root and returns the created path in host view. Nil in
+	// defaultAddDeps; materializeWorkspace wires it to
+	// host.CreateWorkspaceCheckout when unset (TFAC-546: the git work runs
+	// host-side in both transports — the daemon in sandbox mode, in-process
+	// in local mode), so tests stub the git mutation while production
+	// routes through the agenthost seam.
 	create   func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error)
 	statPath func(path string) (os.FileInfo, error)
 	now      func() time.Time
@@ -57,7 +58,7 @@ type checkoutSpec struct {
 // rather than a stale reservation. Sized to outlast the slowest
 // legitimate create — a fresh bare clone of a multi-GB monorepo can
 // take a couple of minutes; 5 minutes gives that ~3x headroom while
-// still un-jamming runs whose `workspace add` was killed mid-create
+// still un-jamming conversations whose `workspace add` was killed mid-create
 // (process kill, SIGTERM at server stop, machine restart) before the
 // row was either updated or released.
 //
@@ -152,11 +153,12 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // extracted from runAdd so it returns errors instead of os.Exit-ing.
 // Returns the absolute worktree path the agent should cd into.
 //
-// Generalized (TFAC-498): works for ANY run — Jira, GitHub, or taskless — and
-// no longer prescribes a feature branch. By default it checks out the repo's
-// default branch (detached); --ref checks out a named branch; --pr checks out a
-// PR head (fork-aware). The agent then drives git itself (`git checkout -b ...`)
-// and the push gate authorizes whatever branch the worktree lands on.
+// Generalized (TFAC-498): works for ANY conversation — Jira, GitHub, or
+// taskless — and no longer prescribes a feature branch. By default it checks
+// out the repo's default branch (detached); --ref checks out a named branch;
+// --pr checks out a PR head (fork-aware). The agent then drives git itself
+// (`git checkout -b ...`) and the push gate authorizes whatever branch the
+// worktree lands on.
 //
 // Two path namespaces (TFAC-546): the git materialization runs HOST-SIDE via
 // host.CreateWorkspaceCheckout — in the sandbox that's the agenthost daemon
@@ -202,10 +204,10 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		}
 	}
 
-	// ref is the (run, repo, ref) discriminator: a run can materialize several
-	// worktrees in one repo (two PRs, or a PR + the default branch), so every
-	// lookup / reservation / path below is keyed on it. It doubles as the
-	// worktree path-slug subdirectory.
+	// ref is the (conversation, repo, ref) discriminator: a conversation
+	// can materialize several worktrees in one repo (two PRs, or a PR + the
+	// default branch), so every lookup / reservation / path below is keyed
+	// on it. It doubles as the worktree path-slug subdirectory.
 	ref := refForSpec(spec)
 
 	ctx := context.Background()
@@ -228,7 +230,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
-	// Idempotent re-add. If a row exists for this (run, repo), prefer
+	// Idempotent re-add. If a row exists for this (conversation, repo), prefer
 	// its path — the row is the authoritative reservation.
 	//
 	// Two scenarios where the on-disk path may NOT exist when the row
@@ -296,12 +298,13 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	if profile == nil {
 		return "", fmt.Errorf("%w: %s", errRepoNotConfigured, repoID)
 	}
-	// Team-tracking gate: a run may only materialize a repo its team tracks, so
-	// `workspace add` and the git proxy's push gate agree — otherwise the agent
-	// could clone a repo the proxy will then refuse to push to. Same
-	// TracksRepoSystem predicate the proxy's Authorize uses, keyed by the run's
-	// team. (Org-configured ≠ team-tracked: a repo can be configured org-wide
-	// yet not attached to this run's team.)
+	// Team-tracking gate: a conversation may only materialize a repo its
+	// team tracks, so `workspace add` and the git proxy's push gate agree —
+	// otherwise the agent could clone a repo the proxy will then refuse to
+	// push to. Same TracksRepoSystem predicate the proxy's Authorize uses,
+	// keyed by the conversation's team. (Org-configured ≠ team-tracked: a
+	// repo can be configured org-wide yet not attached to this
+	// conversation's team.)
 	if tracks, terr := host.TeamTracksRepo(ctx, owner, repo); terr != nil {
 		return "", fmt.Errorf("workspace add: check team tracking: %w", terr)
 	} else if !tracks {
@@ -311,10 +314,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("%w: %s", errRepoMissingCloneURL, repoID)
 	}
 
-	// Reserved path is deterministic from the InRoot create contract, in HOST
-	// view: filepath.Join(hostRoot, owner, repo, ref-slug). The ref-slug subdir
-	// is what lets two PRs (or a PR + a branch) coexist in one repo for one run.
-	// Compute it here so we can reserve the row BEFORE the create runs.
+	// Reserved path is deterministic from the InRoot create contract, in
+	// HOST view: filepath.Join(hostRoot, owner, repo, ref-slug). The ref-
+	// slug subdir is what lets two PRs (or a PR + a branch) coexist in one
+	// repo for one conversation. Compute it here so we can reserve the row
+	// BEFORE the create runs.
 	//
 	// INVARIANT: this must equal the path host.CreateWorkspaceCheckout will
 	// land at — the create derives the same hostRoot via WorkspaceRoots and the
@@ -325,10 +329,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	wtPath := filepath.Join(hostRoot, profile.Owner, profile.Repo, ref)
 
 	// Reserve. Two concurrent processes that both reach this point with the
-	// SAME (run, repo, ref) race at the PK; the loser short-circuits before
-	// touching git. Ref records the checkout intent — the PK discriminator and
-	// the path slug — and is what `workspace list` surfaces; the push gate reads
-	// the worktree's live current branch, never this row.
+	// SAME (conversation, repo, ref) race at the PK; the loser short-
+	// circuits before touching git. Ref records the checkout intent — the
+	// PK discriminator and the path slug — and is what `workspace list`
+	// surfaces; the push gate reads the worktree's live current branch,
+	// never this row.
 	row := domain.ConversationWorktree{
 		ConversationID: info.ConversationID,
 		RepoID:         repoID,
@@ -395,7 +400,8 @@ func agentViewPath(hostRoot, agentRoot, p string) string {
 }
 
 // refForSpec computes the conversation_worktrees ref for a checkout spec — the
-// (run, repo, ref) PK discriminator AND the worktree path-slug subdirectory.
+// (conversation, repo, ref) PK discriminator AND the worktree path-slug
+// subdirectory.
 // "pr-<N>" for a PR, the slugified branch for --ref, or "@default" for a
 // detached default-branch checkout. It uses the same slug helpers the InRoot
 // create funcs land the worktree at, so the reserved path and the created path

@@ -8,7 +8,7 @@ import (
 
 // claimCredentialsStore is the SQLite impl of db.ClaimCredentialsStore. The
 // sealed-bundle channel is Postgres-only in substance — local mode (forced
-// role=all) reads the live secret store directly and never parks a run in
+// role=all) reads the live secret store directly and never parks a claim in
 // awaiting_credentials — so the SQLite schema carries no claim_credentials
 // table and this impl refuses every call.
 type claimCredentialsStore struct{}

@@ -32,11 +32,11 @@ type statusCall struct {
 }
 
 // fakeLifecycleSlack is a minimal fake covering the three endpoints the
-// lifecycle adapter drives: reactions.add (the 👀 ack), chat.postMessage
-// (the no-match reply + the failure note), and assistant.threads.setStatus
-// (the live indicator). All access is mutex-guarded — per-run workers run on
-// their own goroutines and can call concurrently with the dispatch goroutine
-// or each other.
+// lifecycle adapter drives: reactions.add (the 👀 ack), chat.postMessage (the
+// no-match reply + the failure note), and assistant.threads.setStatus (the live
+// indicator). All access is mutex-guarded — per-conversation workers run on
+// their own goroutines and can call concurrently with the dispatch goroutine or
+// each other.
 type fakeLifecycleSlack struct {
 	mu            sync.Mutex
 	reactions     []reactionCall
@@ -616,11 +616,11 @@ func TestLifecycleAdapter_ConversationStatus_RunningThenActivity_SetsDescription
 	})
 }
 
-// TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress walks a
-// run through queued → cloning → running and pins that the indicator starts
-// at the first setup phase's pair (on both surfaces — no default-verbs gap
-// before the agent is live), retexts on the next phase, and swaps to the
-// generic working pair once the agent goes live.
+// TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress
+// walks a conversation through queued → cloning → running and pins that the
+// indicator starts at the first setup phase's pair (on both surfaces — no
+// default-verbs gap before the agent is live), retexts on the next phase, and
+// swaps to the generic working pair once the agent goes live.
 func TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress(t *testing.T) {
 	withFastLifecycleTimings(t)
 	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
@@ -778,8 +778,9 @@ func TestLifecycleAdapter_ConversationStatus_Failed_NoPublicURL_NoURLFragment(t 
 	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
 	ctx := context.Background()
 
-	// Never went "running" — a run that fails during setup still owes the
-	// failure note, via the worker-less direct path in handleConversationStatus.
+	// Never went "running" — a conversation that fails during setup still
+	// owes the failure note, via the worker-less direct path in
+	// handleConversationStatus.
 	adapter.dispatch(ctx, conversationStatusEvent(orgID, fx.ConversationID, "failed"), convs)
 	waitForCondition(t, 2*time.Second, func() bool { return len(fake.postCalls()) >= 1 })
 

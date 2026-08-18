@@ -12,15 +12,16 @@ import (
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
 // task, written in the same durable step as the engagement that commits it
-// (a fenced run insert, a queued firing, an event folded into a live run).
+// (a fenced blueprint-run insert, a queued firing, an event folded into a
+// live conversation).
 //
 // It is a parameter type rather than a call of its own because the two
 // writes must not be separable. A commitment that lands while its stamp
 // silently fails leaves the board showing a free task under a live agent
-// run, and the firing fences (the (triggering_event_id, trigger_id) replay
+// conversation, and the firing fences (the (triggering_event_id, trigger_id) replay
 // fence, the pending-unique) mean a replay of the event skips before it
 // could ever re-stamp — so nothing repairs it. Coupling them is what makes
-// "unclaimed with a live run" mean only what the requeue path intends.
+// "unclaimed with a live conversation" mean only what the requeue path intends.
 //
 // A zero value (empty AgentID) means "no stamp": the commitment writes
 // alone. That is the honest degrade for the seam between DB init and agent
@@ -41,7 +42,7 @@ import (
 // including its three-way refusal (a user claim wins, a same-agent rewrite
 // is a no-op, a terminal task refuses) — and a refusal never fails the
 // surrounding commitment: the claim race has a winner either way, and the
-// run insert (or firing row) must still stand.
+// blueprint-run insert (or firing row) must still stand.
 type AgentClaimStamp struct {
 	AgentID      string
 	ActingTeamID string
@@ -98,7 +99,7 @@ type TaskListFilter struct {
 }
 
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
-// swipe-triggered transitions, plus the run-history queries that
+// swipe-triggered transitions, plus the conversation-history queries that
 // power the auto-delegate breaker.
 //
 // All methods take orgID. Local mode passes runmode.LocalDefaultOrgID
@@ -228,12 +229,12 @@ type TaskStore interface {
 
 	// SetOwnerTeam updates a task's owning/attributed team_id without
 	// touching the claim columns. The router uses it to consolidate the
-	// owner to the acting team just before an auto-fired run is created,
-	// so the run — which inherits conversations.team_id from tasks.team_id at
-	// insert — is attributed to the team that acted even when the
-	// creation-time owner team was skipped (e.g. it had auto-delegation
-	// disabled while a lower-priority team fires). The Postgres impl
-	// resolves the LocalDefaultTeamID sentinel to the org's canonical
+	// owner to the acting team just before an auto-fired conversation is
+	// created, so the conversation — which inherits conversations.team_id
+	// from tasks.team_id at insert — is attributed to the team that acted
+	// even when the creation-time owner team was skipped (e.g. it had auto-
+	// delegation disabled while a lower-priority team fires). The Postgres
+	// impl resolves the LocalDefaultTeamID sentinel to the org's canonical
 	// team. Empty teamID is a no-op.
 	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error
 
@@ -360,13 +361,13 @@ type TaskStore interface {
 	// relationship to the task's team(s) would silently hand them a claim
 	// they can't even see afterward.
 	//
-	// On success the owning team_id consolidates to the acting team
-	// derived from toUserID — the same task_teams-visibility-set
-	// derivation ClaimQueuedForUser applies — so reassigning across teams
-	// re-homes the card to the new claimant's team. Run ownership is
-	// per-run, not per-claim: this method never touches runs — an active
-	// delegated run keeps executing regardless of who now holds the
-	// task's claim.
+	// On success the owning team_id consolidates to the acting team derived
+	// from toUserID — the same task_teams-visibility-set derivation
+	// ClaimQueuedForUser applies — so reassigning across teams re-homes the
+	// card to the new claimant's team. Conversation ownership is per-
+	// conversation, not per-claim: this method never touches conversations
+	// — an active delegated conversation keeps executing regardless of who
+	// now holds the task's claim.
 	//
 	// Callers should use the admin-pool ReassignClaimToUserSystem variant
 	// below rather than this one: unlike every other claim mutation, the
@@ -381,10 +382,10 @@ type TaskStore interface {
 	// --- Breaker ---
 
 	// CountConsecutiveFailedConversations counts consecutive non-success
-	// auto-runs at the tail of runs for (entity_id, prompt_id),
-	// stopping at the first completed row. Chain instances count
-	// once, not once-per-step. Used by the router to check the
-	// circuit-breaker threshold.
+	// auto-fired conversations at the tail of the conversation history for
+	// (entity_id, prompt_id), stopping at the first completed row. Chain
+	// instances count once, not once-per-step. Used by the router to check
+	// the circuit-breaker threshold.
 	CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error)
 
 	// --- Admin-pool variants (`...System`) ---
@@ -436,7 +437,8 @@ type TaskStore interface {
 
 	// CloseWithConversationCancelIntentSystem is the close the router performs: the
 	// task's terminal flip, its task_events audit row, and the durable STOP
-	// INTENT for the runs the close ends — one transaction, three tables.
+	// INTENT for the conversations the close ends — one transaction, three
+	// tables.
 	//
 	// The intent is `cancel_requested` on the blueprint runs behind the task's
 	// then-active conversations, and it is transactional because the kill that
@@ -444,19 +446,20 @@ type TaskStore interface {
 	// afterwards leaves no active task for a replay to find, so nothing walks
 	// back to the runs; stamping here means the system cannot forget it meant
 	// to stop them. From the flag alone the rest finishes on its own — the
-	// claim gate refuses to drive a cancel-requested run, and the reaper's
+	// claim gate refuses to drive a cancel-requested step, and the reaper's
 	// cancel arm finalizes it once its executor is gone.
 	//
-	// The returned run ids are that same then-active set, read inside the tx:
-	// every non-terminal conversation on the task, blueprint-parented or not,
-	// which is the selection the caller's post-commit stop cascade targets.
-	// Conversations with no blueprint parent are returned (they still get
-	// stopped) but stamp nothing — there is no blueprint to call off.
+	// The returned conversation ids are that same then-active set, read
+	// inside the tx: every non-terminal conversation on the task,
+	// blueprint-parented or not, which is the selection the caller's post-
+	// commit stop cascade targets. Conversations with no blueprint parent
+	// are returned (they still get stopped) but stamp nothing — there is no
+	// blueprint to call off.
 	//
 	// closed reports whether THIS call performed the transition. False means
 	// the task was already terminal, and then nothing is stamped and no ids
-	// are returned: a task that closed earlier may since have had a run
-	// legitimately resumed under it (a finished blueprint's final step, which
+	// are returned: a task that closed earlier may since have had a
+	// conversation legitimately resumed under it (a finished blueprint's final step, which
 	// the resume ladder allows), and a replayed close must not reach back and
 	// kill work a user started after the fact. The audit row is written either
 	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
@@ -473,13 +476,14 @@ type TaskStore interface {
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
 	// kind to "injected" in place — the event bumped the task AND was folded
-	// into the live run, and the fold is the fact worth surfacing over the
+	// into the live conversation, and the fold is the fact worth surfacing over the
 	// row RecordEventSystem/upsertTaskForEvent already wrote for that same
 	// (task, event) pair (RecordEventSystem itself is INSERT-only and would
 	// silently no-op on that PK collision). No-op if the row is absent.
 	//
-	// claim rides the same transaction: folding an event into a live run is
-	// the bot committing to that task, so the claim is written with the fold
+	// claim rides the same transaction: folding an event into a live
+	// conversation is the bot committing to that task, so the claim is written
+	// with the fold
 	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
 	// stamp actually moved the claim — a refusal commits the fold anyway.
 	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
@@ -520,7 +524,7 @@ const (
 	HandoffChanged HandoffResult = iota
 	// HandoffNoOp — same agent already owns the task. Idempotent;
 	// caller skips the broadcast (and any sibling work like a
-	// duplicate run spawn).
+	// duplicate conversation spawn).
 	HandoffNoOp
 	// HandoffRefused — a different user owns the task (or the task
 	// vanished / is terminal). Caller returns 409 — the gesture

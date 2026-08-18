@@ -15,7 +15,7 @@ import (
 // is written fresh against D3's schema: $N placeholders, explicit
 // org_id bind (column NOT NULL with no default), and org_id in every
 // WHERE clause as defense in depth alongside the conversation_worktrees_all
-// RLS policy (which gates rows on the parent run's visibility via
+// RLS policy (which gates rows on the parent conversation's visibility via
 // EXISTS).
 //
 // Holds two pools:
@@ -24,7 +24,7 @@ import (
 //     (cmd/exec/workspace) routes here. A separate cmd/exec auth pass
 //     owns wrapping the CLI's store calls in synthetic-claims so the
 //     EXISTS subquery in conversation_worktrees_all can resolve the parent
-//     run row.
+//     conversation row.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The delegate
 //     spawner's runAgent + chain orchestrator cleanup defers route
@@ -59,8 +59,9 @@ func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID stri
 // role holds SELECT and UPDATE on repositories and deliberately not INSERT — a
 // repository is brought into the registry by the side that polls and tracks,
 // never by a running agent's pod. A worktree is reserved for a repository the
-// run was already authorized to clone, so the row exists; an absent one is a
-// broken caller and says so rather than minting a repository nobody tracks.
+// conversation was already authorized to clone, so the row exists; an absent
+// one is a broken caller and says so rather than minting a repository nobody
+// tracks.
 func resolveWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repoID string) (string, error) {
 	owner, repo := splitRepoSlug(repoID)
 	if owner == "" || repo == "" {
@@ -94,11 +95,12 @@ func insertConversationWorktree(
 	// inserted=false and returns the winner's path without
 	// touching git.
 	//
-	// priorRows counts this run's EXISTING rows for the same repo, evaluated
-	// against the statement's own snapshot so it never sees the row this
-	// statement is inserting. It decides the credential doorbell below:
-	// credentials are minted per repo, not per (repo, ref), so a second
-	// checkout in a repo the run already holds widens nothing.
+	// priorRows counts this conversation's EXISTING rows for the same repo,
+	// evaluated against the statement's own snapshot so it never sees the
+	// row this statement is inserting. It decides the credential doorbell
+	// below: credentials are minted per repo, not per (repo, ref), so a
+	// second checkout in a repo the conversation already holds widens
+	// nothing.
 	repositoryID, err := resolveWorktreeRepositoryID(ctx, q, orgID, w.RepoID)
 	if err != nil {
 		return false, "", fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
@@ -122,7 +124,7 @@ func insertConversationWorktree(
 	}
 	if inserted == 1 {
 		if priorRows == 0 {
-			// A repo the run did not hold before, so its authorized repo set
+			// A repo the conversation did not hold before, so its authorized repo set
 			// genuinely widened. The sealed credential bundle is a point-in-time
 			// snapshot of the OLD set, so without this the new repo is
 			// authorized-but-uncredentialed: the git proxy's Authorize relays live
@@ -133,8 +135,8 @@ func insertConversationWorktree(
 			// covers this repo by construction.
 			//
 			// Gated on priorRows because the provisioner dedups by repo id: a
-			// second ref in a repo already in the set (a run reviewing two PRs in
-			// one repo) needs no new token, and re-sealing for it would spend
+			// second ref in a repo already in the set (a conversation reviewing two
+			// PRs in one repo) needs no new token, and re-sealing for it would spend
 			// GitHub App mint quota to produce a byte-identical grant. Two
 			// concurrent adds of two refs of the SAME new repo each see priorRows=0
 			// and both ring — an extra doorbell, which is the safe direction; a

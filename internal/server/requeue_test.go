@@ -16,13 +16,14 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// pendingApprovalFixture installs the full FK chain for a task whose
-// delegated run has COMPLETED (terminal) while leaving an unresolved review
-// artifact in the approval column — a finalized pending review plus the
-// agent-side memory row. Returns (taskID, conversationID, reviewID). Centralized here so
-// each teardown test exercises the shape the task-level resolve-all gesture is
-// meant to clean up: agent finished, wrote memory, prepared a review, the human
-// then dragged the card to Done / Queue / dismissed it instead of approving.
+// pendingApprovalFixture installs the full FK chain for a task whose delegated
+// conversation has COMPLETED (terminal) while leaving an unresolved review
+// artifact in the approval column — a finalized pending review plus the agent-
+// side memory row. Returns (taskID, conversationID, reviewID). Centralized here
+// so each teardown test exercises the shape the task-level resolve-all gesture
+// is meant to clean up: agent finished, wrote memory, prepared a review, the
+// human then dragged the card to Done / Queue / dismissed it instead of
+// approving.
 func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversationID, reviewID string) {
 	t.Helper()
 	// The review-abandon path resolves a GitHub client (to delete the pending
@@ -71,7 +72,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 		 VALUES ('r_pa', '00000000-0000-4000-8000-000000000024', 'p_pa', 'completed', 'manual', ?, 0)`,
 		blueprintRunID,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	// conversation_memory: agent finished and wrote its self-report (the
@@ -80,7 +81,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	// The primary join row a real run's completion will carry once the
+	// The primary join row a real conversation's completion will carry once the
 	// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
 	// join-based read (TFAC-622), exercised in assertPendingApprovalCleanedUp
 	// below, needs it to find anything.
@@ -88,10 +89,11 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
-	// A finalized review draft parks the run: a review artifact in state=pending
-	// whose ready sentinel (details.review_event) is set, with the agent's draft
-	// snapshotted into details.proposed. Abandon flips it to dismissed (no GitHub
-	// call — the draft is local). Returns the artifact id.
+	// A finalized review draft parks the conversation: a review artifact in
+	// state=pending whose ready sentinel (details.review_event) is set,
+	// with the agent's draft snapshotted into details.proposed. Abandon
+	// flips it to dismissed (no GitHub call — the draft is local). Returns
+	// the artifact id.
 	line := 1
 	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "headsha_pa", "r_pa")
 	reviewArt.ConversationID = "r_pa"
@@ -123,10 +125,10 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 // dismiss (`dismissed` + "dismissed the task entirely") paths.
 //
 // Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
-// conversations.status — the completed run stays completed. The live-run
-// cancellation that the old park model folded in here is now the spawner's
-// job (only a still-running run is cancelled, by swipeTeardownConversations), so a
-// terminal run is left untouched.
+// conversations.status — the completed conversation stays completed. The
+// live-conversation cancellation that the old park model folded in here is now
+// the spawner's job (only a still-running conversation is cancelled, by
+// swipeTeardownConversations), so a terminal conversation is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
@@ -143,11 +145,11 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
-	// The run is untouched by the resolve — it stays terminal (completed). A
-	// resolve must never flip conversations.status.
+	// The conversation is untouched by the resolve — it stays terminal
+	// (completed). A resolve must never flip conversations.status.
 	var convStatus string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("scan run: %v", err)
+		t.Fatalf("scan conversation: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Errorf("conversation status = %q, want %q (teardown must not flip conversation lifecycle)", convStatus, "completed")
@@ -206,7 +208,7 @@ func assertPendingApprovalCleanedUp(
 		}
 	}
 	if mem == nil {
-		t.Fatalf("GetMemoriesForEntity returned no row for run %s after cleanup", conversationID)
+		t.Fatalf("GetMemoriesForEntity returned no row for conversation %s after cleanup", conversationID)
 	}
 	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
 	if headingCount != 1 {
@@ -215,12 +217,12 @@ func assertPendingApprovalCleanedUp(
 	}
 }
 
-// TestHandleUndo_CleansUpPendingApprovalRun is the regression
+// TestHandleUndo_CleansUpPendingApprovalConversation is the regression
 // for the swipe-toast UX path: Cards user dismissed/claimed the
 // task, agent ran and left an artifact awaiting approval, user hits Cmd-Z (or
 // the toast's Undo button). The full cleanup must run AND a swipe
 // audit row should be recorded since this is a swipe undo.
-func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
@@ -246,11 +248,11 @@ func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 	}
 }
 
-// TestHandleRequeue_CleansUpPendingApprovalRun is the parallel for
+// TestHandleRequeue_CleansUpPendingApprovalConversation is the parallel for
 // the state-driven path: Board's drag-to-Queue, the "Return
 // to queue" button. Same cleanup, but NO swipe row — drag/click
 // gestures aren't swipes and shouldn't muddy the swipe analytics.
-func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
@@ -277,7 +279,7 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DismissCleansUpPendingApprovalRun is the third
+// TestHandleSwipe_DismissCleansUpPendingApprovalConversation is the third
 // entry point: user swipes left to dismiss a delegated card whose
 // agent already produced a review awaiting approval. Today this
 // orphans the review and leaves it hanging unresolved against a
@@ -288,7 +290,7 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 // requeue paths so a future agent reading prior memory can
 // distinguish "the human shelved this verdict but kept the entity
 // on the docket" from "the human walked away from this entity".
-func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleSwipe_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
@@ -302,19 +304,19 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
 		"dismissed", "dismissed the task entirely")
 }
 
-// TestHandleSwipe_CompleteCleansUpPendingApprovalRun is the fourth
-// entry point: the Board's drag-AgentCard-to-Done gesture for a run
+// TestHandleSwipe_CompleteCleansUpPendingApprovalConversation is the fourth
+// entry point: the Board's drag-AgentCard-to-Done gesture for a conversation
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same cleanup — pending_reviews row gone, run flipped
+// the same cleanup — pending_reviews row gone, conversation flipped
 // to cancelled, agent_content preserved, human_content recording
 // the user's verdict with a complete-flavored marker that's distinct
 // from both the requeue and dismiss shapes. Future agents reading
 // memory should be able to tell "the human resolved this themselves
 // without applying my prepared review" from "the human walked away
 // from the entity entirely."
-func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleSwipe_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
@@ -328,19 +330,19 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
 		"done", "marked the task complete without submitting")
 }
 
-// TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the
-// race the PR #77 review flagged: Board's drag-Agent-to-You issues
-// /swipe claim, but the frontend's conversations map can be transiently
-// empty during a fetchTasks refresh — so any frontend gating on a stale
-// run-status snapshot would silently skip the cleanup, stranding the prepared
-// review and leaving an unresolved artifact behind.
+// TestHandleSwipe_ClaimCleansUpPendingApprovalConversation guards the race the PR #77
+// review flagged: Board's drag-Agent-to-You issues /swipe claim, but the
+// frontend's conversations map can be transiently empty during a fetchTasks
+// refresh — so any frontend gating on a stale conversation-status snapshot
+// would silently skip the cleanup, stranding the prepared review and leaving an
+// unresolved artifact behind.
 //
 // Backend-authoritative teardown closes that hole: the swipe handler runs
 // teardownTaskArtifacts for every claim, resolving every unresolved artifact (a
 // no-op for tasks without one). The claim-flavored marker carries its own
 // recalibration signal — "human took over manually" — distinct from
 // requeue/dismiss/complete.
-func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleSwipe_ClaimCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
@@ -352,7 +354,7 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 
 	// Claim no longer transitions status; the task stays
 	// 'queued' and claimed_by_user_id is set instead. The
-	// pending-approval cleanup invariants (run cancelled, review row
+	// pending-approval cleanup invariants (conversation cancelled, review row
 	// removed, human_content marker) are unchanged.
 	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "claimed the task to handle it themselves")
@@ -377,9 +379,9 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Plain queued task with no agent run. Mirrors what claim from
+	// Plain queued task with no agent conversation. Mirrors what claim from
 	// the queue looks like — the event/task FK chain mirrors
-	// pendingApprovalFixture but stops short of any runs or reviews.
+	// pendingApprovalFixture but stops short of any conversations or reviews.
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, state)
@@ -967,7 +969,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	}
 
 	// Use a blueprint id that won't resolve — the spawner will fail
-	// before producing a run, but the claim stamping is the part
+	// before producing a conversation, but the claim stamping is the part
 	// under test and that runs before the spawn. The failed spawn is a
 	// 422 (bad blueprint reference); what we care about is that the
 	// transfer landed (claim flipped to bot) despite the error status.
@@ -1123,13 +1125,13 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 }
 
 // TestHandleUndo_NoPendingApprovalIsNoOp guards the common case:
-// the task has no delegated run (or its delegated run is still
+// the task has no delegated conversation (or its delegated conversation is still
 // active, with nothing awaiting approval). The cleanup should silently
-// no-op rather than touching unrelated runs/reviews.
+// no-op rather than touching unrelated conversations/reviews.
 func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Seed a plain user-claimed task with no run at all — the simplest
+	// Seed a plain user-claimed task with no conversation at all — the simplest
 	// shape that exercises handleUndo's other half (claim clear +
 	// Jira reversal skipped because EntitySource isn't 'jira'). Post-B+
 	// this is status='queued' + claimed_by_user_id; pre-B+
@@ -1243,8 +1245,8 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 // We pick discardOutcomeDismissed for the second call so that if the no-op broke,
 // the human_content marker would visibly flip from "returned to the triage queue"
 // to "dismissed the task entirely" — making the test failure mode loud rather
-// than silent. The completed run stays completed across both calls (a resolve
-// never flips run lifecycle).
+// than silent. The completed conversation stays completed across both calls (a
+// resolve never flips conversation lifecycle).
 func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
@@ -1286,7 +1288,8 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 // TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry is the regression for
 // the all-or-nothing contract: if a DB op inside the teardown tx fails
 // transiently, the whole batch rolls back, leaving the artifact unresolved
-// (still pending) and the run untouched — a subsequent call retries cleanly.
+// (still pending) and the conversation untouched — a subsequent call retries
+// cleanly.
 //
 // We force a failure by temporarily renaming the artifacts table — the teardown's
 // ListByConversation (and the dismiss upsert) reference it by name and the whole tx rolls
@@ -1307,7 +1310,7 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	// and human_content was rolled back with the rest of the batch.
 	var convStatus string
 	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("scan run after sabotaged teardown: %v", err)
+		t.Fatalf("scan conversation after sabotaged teardown: %v", err)
 	}
 	if convStatus != "completed" {
 		t.Fatalf("conversation status = %q after failure; want %q (conversation untouched)", convStatus, "completed")

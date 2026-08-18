@@ -12,8 +12,9 @@ import (
 // sealed per-claim credential bundle channel. Admin-pool only:
 // claim_credentials carries no app-pool grant at all (see the table's RLS
 // comment in the baseline migration), so both the brain's write and the
-// executor's read route through the superuser pool. Rows key on the run's
-// ACTIVE claim, resolved here from the conversation id the caller holds.
+// executor's read route through the superuser pool. Rows key on the
+// conversation's ACTIVE claim, resolved here from the conversation id the
+// caller holds.
 type claimCredentialsStore struct{ admin queryer }
 
 func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
@@ -22,17 +23,17 @@ func newClaimCredentialsStore(admin queryer) db.ClaimCredentialsStore {
 
 var _ db.ClaimCredentialsStore = (*claimCredentialsStore)(nil)
 
-// Put is guarded on boot_epoch so a slow provision can never clobber a
-// fresher one: if run X times out under executor A (boot_epoch 1) and is
-// reclaimed by executor B (boot_epoch 2) before A's in-flight resolve
-// finishes, A's write must not overwrite B's once it lands. The WHERE
-// clause makes the UPDATE a no-op whenever the row already carries a
-// STRICTLY NEWER boot_epoch than this write's — <=, not <, so a same-epoch
-// refresh (the brain's periodic GitHub-token re-mint for the SAME still-
-// live claim) still applies. The active-claim resolution adds a second
-// layer: a reclaimed run has a NEW active claim, so the stale write keys a
-// different row entirely and the fresh claim's bundle is untouched either
-// way. A run with no active claim inserts nothing (silent no-op).
+// Put is guarded on boot_epoch so a slow provision can never clobber a fresher
+// one: if conversation X times out under executor A (boot_epoch 1) and is
+// reclaimed by executor B (boot_epoch 2) before A's in-flight resolve finishes,
+// A's write must not overwrite B's once it lands. The WHERE clause makes the
+// UPDATE a no-op whenever the row already carries a STRICTLY NEWER boot_epoch
+// than this write's — <=, not <, so a same-epoch refresh (the brain's periodic
+// GitHub-token re-mint for the SAME still-live claim) still applies. The
+// active-claim resolution adds a second layer: a reclaimed conversation has a
+// NEW active claim, so the stale write keys a different row entirely and the
+// fresh claim's bundle is untouched either way. A conversation with no active
+// claim inserts nothing (silent no-op).
 func (s *claimCredentialsStore) Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error {
 	_, err := s.admin.ExecContext(ctx, `
 		INSERT INTO claim_credentials (claim_id, org_id, executor_id, boot_epoch, sealed, created_at)

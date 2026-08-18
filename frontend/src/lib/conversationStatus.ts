@@ -139,7 +139,7 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
 }
 
 // completionGloss — the plain-language line for a settled conversation, in one
-// place so the run dock and the telemetry rail can't tell the viewer two
+// place so the dock and the telemetry rail can't tell the viewer two
 // different stories about the same row. Empty for a conversation that hasn't completed.
 export function completionGloss(conversation: Conversation): string {
   const kind = completionKind(conversation)
@@ -256,7 +256,7 @@ export function workStartedAt(conversation: Conversation): string {
   return conversation.ClaimedAt ?? conversation.StartedAt
 }
 
-// Settled queue dwell below this stays off the run surfaces (card footer,
+// Settled queue dwell below this stays off the display surfaces (card footer,
 // telemetry rail): a couple of seconds is normal dispatch latency (the claim
 // scan tick), not a wait worth a readout. One constant so the two surfaces
 // can't drift; a live QUEUED conversation always shows its wait regardless.

@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 )
 
-// readConversation issues the run detail read and decodes it.
+// readConversation issues the conversation detail read and decodes it.
 func readConversation(t *testing.T, s *Server, conversationID string) map[string]any {
 	t.Helper()
 	rec := doJSON(t, s, "GET", "/api/agent/conversations/"+conversationID, nil)
@@ -20,12 +20,12 @@ func readConversation(t *testing.T, s *Server, conversationID string) map[string
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode run: %v", err)
+		t.Fatalf("decode conversation: %v", err)
 	}
 	return out
 }
 
-// withEmptyBlobStore wires a blob store with nothing in it, so a run whose
+// withEmptyBlobStore wires a blob store with nothing in it, so a conversation whose
 // worktree is also gone is unrecoverable for real rather than
 // unverifiable (an unwired store answers "recoverable" by design).
 func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
@@ -63,10 +63,11 @@ func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 	}
 }
 
-// TestHandleAgentStatus_ResumableParkedRun: the unchanged case. A parked run
+// TestHandleAgentStatus_ResumableParkedConversation: the unchanged case. A
+// parked conversation
 // with a live workspace under a running blueprint reads resumable, with no
 // reason attached — the composer stays live and the follow-up works.
-func TestHandleAgentStatus_ResumableParkedRun(t *testing.T) {
+func TestHandleAgentStatus_ResumableParkedConversation(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
 	conversationID := seedSteerConversation(t, s.db, "reswarm", "open")
@@ -102,11 +103,11 @@ func TestHandleAgentStatus_ResumableBlueprintCancelled(t *testing.T) {
 }
 
 // TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed: the two shapes
-// the read deliberately doesn't answer for. An active run is steered through
+// the read deliberately doesn't answer for. An active conversation is steered through
 // its live process (and the client's own `active` arm already opens the
 // composer); a failed one has no workspace by construction. Absence is the
 // answer — the client falls back to the status reading, which is right for
-// both — and it is what keeps a blob existence check off every live run's
+// both — and it is what keeps a blob existence check off every live conversation's
 // poll.
 func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 	for _, status := range []string{"running", "cloning", "failed"} {
@@ -130,7 +131,7 @@ func TestHandleAgentStatus_ResumabilityOmittedForActiveAndFailed(t *testing.T) {
 				t.Fatalf("display status = %v, want %s — the fixture didn't produce the shape under test", got["Status"], status)
 			}
 			if _, ok := got["resumable"]; ok {
-				t.Errorf("resumable = %v, want the key absent for a %s run", got["resumable"], status)
+				t.Errorf("resumable = %v, want the key absent for a %s conversation", got["resumable"], status)
 			}
 		})
 	}
