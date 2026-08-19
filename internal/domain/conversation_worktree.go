@@ -13,9 +13,10 @@ import "time"
 // conversation), so ref discriminates them. Ref is the materialization selector AND the
 // worktree's path-slug subdirectory:
 //
-//   - "default"   — the repo's default branch (detached checkout)
-//   - "pr-<N>"    — pull request N's head
-//   - "<branch>"  — a named branch (--ref), path-slugified
+//   - "default"       — the repo's default branch (detached checkout)
+//   - "pr-<N>"        — pull request N's head
+//   - "ref-<branch>"  — a named branch (--ref), with '/' folded to '~'
+//     (worktree.CheckoutRefSlug — never the bare branch name)
 //
 // It replaced the vestigial feature_branch column (TFAC-502): the push
 // gate reads the worktree's live current branch, never this row, so a

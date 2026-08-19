@@ -18,7 +18,7 @@ import (
 //     stays consistent).
 //   - materialized: repos the agent has already `workspace add`'d for
 //     this run, with the absolute worktree path and the ref the worktree
-//     was materialized for ("default", "pr-<N>", or a slugified branch).
+//     was materialized for ("default", "pr-<N>", or "ref-<branch>").
 //
 // Two-section structure (rather than a flat list with a `materialized`
 // boolean) keeps the field shape per entry uniform — available entries
@@ -49,7 +49,7 @@ type listMaterialized struct {
 	Repo string `json:"repo"`
 	Path string `json:"path"`
 	// Ref is the materialization selector the worktree was created for:
-	// "default", "pr-<N>", or a slugified branch name. It is the checkout
+	// "default", "pr-<N>", or "ref-<branch>". It is the checkout
 	// intent, not the agent's live working branch (the agent creates its own
 	// branch off the checkout; the push gate authorizes that live branch).
 	Ref string `json:"ref"`

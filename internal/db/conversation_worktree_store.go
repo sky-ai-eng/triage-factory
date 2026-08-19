@@ -14,7 +14,7 @@ import (
 // `triagefactory exec workspace add` against each repo it needs. The
 // ref discriminator (TFAC-502) lets a single conversation hold several
 // worktrees in one repo (e.g. two PRs reviewed in one interactive
-// conversation): "default", "pr-<N>", or a slugified branch name.
+// conversation): "default", "pr-<N>", or "ref-<branch>".
 //
 // The row references the repository by its registry row id, so a rename moves
 // nothing here. Every method still takes and returns repoID as "owner/repo" —
