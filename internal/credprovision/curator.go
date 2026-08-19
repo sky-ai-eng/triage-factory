@@ -183,7 +183,7 @@ func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID
 			continue
 		}
 		seen[key] = true
-		tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
+		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				continue

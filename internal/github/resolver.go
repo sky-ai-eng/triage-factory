@@ -124,6 +124,19 @@ type ScopedResolver interface {
 	HasAnyCredential(ctx context.Context, orgID string) (bool, error)
 }
 
+// TokenForManagedGit resolves the credential injected by a managed Git proxy.
+// A nil permission subset is intentional: an App token inherits the
+// installation's granted permissions, so a read-only installation can still
+// clone and fetch while GitHub rejects pushes. Repository and ref policy remain
+// the proxy gate's responsibility. PATs are returned unchanged because GitHub
+// cannot narrow them.
+//
+// Both local's live token source and multi's sealed-bundle provisioner use this
+// helper so their App permission request cannot drift.
+func TokenForManagedGit(ctx context.Context, resolver ScopedResolver, orgID, owner, repo string) (githubapp.Token, error) {
+	return resolver.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
+}
+
 // ScopedRepoResolver is the optional extension that resolves a *Client backed
 // by a per-repo down-scoped token (the multi-mode exec-gh channel). Separate
 // from ScopedResolver because the gh channel wants a ready client + identity,

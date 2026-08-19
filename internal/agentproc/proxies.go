@@ -179,11 +179,11 @@ type sigV4LiveSource func(ctx context.Context) (env map[string]string, expiry ti
 type GitProxyConfig struct {
 	// TokenSource resolves the host-side GitHub credential the proxy injects
 	// on outbound git-over-HTTPS for ONE repo (owner/repo). Built over the
-	// GitHub resolver's per-repo scoped mint (TokenForRepoScoped with
-	// {contents:write}) so the injected App token is narrowed to exactly the
-	// repo being touched; a PAT org falls through unscoped (a PAT can't be
-	// narrowed). Required when GitProxyConfig is non-nil. Lazy + cached
-	// per-repo inside the proxy; a zero-expiry token (a PAT) mints once per repo.
+	// GitHub resolver's managed-Git mint. An App token is narrowed to exactly
+	// the repo being touched while inheriting that installation's granted
+	// permissions; a PAT org falls through unscoped (a PAT can't be narrowed).
+	// Required when GitProxyConfig is non-nil. Lazy + cached per-repo inside the
+	// proxy; a zero-expiry token (a PAT) mints once per repo.
 	TokenSource gitproxy.TokenSource
 
 	// Upstream is the real git host base — empty defaults to

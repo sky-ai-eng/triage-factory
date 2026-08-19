@@ -168,6 +168,8 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	}
 	if c := res.calls[0]; c.owner != "acme" || c.repo != "widgets" {
 		t.Errorf("minted for %s/%s, want acme/widgets", c.owner, c.repo)
+	} else if c.perms != nil {
+		t.Errorf("managed Git permissions = %v, want nil to inherit the installation grant", c.perms)
 	}
 
 	// The gh-channel single team-set token is minted for the primary owner

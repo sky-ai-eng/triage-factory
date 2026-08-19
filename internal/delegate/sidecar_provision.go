@@ -333,7 +333,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	)
 	if storesSet {
 		auditHost = agenthost.NewLocal(stores, info)
-		git = s.executorGitGate(ctx, info, stores, auditHost)
+		git = s.managedGitGate(ctx, info, stores, auditHost)
 	}
 
 	// The commit identity's git config pairs (author/committer) fold into the
@@ -545,8 +545,9 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 	return ghclient.APIBase(base)
 }
 
-// executorGitGate builds the orchestrator-side git gate the sidecar's git proxy
-// relays to: the non-secret org base as the insteadOf upstream, plus the
+// managedGitGate builds the shared DB-backed policy and audit half of managed
+// Git. Local's loopback proxy calls it directly; the multi sidecar relays to it.
+// It carries the non-secret org base as the insteadOf upstream, plus the
 // DB-backed Authorize (team-tracks + conversation_worktrees ledger + ref allowlist), the
 // RecordDenial audit, and the RecordPush capture. No TokenSource /
 // ProbeCredentials — the sidecar resolves and probes the real token from its
@@ -561,7 +562,7 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 // auditHost is the caller's — not built here — because the run's acting GitHub
 // credential is not known until the sidecar reports it, and the caller is the
 // half that holds both the client and that answer.
-func (s *Spawner) executorGitGate(ctx context.Context, info agenthost.ConversationInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
+func (s *Spawner) managedGitGate(ctx context.Context, info agenthost.ConversationInfo, stores db.Stores, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()

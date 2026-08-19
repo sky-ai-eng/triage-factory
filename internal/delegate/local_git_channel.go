@@ -102,12 +102,12 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 		auditHost.SetGitHubCredential(domain.CredentialGitHubPAT)
 	}
 
-	cfg := s.executorGitGate(ctx, info, stores, auditHost)
+	cfg := s.managedGitGate(ctx, info, stores, auditHost)
 	if cfg == nil {
 		return nil, errors.New("local Git credential proxy is not configured")
 	}
 	cfg.TokenSource = func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
-		tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, map[string]string{"contents": "write"})
+		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			return gitproxy.Token{}, err
 		}
