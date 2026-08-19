@@ -1082,6 +1082,7 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
+	eventsEmitted := 0
 	terminal := func(snap domain.JiraSnapshot) bool {
 		rule := projects.ForKey(extractProject(snap.Key))
 		if rule == nil {
@@ -1109,7 +1110,21 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
-			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			if state.DiscoveredAssignedToCurrentUser {
+				// An issue assigned to someone else is outside both discovery
+				// queries, so appearing in the assigned-to-current-user result
+				// can itself be the assignment transition. Commit that initial
+				// event with the first snapshot; seeding first would make Phase 3
+				// diff current-against-current and retire the transition unseen.
+				events := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, projects.doneMembersForKey(snap.Key))
+				if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, events); err != nil {
+					trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
+				} else if !ok {
+					trackerLog.Warn("seed assigned jira snapshot CAS lost race, skipping", "source_id", snap.Key)
+				} else {
+					eventsEmitted += len(events)
+				}
+			} else if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 				trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
 			} else if !ok {
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
@@ -1167,7 +1182,6 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	// Phase 3: Diff + emit events. Network-free, like the GitHub twin.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
-	eventsEmitted := 0
 	staleReads := 0
 	for _, e := range entities {
 		newState, ok := refreshed[e.SourceID]
@@ -1566,8 +1580,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	defer span.End()
 
 	type queryWithDone struct {
-		jql         string
-		doneMembers []string // for subtask classification on issues returned by this query
+		jql                   string
+		doneMembers           []string // for subtask classification on issues returned by this query
+		assignedToCurrentUser bool     // this query's arrival is itself an assignment signal
 	}
 	var queries []queryWithDone
 
@@ -1605,7 +1620,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
 		}
-		queries = append(queries, queryWithDone{jql: assignedJQL, doneMembers: allDone})
+		queries = append(queries, queryWithDone{
+			jql: assignedJQL, doneMembers: allDone, assignedToCurrentUser: true,
+		})
 	}
 
 	seen := map[string]bool{}
@@ -1632,7 +1649,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToState(issue, baseURL, q.doneMembers))
+				state := issueToState(issue, baseURL, q.doneMembers)
+				state.DiscoveredAssignedToCurrentUser = q.assignedToCurrentUser
+				all = append(all, state)
 			}
 		}
 	}
@@ -1730,8 +1749,9 @@ func missingJiraKeys(keys []string, results map[string]jiraIssueState) []string 
 // the persisted snapshot_json stays small — diff reads don't drag multi-KB
 // issue bodies through every poll.
 type jiraIssueState struct {
-	Snap        domain.JiraSnapshot
-	Description string
+	Snap                            domain.JiraSnapshot
+	Description                     string
+	DiscoveredAssignedToCurrentUser bool
 }
 
 // issueToState converts a Jira API Issue into the diff-scope snapshot plus
