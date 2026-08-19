@@ -30,6 +30,7 @@ type AgentStoreFactory func(t *testing.T) (store db.AgentStore, orgID, patUserID
 //     jira_service_account_id.
 //   - SetGitHubPATUser writes the PAT-borrow FK; malformed input is
 //     refused before any UPDATE runs.
+//   - SetGitHubOrgIdentity stores or clears login + email atomically.
 //   - Postgres invalid-UUID guards: Update / SetGitHubPAT return nil
 //     instead of bubbling 22P02 parse errors.
 //   - DisplayName defaulting: empty input fills "Triage Factory Bot".
@@ -313,6 +314,32 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		got, _ = store.GetForOrg(ctx, orgID)
 		if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
 			t.Errorf("GitHub org identity=%v after clear, want empty", got)
+		}
+
+		partials := []struct {
+			name  string
+			login string
+			email string
+		}{
+			{name: "login_only", login: "acme-bot[bot]"},
+			{name: "email_only", email: "bot@example.com"},
+		}
+		for _, partial := range partials {
+			t.Run(partial.name, func(t *testing.T) {
+				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+					t.Fatalf("seed full identity: %v", err)
+				}
+				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, partial.email); err != nil {
+					t.Fatalf("SetGitHubOrgIdentity partial: %v", err)
+				}
+				got, err := store.GetForOrg(ctx, orgID)
+				if err != nil {
+					t.Fatalf("GetForOrg: %v", err)
+				}
+				if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
+					t.Errorf("GitHub org identity=%v after partial write, want both fields empty", got)
+				}
+			})
 		}
 	})
 

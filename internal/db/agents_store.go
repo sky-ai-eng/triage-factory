@@ -87,8 +87,9 @@ type AgentStore interface {
 	// distinct from SetGitHubPATUser (the user who pasted the PAT). Written by the
 	// org-PAT setup/rebind writers (internal/server/credentials.go and
 	// the other integrations.Save sites) so the credential resolver's
-	// OrgIdentityFor PAT tier can stamp the org commit-author identity
-	// identity. Empty values clear both fields. Admin-only in Postgres, same
+	// OrgIdentityFor PAT tier can stamp the org commit-author identity. If
+	// either value is empty, both fields are cleared so a partial
+	// identity can never be persisted. Admin-only in Postgres, same
 	// pool + RLS as SetGitHubPATUser. App-tier orgs never write here —
 	// the App bot login (<slug>[bot]) resolves live from the App
 	// registration, so this is the PAT path only.

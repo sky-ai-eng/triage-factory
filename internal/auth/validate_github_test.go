@@ -5,15 +5,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
 func TestCaptureGitHubIdentity(t *testing.T) {
 	t.Parallel()
 
-	var calls []string
+	var (
+		calls   []string
+		callsMu sync.Mutex
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callsMu.Lock()
 		calls = append(calls, r.URL.Path)
+		callsMu.Unlock()
 		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
 			t.Errorf("Authorization = %q, want Bearer secret", got)
 		}
@@ -38,8 +44,12 @@ func TestCaptureGitHubIdentity(t *testing.T) {
 	if got.Login != "octocat" || got.UserID() != "583231" || got.PrimaryEmail != "octocat@example.com" {
 		t.Fatalf("identity = %#v, want octocat/583231/octocat@example.com", got)
 	}
-	if strings.Join(calls, ",") != "/api/v3/user,/api/v3/user/emails" {
-		t.Fatalf("calls = %v", calls)
+	callsMu.Lock()
+	gotCalls := strings.Join(calls, ",")
+	callsSnapshot := append([]string(nil), calls...)
+	callsMu.Unlock()
+	if gotCalls != "/api/v3/user,/api/v3/user/emails" {
+		t.Fatalf("calls = %v", callsSnapshot)
 	}
 }
 

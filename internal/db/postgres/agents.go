@@ -179,7 +179,11 @@ func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, l
 	}
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// stored in the text column github_org_login — no UUID shape check, unlike
-	// SetGitHubPATUser's user FK. Empty clears it (SQL NULL).
+	// SetGitHubPATUser's user FK. The pair is all-or-nothing: either empty input
+	// clears both columns so no caller can persist a partial commit identity.
+	if login == "" || email == "" {
+		login, email = "", ""
+	}
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE agents
 		SET github_org_login = $1,

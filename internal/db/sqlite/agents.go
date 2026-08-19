@@ -137,8 +137,12 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 
 func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) error {
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
-	// not a UUID — no shape validation. Empty clears it (NULL), so an org that
-	// drops its PAT path stops stamping a stale identity.
+	// not a UUID — no shape validation. The pair is all-or-nothing: either
+	// empty input clears both columns so no caller can persist a partial commit
+	// identity.
+	if login == "" || email == "" {
+		login, email = "", ""
+	}
 	_, err := s.q.ExecContext(ctx, `
 		UPDATE agents
 		SET github_org_login = ?,
