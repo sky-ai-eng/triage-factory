@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,19 +60,28 @@ type GitDelta struct {
 	Patch []byte
 }
 
-// CapturedState is everything one snapshot-capture pass emits from inside the
-// agent-uid child: the git delta (nil for a non-git run root) AND the Claude
-// session transcript (empty when the run carries no session, or the file was
-// absent). Both are agent-owned — the transcript sits at 0600 under a 0700
-// projects dir the SDK locks to its owner — so both have to be read as the
-// sandbox uid. Reading them in the same dropped-privilege child is exactly why
-// the orchestrator, which can read neither, never needs to: it decodes this
-// envelope rather than touching the files. Transcript is a []byte, so JSON
-// carries it base64-encoded, tolerating any bytes without escaping.
+// CapturedState is the manifest one snapshot-capture pass emits from inside the
+// agent-uid child. The large members are written into fixed files in a staging
+// directory prepared by the orchestrator; only their paths and the small git
+// metadata cross the JSON control channel. The byte fields remain the local-mode
+// representation, where capture is in-process and has no cross-uid/base64 hop.
 type CapturedState struct {
-	Delta      *GitDelta `json:"delta"`
-	Transcript []byte    `json:"transcript,omitempty"`
+	Delta          *GitDelta `json:"delta"`
+	SessionID      string    `json:"session_id,omitempty"`
+	BundlePath     string    `json:"bundle_path,omitempty"`
+	PatchPath      string    `json:"patch_path,omitempty"`
+	TranscriptPath string    `json:"transcript_path,omitempty"`
+	Transcript     []byte    `json:"transcript,omitempty"`
 }
+
+// Capture staging member names are fixed at both ends of the cross-uid handoff.
+// The parent pre-creates exactly these files, and validates that the child
+// manifest points back to them before opening anything.
+const (
+	CaptureBundleFile     = sandbox.CaptureBundleFile
+	CapturePatchFile      = sandbox.CapturePatchFile
+	CaptureTranscriptFile = sandbox.CaptureTranscriptFile
+)
 
 // ReadClaudeSessionTranscript reads the Claude session transcript for sessionID
 // under wtPath's project encoding, returning (bytes, true) on success and
@@ -127,6 +137,30 @@ func ReadSandboxSessionTranscript(runRoot, sessionID string) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
+}
+
+// CopySandboxSessionTranscript streams a sandboxed run's confined transcript
+// into w. A missing or unreadable transcript retains the existing best-effort
+// semantics and reports (false, nil); an error after the source is open is an
+// output failure and is returned.
+func CopySandboxSessionTranscript(runRoot, sessionID string, w io.Writer) (bool, error) {
+	if sessionID == "" {
+		return false, nil
+	}
+	root := ResolveClaudeProjectCwd(runRoot)
+	rel, err := filepath.Rel(root, SandboxClaudeSessionPath(runRoot, sessionID))
+	if err != nil {
+		return false, nil
+	}
+	f, err := openFileConfined(root, rel)
+	if err != nil {
+		return false, nil
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := io.Copy(w, f); err != nil {
+		return false, fmt.Errorf("copy sandbox session transcript: %w", err)
+	}
+	return true, nil
 }
 
 // SandboxClaudeSessionPath is the host path of a sandboxed run's session
@@ -197,31 +231,69 @@ func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) 
 	return d, nil
 }
 
+// CaptureWorkspaceGitToWriters is the multi-mode capture body. It writes the
+// two unbounded git members directly to caller-prepared files (handed in as
+// writers across exec) and returns only the branch/HEAD metadata.
+func CaptureWorkspaceGitToWriters(ctx context.Context, wtPath string, bundle, patch io.Writer) (_ *GitDelta, hasBundle, hasPatch bool, err error) {
+	if !IsGitWorktree(wtPath) {
+		return nil, false, false, nil
+	}
+	d, err := captureWorkspaceGitMetadata(ctx, wtPath)
+	if err != nil {
+		return nil, false, false, err
+	}
+	hasBundle, err = bundleLocalCommitsTo(ctx, wtPath, d.Branch, bundle)
+	if err != nil {
+		return nil, false, false, err
+	}
+	hasPatch, err = captureUncommittedTo(ctx, wtPath, patch)
+	if err != nil {
+		return nil, false, false, err
+	}
+	return d, hasBundle, hasPatch, nil
+}
+
+func captureWorkspaceGitMetadata(ctx context.Context, wtPath string) (*GitDelta, error) {
+	d := &GitDelta{}
+	head, err := gitCapture(ctx, wtPath, nil, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("rev-parse HEAD: %w", err)
+	}
+	d.Head = strings.TrimSpace(string(head))
+	if out, err := gitCapture(ctx, wtPath, nil, "rev-parse", "--abbrev-ref", "HEAD"); err == nil {
+		if b := strings.TrimSpace(string(out)); b != "HEAD" {
+			d.Branch = b
+		}
+	}
+	return d, nil
+}
+
 // bundleLocalCommits writes a `git bundle` of <rev> --not --remotes — the
 // commits the agent made that aren't on any remote-tracking ref yet — and
 // returns its bytes. Returns (nil, nil) when git refuses to create an empty
 // bundle: the tip is already published, so there are no local-only commits to
 // carry and the bare reproduces the committed state unaided.
 func bundleLocalCommits(ctx context.Context, wtPath, branch string) ([]byte, error) {
+	var out bytes.Buffer
+	ok, err := bundleLocalCommitsTo(ctx, wtPath, branch, &out)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Writer) (bool, error) {
 	rev := branch
 	if rev == "" {
 		rev = "HEAD"
 	}
-	f, err := os.CreateTemp("", "tf-bundle-*.bundle")
-	if err != nil {
-		return nil, fmt.Errorf("bundle tempfile: %w", err)
-	}
-	name := f.Name()
-	_ = f.Close()
-	defer func() { _ = os.Remove(name) }()
-
-	if _, err := gitCapture(ctx, wtPath, nil, "bundle", "create", name, rev, "--not", "--remotes"); err != nil {
+	if err := gitCaptureTo(ctx, wtPath, nil, w, "bundle", "create", "-", rev, "--not", "--remotes"); err != nil {
 		if strings.Contains(err.Error(), "empty bundle") {
-			return nil, nil
+			return false, nil
 		}
-		return nil, fmt.Errorf("git bundle: %w", err)
+		return false, fmt.Errorf("git bundle: %w", err)
 	}
-	return os.ReadFile(name)
+	return true, nil
 }
 
 // skillsExcludePath is the capture's git-pathspec spelling of the skills path
@@ -385,16 +457,25 @@ func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths [
 // either way, but carries them so no diff here reads as license for a flag-less
 // one.
 func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
+	var out bytes.Buffer
+	ok, err := captureUncommittedTo(ctx, wtPath, &out)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool, error) {
 	changed, scoped := changedPathsVsHEAD(ctx, wtPath)
 	if scoped && len(changed) == 0 {
 		// The real index's stat cache says the tree matches HEAD exactly —
 		// nothing uncommitted to carry, and no temp index to build.
-		return nil, nil
+		return false, nil
 	}
 
 	idx, err := os.CreateTemp("", "tf-index-*")
 	if err != nil {
-		return nil, fmt.Errorf("temp index: %w", err)
+		return false, fmt.Errorf("temp index: %w", err)
 	}
 	idxName := idx.Name()
 	_ = idx.Close()
@@ -405,7 +486,7 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 	// base environment.
 	env := append(gitBaseEnv(), "GIT_INDEX_FILE="+idxName)
 	if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
-		return nil, fmt.Errorf("seed temp index: %w", err)
+		return false, fmt.Errorf("seed temp index: %w", err)
 	}
 	if scoped {
 		// A scoped stage can fail legitimately: a pathspec can match nothing
@@ -418,13 +499,13 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 		if sErr := stageChangedPaths(ctx, wtPath, env, changed); sErr != nil {
 			scoped = false
 			if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
-				return nil, fmt.Errorf("re-seed temp index: %w", err)
+				return false, fmt.Errorf("re-seed temp index: %w", err)
 			}
 		}
 	}
 	if !scoped {
 		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
-			return nil, fmt.Errorf("stage worktree: %w", err)
+			return false, fmt.Errorf("stage worktree: %w", err)
 		}
 		// The full stage's exclusions are add-then-reset; the scoped stage
 		// carries them as `:(exclude)` pathspecs instead and MUST NOT run
@@ -442,7 +523,7 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 		// want — the working-tree files stay on disk either way, only the temp
 		// index changes.
 		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
-			return nil, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
+			return false, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
 		}
 		// Keep `.claude/skills` out of the delta for the same reason: it is TF
 		// mechanism, not the agent's work. In a sandboxed tree the path is our
@@ -464,21 +545,18 @@ func captureUncommitted(ctx context.Context, wtPath string) ([]byte, error) {
 		// snapshot capture on. When the diff is empty the reset would be a
 		// no-op anyway, so the guard costs nothing but the read.
 		if staged, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", skillsExcludePath); err != nil {
-			return nil, fmt.Errorf("check %s in temp index: %w", skillsExcludePath, err)
+			return false, fmt.Errorf("check %s in temp index: %w", skillsExcludePath, err)
 		} else if len(bytes.TrimSpace(staged)) > 0 {
 			if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", skillsExcludePath); err != nil {
-				return nil, fmt.Errorf("drop %s from temp index: %w", skillsExcludePath, err)
+				return false, fmt.Errorf("drop %s from temp index: %w", skillsExcludePath, err)
 			}
 		}
 	}
-	patch, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD")
-	if err != nil {
-		return nil, fmt.Errorf("diff temp index: %w", err)
+	cw := &captureCountingWriter{w: w}
+	if err := gitCaptureTo(ctx, wtPath, env, cw, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD"); err != nil {
+		return false, fmt.Errorf("diff temp index: %w", err)
 	}
-	if len(bytes.TrimSpace(patch)) == 0 {
-		return nil, nil
-	}
-	return patch, nil
+	return cw.n > 0, nil
 }
 
 // RestoreWorkspaceGit rebuilds a worktree at wtDir from the durable bare clone
@@ -716,6 +794,25 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // Keep it strict; the isolation is the dropped-privilege child, not any check
 // here.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
+	var out bytes.Buffer
+	if err := gitCaptureTo(ctx, dir, env, &out, args...); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+type captureCountingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *captureCountingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func gitCaptureTo(ctx context.Context, dir string, env []string, stdout io.Writer, args ...string) error {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
@@ -729,14 +826,14 @@ func gitCapture(ctx context.Context, dir string, env []string, args ...string) (
 	} else {
 		cmd.Env = gitBaseEnv()
 	}
-	var out, errb bytes.Buffer
-	cmd.Stdout = &out
+	var errb bytes.Buffer
+	cmd.Stdout = stdout
 	cmd.Stderr = &errb
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
-		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(errb.String()))
 	}
-	return out.Bytes(), nil
+	return nil
 }

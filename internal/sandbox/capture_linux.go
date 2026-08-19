@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -20,44 +21,37 @@ import (
 // `snapshot-capture` subcommand — os.Executable() resolves to the same
 // triagefactory binary; this capture runs inside the cap-broker, which is
 // itself a re-exec of that binary.
-var captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+var captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 	self, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("locate self: %w", err)
 	}
-	argv := []string{"snapshot-capture", wtPath}
+	argv := []string{"snapshot-capture", wtPath, stagingDir}
 	if sessionID != "" {
 		argv = append(argv, sessionID)
 	}
 	return exec.CommandContext(ctx, self, argv...), nil
 }
 
-// CaptureMaxBytes bounds how many raw bytes of a capture child's stdout
-// either capture path — the buffered in-process fallback below, or the
-// cap-broker's streamed RPC (cmd/capbroker) — will hold before giving up.
-// This is the true raw ceiling: the frame cap this replaces applied to the
-// JSON response AFTER base64 inflation, an effective ~384 MiB raw limit, so
-// this is never tighter than what shipped before. A var (not a const) only
-// so tests can shrink it rather than pushing real hundreds-of-MiB payloads.
-var CaptureMaxBytes int64 = 512 * 1024 * 1024
+// CaptureManifestMaxBytes bounds the capture child's small JSON manifest. The
+// bundle, patch, and transcript never cross stdout, so a manifest approaching
+// this ceiling is malformed rather than a legitimate large workspace.
+var CaptureManifestMaxBytes int64 = 1 * 1024 * 1024
 
 // captureStderrTailBytes bounds how much of the capture child's stderr a
 // caller gets back. Diagnostics only — never run data — so a small fixed
 // tail is enough; the stdout stream is what needed the real cap above.
 const captureStderrTailBytes = 64 * 1024
 
-// ReadCapturedDelta reads r up to CaptureMaxBytes, erroring instead of
-// silently truncating if more arrives — the shared ceiling both capture
-// paths enforce on the same raw byte stream (decision: "one ceiling"),
-// applied by the reader in each case: hostOps.CaptureRunDelta's own pipe
-// below, and the orchestrator-side IPCClient reading the brokered stream.
-func ReadCapturedDelta(r io.Reader) ([]byte, error) {
-	buf, err := io.ReadAll(io.LimitReader(r, CaptureMaxBytes+1))
+// ReadCaptureManifest reads the bounded JSON control message shared by the
+// fallback and brokered paths.
+func ReadCaptureManifest(r io.Reader) ([]byte, error) {
+	buf, err := io.ReadAll(io.LimitReader(r, CaptureManifestMaxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read captured delta: %w", err)
+		return nil, fmt.Errorf("read capture manifest: %w", err)
 	}
-	if int64(len(buf)) > CaptureMaxBytes {
-		return nil, fmt.Errorf("capture stream exceeds %d byte cap", CaptureMaxBytes)
+	if int64(len(buf)) > CaptureManifestMaxBytes {
+		return nil, fmt.Errorf("capture manifest exceeds %d byte cap", CaptureManifestMaxBytes)
 	}
 	return buf, nil
 }
@@ -119,10 +113,9 @@ func (t *tailBuffer) String() string {
 // wrapped in another io.Writer: os/exec special-cases *os.File (dup2
 // straight into the child at exec time, no copy in this process); any other
 // io.Writer forces os/exec to fall back to an os.Pipe() plus a copy
-// goroutine RIGHT HERE, silently reintroducing every byte of the delta into
-// this process's memory and defeating the reason this function exists. This
-// is what lets the cap-broker call it with the orchestrator's
-// passed-through socket fd and never read a byte of the delta itself.
+// goroutine RIGHT HERE. Keeping the passed-through fd preserves the broker's
+// payload-blind posture even though stdout now carries only the small manifest;
+// the large members go to stagingDir.
 //
 // The child drops to the sandbox uid/gid (matching the run tree's ownership
 // hand-off) and runs in a fresh, empty network namespace. So: any
@@ -157,7 +150,7 @@ func (t *tailBuffer) String() string {
 //
 // Returns a bounded tail of the child's stderr (diagnostics, never run
 // data) regardless of outcome, plus the run's error if any.
-func CaptureRunDeltaTo(ctx context.Context, worktree, sessionID string, stdout *os.File) (stderrTail string, err error) {
+func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (stderrTail string, err error) {
 	// stdout is this function's to close, whichever way it returns: on a
 	// validation or captureCommand failure below nobody else will ever hold
 	// a reference to it, and once the child is spawned its own inherited
@@ -168,13 +161,26 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, sessionID string, stdout *
 	if _, err := validateRunTreeRoot("capture run delta", worktree); err != nil {
 		return "", err
 	}
+	if err := validateCaptureStagingDir(stagingDir); err != nil {
+		return "", err
+	}
+	outputs, err := openCaptureStaging(stagingDir)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		for _, f := range outputs {
+			_ = f.Close()
+		}
+	}()
 
-	cmd, err := captureCommand(ctx, worktree, sessionID)
+	cmd, err := captureCommand(ctx, worktree, stagingDir, sessionID)
 	if err != nil {
 		return "", err
 	}
 	cmd.Dir = "/" // a neutral cwd; the child is passed the worktree path explicitly
 	cmd.Env = CaptureChildEnv()
+	cmd.ExtraFiles = outputs
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
 			Uid: uint32(WorktreeUID),
@@ -204,14 +210,27 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, sessionID string, stdout *
 	return stderr.String(), nil
 }
 
+func openCaptureStaging(dir string) ([]*os.File, error) {
+	var files []*os.File
+	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			for _, opened := range files {
+				_ = opened.Close()
+			}
+			return nil, fmt.Errorf("sandbox: open capture staging member %s: %w", name, err)
+		}
+		files = append(files, f)
+	}
+	return files, nil
+}
+
 // CaptureRunDelta is the unprivileged, in-process fallback used only when
 // no broker exists (unprivileged bare-metal dev): a thin buffered wrapper
-// over CaptureRunDeltaTo. It pipes the streaming variant's stdout into
-// itself, reading concurrently with the child's Run (a pipe's kernel buffer
-// is a few tens of KiB — anything larger would deadlock a child that writes
-// before anyone drains it) and enforcing the same CaptureMaxBytes ceiling
-// the brokered path's client-side reader applies, via ReadCapturedDelta.
-func (hostOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+// over CaptureRunDeltaTo. It pipes the manifest into itself, reading
+// concurrently with the child's Run and enforcing the same small control-plane
+// ceiling the brokered path applies via ReadCaptureManifest.
+func (hostOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("isolated capture: create pipe: %w", err)
@@ -223,12 +242,12 @@ func (hostOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) 
 	}
 	readDone := make(chan readResult, 1)
 	go func() {
-		buf, err := ReadCapturedDelta(pr)
+		buf, err := ReadCaptureManifest(pr)
 		_ = pr.Close()
 		readDone <- readResult{buf, err}
 	}()
 
-	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, sessionID, pw)
+	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, stagingDir, sessionID, pw)
 	res := <-readDone
 	if runErr != nil {
 		if stderrTail != "" {

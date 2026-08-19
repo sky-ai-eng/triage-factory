@@ -156,30 +156,54 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	// themselves, so this executor-side span IS its measurement; in local mode
 	// the same span covers the in-process capture.
 	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", runtime)
-	delta, transcript, err := captureWorkspaceGit(capCtx, wtPath, sessionID)
+	captured, cleanupCapture, err := captureWorkspaceGit(capCtx, wtPath, sessionID)
 	if err != nil {
 		recordSpanError(capSpan, err)
 		capSpan.End()
 		return fmt.Errorf("snapshot: capture: %w", err)
 	}
-	var bundleBytes, patchBytes int64
-	if delta != nil {
-		bundleBytes = int64(len(delta.Bundle))
-		patchBytes = int64(len(delta.Patch))
+	if cleanupCapture != nil {
+		defer func() {
+			if cleanupCapture != nil {
+				cleanupCapture()
+			}
+		}()
+	}
+	bundleBytes, err := capturedMemberSize(captured.Delta, captured.BundlePath, true)
+	if err != nil {
+		recordSpanError(capSpan, err)
+		capSpan.End()
+		return fmt.Errorf("snapshot: capture bundle size: %w", err)
+	}
+	patchBytes, err := capturedMemberSize(captured.Delta, captured.PatchPath, false)
+	if err != nil {
+		recordSpanError(capSpan, err)
+		capSpan.End()
+		return fmt.Errorf("snapshot: capture patch size: %w", err)
+	}
+	transcriptBytes, err := capturedBytesSize(captured.Transcript, captured.TranscriptPath)
+	if err != nil {
+		recordSpanError(capSpan, err)
+		capSpan.End()
+		return fmt.Errorf("snapshot: capture transcript size: %w", err)
 	}
 	capSpan.SetAttributes(
 		telemetry.SnapshotBundleBytes(bundleBytes),
 		telemetry.SnapshotPatchBytes(patchBytes),
-		telemetry.SnapshotTranscriptBytes(int64(len(transcript))),
+		telemetry.SnapshotTranscriptBytes(transcriptBytes),
 	)
 	capSpan.End()
 
 	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", runtime)
-	f, rawBytes, compressedBytes, err := stageSnapshotArchive(delta, wtPath, sessionID, transcript)
+	f, rawBytes, compressedBytes, err := stageSnapshotArchive(captured, wtPath)
 	if err != nil {
 		recordSpanError(archSpan, err)
 		archSpan.End()
 		return fmt.Errorf("snapshot: archive: %w", err)
+	}
+	if cleanupCapture != nil {
+		cleanupCapture()
+		cleanupCapture = nil
 	}
 	defer func() {
 		_ = f.Close()
@@ -235,7 +259,7 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 // transcript and ci-logs members that dominate the blob are highly
 // compressible text — without touching the member-by-member streaming inside
 // writeSnapshotTar.
-func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) (_ *os.File, rawBytes, compressedBytes int64, err error) {
+func stageSnapshotArchive(captured worktree.CapturedState, wtPath string) (_ *os.File, rawBytes, compressedBytes int64, err error) {
 	f, err := os.CreateTemp("", "tf-snapshot-*.tar.zst")
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
@@ -251,7 +275,7 @@ func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, tr
 		return nil, 0, 0, fmt.Errorf("open zstd: %w", err)
 	}
 	cw := countingWriter{w: zw}
-	if err = writeSnapshotTar(&cw, delta, wtPath, sessionID, transcript); err != nil {
+	if err = writeSnapshotTar(&cw, captured, wtPath); err != nil {
 		_ = zw.Close()
 		return nil, 0, 0, err
 	}
@@ -285,24 +309,25 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// writeSnapshotTar streams the snapshot members into w as one tar: the git
-// bundle + uncommitted patch (bounded — they're the delta, not full history),
+// writeSnapshotTar streams the snapshot members into w as one tar: the
+// potentially unbounded git bundle + uncommitted patch,
 // the ephemeral _tfac tree (streamed file by file), the Claude session
 // transcript, and the manifest.
-func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) error {
+func writeSnapshotTar(w io.Writer, captured worktree.CapturedState, wtPath string) error {
 	tw := tar.NewWriter(w)
-	man := snapshotManifest{SessionID: sessionID}
+	delta := captured.Delta
+	man := snapshotManifest{SessionID: captured.SessionID}
 	if delta != nil {
 		man.HasGit = true
 		man.Branch = delta.Branch
 		man.Head = delta.Head
-		if len(delta.Bundle) > 0 {
-			if err := writeTarBytes(tw, snapBundle, delta.Bundle); err != nil {
+		if len(delta.Bundle) > 0 || captured.BundlePath != "" {
+			if err := writeCapturedMember(tw, snapBundle, delta.Bundle, captured.BundlePath); err != nil {
 				return err
 			}
 		}
-		if len(delta.Patch) > 0 {
-			if err := writeTarBytes(tw, snapPatch, delta.Patch); err != nil {
+		if len(delta.Patch) > 0 || captured.PatchPath != "" {
+			if err := writeCapturedMember(tw, snapPatch, delta.Patch, captured.PatchPath); err != nil {
 				return err
 			}
 		}
@@ -310,9 +335,9 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 	if err := tarScratch(tw, wtPath); err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
 	}
-	if sessionID != "" {
-		if len(transcript) > 0 {
-			if err := writeTarBytes(tw, snapSession, transcript); err != nil {
+	if captured.SessionID != "" {
+		if len(captured.Transcript) > 0 || captured.TranscriptPath != "" {
+			if err := writeCapturedMember(tw, snapSession, captured.Transcript, captured.TranscriptPath); err != nil {
 				return err
 			}
 		} else {
@@ -322,7 +347,7 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 			// resume from it will hit the transcript-missing guard and fail.
 			// Surface it: this is otherwise silent, and it's exactly the shape that
 			// produced a resume-fails-with-no-reason report.
-			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", sessionID, "worktree", wtPath)
+			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", captured.SessionID, "worktree", wtPath)
 		}
 	}
 	manBytes, err := json.Marshal(man)
@@ -333,6 +358,46 @@ func writeSnapshotTar(w io.Writer, delta *worktree.GitDelta, wtPath, sessionID s
 		return err
 	}
 	return tw.Close()
+}
+
+func capturedMemberSize(delta *worktree.GitDelta, path string, bundle bool) (int64, error) {
+	var data []byte
+	if delta != nil {
+		if bundle {
+			data = delta.Bundle
+		} else {
+			data = delta.Patch
+		}
+	}
+	return capturedBytesSize(data, path)
+}
+
+func capturedBytesSize(data []byte, path string) (int64, error) {
+	if path == "" {
+		return int64(len(data)), nil
+	}
+	if len(data) != 0 {
+		return 0, fmt.Errorf("member has both buffered bytes and a staged path")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("staged member %s is not a regular file", path)
+	}
+	return info.Size(), nil
+}
+
+func writeCapturedMember(tw *tar.Writer, name string, data []byte, path string) error {
+	if path == "" {
+		return writeTarBytes(tw, name, data)
+	}
+	size, err := capturedBytesSize(data, path)
+	if err != nil {
+		return fmt.Errorf("tar staged %s: %w", name, err)
+	}
+	return writeTarFile(tw, name, path, size)
 }
 
 // gitSeed is everything a cold rehydrate's git rebuild needs about the repo it
@@ -760,8 +825,8 @@ func restoreSessionTranscript(wtDir, sessionID string, data []byte) error {
 }
 
 // writeTarBytes writes one regular-file member into the snapshot tar from an
-// in-memory buffer. Used for the bounded members (bundle, patch, session,
-// manifest); _tfac files stream through writeTarFile instead.
+// in-memory buffer. Local capture members and the manifest use this path;
+// multi capture members and _tfac files stream through writeTarFile.
 func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     name,

@@ -12,11 +12,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestRun_EmitsDecodableDelta exercises the snapshot-capture child body end
-// to end: capture a real worktree's delta and JSON-encode it, as the
-// re-exec'd child does, and assert the parent can decode a delta carrying
-// the branch, head, and the uncommitted change.
-func TestRun_EmitsDecodableDelta(t *testing.T) {
+// TestRun_EmitsStagedDelta exercises the snapshot-capture child body end to
+// end: the large patch lands in the parent-prepared file while stdout carries
+// only the small manifest.
+func TestRun_EmitsStagedDelta(t *testing.T) {
 	dir := t.TempDir()
 	git := func(args ...string) {
 		t.Helper()
@@ -39,7 +38,8 @@ func TestRun_EmitsDecodableDelta(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := Run(context.Background(), dir, "", &buf); err != nil {
+	staging, outputs := captureStaging(t)
+	if err := Run(context.Background(), dir, staging, "", outputs, &buf); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var state worktree.CapturedState
@@ -55,11 +55,20 @@ func TestRun_EmitsDecodableDelta(t *testing.T) {
 	if state.Delta.Head == "" {
 		t.Error("head is empty")
 	}
-	if len(state.Delta.Patch) == 0 {
-		t.Error("patch is empty; the uncommitted change was not captured")
+	if state.BundlePath != filepath.Join(staging, worktree.CaptureBundleFile) {
+		t.Errorf("bundle path = %q, want staged member", state.BundlePath)
+	} else if bundle, err := os.Stat(state.BundlePath); err != nil || bundle.Size() == 0 {
+		t.Errorf("staged bundle = %v, %v; want local-only commit data", bundle, err)
 	}
-	if len(state.Transcript) != 0 {
-		t.Error("transcript is non-empty; none was requested (empty session id)")
+	if len(state.Delta.Patch) != 0 {
+		t.Error("patch bytes rode the manifest; want a staged path only")
+	}
+	if state.PatchPath != filepath.Join(staging, worktree.CapturePatchFile) {
+		t.Errorf("patch path = %q, want staged member", state.PatchPath)
+	}
+	patch, err := os.ReadFile(state.PatchPath)
+	if err != nil || len(patch) == 0 {
+		t.Errorf("staged patch = %d bytes, %v; want the uncommitted change", len(patch), err)
 	}
 }
 
@@ -67,7 +76,8 @@ func TestRun_EmitsDecodableDelta(t *testing.T) {
 // nil (captureIsolated maps that to no delta), not an error.
 func TestRun_NonGitRoot(t *testing.T) {
 	var buf bytes.Buffer
-	if err := Run(context.Background(), t.TempDir(), "", &buf); err != nil {
+	staging, outputs := captureStaging(t)
+	if err := Run(context.Background(), t.TempDir(), staging, "", outputs, &buf); err != nil {
 		t.Fatalf("Run on a non-git dir: %v", err)
 	}
 	var state worktree.CapturedState
@@ -97,14 +107,44 @@ func TestRun_CapturesSessionTranscript(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := Run(context.Background(), dir, sessionID, &buf); err != nil {
+	staging, outputs := captureStaging(t)
+	if err := Run(context.Background(), dir, staging, sessionID, outputs, &buf); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	var state worktree.CapturedState
 	if err := json.Unmarshal(buf.Bytes(), &state); err != nil {
 		t.Fatalf("decode captured state: %v", err)
 	}
-	if string(state.Transcript) != `{"type":"summary"}` {
-		t.Errorf("transcript = %q, want the session JSONL bytes", state.Transcript)
+	if len(state.Transcript) != 0 {
+		t.Error("transcript bytes rode the manifest; want a staged path only")
 	}
+	transcript, err := os.ReadFile(state.TranscriptPath)
+	if err != nil || string(transcript) != `{"type":"summary"}` {
+		t.Errorf("staged transcript = %q, %v; want the session JSONL bytes", transcript, err)
+	}
+}
+
+func captureStaging(t *testing.T) (string, Outputs) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{worktree.CaptureBundleFile, worktree.CapturePatchFile, worktree.CaptureTranscriptFile} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open := func(name string) *os.File {
+		t.Helper()
+		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	outputs := Outputs{
+		Bundle:     open(worktree.CaptureBundleFile),
+		Patch:      open(worktree.CapturePatchFile),
+		Transcript: open(worktree.CaptureTranscriptFile),
+	}
+	t.Cleanup(outputs.Close)
+	return dir, outputs
 }

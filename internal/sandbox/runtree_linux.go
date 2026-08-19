@@ -23,8 +23,8 @@ func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
 
-func captureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
-	return defaultOps.CaptureRunDelta(ctx, worktree, sessionID)
+func captureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+	return defaultOps.CaptureRunDelta(ctx, worktree, stagingDir, sessionID)
 }
 
 // runTreeHandedOff stats path and reports whether the sandbox identity owns it
@@ -206,6 +206,51 @@ func validateRunTreeRoot(op, path string) (os.FileInfo, error) {
 		return nil, fmt.Errorf("sandbox: %s: %s is owned by uid %d, not a run-tree owner", op, path, st.Uid)
 	}
 	return info, nil
+}
+
+// validateCaptureStagingDir confines the capture child's write side to the
+// exact parent-owned files prepared for this invocation. Both the directory
+// and its fixed members remain 0700/0600: the sandbox uid receives already-open
+// descriptors across exec, never path access that could add, remove, or replace
+// members.
+func validateCaptureStagingDir(path string) error {
+	if err := validateRunTreeShape("capture staging", path); err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("sandbox: capture staging: resolve %s: %w", path, err)
+	}
+	if resolved != path {
+		return fmt.Errorf("sandbox: capture staging: path %q resolves elsewhere (%q)", path, resolved)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("sandbox: capture staging: lstat %s: %w", path, err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("sandbox: capture staging: %s must be a 0700 directory", path)
+	}
+	wantUID := os.Getuid()
+	if runTreeOwnerExtraUID >= 0 {
+		wantUID = runTreeOwnerExtraUID
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != wantUID {
+		return fmt.Errorf("sandbox: capture staging: %s is not owned by orchestrator uid %d", path, wantUID)
+	}
+	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
+		member := filepath.Join(path, name)
+		memberInfo, err := os.Lstat(member)
+		if err != nil {
+			return fmt.Errorf("sandbox: capture staging: lstat %s: %w", member, err)
+		}
+		memberStat, ok := memberInfo.Sys().(*syscall.Stat_t)
+		if !memberInfo.Mode().IsRegular() || memberInfo.Mode().Perm() != 0o600 || !ok || int(memberStat.Uid) != wantUID {
+			return fmt.Errorf("sandbox: capture staging: %s must be a regular 0600 file owned by orchestrator uid %d", member, wantUID)
+		}
+	}
+	return nil
 }
 
 // openat2Syscall is a seam over unix.Openat2 so tests can force an

@@ -25,22 +25,21 @@ import (
 // Local mode has no sandbox and no chown — the operator runs their own repos on
 // a trusted machine — so the capture runs in-process, unchanged.
 //
-// The session transcript rides out of the SAME capture: in multi mode the
-// child (running as the sandbox uid) is the only identity that can read the
-// SDK's owner-only transcript, so it reads it there; in local mode the
-// in-process reader already IS that uid. Either way the orchestrator, which can
-// read neither the transcript nor a chowned worktree, never touches the files.
-// transcript is empty when the run has no session or the file was absent.
-func captureWorkspaceGit(ctx context.Context, wtPath, sessionID string) (delta *worktree.GitDelta, transcript []byte, err error) {
+// The session transcript is read by that SAME child in multi mode, then written
+// into a parent-owned staging file; the orchestrator never opens agent-owned
+// files. Local mode keeps the existing in-memory representation. The transcript
+// member is absent when the run has no session or the file was absent.
+func captureWorkspaceGit(ctx context.Context, wtPath, sessionID string) (state worktree.CapturedState, cleanup func(), err error) {
 	if runmode.Current() != runmode.ModeMulti || runtime.GOOS != "linux" {
-		delta, err = worktree.CaptureWorkspaceGit(ctx, wtPath)
+		state.Delta, err = worktree.CaptureWorkspaceGit(ctx, wtPath)
 		if err != nil {
-			return nil, nil, err
+			return worktree.CapturedState{}, nil, err
 		}
+		state.SessionID = sessionID
 		if data, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
-			transcript = data
+			state.Transcript = data
 		}
-		return delta, transcript, nil
+		return state, nil, nil
 	}
 	return captureIsolated(ctx, wtPath, sessionID)
 }

@@ -74,17 +74,17 @@ type PrivilegedOps interface {
 	RemoveRunTree(ctx context.Context, path string) error
 
 	// CaptureRunDelta runs the parked-run capture
-	// (`snapshot-capture <worktree> [session-id]`) in a child dropped to
-	// the sandbox uid/gid inside an empty network namespace, and returns
-	// the child's raw JSON stdout (a worktree.CapturedState; decoded by
-	// the caller so this package doesn't import internal/worktree). The
+	// (`snapshot-capture <worktree> <staging-dir> [session-id]`) in a child
+	// dropped to the sandbox uid/gid inside an empty network namespace. The
+	// large members land in the validated, parent-owned staging directory;
+	// stdout carries only their JSON manifest. The
 	// child runs as the sandbox uid for two reasons that share the one
 	// drop: a hostile .git filter fires only as the agent, and the SDK's
 	// owner-only session transcript is readable. Both halves of that
 	// confinement — the setuid and the CLONE_NEWNET — need capabilities
 	// the orchestrator no longer holds, so the exec runs privileged-side
 	// whole. sessionID is empty when the run carries no session.
-	CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error)
+	CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error)
 }
 
 // SidecarLaunchParams is the serializable, validated input to
