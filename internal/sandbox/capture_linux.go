@@ -8,11 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
+	"golang.org/x/sys/unix"
 )
 
 // captureCommand builds the child command that runs the git-delta capture. A
@@ -161,9 +162,6 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID stri
 	if _, err := validateRunTreeRoot("capture run delta", worktree); err != nil {
 		return "", err
 	}
-	if err := validateCaptureStagingDir(stagingDir); err != nil {
-		return "", err
-	}
 	outputs, err := openCaptureStaging(stagingDir)
 	if err != nil {
 		return "", err
@@ -211,18 +209,127 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID stri
 }
 
 func openCaptureStaging(dir string) ([]*os.File, error) {
+	if err := validateRunTreeShape("capture staging", dir); err != nil {
+		return nil, err
+	}
+	dirFD, wantUID, err := openCaptureStagingDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFd(dirFD)
+	return openCaptureStagingMembers(dirFD, wantUID)
+}
+
+// openCaptureStagingDir resolves every component through pinned directory
+// descriptors. The untrusted orchestrator can rename or replace any path it
+// owns while the broker is serving the request; once this returns, later
+// member opens stay on the exact directory inode resolved here.
+func openCaptureStagingDir(path string) (fd, wantUID int, err error) {
+	fd, err = unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, 0, fmt.Errorf("sandbox: capture staging: open root anchor: %w", err)
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		next, openErr := unix.Openat(fd, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		closeFd(fd)
+		if openErr != nil {
+			return -1, 0, fmt.Errorf("sandbox: capture staging: open anchored directory %s: %w", path, openErr)
+		}
+		fd = next
+	}
+
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		closeFd(fd)
+		return -1, 0, fmt.Errorf("sandbox: capture staging: fstat directory %s: %w", path, err)
+	}
+	wantUID = os.Getuid()
+	if runTreeOwnerExtraUID >= 0 {
+		wantUID = runTreeOwnerExtraUID
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR || st.Mode&0o7777 != 0o700 {
+		closeFd(fd)
+		return -1, 0, fmt.Errorf("sandbox: capture staging: %s must be a 0700 directory", path)
+	}
+	if int(st.Uid) != wantUID {
+		closeFd(fd)
+		return -1, 0, fmt.Errorf("sandbox: capture staging: %s is not owned by orchestrator uid %d", path, wantUID)
+	}
+	return fd, wantUID, nil
+}
+
+func openCaptureStagingMembers(dirFD, wantUID int) ([]*os.File, error) {
 	var files []*os.File
 	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
-		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_TRUNC, 0)
+		f, err := openCaptureStagingMember(dirFD, name, wantUID)
 		if err != nil {
 			for _, opened := range files {
 				_ = opened.Close()
 			}
-			return nil, fmt.Errorf("sandbox: open capture staging member %s: %w", name, err)
+			return nil, err
 		}
 		files = append(files, f)
 	}
 	return files, nil
+}
+
+// openCaptureStagingMember validates a harmless O_PATH handle before gaining
+// write access. Reopening /proc/self/fd pins the write handle to that same
+// inode; no attacker-controlled path is resolved between validation and
+// truncation.
+func openCaptureStagingMember(dirFD int, name string, wantUID int) (*os.File, error) {
+	pathFD, err := pinCaptureStagingMember(dirFD, name)
+	if err != nil {
+		return nil, err
+	}
+	defer closeFd(pathFD)
+	return openPinnedCaptureStagingMember(pathFD, name, wantUID)
+}
+
+func pinCaptureStagingMember(dirFD int, name string) (int, error) {
+	fd, err := unix.Openat(dirFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("sandbox: open capture staging member %s: %w", name, err)
+	}
+	return fd, nil
+}
+
+func openPinnedCaptureStagingMember(pathFD int, name string, wantUID int) (*os.File, error) {
+	var pinned unix.Stat_t
+	if err := unix.Fstat(pathFD, &pinned); err != nil {
+		return nil, fmt.Errorf("sandbox: fstat capture staging member %s: %w", name, err)
+	}
+	if !validCaptureStagingMemberStat(&pinned, wantUID) {
+		return nil, fmt.Errorf("sandbox: capture staging: %s must be a single-link regular 0600 file owned by orchestrator uid %d", name, wantUID)
+	}
+
+	fd, err := unix.Open("/proc/self/fd/"+strconv.Itoa(pathFD), unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: reopen pinned capture staging member %s: %w", name, err)
+	}
+	var writable unix.Stat_t
+	if err := unix.Fstat(fd, &writable); err != nil {
+		closeFd(fd)
+		return nil, fmt.Errorf("sandbox: fstat writable capture staging member %s: %w", name, err)
+	}
+	if writable.Dev != pinned.Dev || writable.Ino != pinned.Ino || !validCaptureStagingMemberStat(&writable, wantUID) {
+		closeFd(fd)
+		return nil, fmt.Errorf("sandbox: capture staging member %s changed while opening or no longer satisfies its boundary", name)
+	}
+	if err := unix.Ftruncate(fd, 0); err != nil {
+		closeFd(fd)
+		return nil, fmt.Errorf("sandbox: truncate capture staging member %s: %w", name, err)
+	}
+	f := os.NewFile(uintptr(fd), name)
+	if f == nil {
+		closeFd(fd)
+		return nil, fmt.Errorf("sandbox: wrap capture staging member %s", name)
+	}
+	return f, nil
+}
+
+func validCaptureStagingMemberStat(st *unix.Stat_t, wantUID int) bool {
+	return st.Mode&unix.S_IFMT == unix.S_IFREG && st.Mode&0o7777 == 0o600 && int(st.Uid) == wantUID && st.Nlink == 1
 }
 
 // CaptureRunDelta is the unprivileged, in-process fallback used only when

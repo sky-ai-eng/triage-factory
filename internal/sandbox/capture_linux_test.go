@@ -370,30 +370,150 @@ func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
 	}
 }
 
-func TestValidateCaptureStagingDir_RejectsWritableOrReplaceableMembers(t *testing.T) {
+func TestOpenCaptureStaging_RejectsWritableOrReplaceableMembers(t *testing.T) {
 	valid := captureTestStaging(t)
-	if err := validateCaptureStagingDir(valid); err != nil {
+	files, err := openCaptureStaging(valid)
+	if err != nil {
 		t.Fatalf("valid staging rejected: %v", err)
+	}
+	for _, f := range files {
+		_ = f.Close()
 	}
 
 	wrongMode := captureTestStaging(t)
 	if err := os.Chmod(wrongMode, 0o701); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCaptureStagingDir(wrongMode); err == nil {
+	if _, err := openCaptureStaging(wrongMode); err == nil {
 		t.Error("accepted a staging directory accessible by path to the sandbox uid")
 	}
 
 	symlinked := captureTestStaging(t)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	bundle := filepath.Join(symlinked, CaptureBundleFile)
 	if err := os.Remove(bundle); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("/tmp/elsewhere", bundle); err != nil {
+	if err := os.Symlink(victim, bundle); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCaptureStagingDir(symlinked); err == nil {
+	if _, err := openCaptureStaging(symlinked); err == nil {
 		t.Error("accepted a symlink in place of a fixed staging member")
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "do not truncate" {
+		t.Errorf("symlink target = %q, %v; broker must not truncate it", got, err)
+	}
+
+	hardLinkStaging := captureTestStaging(t)
+	victim = filepath.Join(t.TempDir(), "hardlink-victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle = filepath.Join(hardLinkStaging, CaptureBundleFile)
+	if err := os.Remove(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCaptureStaging(hardLinkStaging); err == nil {
+		t.Error("accepted a hard link in place of a fixed staging member")
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "do not truncate" {
+		t.Errorf("hardlink target = %q, %v; broker must not truncate it", got, err)
+	}
+}
+
+func TestOpenCaptureStaging_AnchorsDirectoryAcrossRename(t *testing.T) {
+	original := captureTestStaging(t)
+	dirFD, wantUID, err := openCaptureStagingDir(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(dirFD)
+
+	moved := original + "-moved"
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(moved) })
+	replacement := captureTestStaging(t)
+	if err := os.Symlink(replacement, original); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := openCaptureStagingMembers(dirFD, wantUID)
+	if err != nil {
+		t.Fatalf("open members through anchored directory: %v", err)
+	}
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+	if _, err := files[0].WriteString("anchored"); err != nil {
+		t.Fatal(err)
+	}
+	gotMoved, err := os.ReadFile(filepath.Join(moved, CaptureBundleFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReplacement, err := os.ReadFile(filepath.Join(replacement, CaptureBundleFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMoved) != "anchored" || len(gotReplacement) != 0 {
+		t.Errorf("moved member = %q, replacement member = %q; want writes confined to anchored directory", gotMoved, gotReplacement)
+	}
+}
+
+func TestOpenCaptureStagingMember_AnchorsInodeAcrossReplacement(t *testing.T) {
+	dir := captureTestStaging(t)
+	dirFD, wantUID, err := openCaptureStagingDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(dirFD)
+	pinnedFD, err := pinCaptureStagingMember(dirFD, CaptureBundleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(pinnedFD)
+
+	bundle := filepath.Join(dir, CaptureBundleFile)
+	moved := bundle + ".moved"
+	if err := os.Rename(bundle, moved); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openPinnedCaptureStagingMember(pinnedFD, CaptureBundleFile, wantUID)
+	if err != nil {
+		t.Fatalf("reopen pinned member after replacement: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("anchored"); err != nil {
+		t.Fatal(err)
+	}
+	gotMoved, err := os.ReadFile(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotVictim, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMoved) != "anchored" || string(gotVictim) != "do not truncate" {
+		t.Errorf("pinned member = %q, replacement target = %q; want writes confined to pinned inode", gotMoved, gotVictim)
 	}
 }
 
