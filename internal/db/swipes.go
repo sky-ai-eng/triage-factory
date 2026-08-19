@@ -32,6 +32,15 @@ type SwipeStore interface {
 	// misuse doesn't silently strand the task. Returns the new
 	// task status the handler echoes back in the JSON response.
 	//
+	// A closed task takes no swipe: the UPDATE carries its own
+	// status predicate, so a row that went done/dismissed since the
+	// caller read it returns ok=false with nothing written — audit
+	// row included. That predicate is the ONLY thing standing
+	// between two concurrent closes and a rewritten closed_at /
+	// close_reason; a handler-side pre-read can't be, because the
+	// row can go terminal in the window between the two statements.
+	// Handlers map ok=false to 409.
+	//
 	// snoozeUntil is the wake time and is REQUIRED for action
 	// "snooze" — a nil pointer there returns
 	// ErrSnoozeUntilRequired rather than writing the row, so no
@@ -46,7 +55,7 @@ type SwipeStore interface {
 	// A refused claim/delegate is never audited. For dismiss/
 	// snooze/complete the action IS the state change, so this
 	// method is the audit + lifecycle write in one step.
-	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error)
+	RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (newStatus string, ok bool, err error)
 
 	// SnoozeTask is the snooze-specific swipe: writes a 'snooze'
 	// swipe_events row + sets tasks.snooze_until and
@@ -54,10 +63,12 @@ type SwipeStore interface {
 	// timestamp parameter has no other use and the action is fixed.
 	//
 	// Invariant: snooze is queue-only ("snoozed ↔ both
-	// claim cols NULL"). The UPDATE refuses on a claimed task and
-	// returns ok=false; the audit row is rolled back atomically so
-	// a refused gesture leaves no state change. Handler maps
-	// ok=false to 409.
+	// claim cols NULL"), and a closed task is never parked. The
+	// UPDATE carries both predicates and returns ok=false when
+	// either refuses — a claimed task, or one that went
+	// done/dismissed since the caller read it; the audit row is
+	// rolled back atomically so a refused gesture leaves no state
+	// change. Handler maps ok=false to 409.
 	SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (ok bool, err error)
 
 	// RequeueTask sends a task back to the queue WITHOUT recording a

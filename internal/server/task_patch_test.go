@@ -93,6 +93,60 @@ func TestTaskPatch_RejectsEveryMutationOnATerminalTask(t *testing.T) {
 	}
 }
 
+// TestTaskPatchClose_SecondCloseRewritesNothing pins the guard that the
+// handler's pre-read cannot provide. The pre-read and the write are separate
+// statements, so a close can land between them; the store's own status
+// predicate is what makes the second write find no row. Driving the store
+// directly is the point — it stands in for the write half of a concurrent
+// request that passed its own pre-read a moment earlier.
+func TestTaskPatchClose_SecondCloseRewritesNothing(t *testing.T) {
+	s := newTestServer(t)
+	taskID := seedLifecycleTask(t, s.db, "double-close", lifecycleTaskOpts{})
+
+	if rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
+		t.Fatalf("first close = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	closedAt, closeReason := readTaskClose(t, s.db, taskID)
+	if closedAt == "" || closeReason != "user_dismissed" {
+		t.Fatalf("after the first close: closed_at=%q close_reason=%q; want both stamped", closedAt, closeReason)
+	}
+
+	for _, action := range []string{"complete", "dismiss"} {
+		_, ok, err := s.swipes.RecordSwipe(t.Context(), runmode.LocalDefaultOrgID, taskID, action, 0, nil)
+		if err != nil {
+			t.Fatalf("RecordSwipe(%s) on a closed task: %v", action, err)
+		}
+		if ok {
+			t.Fatalf("RecordSwipe(%s) returned ok=true against a closed task", action)
+		}
+		gotAt, gotReason := readTaskClose(t, s.db, taskID)
+		if gotAt != closedAt || gotReason != closeReason {
+			t.Fatalf("close metadata rewritten by a second %s: (%q, %q) want (%q, %q)",
+				action, gotAt, gotReason, closedAt, closeReason)
+		}
+		if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
+			t.Fatalf("status = %q after a refused %s, want the original dismissed", got, action)
+		}
+		if got := readSwipeActions(t, s.db, taskID); !equalStrings(got, []string{"dismiss"}) {
+			t.Fatalf("swipe_events actions = %v, want [dismiss] (a refused close leaves no trace)", got)
+		}
+	}
+}
+
+// readTaskClose returns a task's close metadata as raw strings, empty when
+// NULL — the columns a second close must not touch.
+func readTaskClose(t *testing.T, database *sql.DB, taskID string) (closedAt, closeReason string) {
+	t.Helper()
+	var at, reason sql.NullString
+	if err := database.QueryRow(
+		`SELECT closed_at, close_reason FROM tasks WHERE id = ?`, taskID,
+	).Scan(&at, &reason); err != nil {
+		t.Fatalf("scan close metadata: %v", err)
+	}
+	return at.String, reason.String
+}
+
 // TestTaskPatch_RejectsUnwritableStatuses pins the accepted set. 'queued' is
 // requeue/undo territory — a bare status write would leave the claim stamped
 // and the agent's artifacts stranded — and 'snoozed' is what setting

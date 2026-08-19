@@ -78,7 +78,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Viewers can't act on a team's tasks (TFAC-447). A claim is a
+	// Viewers can't act on a team's tasks. A claim is a
 	// team-scoped write, so gate it here with one clean 403 rather than
 	// letting the store UPDATE fall off the tasks_update RLS policy as a
 	// confusing 409/500. A task the viewer can't see at all still 404s
@@ -132,9 +132,9 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		return "", nil, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
-	// meaningless, and letting them fall through would trip RecordSwipe's
-	// vestigial status='queued' write — reopening a closed task as a side
-	// effect of the audit.
+	// meaningless. RecordSwipe refuses them too, so this is the answer the
+	// caller gets either way — but saying it here keeps the refusal a 409
+	// about the task rather than a silently unaudited claim.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
 		return "", nil, false
@@ -215,18 +215,21 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 
 	// Audit post-mutation, best-effort: the claim helpers already cleared
 	// snooze_until and flipped status atomically, so RecordSwipe is a no-op on
-	// lifecycle and the load-bearing effect is the swipe_events row. If the
-	// insert fails, the claim still landed — log and continue rather than
-	// 500-ing on a committed state change.
+	// lifecycle and the load-bearing effect is the swipe_events row. If it
+	// doesn't land — an insert failure, or the task closing under us, which
+	// RecordSwipe's own status predicate refuses — the claim still landed, so
+	// log and continue rather than 500-ing on a committed state change.
 	var newStatus string
+	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionClaim, hesitationMs, nil)
+		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionClaim, hesitationMs, nil)
 		return e
 	})
-	if swipeErr != nil {
-		taskActionLog.Warn("audit write failed for claim, claim mutation already landed", "task", id, "error", swipeErr)
-		newStatus = "queued"
+	if swipeErr != nil || !audited {
+		taskActionLog.Warn("audit write did not land for claim, claim mutation already did",
+			"task", id, "refused", swipeErr == nil, "error", swipeErr)
+		newStatus = taskStatusQueued
 	}
 	if claimChanged {
 		s.ws.Broadcast(websocket.Event{
@@ -242,8 +245,8 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	return newStatus, jiraUserClient, true
 }
 
-// reassignClaim is the claim route's target_user_id arm (TFAC-561): the
-// user↔user handoff. It's a race-safe CAS on the *expected* current claimant —
+// reassignClaim is the claim route's target_user_id arm: the user↔user
+// handoff. It's a race-safe CAS on the *expected* current claimant —
 // ReassignClaimToUserSystem refuses unless the task is presently claimed by
 // exactly that user AND the target is a member of a team associated with the
 // task — so two concurrent handoffs (or one racing a takeover) can't clobber
@@ -311,8 +314,8 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 	}
 
 	// Permission: the current claimant may hand off their own claim; anyone
-	// else needs to admin the task's owning team (TFAC-561's suggested
-	// "claimant + team admin" model). Scoped to task_id ONLY, not the wider
+	// else needs to admin the task's owning team — the "claimant + team
+	// admin" model. Scoped to task_id ONLY, not the wider
 	// task_teams visibility set: tasks_update RLS's task_teams branch only
 	// ever applies to an UNCLAIMED row (both claim cols NULL) — a handoff
 	// candidate is by definition already claimed, so team_id is the only
@@ -383,13 +386,15 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 
 	// Audit post-mutation, best-effort — mirrors selfClaim.
 	var newStatus string
+	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionReassign, hesitationMs, nil)
+		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionReassign, hesitationMs, nil)
 		return e
 	})
-	if swipeErr != nil {
-		taskActionLog.Warn("audit write failed for reassign, claim mutation already landed", "task", id, "error", swipeErr)
+	if swipeErr != nil || !audited {
+		taskActionLog.Warn("audit write did not land for reassign, claim mutation already did",
+			"task", id, "refused", swipeErr == nil, "error", swipeErr)
 		// Mirror ReassignClaimToUser(System)'s own status transformation
 		// (SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE
 		// status END) rather than assuming the pre-mutation snapshot still
@@ -557,14 +562,16 @@ func (s *Server) stampAgentClaim(w http.ResponseWriter, r *http.Request, orgID, 
 
 	// Accepted (Changed or NoOp). Audit post-mutation, best-effort.
 	var newStatus string
+	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionDelegate, req.HesitationMs, nil)
+		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionDelegate, req.HesitationMs, nil)
 		return e
 	})
-	if swipeErr != nil {
-		taskActionLog.Warn("audit write failed for delegate, claim mutation already landed", "task", id, "error", swipeErr)
-		newStatus = "queued"
+	if swipeErr != nil || !audited {
+		taskActionLog.Warn("audit write did not land for delegate, claim mutation already did",
+			"task", id, "refused", swipeErr == nil, "error", swipeErr)
+		newStatus = taskStatusQueued
 	}
 	if result == db.HandoffChanged {
 		s.ws.Broadcast(websocket.Event{

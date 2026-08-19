@@ -30,7 +30,7 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, bool, error) {
 	// See sqlite/swipes.go for the full rationale. Summary: claim +
 	// delegate + reassign (TFAC-561) are responsibility-only and MUST
 	// NOT touch the lifecycle status (or in_progress / in_review tasks
@@ -57,7 +57,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		// wake sweep requeues on snooze_until. Refuse rather than
 		// write it. See the SQLite mirror for the full rationale.
 		if snoozeUntil == nil {
-			return "", db.ErrSnoozeUntilRequired
+			return "", false, db.ErrSnoozeUntilRequired
 		}
 		newStatus = "snoozed"
 		snoozeVal = *snoozeUntil
@@ -74,14 +74,23 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			// "snoozed ↔ unclaimed" invariant holds when a
 			// path bypasses the claim helpers. See SQLite mirror for
 			// the full rationale.
-			if _, err := tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				`UPDATE tasks
 				    SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				        snooze_until = NULL
-				  WHERE org_id = $1 AND id = $2`,
+				  WHERE org_id = $1 AND id = $2
+				    AND status NOT IN ('done', 'dismissed')`,
 				orgID, taskID,
-			); err != nil {
+			)
+			if err != nil {
 				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return errTerminalRefused
 			}
 			row := tx.QueryRowContext(ctx,
 				`SELECT status FROM tasks WHERE org_id = $1 AND id = $2`,
@@ -95,21 +104,43 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
-		_, err := tx.ExecContext(ctx,
+		// The status predicate is what makes a second close a no-op
+		// rather than a rewrite — see the SQLite mirror.
+		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = $1,
 			        snooze_until = $2,
 			        closed_at = $3,
 			        close_reason = $4
-			  WHERE org_id = $5 AND id = $6`,
+			  WHERE org_id = $5 AND id = $6
+			    AND status NOT IN ('done', 'dismissed')`,
 			newStatus, snoozeVal, closedAt, reason, orgID, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errTerminalRefused
+		}
+		return nil
 	}); err != nil {
-		return "", err
+		if errors.Is(err, errTerminalRefused) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	return newStatus, nil
+	return newStatus, true, nil
 }
+
+// errTerminalRefused signals RecordSwipe's status predicate refused: the task
+// closed between the caller's read and this write. Sentinel distinct from real
+// DB errors so RecordSwipe can return ("", false, nil) while triggering the
+// deferred tx rollback for the audit row it already inserted.
+var errTerminalRefused = errors.New("postgres swipes: task is closed")
 
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	var ok bool
@@ -120,14 +151,17 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 			return err
 		}
 		// Claim guard: snooze is queue-only post-invariant ("snoozed
-		// ↔ both claim cols NULL"). Inline UPDATE so the WHERE
-		// clause's claim-column guards live with the snooze write.
+		// ↔ both claim cols NULL"), plus the status predicate that keeps
+		// a task closed under us out of the snoozed lane. Inline UPDATE
+		// so both guards live with the snooze write. See the SQLite
+		// mirror for the full rationale.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'snoozed', snooze_until = $1
 			  WHERE org_id = $2 AND id = $3
 			    AND claimed_by_agent_id IS NULL
-			    AND claimed_by_user_id  IS NULL`,
+			    AND claimed_by_user_id  IS NULL
+			    AND status NOT IN ('done', 'dismissed')`,
 			until, orgID, taskID,
 		)
 		if err != nil {

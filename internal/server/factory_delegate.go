@@ -345,21 +345,21 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Record the swipe_events audit row BEFORE the spawn attempt.
-	// The audit captures the user's gesture (drag-to-bot), which is
-	// real regardless of whether the run materializes. The earlier
-	// "after-spawn-success only" placement meant partial-success
-	// gestures (claim stamped, spawn failed) had no audit trail —
-	// inconsistent with the task delegate route (which audits as soon
-	// as the claim stamp accepts) and with the semantic that
-	// claim is commitment regardless of run outcome. RecordSwipe
-	// failure stays non-fatal because the claim col + WS broadcast
-	// already captured the state-level effect; the audit is best-
-	// effort.
+	// The audit captures the user's gesture (drag-to-bot), which is real
+	// regardless of whether the run materializes — a partial success (claim
+	// stamped, spawn failed) still leaves a trail, matching the task delegate
+	// route and the semantic that claim is commitment regardless of run
+	// outcome. An audit that doesn't land — a write failure, or the task
+	// closing under us, which RecordSwipe's own status predicate refuses —
+	// stays non-fatal: the claim col + WS broadcast already captured the
+	// state-level effect.
+	var audited bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0, nil)
+		var e error
+		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0, nil)
 		return e
-	}); err != nil {
-		factoryLog.Warn("failed to record delegate swipe", "task", task.ID, "error", err)
+	}); err != nil || !audited {
+		factoryLog.Warn("delegate swipe not recorded", "task", task.ID, "refused", err == nil, "error", err)
 	}
 
 	// Now attempt the spawn. Delegate's failure modes (blueprint not

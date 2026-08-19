@@ -23,9 +23,9 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return "", false, err
 	}
 	// Action → effect mapping. The responsibility axis
 	// (who owns this) is split off the lifecycle axis (where in its life the
@@ -67,7 +67,7 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		// wake sweep requeues on snooze_until, so a snoozed row without
 		// one never comes back. Refuse rather than write that state.
 		if snoozeUntil == nil {
-			return "", db.ErrSnoozeUntilRequired
+			return "", false, db.ErrSnoozeUntilRequired
 		}
 		newStatus = "snoozed"
 		snoozeVal = snoozeUntil.UTC()
@@ -91,14 +91,23 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			// keeps every non-snoozed status intact — load-bearing for
 			// the assignee picker's take-over-from-bot path, which
 			// hits an in_progress / in_review row.
-			if _, err := q.ExecContext(ctx,
+			res, err := q.ExecContext(ctx,
 				`UPDATE tasks
 				   SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				       snooze_until = NULL
-				 WHERE id = ?`,
+				 WHERE id = ?
+				   AND status NOT IN ('done', 'dismissed')`,
 				taskID,
-			); err != nil {
+			)
+			if err != nil {
 				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return errTerminalRefused
 			}
 			// Read-back so the caller's WS broadcast carries the
 			// actual post-mutation status.
@@ -111,22 +120,46 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
-		_, err := q.ExecContext(ctx,
+		// The status predicate is what makes a second close a no-op
+		// rather than a rewrite: two callers closing the same task
+		// concurrently both pass their own pre-read, and only the one
+		// that gets here first finds a row to update.
+		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			   SET status = ?,
 			       snooze_until = ?,
 			       closed_at = ?,
 			       close_reason = ?
-			 WHERE id = ?`,
+			 WHERE id = ?
+			   AND status NOT IN ('done', 'dismissed')`,
 			newStatus, snoozeVal, closedAt, reason, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errTerminalRefused
+		}
+		return nil
 	})
-	if err != nil {
-		return "", err
+	if errors.Is(err, errTerminalRefused) {
+		return "", false, nil
 	}
-	return newStatus, nil
+	if err != nil {
+		return "", false, err
+	}
+	return newStatus, true, nil
 }
+
+// errTerminalRefused signals RecordSwipe's status predicate refused: the task
+// closed between the caller's read and this write. Distinct from a real DB
+// error so RecordSwipe can return ("", false, nil) while still triggering
+// inTx's deferred rollback for the audit row it already inserted.
+var errTerminalRefused = errors.New("sqlite swipes: task is closed")
 
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -152,12 +185,18 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 		// (drain skips it, re-derive skips it, Board doesn't
 		// render the SnoozedBadge in a claimed lane). Refuse here;
 		// caller surfaces 409 and the user can requeue first.
+		//
+		// The status predicate is the other half: a closed task can have
+		// both claim columns NULL, so without it a dismiss landing between
+		// the caller's read and this write would park a closed task in the
+		// snoozed lane for the wake sweep to resurrect.
 		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'snoozed', snooze_until = ?
 			  WHERE id = ?
 			    AND claimed_by_agent_id IS NULL
-			    AND claimed_by_user_id  IS NULL`,
+			    AND claimed_by_user_id  IS NULL
+			    AND status NOT IN ('done', 'dismissed')`,
 			until.UTC(), taskID,
 		)
 		if err != nil {

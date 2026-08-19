@@ -418,7 +418,7 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Every arm here is a team-scoped write — viewers can't (TFAC-447).
+	// Every arm here is a team-scoped write — viewers can't.
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
 	}
@@ -500,8 +500,9 @@ func patchWritesAudit(status string, statusState, snoozeState httpx.PatchState) 
 }
 
 // patchSnooze parks a task until the given wake time. Snooze is queue-only
-// ("snoozed ↔ both claim cols NULL"), so the store's atomic UPDATE refuses on
-// a claimed task and the caller gets a 409 telling them to requeue first.
+// ("snoozed ↔ both claim cols NULL") and never applies to a closed task, so
+// the store's atomic UPDATE carries both predicates and the caller gets a 409
+// telling them to requeue first.
 func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time, hesitationMs int) bool {
 	// errSnoozeRefusedSentinel rolls the outer tx back when SnoozeTask returns
 	// (false, nil): the swipes store relies on a tx-level rollback to discard
@@ -524,9 +525,11 @@ func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, user
 		return false
 	}
 	if !snoozed {
+		// Either guard in the store's predicate: the task is claimed, or it
+		// closed between the pre-read above and this write.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
-			Message: "can't snooze a claimed task; requeue or complete it first",
+			Message: "can't snooze this task; snoozing needs an open, unclaimed task — requeue or complete it first",
 		})
 		return false
 	}
@@ -592,8 +595,10 @@ func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userI
 }
 
 // patchClose is the terminal arm: dismissed (walked away) or done (resolved).
-// The write and its audit row land in one store call, so there's no refuse
-// path to disambiguate — the terminal guard already ran on the pre-read.
+// The write and its audit row land in one store call, and that call carries the
+// terminal predicate itself — the pre-read in the handler answers the common
+// case early, but only the predicate rules out a close landing between the two,
+// which is what a second close rewriting closed_at / close_reason would be.
 func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string, hesitationMs int) bool {
 	action := swipeActionDismiss
 	outcome := discardOutcomeDismissed
@@ -602,12 +607,20 @@ func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userI
 		outcome = discardOutcomeCompleted
 	}
 	var newStatus string
+	var closed bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
+		newStatus, closed, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
+		return false
+	}
+	if !closed {
+		// Someone else closed it in the window since the pre-read. Same
+		// answer the pre-read would have given a moment later, and nothing
+		// was written.
+		writeTaskTerminal(w, "status")
 		return false
 	}
 	// Closing a task takes it off the agent's hands: resolve every unresolved

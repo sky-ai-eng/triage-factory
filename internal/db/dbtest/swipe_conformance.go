@@ -50,8 +50,10 @@ type SwipeAuditReader func(t *testing.T, taskID string) []string
 // invariants are the contract every SwipeStore impl must hold:
 //
 //   - RecordSwipe maps action → status correctly + writes an audit
-//     row + leaves a fresh task in the right state.
-//   - SnoozeTask sets snooze_until + status='snoozed'.
+//     row + leaves a fresh task in the right state, and refuses a
+//     task that is already closed.
+//   - SnoozeTask sets snooze_until + status='snoozed', and refuses a
+//     task that is claimed or already closed.
 //   - RequeueTask flips status back without writing an audit row,
 //     and returns ok=false on a missing id.
 //   - ClearSnooze wakes a snoozed task without an audit row, and
@@ -73,9 +75,9 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		ctx := context.Background()
 		taskID := seedTask(t)
-		newStatus, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 200, nil)
-		if err != nil {
-			t.Fatalf("RecordSwipe: %v", err)
+		newStatus, ok, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 200, nil)
+		if err != nil || !ok {
+			t.Fatalf("RecordSwipe: ok=%v err=%v", ok, err)
 		}
 		if newStatus != "queued" {
 			t.Fatalf("newStatus=%q want queued (claim no longer changes status)", newStatus)
@@ -96,7 +98,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Run("RecordSwipe_DismissMapsToDismissed", func(t *testing.T) {
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
 		status, _ := readTask(t, taskID)
@@ -116,15 +118,48 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// pins both halves of that contract.
 		store, orgID, _, seedTask, _, readAudit := factory(t)
 		taskID := seedTask(t)
-		newStatus, err := store.RecordSwipe(context.Background(), orgID, taskID, "garbage", 0, nil)
-		if err != nil {
-			t.Fatalf("RecordSwipe: %v", err)
+		newStatus, ok, err := store.RecordSwipe(context.Background(), orgID, taskID, "garbage", 0, nil)
+		if err != nil || !ok {
+			t.Fatalf("RecordSwipe: ok=%v err=%v", ok, err)
 		}
 		if newStatus != "queued" {
 			t.Fatalf("newStatus=%q want queued for unknown action", newStatus)
 		}
 		if got := readAudit(t, taskID); !equalActions(got, []string{"garbage"}) {
 			t.Fatalf("swipe_events actions=%v want [garbage] (original action preserved for audit)", got)
+		}
+	})
+
+	t.Run("RecordSwipe_RefusesAClosedTask", func(t *testing.T) {
+		// The write carries its own status predicate, so it is safe against
+		// the race a caller's pre-read cannot cover: two closes land, the
+		// second finds no row to update and rewrites neither closed_at nor
+		// close_reason. Nothing is written on the refusal, audit row
+		// included, and the assertion runs per action because every arm
+		// shares the predicate.
+		for _, action := range []string{"dismiss", "complete", "claim", "delegate", "reassign", "garbage"} {
+			t.Run(action, func(t *testing.T) {
+				store, orgID, _, seedTask, readTask, readAudit := factory(t)
+				ctx := context.Background()
+				taskID := seedTask(t)
+				if _, ok, err := store.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+					t.Fatalf("seed dismiss: ok=%v err=%v", ok, err)
+				}
+
+				_, ok, err := store.RecordSwipe(ctx, orgID, taskID, action, 0, nil)
+				if err != nil {
+					t.Fatalf("RecordSwipe on a closed task: %v", err)
+				}
+				if ok {
+					t.Fatalf("RecordSwipe(%s) returned ok=true against a closed task", action)
+				}
+				if status, _ := readTask(t, taskID); status != "dismissed" {
+					t.Fatalf("status=%q want the seeded dismissed", status)
+				}
+				if got := readAudit(t, taskID); !equalActions(got, []string{"dismiss"}) {
+					t.Fatalf("swipe_events actions=%v want [dismiss] (a refused swipe leaves no trace)", got)
+				}
+			})
 		}
 	})
 
@@ -145,7 +180,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
 			t.Fatalf("snooze: ok=%v err=%v", ok, err)
 		}
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
 		}
 		status, snoozeUntil := readTask(t, taskID)
@@ -164,9 +199,9 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-		newStatus, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, &until)
-		if err != nil {
-			t.Fatalf("RecordSwipe: %v", err)
+		newStatus, ok, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, &until)
+		if err != nil || !ok {
+			t.Fatalf("RecordSwipe: ok=%v err=%v", ok, err)
 		}
 		if newStatus != "snoozed" {
 			t.Fatalf("newStatus=%q want snoozed", newStatus)
@@ -195,7 +230,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// one tx and a refused gesture leaves no trace.
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, nil); !errors.Is(err, db.ErrSnoozeUntilRequired) {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, nil); !errors.Is(err, db.ErrSnoozeUntilRequired) {
 			t.Fatalf("RecordSwipe(snooze, nil) error = %v, want ErrSnoozeUntilRequired", err)
 		}
 		status, snoozeUntil := readTask(t, taskID)
@@ -229,11 +264,37 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		}
 	})
 
+	t.Run("SnoozeTask_RefusesAClosedTask", func(t *testing.T) {
+		// A closed task can have both claim columns NULL, so the claim guard
+		// alone would let a dismiss landing between the caller's read and
+		// this write park a closed task for the wake sweep to resurrect.
+		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		ctx := context.Background()
+		taskID := seedTask(t)
+		if _, ok, err := store.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+			t.Fatalf("seed dismiss: ok=%v err=%v", ok, err)
+		}
+		ok, err := store.SnoozeTask(ctx, orgID, taskID, time.Now().Add(time.Hour).UTC(), 0)
+		if err != nil {
+			t.Fatalf("SnoozeTask on a closed task: %v", err)
+		}
+		if ok {
+			t.Fatalf("SnoozeTask returned ok=true against a closed task")
+		}
+		status, snoozeUntil := readTask(t, taskID)
+		if status != "dismissed" || !snoozeUntil.IsZero() {
+			t.Fatalf("task = (%q, %v) after a refused snooze; want the closed (dismissed, zero)", status, snoozeUntil)
+		}
+		if got := readAudit(t, taskID); !equalActions(got, []string{"dismiss"}) {
+			t.Fatalf("swipe_events actions=%v want [dismiss] (a refused snooze leaves no trace)", got)
+		}
+	})
+
 	t.Run("RequeueTask_FlipsToQueuedWithoutAuditRow", func(t *testing.T) {
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
 		// First swipe → claimed so we can observe the transition back.
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
 			t.Fatalf("seed swipe: %v", err)
 		}
 		ok, err := store.RequeueTask(context.Background(), orgID, taskID)
@@ -305,7 +366,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// resurrected by a stray clear) is the same predicate.
 		store, orgID, _, seedTask, readTask, _ := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
 		}
 		ok, err := store.ClearSnooze(context.Background(), orgID, taskID)
@@ -377,7 +438,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// 'undo' means the thing they meant to reverse already is.
 		store, orgID, userID, seedTask, _, readAudit := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
 		}
 		if ok, err := store.UndoLastSwipe(context.Background(), orgID, taskID, userID); err != nil || !ok {
@@ -401,7 +462,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// the task where it is.
 		store, orgID, _, seedTask, readTask, readAudit := factory(t)
 		taskID := seedTask(t)
-		if _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
+		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
 		}
 		const stranger = "00000000-0000-0000-0000-0000000000ff"
@@ -425,7 +486,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		taskID := seedTask(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if _, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 0, nil); err == nil {
+		if _, _, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 0, nil); err == nil {
 			t.Fatalf("RecordSwipe with cancelled ctx returned nil error")
 		}
 	})

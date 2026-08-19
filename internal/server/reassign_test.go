@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestTaskClaim_ReassignHappyPath pins the TFAC-561 user↔user handoff arm's
+// TestTaskClaim_ReassignHappyPath pins the user↔user handoff arm's
 // core CAS behavior against local-mode SQLite: a task claimed by another user
 // gets reassigned to a third user, the claim columns land as expected, and
 // the audit trail records the gesture.
@@ -252,7 +252,7 @@ func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	}
 }
 
-// TestTaskClaimReassign_PermissionModel pins TFAC-561's "claimant + team admin"
+// TestTaskClaimReassign_PermissionModel pins the "claimant + team admin"
 // permission rule against real Postgres RLS (local mode has no admin concept
 // to test against — the check short-circuits true there by design). A plain
 // team member who is neither the current claimant nor an admin of the task's
