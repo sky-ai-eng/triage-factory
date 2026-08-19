@@ -13,10 +13,12 @@ import "time"
 // conversation), so ref discriminates them. Ref is the materialization selector AND the
 // worktree's path-slug subdirectory:
 //
-//   - "default"       — the repo's default branch (detached checkout)
+//   - "ref-<branch>"  — a named branch, with '/' folded to '~'
+//     (worktree.CheckoutRefSlug — never the bare branch name): an explicit
+//     --ref, or a bare add resolved to the repository row's base/default branch
 //   - "pr-<N>"        — pull request N's head
-//   - "ref-<branch>"  — a named branch (--ref), with '/' folded to '~'
-//     (worktree.CheckoutRefSlug — never the bare branch name)
+//   - "default"       — the fallback for a bare add against a row that names
+//     no branch: a detached checkout of whatever origin/HEAD points at
 //
 // It replaced the vestigial feature_branch column (TFAC-502): the push
 // gate reads the worktree's live current branch, never this row, so a
