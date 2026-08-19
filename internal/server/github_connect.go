@@ -40,8 +40,9 @@ import (
 //
 // It reuses the org App's stored client_id/secret (the App's user-to-server
 // OAuth credentials), exchanges the code for a `ghu_` user token, calls
-// GET /user, records the login, and discards the token — there's no per-user
-// API consumer yet, so nothing is persisted beyond the identity row.
+// GET /user plus /user/emails, records the identity, and discards the token —
+// there's no per-user API consumer yet, so nothing is persisted beyond the
+// identity row.
 //
 // This is NOT a TF session: it's attribute-binding, not login. The session
 // the user already holds (from GoTrue or SAML) is untouched.
@@ -190,8 +191,8 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 
 	// No `scope`: this is a GitHub *App* user-to-server flow, where the token's
 	// capabilities come from the App's configured permissions, not an OAuth
-	// scope string (the OAuth-App model) — and GET /user, all we do, needs
-	// none. Only the CSRF nonce travels through GitHub; the
+	// scope string (the OAuth-App model). This flow calls /user/emails, so the
+	// manifest grants read access to Email addresses. Only the CSRF nonce travels through GitHub; the
 	// orgID/userID/return_to stay in the signed cookie, off GitHub's logs and
 	// the URL bar.
 	q := url.Values{}
@@ -306,7 +307,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
-	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, token)
+	ghUser, err := auth.CaptureGitHubIdentity(r.Context(), ghWeb, token)
 	if err != nil {
 		githubConnectLog.Warn("whoami failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
@@ -318,7 +319,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), "connect_oauth"); err != nil {
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "connect_oauth"); err != nil {
 			return err
 		}
 		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)
@@ -449,12 +450,12 @@ func recordGitHubIdentityBind(ctx context.Context, tx db.TxStores, orgID, userID
 // numeric id that binding records together — WITHOUT storing the token. It is
 // the shared validation core of the PAT-capture HTTP handler and the headless
 // bootstrap; each caller writes user_github_identities in its own tx (the tx
-// context differs). Errors wrap auth.ValidateGitHub's (callers can
+// context differs). Errors wrap auth.CaptureGitHubIdentity's (callers can
 // errors.Is auth.ErrGitHubHostUnreachable) or are errGitHubNoLogin. The login
 // is what proves the token; a host that answers with no id still binds, and the
 // id fills in on a later capture.
 func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (auth.GitHubUser, error) {
-	ghUser, err := auth.ValidateGitHub(ctx, ghWeb, pat)
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, ghWeb, pat)
 	if err != nil {
 		return auth.GitHubUser{}, err
 	}
@@ -465,8 +466,8 @@ func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (auth.Git
 }
 
 // handleGitHubIdentityPAT binds the caller's GitHub identity from a personal
-// access token they supply, WITHOUT storing the token. It validates the PAT
-// against the org's resolved host (GET /user), writes
+// access token they supply, WITHOUT storing the token. It captures the account
+// against the org's resolved host (GET /user and /user/emails), writes
 // user_github_identities(source='pat'), and discards the token — the same end
 // state as the Connect OAuth flow, just proven by a token instead of a consent
 // click. This is PAT_2: the per-user identity credential, independent of the
@@ -519,12 +520,20 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "github_pat"})
 			return
 		}
+		if errors.Is(err, auth.ErrGitHubEmailPermission) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "github_pat"})
+			return
+		}
+		if errors.Is(err, auth.ErrGitHubPrimaryEmailUnavailable) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "github_pat"})
+			return
+		}
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "github_pat"})
 		return
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), "pat"); err != nil {
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "pat"); err != nil {
 			return err
 		}
 		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)

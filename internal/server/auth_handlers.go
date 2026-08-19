@@ -1249,16 +1249,24 @@ func resolveOrCreatePrincipal(ctx context.Context, db *sql.DB, authUserID uuid.U
 	// separate axis from the login identity. Only a real GitHub login mirrors it
 	// (source='login_claim'); a SAML login writes none. Keyed on the principal.
 	if !isSSO && ghUsername != "" {
+		githubEmail := ""
+		if claims.EmailVerified {
+			githubEmail = email
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO public.user_github_identities
-				(user_id, github_base_url, login, source, verified_at, created_at, updated_at)
-			VALUES ($1, 'https://github.com', $2, 'login_claim', now(), now(), now())
+				(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
+			VALUES ($1, 'https://github.com', $2, NULLIF($3, ''), NULLIF($4, ''), 'login_claim', now(), now(), now())
 			ON CONFLICT (user_id, github_base_url) DO UPDATE
 			   SET login       = EXCLUDED.login,
+			       github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
+			       email       = CASE
+			                       WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
+			                       ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
 			       source      = EXCLUDED.source,
 			       verified_at = EXCLUDED.verified_at,
 			       updated_at  = now()
-		`, principalID, ghUsername); err != nil {
+		`, principalID, ghUsername, providerSubject, githubEmail); err != nil {
 			return uuid.Nil, fmt.Errorf("upsert github login identity: %w", err)
 		}
 	}

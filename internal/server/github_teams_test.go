@@ -243,7 +243,7 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolveGitHubHost(%q) failed", ts.URL)
 	}
-	if err := srv.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "connect_oauth"); err != nil {
+	if err := srv.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 	// A configured repo under owner "acme" is the org the fan-out queries.

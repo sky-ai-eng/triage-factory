@@ -116,15 +116,16 @@ export default function GitHubAccessGroup({
           <p className="text-[11px] text-text-tertiary mt-1">
             Requires a{' '}
             <a
-              href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
+              href="https://github.com/settings/tokens/new?scopes=repo,read:org,user:email&description=Triage+Factory"
               target="_blank"
               rel="noopener noreferrer"
               className="text-accent hover:underline"
             >
               classic PAT
             </a>{' '}
-            with <code className="text-text-secondary">repo</code> and{' '}
-            <code className="text-text-secondary">read:org</code> scopes — the token Triage
+            with <code className="text-text-secondary">repo</code>,{' '}
+            <code className="text-text-secondary">read:org</code>, and{' '}
+            <code className="text-text-secondary">user:email</code> scopes — the token Triage
             Factory&rsquo;s bots poll your organization with.{' '}
             <code className="text-text-secondary">read:org</code> lets them resolve your
             organization&rsquo;s team memberships so review requests routed to teams (e.g.

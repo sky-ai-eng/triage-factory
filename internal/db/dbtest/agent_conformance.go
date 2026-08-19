@@ -30,6 +30,7 @@ type AgentStoreFactory func(t *testing.T) (store db.AgentStore, orgID, patUserID
 //     jira_service_account_id.
 //   - SetGitHubPATUser writes the PAT-borrow FK; malformed input is
 //     refused before any UPDATE runs.
+//   - SetGitHubOrgIdentity stores or clears login + email atomically.
 //   - Postgres invalid-UUID guards: Update / SetGitHubPAT return nil
 //     instead of bubbling 22P02 parse errors.
 //   - DisplayName defaulting: empty input fills "Triage Factory Bot".
@@ -280,7 +281,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 	})
 
-	t.Run("SetGitHubOrgLogin_WritesScansAndClears", func(t *testing.T) {
+	t.Run("SetGitHubOrgIdentity_WritesScansAndClears", func(t *testing.T) {
 		// The org credential's OWN GitHub login (TFAC-452). Free-form text,
 		// NOT a UUID — the App-bot form "acme-bot[bot]" must round-trip
 		// unmolested (no shape validation, distinct from the PAT-user FK).
@@ -296,30 +297,56 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		if got == nil || got.GitHubOrgLogin != "" {
 			t.Fatalf("fresh agent GitHubOrgLogin=%v, want empty", got)
 		}
-		if err := store.SetGitHubOrgLogin(ctx, orgID, id, "acme-bot[bot]"); err != nil {
-			t.Fatalf("SetGitHubOrgLogin: %v", err)
+		if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+			t.Fatalf("SetGitHubOrgIdentity: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
-		if got == nil || got.GitHubOrgLogin != "acme-bot[bot]" {
-			t.Errorf("GitHubOrgLogin=%v want acme-bot[bot]", got)
+		if got == nil || got.GitHubOrgLogin != "acme-bot[bot]" || got.GitHubOrgEmail != "bot@example.com" {
+			t.Errorf("GitHub org identity=%v want acme-bot[bot] <bot@example.com>", got)
 		}
 		// Setting the org login must NOT disturb the PAT-user FK or other fields.
 		if got.DisplayName != "Test" {
-			t.Errorf("DisplayName=%q corrupted by SetGitHubOrgLogin", got.DisplayName)
+			t.Errorf("DisplayName=%q corrupted by SetGitHubOrgIdentity", got.DisplayName)
 		}
-		if err := store.SetGitHubOrgLogin(ctx, orgID, id, ""); err != nil {
-			t.Fatalf("SetGitHubOrgLogin clear: %v", err)
+		if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "", ""); err != nil {
+			t.Fatalf("SetGitHubOrgIdentity clear: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
-		if got == nil || got.GitHubOrgLogin != "" {
-			t.Errorf("GitHubOrgLogin=%v after clear, want empty", got)
+		if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
+			t.Errorf("GitHub org identity=%v after clear, want empty", got)
+		}
+
+		partials := []struct {
+			name  string
+			login string
+			email string
+		}{
+			{name: "login_only", login: "acme-bot[bot]"},
+			{name: "email_only", email: "bot@example.com"},
+		}
+		for _, partial := range partials {
+			t.Run(partial.name, func(t *testing.T) {
+				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+					t.Fatalf("seed full identity: %v", err)
+				}
+				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, partial.email); err != nil {
+					t.Fatalf("SetGitHubOrgIdentity partial: %v", err)
+				}
+				got, err := store.GetForOrg(ctx, orgID)
+				if err != nil {
+					t.Fatalf("GetForOrg: %v", err)
+				}
+				if got == nil || got.GitHubOrgLogin != "" || got.GitHubOrgEmail != "" {
+					t.Errorf("GitHub org identity=%v after partial write, want both fields empty", got)
+				}
+			})
 		}
 	})
 
-	t.Run("SetGitHubOrgLogin_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
+	t.Run("SetGitHubOrgIdentity_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
 		store, orgID, _ := factory(t)
-		if err := store.SetGitHubOrgLogin(context.Background(), orgID, "not-a-uuid", "octocat"); err != nil {
-			t.Errorf("SetGitHubOrgLogin invalid agent UUID: want nil, got %v", err)
+		if err := store.SetGitHubOrgIdentity(context.Background(), orgID, "not-a-uuid", "octocat", "octocat@example.com"); err != nil {
+			t.Errorf("SetGitHubOrgIdentity invalid agent UUID: want nil, got %v", err)
 		}
 	})
 }

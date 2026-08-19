@@ -39,6 +39,7 @@ type GitHubNumericIDSeeder struct {
 	// Implementations must normalize the host the way the writers do
 	// (db.NormalizeGitHubHost).
 	GitHubUserID func(t *testing.T, userID, githubBaseURL string) string
+	GitHubEmail  func(t *testing.T, userID, githubBaseURL string) string
 }
 
 // GitHubNumericIDFactory is what a per-backend test file hands to
@@ -180,7 +181,7 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 	t.Run("IdentityGitHubUserIDRoundTrips", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "583231" {
@@ -195,12 +196,43 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		assertSameSet(t, "UserIDsForGitHubLoginSystem", got, []string{u})
 	})
 
+	t.Run("IdentityEmailRoundTripsAndSurvivesAnOmission", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "octocat@example.com", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if got := seed.GitHubEmail(t, u, host); got != "octocat@example.com" {
+			t.Errorf("email = %q; want octocat@example.com", got)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "login_claim"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity without email: %v", err)
+		}
+		if got := seed.GitHubEmail(t, u, host); got != "octocat@example.com" {
+			t.Errorf("email = %q after omitted capture; want stored address", got)
+		}
+	})
+
+	t.Run("IdentityRebindWithoutEmailClearsPriorAccountsEmail", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "octocat@example.com", "pat"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity: %v", err)
+		}
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "hubber", "999", "", "login_claim"); err != nil {
+			t.Fatalf("UpsertGitHubIdentity rebind: %v", err)
+		}
+		if got := seed.GitHubEmail(t, u, host); got != "" {
+			t.Errorf("email = %q after rebind without one; want empty rather than prior account's address", got)
+		}
+	})
+
 	t.Run("IdentityWithoutGitHubUserIDReadsEmpty", func(t *testing.T) {
 		// A host that reported no id binds anyway: the login is what proves the
 		// token, and the id fills in on a later capture.
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "" {
@@ -211,16 +243,16 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 	t.Run("IdentityGitHubUserIDBackfillsAndSurvivesAnOmission", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity (no id): %v", err)
 		}
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "connect_oauth"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "connect_oauth"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity (with id): %v", err)
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "583231" {
 			t.Errorf("github_user_id = %q after a capture that named it; want %q", got, "583231")
 		}
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity (no id, again): %v", err)
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "583231" {
@@ -233,10 +265,10 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// fill-in-never-erase can't pin a stale one.
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "octocat", "583231", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "hubber", "999", "connect_oauth"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "hubber", "999", "", "connect_oauth"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity (re-bind): %v", err)
 		}
 		if got := seed.GitHubUserID(t, u, host); got != "999" {
@@ -250,7 +282,7 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// here reads as "this person is on no team", not as an error.
 		stores, seed := mk(t)
 		u := seed.User(t)
-		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "OctoCat", "583231", "pat"); err != nil {
+		if err := stores.Users.UpsertGitHubIdentity(ctx, u, host, "OctoCat", "583231", "", "pat"); err != nil {
 			t.Fatalf("UpsertGitHubIdentity: %v", err)
 		}
 		for _, probe := range []string{"OctoCat", "octocat", "OCTOCAT"} {

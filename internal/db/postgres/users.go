@@ -141,7 +141,7 @@ func scanIDs(rows *sql.Rows, errContext string) ([]string, error) {
 	return out, rows.Err()
 }
 
-func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, source string) error {
+func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a foreign_key_violation, matching the old
 	// SetGitHubUsername "user not found" guard.
@@ -152,11 +152,14 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 	// account's id, so the COALESCE never pins a stale one.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO user_github_identities
-			(user_id, github_base_url, login, github_user_id, source, verified_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, now(), now(), now())
+			(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, now(), now(), now())
 		ON CONFLICT (user_id, github_base_url) DO UPDATE SET
 			login          = EXCLUDED.login,
 			github_user_id = COALESCE(EXCLUDED.github_user_id, user_github_identities.github_user_id),
+			email           = CASE
+				WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN EXCLUDED.email
+				ELSE COALESCE(EXCLUDED.email, user_github_identities.email) END,
 			source         = EXCLUDED.source,
 			verified_at    = EXCLUDED.verified_at,
 			updated_at     = now(),
@@ -167,7 +170,7 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 			dashboard_backfilled_at = CASE
 				WHEN user_github_identities.login IS DISTINCT FROM EXCLUDED.login THEN NULL
 				ELSE user_github_identities.dashboard_backfilled_at END
-	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), source)
+	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), nullString(email), source)
 	if err != nil {
 		return fmt.Errorf("upsert user_github_identities: %w", err)
 	}

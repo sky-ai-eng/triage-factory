@@ -82,17 +82,18 @@ type AgentStore interface {
 	// multi-mode small-org fallback. Admin-only in Postgres.
 	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error
 
-	// SetGitHubOrgLogin records the org credential's OWN GitHub login —
-	// the login the bot/org PAT authenticates as, distinct from
-	// SetGitHubPATUser (the user who pasted the PAT). Written by the
+	// SetGitHubOrgIdentity records the org credential's OWN GitHub login and
+	// verified primary email — the account the bot/org PAT authenticates as,
+	// distinct from SetGitHubPATUser (the user who pasted the PAT). Written by the
 	// org-PAT setup/rebind writers (internal/server/credentials.go and
 	// the other integrations.Save sites) so the credential resolver's
-	// OrgIdentityFor PAT tier can stamp the org commit-author identity
-	// (TFAC-452). Empty login clears it. Admin-only in Postgres, same
+	// OrgIdentityFor PAT tier can stamp the org commit-author identity. If
+	// either value is empty, both fields are cleared so a partial
+	// identity can never be persisted. Admin-only in Postgres, same
 	// pool + RLS as SetGitHubPATUser. App-tier orgs never write here —
 	// the App bot login (<slug>[bot]) resolves live from the App
 	// registration, so this is the PAT path only.
-	SetGitHubOrgLogin(ctx context.Context, orgID, agentID, login string) error
+	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) error
 
 	// GetForOrgSystem mirrors GetForOrg but routes through the admin
 	// pool in Postgres. Used by system / claims-free callers that have

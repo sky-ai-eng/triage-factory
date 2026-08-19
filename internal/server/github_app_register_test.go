@@ -237,6 +237,10 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 	if got, _ := m["redirect_url"].(string); !strings.HasPrefix(got, "http://localhost:3000/") {
 		t.Errorf("redirect_url = %v, must point at the local deployment, not the homepage", got)
 	}
+	permissions, ok := m["default_permissions"].(map[string]any)
+	if !ok || permissions["email_addresses"] != "read" {
+		t.Errorf("manifest email_addresses permission = %v, want read", permissions["email_addresses"])
+	}
 
 	rawEvents, ok := m["default_events"].([]any)
 	if !ok {

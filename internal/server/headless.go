@@ -223,7 +223,8 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	//    around a token the host rejects. Validating first means fixing the token
 	//    and restarting recovers cleanly; provisioning an empty tenant first would
 	//    trip the never-overwrite gate and the seed would never run.
-	if _, err := auth.ValidateGitHub(ctx, creds.GitHubURL, creds.GitHubPAT); err != nil {
+	botIdentity, err := auth.CaptureGitHubIdentity(ctx, creds.GitHubURL, creds.GitHubPAT)
+	if err != nil {
 		headlessLog.Warn("GitHub bot credential failed validation; skipping bootstrap", "host", ghWeb, "error", err)
 		return nil
 	}
@@ -316,6 +317,9 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		if uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
 			return uerr
 		}
+		if uerr := persistOrgGitHubIdentity(ctx, tx, runmode.LocalDefaultOrgID, botIdentity.Login, botIdentity.PrimaryEmail); uerr != nil {
+			return uerr
+		}
 
 		// Tracked repos (only if the team tracks none yet).
 		if len(cfg.repos) > 0 {
@@ -360,7 +364,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				return gierr
 			}
 			if cur == "" {
-				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentity.Login, githubIdentity.UserID(), "pat"); uerr != nil {
+				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentity.Login, githubIdentity.UserID(), githubIdentity.PrimaryEmail, "pat"); uerr != nil {
 					return uerr
 				}
 				boundGitHubLogin = githubIdentity.Login

@@ -24,6 +24,16 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 // onboarding state separately from "you haven't connected yet."
 var ErrGitHubHostUnreachable = errors.New("github host unreachable")
 
+// ErrGitHubEmailPermission is returned when a user-scoped credential can read
+// /user but cannot read /user/emails. Callers surface permission-specific setup
+// guidance instead of treating this as a generic bad token.
+var ErrGitHubEmailPermission = errors.New("github email permission missing")
+
+// ErrGitHubPrimaryEmailUnavailable means GitHub returned no address that was
+// both primary and verified. Commit attribution requires that exact account
+// fact, so identity capture fails rather than selecting an alternate address.
+var ErrGitHubPrimaryEmailUnavailable = errors.New("github verified primary email unavailable")
+
 // ErrJiraHostUnreachable is the Jira sibling of ErrGitHubHostUnreachable: it
 // wraps the network-level failure of a call to a Jira host (DNS, dial, TLS,
 // timeout) — TF's backend couldn't reach the host at all, distinct from the
@@ -59,10 +69,11 @@ var ErrAnthropicUnreachable = errors.New("couldn't reach Anthropic — check you
 // and what every GitHub-side lookup takes, while ID is the half that survives
 // a rename — so it is what an identity binding persists alongside the login.
 type GitHubUser struct {
-	ID        int64  `json:"id"`
-	Login     string `json:"login"`
-	AvatarURL string `json:"avatar_url"`
-	Name      string `json:"name"`
+	ID           int64  `json:"id"`
+	Login        string `json:"login"`
+	AvatarURL    string `json:"avatar_url"`
+	Name         string `json:"name"`
+	PrimaryEmail string `json:"-"`
 }
 
 // UserID renders the numeric account id in the text form
@@ -149,6 +160,69 @@ func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, erro
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
 	return &user, nil
+}
+
+// CaptureGitHubIdentity validates a user-scoped GitHub credential and captures
+// the account's verified primary email. The email endpoint is intentionally
+// separate from /user: that response's email field is only the public profile
+// email and may be empty even when the account has a primary address.
+func CaptureGitHubIdentity(ctx context.Context, baseURL, token string) (*GitHubUser, error) {
+	user, err := ValidateGitHub(ctx, baseURL, token)
+	if err != nil {
+		return nil, err
+	}
+
+	baseURL = strings.TrimRight(baseURL, "/")
+	var apiURL string
+	if baseURL == "https://github.com" {
+		apiURL = "https://api.github.com/user/emails"
+	} else {
+		apiURL = baseURL + "/api/v3/user/emails"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build email request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrGitHubHostUnreachable, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read email response: %w", err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// ok
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("bad token: GitHub returned 401 Unauthorized while reading email addresses")
+	case http.StatusForbidden:
+		return nil, fmt.Errorf("%w: GitHub returned 403 Forbidden — grant 'user:email' for a classic token or read access to Email addresses", ErrGitHubEmailPermission)
+	default:
+		return nil, fmt.Errorf("GitHub email API error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var emails []struct {
+		Email    string `json:"email"`
+		Primary  bool   `json:"primary"`
+		Verified bool   `json:"verified"`
+	}
+	if err := json.Unmarshal(body, &emails); err != nil {
+		return nil, fmt.Errorf("parse email response: %w", err)
+	}
+	for _, candidate := range emails {
+		if candidate.Primary && candidate.Verified && strings.TrimSpace(candidate.Email) != "" {
+			user.PrimaryEmail = strings.TrimSpace(candidate.Email)
+			return user, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: GitHub account has no verified primary email", ErrGitHubPrimaryEmailUnavailable)
 }
 
 // ValidateJira checks the configured credential against the Jira API and

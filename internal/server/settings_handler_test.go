@@ -546,7 +546,7 @@ func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "pat"); err != nil {
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host); login != "octocat" {

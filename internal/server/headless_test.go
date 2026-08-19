@@ -195,6 +195,10 @@ func TestRunHeadlessBootstrap_HappyPath(t *testing.T) {
 
 	// Stub GitHub: ValidateGitHub (bot + user) hits {host}/api/v3/user.
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octocat@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
@@ -285,6 +289,10 @@ func TestRunHeadlessBootstrap_CloneProtocolSSHOverride(t *testing.T) {
 	auth.ResetSecretBackendForTest(t)
 
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octocat@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
@@ -329,6 +337,10 @@ func TestRunHeadlessBootstrap_UnsetIdentityPATsWarn(t *testing.T) {
 	auth.ResetSecretBackendForTest(t)
 
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octocat@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
@@ -407,6 +419,10 @@ func TestRunHeadlessBootstrap_JiraBotCredsWithoutConfigWarns(t *testing.T) {
 	auth.ResetSecretBackendForTest(t)
 
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octocat@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
