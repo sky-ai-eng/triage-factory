@@ -183,6 +183,7 @@ export default function TeamSettings({
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
   const [defaultModel, setDefaultModel] = useState('sonnet')
   const [autoDelegate, setAutoDelegate] = useState(true)
+  const [autoMode, setAutoMode] = useState(true)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
   // How finished agent reviews reach GitHub.
@@ -246,6 +247,7 @@ export default function TeamSettings({
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
+        setAutoMode(form.auto_mode_enabled)
         setBranchTemplate(form.branch_template)
         setReviewPosture(form.review_posture)
         setBasePushPolicy(form.base_branch_push_policy)
@@ -340,6 +342,7 @@ export default function TeamSettings({
   const defaultsDirty =
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
+    (isLocal && autoMode !== baseline.auto_mode_enabled) ||
     branchTemplate !== baseline.branch_template ||
     reviewPosture !== baseline.review_posture ||
     basePushPolicy !== baseline.base_branch_push_policy
@@ -350,6 +353,7 @@ export default function TeamSettings({
         ...baseline,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
+        auto_mode_enabled: autoMode,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
         base_branch_push_policy: basePushPolicy,
@@ -362,6 +366,7 @@ export default function TeamSettings({
         ...b,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
+        auto_mode_enabled: autoMode,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
         base_branch_push_policy: basePushPolicy,
@@ -524,7 +529,7 @@ export default function TeamSettings({
         title="Team defaults"
         summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
           baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
-        } · Reviews: ${
+        }${isLocal ? ` · auto mode ${baseline.auto_mode_enabled ? 'on' : 'off'}` : ''} · Reviews: ${
           REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture
         } · Base-branch pushes: ${
           BASE_BRANCH_PUSH_LABELS[baseline.base_branch_push_policy] ??
@@ -536,6 +541,7 @@ export default function TeamSettings({
         onCancel={() => {
           setDefaultModel(baseline.default_model)
           setAutoDelegate(baseline.auto_delegate_enabled)
+          setAutoMode(baseline.auto_mode_enabled)
           setBranchTemplate(baseline.branch_template)
           setReviewPosture(baseline.review_posture)
           setBasePushPolicy(baseline.base_branch_push_policy)
@@ -578,6 +584,32 @@ export default function TeamSettings({
             />
           </button>
         </div>
+        {isLocal && (
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[13px] text-text-primary">Auto mode</p>
+              <p className="mt-0.5 text-[11px] text-text-tertiary">
+                Let Claude automatically approve tool calls it determines are safe
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-label="Auto mode"
+              aria-checked={autoMode}
+              onClick={() => setAutoMode((v) => !v)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                autoMode ? 'bg-accent' : 'bg-black/[0.08]'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                  autoMode ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        )}
         <div>
           <p className="text-[13px] text-text-primary">Branch name template</p>
           <p className="mt-0.5 text-[11px] text-text-tertiary">

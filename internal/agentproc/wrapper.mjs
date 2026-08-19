@@ -70,6 +70,9 @@ function parseArgs(argv) {
       case "--model":
         opts.model = next()
         break
+      case "--permission-mode":
+        opts.permissionMode = next()
+        break
       case "--claude-bin":
         // Explicit Claude binary (local-mode TF_CLAUDE_BINARY override). The Go
         // side validates the path and only passes this on the non-sandbox path,

@@ -326,6 +326,11 @@ type TeamSettings struct {
 	AIPreferenceUpdateInterval int
 	DefaultModel               string // "haiku" | "sonnet" | "opus"
 	AutoDelegateEnabled        bool
+	// AutoModeEnabled starts SDK-runtime delegated conversations in Claude
+	// Code's auto permission mode. Local mode honors the stored team choice;
+	// multi-mode SDK conversations always enable auto mode, and the native
+	// runtime ignores this field entirely.
+	AutoModeEnabled bool
 
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
@@ -397,6 +402,7 @@ func DefaultTeamSettings() TeamSettings {
 		AIPreferenceUpdateInterval:      20,
 		DefaultModel:                    DefaultModel,
 		AutoDelegateEnabled:             true,
+		AutoModeEnabled:                 true,
 		PermissionAbsentGraceMS:         15000,
 		PermissionAbsentAutodenyEnabled: true,
 		BranchTemplate:                  DefaultBranchTemplate,

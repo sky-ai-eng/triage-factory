@@ -1756,6 +1756,9 @@ CREATE TABLE public.team_settings (
     -- wanting review-before-run turn it off.
     default_model text DEFAULT 'sonnet'::text NOT NULL,
     auto_delegate_enabled boolean DEFAULT true NOT NULL,
+    -- Claude Code SDK permission posture. Multi-mode SDK runs always use auto;
+    -- local mode honors this team setting, and native runs ignore it.
+    auto_mode_enabled boolean DEFAULT true NOT NULL,
     -- Per-team daily LLM spend cap (TFAC-482, EE/governance-gated). NULL = no cap;
     -- the app layer also treats 0 as "no cap". When the team's spend for the
     -- current UTC calendar day (summed over its team_id rows ONLY — system

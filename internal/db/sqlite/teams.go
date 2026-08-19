@@ -70,6 +70,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		aiThreshold, aiInterval int
 		defaultModel            string
 		autoDelegate            bool
+		autoMode                bool
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
@@ -79,14 +80,14 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	)
 	err := q.QueryRowContext(ctx, `
 		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled,
+		       default_model, auto_delegate_enabled, auto_mode_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
 		       max_daily_cost_usd, branch_template, review_posture,
 		       base_branch_push_policy
 		FROM team_settings WHERE team_id = ?
 	`, teamID).Scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
-		&defaultModel, &autoDelegate,
+		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
 	)
@@ -112,6 +113,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		AIPreferenceUpdateInterval:      aiInterval,
 		DefaultModel:                    defaultModel,
 		AutoDelegateEnabled:             autoDelegate,
+		AutoModeEnabled:                 autoMode,
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
@@ -504,16 +506,18 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
+			auto_mode_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			max_daily_cost_usd, branch_template, review_posture,
 			base_branch_push_policy, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			jira_projects = excluded.jira_projects,
 			ai_reprioritize_threshold = excluded.ai_reprioritize_threshold,
 			ai_preference_update_interval = excluded.ai_preference_update_interval,
 			default_model = excluded.default_model,
 			auto_delegate_enabled = excluded.auto_delegate_enabled,
+			auto_mode_enabled = excluded.auto_mode_enabled,
 			permission_absent_grace_ms = excluded.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = excluded.permission_absent_autodeny_enabled,
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
@@ -524,6 +528,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	`,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
+		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloatValue(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy,

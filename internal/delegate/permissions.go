@@ -39,6 +39,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -121,6 +122,30 @@ const defaultPresencePollInterval = time.Second
 // request matches (orgID, conversationID, toolCallID) — it was already answered, timed
 // out, or never existed. The permission endpoint maps it to 404.
 var ErrNoPendingPermission = errors.New("no pending permission request")
+
+// resolveSDKPermissionMode chooses the initial Claude Code permission posture
+// for SDK-runtime delegated conversations. Multi mode is always unattended and
+// always starts in auto. Local mode honors the team toggle, falling back to the
+// schema default on a missing row or read failure. Native conversations never
+// call this helper, so the setting cannot affect their own permission gate.
+func (s *Spawner) resolveSDKPermissionMode(ctx context.Context, teamID string) string {
+	if runmode.Current() == runmode.ModeMulti {
+		return "auto"
+	}
+
+	ts := domain.DefaultTeamSettings()
+	if s.teams != nil && teamID != "" {
+		if loaded, err := s.teams.GetSettingsSystem(ctx, teamID); err == nil {
+			ts = loaded
+		} else {
+			delegateLog.Warn("load team settings for auto mode failed; using default", "team", teamID, "error", err)
+		}
+	}
+	if ts.AutoModeEnabled {
+		return "auto"
+	}
+	return ""
+}
 
 // pendingPermission is one in-flight browser permission prompt: the 1-buffered
 // channel the handler goroutine is parked on, plus the owning org so a resolve

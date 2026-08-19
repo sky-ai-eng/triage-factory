@@ -534,10 +534,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
-		Cwd:       claudeCwd,
-		Model:     model,
-		SessionID: resumeSession,
-		Message:   prompt,
+		Cwd:            claudeCwd,
+		Model:          model,
+		PermissionMode: s.resolveSDKPermissionMode(ctx, teamID),
+		SessionID:      resumeSession,
+		Message:        prompt,
 		// The gh subcommands are granted only when the channel is actually
 		// live: without one, `gh` on a local host would resolve to the user's
 		// own installation under the user's own auth, so the allowlist must

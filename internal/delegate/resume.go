@@ -397,10 +397,11 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 
 	baseOpts := agentproc.RunOptions{
-		Cwd:       cwd,
-		Model:     model,
-		SessionID: sessionID,
-		Message:   message,
+		Cwd:            cwd,
+		Model:          model,
+		PermissionMode: s.resolveSDKPermissionMode(ctx, opts.TeamID),
+		SessionID:      sessionID,
+		Message:        message,
 		// gh is granted only alongside a live channel — see runAgent's note.
 		AllowedTools: agentproc.BuildAllowedToolsFor(agentproc.AllowedToolsOptions{
 			SelfBin: selfBin,

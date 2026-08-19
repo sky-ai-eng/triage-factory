@@ -39,6 +39,9 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
+	if opts.PermissionMode != "" {
+		args = append(args, "--permission-mode", opts.PermissionMode)
+	}
 	args = append(args,
 		"--output-format", "stream-json",
 		"--verbose",

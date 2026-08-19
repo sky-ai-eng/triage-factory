@@ -31,6 +31,12 @@ type RunOptions struct {
 	// Model is passed via --model. Empty omits the flag.
 	Model string
 
+	// PermissionMode is the Claude Code permission posture used when the query
+	// starts. Empty leaves the SDK default unchanged; "auto" lets Claude decide
+	// which tool calls can proceed without asking. This is an SDK-runtime option
+	// only — the native agent loop does not consume RunOptions.
+	PermissionMode string
+
 	// SessionID, when non-empty, switches the invocation to
 	// `--resume <id>`. Used for the crash-reclaim resume, the open-run
 	// resume path, and the curator's per-message resumption against a

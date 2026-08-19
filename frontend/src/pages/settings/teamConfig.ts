@@ -43,6 +43,9 @@ export interface GitHubGroup {
 export interface TeamConfigForm {
   default_model: string
   auto_delegate_enabled: boolean
+  // Claude Code SDK permission posture. Exposed only on the local Settings
+  // page; multi mode is always auto and native conversations ignore it.
+  auto_mode_enabled: boolean
   // Branch-name template suggested (not enforced) to delegated agents when they
   // create a branch (TFAC-498). The `<ticket-id>` literal is replaced with the
   // ticket id at run time. Same key on the GET and POST wire.
@@ -88,6 +91,7 @@ export interface TeamSettingsData {
     AIPreferenceUpdateInterval: number
     DefaultModel: string
     AutoDelegateEnabled: boolean
+    AutoModeEnabled: boolean
     BranchTemplate: string
     ReviewPosture: string
     BaseBranchPushPolicy: string
@@ -160,6 +164,7 @@ export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: bo
 export const emptyTeamConfig = (): TeamConfigForm => ({
   default_model: 'sonnet',
   auto_delegate_enabled: true,
+  auto_mode_enabled: true,
   branch_template: 'tfac/<ticket-id>',
   review_posture: 'identity',
   base_branch_push_policy: 'never',
@@ -179,6 +184,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel || 'sonnet',
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
+    auto_mode_enabled: data.team_settings.AutoModeEnabled ?? true,
     branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
     review_posture: data.team_settings.ReviewPosture || 'identity',
     base_branch_push_policy: data.team_settings.BaseBranchPushPolicy || 'never',
@@ -244,6 +250,9 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
       body: JSON.stringify({
         ai_model: form.default_model,
         ai_auto_delegate_enabled: form.auto_delegate_enabled,
+        // "default" is the local-only team alias. Multi mode always uses auto
+        // and must not grow a hidden setup/settings write for this field.
+        ...(teamId === 'default' ? { auto_mode_enabled: form.auto_mode_enabled } : {}),
         branch_template: form.branch_template,
         review_posture: form.review_posture,
         base_branch_push_policy: form.base_branch_push_policy,
