@@ -63,16 +63,41 @@ type Outputs struct {
 }
 
 func inheritedOutputs() (Outputs, error) {
-	out := Outputs{
-		Bundle:     os.NewFile(3, worktree.CaptureBundleFile),
-		Patch:      os.NewFile(4, worktree.CapturePatchFile),
-		Transcript: os.NewFile(5, worktree.CaptureTranscriptFile),
-	}
-	if out.Bundle == nil || out.Patch == nil || out.Transcript == nil {
-		out.Close()
-		return Outputs{}, fmt.Errorf("capture staging descriptors are missing")
+	var out Outputs
+	for _, inherited := range []struct {
+		fd   uintptr
+		name string
+		dst  **os.File
+	}{
+		{fd: 3, name: worktree.CaptureBundleFile, dst: &out.Bundle},
+		{fd: 4, name: worktree.CapturePatchFile, dst: &out.Patch},
+		{fd: 5, name: worktree.CaptureTranscriptFile, dst: &out.Transcript},
+	} {
+		f, err := inheritedOutput(inherited.fd, inherited.name)
+		if err != nil {
+			out.Close()
+			return Outputs{}, err
+		}
+		*inherited.dst = f
 	}
 	return out, nil
+}
+
+func inheritedOutput(fd uintptr, name string) (*os.File, error) {
+	f := os.NewFile(fd, name)
+	if f == nil {
+		return nil, fmt.Errorf("capture staging descriptor %d (%s) is missing", fd, name)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("capture staging descriptor %d (%s) is invalid: %w", fd, name, err)
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("capture staging descriptor %d (%s) is not a regular file", fd, name)
+	}
+	return f, nil
 }
 
 func (o Outputs) Close() {

@@ -124,6 +124,31 @@ func TestRun_CapturesSessionTranscript(t *testing.T) {
 	}
 }
 
+func TestInheritedOutput_RejectsClosedDescriptor(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "closed-output-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fd := f.Fd()
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inheritedOutput(fd, worktree.CaptureBundleFile); err == nil {
+		t.Fatal("inheritedOutput accepted a closed descriptor")
+	}
+}
+
+func TestInheritedOutput_RejectsNonRegularDescriptor(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := inheritedOutput(r.Fd(), worktree.CaptureBundleFile); err == nil {
+		t.Fatal("inheritedOutput accepted a pipe descriptor")
+	}
+}
+
 func captureStaging(t *testing.T) (string, Outputs) {
 	t.Helper()
 	dir := t.TempDir()

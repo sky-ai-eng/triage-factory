@@ -437,6 +437,21 @@ func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 	}
 }
 
+func TestCapturedBytesSize_RejectsStagedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "member")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capturedBytesSize(nil, link); err == nil {
+		t.Fatal("capturedBytesSize accepted a staged symlink")
+	}
+}
+
 // TestEnsureWorkspace_ColdPath_DetachedHead: a worktree snapshotted while HEAD
 // is detached (e.g. the agent ran `git checkout <sha>`) rehydrates to the same
 // detached commit — the manifest carries the HEAD SHA, so an empty branch no

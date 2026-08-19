@@ -379,7 +379,7 @@ func capturedBytesSize(data []byte, path string) (int64, error) {
 	if len(data) != 0 {
 		return 0, fmt.Errorf("member has both buffered bytes and a staged path")
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, err
 	}
