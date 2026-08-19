@@ -102,6 +102,30 @@ func TestWrapperHasNoPermissionCounter(t *testing.T) {
 	}
 }
 
+const permissionModeStubSDK = `
+export function query({ options }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield { type: "stub_options", permission_mode: options.permissionMode }
+    },
+    async interrupt() {},
+    async setPermissionMode() {},
+  }
+}
+`
+
+func TestWrapperPassesInitialPermissionMode(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	w := startWrapper(t, node, permissionModeStubSDK, "--permission-mode", "auto")
+	got := w.next()
+	if got["permission_mode"] != "auto" {
+		t.Errorf("SDK option permissionMode = %v, want auto", got["permission_mode"])
+	}
+}
+
 // TestParseControlLine_PermissionRequest pins the Go half of the same contract:
 // the reader decodes the wrapper's permission_request into the fields the
 // handler sees, tool_call_id included.
@@ -249,7 +273,7 @@ type wrapperProc struct {
 // so the test pins what the binary installs) next to a stub
 // @anthropic-ai/claude-agent-sdk, and runs it in streaming-input mode with
 // permission prompts on. The process is killed and reaped at test end.
-func startWrapper(t *testing.T, node, stubSDK string) *wrapperProc {
+func startWrapper(t *testing.T, node, stubSDK string, extraArgs ...string) *wrapperProc {
 	t.Helper()
 	dir := t.TempDir()
 	pkgDir := filepath.Join(dir, "node_modules", "@anthropic-ai", "claude-agent-sdk")
@@ -264,7 +288,9 @@ func startWrapper(t *testing.T, node, stubSDK string) *wrapperProc {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	cmd := exec.CommandContext(ctx, node, wrapper, "--input-format", "stream-json", "--permission-prompts")
+	args := []string{wrapper, "--input-format", "stream-json", "--permission-prompts"}
+	args = append(args, extraArgs...)
+	cmd := exec.CommandContext(ctx, node, args...)
 	cmd.Dir = dir
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

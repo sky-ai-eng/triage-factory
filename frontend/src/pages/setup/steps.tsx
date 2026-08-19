@@ -376,7 +376,7 @@ async function persistTeamSettings(
       'Team settings didn’t load — reopen the Repositories step and retry before saving.',
     )
   }
-  const result = await saveTeamSettings(teamId, state.team)
+  const result = await saveTeamSettings(teamId, state.team, false)
   if (!result.ok) throw new Error(result.error)
   return result.warning
 }

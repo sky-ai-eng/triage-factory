@@ -15,6 +15,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -89,6 +91,34 @@ func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	s.mu.Unlock()
 	if pending {
 		t.Error("AutoApprovePermissionHandler must not register a pending broker entry")
+	}
+}
+
+func TestResolveSDKPermissionMode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        runmode.Mode
+		teamEnabled bool
+		want        string
+	}{
+		{name: "local enabled", mode: runmode.ModeLocal, teamEnabled: true, want: "auto"},
+		{name: "local disabled", mode: runmode.ModeLocal, teamEnabled: false, want: ""},
+		{name: "multi ignores stored false", mode: runmode.ModeMulti, teamEnabled: false, want: "auto"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, tc.mode)
+			database := newDelegateTestDB(t)
+			stores := sqlitestore.New(database)
+			settings := domain.DefaultTeamSettings()
+			settings.AutoModeEnabled = tc.teamEnabled
+			if err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
+				t.Fatalf("UpdateSettings: %v", err)
+			}
+			s := NewSpawner(database, stores, nil, nil, "")
+			if got := s.resolveSDKPermissionMode(t.Context(), runmode.LocalDefaultTeamID); got != tc.want {
+				t.Errorf("permission mode = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

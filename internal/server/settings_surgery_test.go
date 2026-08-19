@@ -180,6 +180,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	patchTeamSettingsOK(t, s, "default", map[string]any{
 		"ai_model":                           "opus",
 		"ai_auto_delegate_enabled":           false,
+		"auto_mode_enabled":                  false,
 		"ai_reprioritize_threshold":          11,
 		"ai_preference_update_interval":      33,
 		"branch_template":                    "wip/<ticket-id>",
@@ -192,7 +193,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	defaults := domain.DefaultTeamSettings()
 	body := map[string]any{}
 	for _, f := range []string{
-		"ai_model", "ai_auto_delegate_enabled", "ai_reprioritize_threshold",
+		"ai_model", "ai_auto_delegate_enabled", "auto_mode_enabled", "ai_reprioritize_threshold",
 		"ai_preference_update_interval", "branch_template", "review_posture",
 		"base_branch_push_policy", "permission_absent_autodeny_enabled",
 		"permission_absent_grace_seconds",
@@ -208,6 +209,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		t.Errorf("ai_model after null = %q, want \"\" (inherit)", got.DefaultModel)
 	}
 	if got.AutoDelegateEnabled != defaults.AutoDelegateEnabled ||
+		got.AutoModeEnabled != defaults.AutoModeEnabled ||
 		got.AIReprioritizeThreshold != defaults.AIReprioritizeThreshold ||
 		got.AIPreferenceUpdateInterval != defaults.AIPreferenceUpdateInterval ||
 		got.BranchTemplate != defaults.BranchTemplate ||

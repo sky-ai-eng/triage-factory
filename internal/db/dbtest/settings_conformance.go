@@ -580,6 +580,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AIPreferenceUpdateInterval:      30,
 			DefaultModel:                    "opus",
 			AutoDelegateEnabled:             true,
+			AutoModeEnabled:                 false,
 			PermissionAbsentGraceMS:         30000,
 			PermissionAbsentAutodenyEnabled: false,
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap

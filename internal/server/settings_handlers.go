@@ -216,6 +216,7 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 type teamSettingsPatch struct {
 	AIModel                         json.RawMessage `json:"ai_model"`
 	AIAutoDelegate                  json.RawMessage `json:"ai_auto_delegate_enabled"`
+	AutoModeEnabled                 json.RawMessage `json:"auto_mode_enabled"`
 	AIReprioritizeThreshold         json.RawMessage `json:"ai_reprioritize_threshold"`
 	AIPreferenceUpdateInterval      json.RawMessage `json:"ai_preference_update_interval"`
 	BranchTemplate                  json.RawMessage `json:"branch_template"`
@@ -321,7 +322,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 // On any failure the response is already written and ok is false.
 func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (apply func(*domain.TeamSettings), ok bool) {
 	if !httpx.PatchNamed(
-		req.AIModel, req.AIAutoDelegate, req.AIReprioritizeThreshold,
+		req.AIModel, req.AIAutoDelegate, req.AutoModeEnabled, req.AIReprioritizeThreshold,
 		req.AIPreferenceUpdateInterval, req.BranchTemplate, req.ReviewPosture,
 		req.BaseBranchPushPolicy, req.PermissionAbsentAutodenyEnabled,
 		req.PermissionAbsentGraceSeconds,
@@ -363,6 +364,13 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 			next = v
 		}
 		set(func(t *domain.TeamSettings) { t.AutoDelegateEnabled = next })
+	}
+	if v, st := httpx.PatchBool(&shape, req.AutoModeEnabled, "auto_mode_enabled"); st != httpx.PatchAbsent {
+		next := defaults.AutoModeEnabled
+		if st == httpx.PatchSet {
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.AutoModeEnabled = next })
 	}
 	if v, st := httpx.PatchInt(&shape, req.AIReprioritizeThreshold, "ai_reprioritize_threshold"); st != httpx.PatchAbsent {
 		next := defaults.AIReprioritizeThreshold

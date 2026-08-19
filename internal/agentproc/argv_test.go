@@ -82,6 +82,26 @@ func TestBuildArgs_PermissionPromptsFlag(t *testing.T) {
 	}
 }
 
+func TestBuildArgs_PermissionMode(t *testing.T) {
+	got := BuildArgs(RunOptions{
+		Interactive:    true,
+		Model:          "sonnet-4-6",
+		PermissionMode: "auto",
+	})
+	idx := slices.Index(got, "--permission-mode")
+	if idx < 0 || idx+1 >= len(got) {
+		t.Fatalf("expected --permission-mode flag: %v", got)
+	}
+	if got[idx+1] != "auto" {
+		t.Errorf("--permission-mode value = %q, want auto", got[idx+1])
+	}
+
+	withoutMode := BuildArgs(RunOptions{Interactive: true})
+	if slices.Contains(withoutMode, "--permission-mode") {
+		t.Errorf("zero-value PermissionMode must omit the flag: %v", withoutMode)
+	}
+}
+
 func TestBuildArgs_ResumeAddsResumeFlagBeforeModel(t *testing.T) {
 	// --resume must precede --model so claude treats this as a
 	// continuation of the captured session, not a fresh run that
