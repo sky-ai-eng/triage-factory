@@ -561,6 +561,70 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 	return err
 }
 
+func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var survivor string
+	merged := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := q.QueryRowContext(ctx, `SELECT id FROM entities WHERE source = (SELECT source FROM entities WHERE id = ?) AND source_id = ?`, id, newSourceID).Scan(&survivor); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id = ?, project_id = NULL, classification_rationale = NULL, classified_at = NULL, last_polled_at = ? WHERE id = ?`, newSourceID, time.Now().UTC(), id)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return sql.ErrNoRows
+			}
+			survivor = id
+			return nil
+		}
+		if survivor == id {
+			return nil
+		}
+		merged = true
+		// Dismiss active tasks whose dedup slot is already occupied on the survivor.
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET status='dismissed', closed_at=?, close_reason='duplicate_entity_merged' WHERE entity_id=? AND status NOT IN ('done','dismissed') AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id=? AND s.event_type=tasks.event_type AND s.dedup_key=tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`, time.Now().UTC(), id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=1 WHERE status='running' AND cancel_requested=0 AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.entity_id=? AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND (c.status IS NULL OR c.status NOT IN ('completed','failed')))`, id); err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`UPDATE tasks SET entity_id=? WHERE entity_id=?`, `UPDATE events SET entity_id=? WHERE entity_id=?`, `UPDATE event_queue SET entity_id=? WHERE entity_id=?`, `UPDATE pending_firings SET entity_id=? WHERE entity_id=?`, `UPDATE conversation_memory SET entity_id=? WHERE entity_id=?`,
+		} {
+			if _, err := q.ExecContext(ctx, stmt, survivor, id); err != nil {
+				return err
+			}
+		}
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO conversation_memory_entities(org_id,conversation_id,entity_id,role,created_at) SELECT org_id,conversation_id,?,role,created_at FROM conversation_memory_entities WHERE entity_id=?`, survivor, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE (from_entity_id=? OR to_entity_id=?) AND (CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END)=(CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END)`, id, id, id, survivor, id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO entity_links(from_entity_id,to_entity_id,kind,origin,created_at,org_id) SELECT CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END,CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END,kind,origin,created_at,org_id FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, survivor, id, survivor, id, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, id); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id=?`, id)
+		return err
+	})
+	return survivor, merged, err
+}
+
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }

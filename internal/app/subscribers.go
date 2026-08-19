@@ -95,6 +95,8 @@ func (a *App) registerSubscribers() {
 		Filter: []string{domain.EventGitHubPRNewCommits},
 		Handle: a.spawner.HandlePRNewCommits,
 	})
+	// TODO(TFAC-851): Also inject CI failures, CI passes, and merge conflicts
+	// without absorbing any task routing those events independently trigger.
 }
 
 // brainHolderOnly wraps a subscriber handler so it fires only while this

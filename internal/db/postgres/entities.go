@@ -564,6 +564,64 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 	return err
 }
 
+func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (string, bool, error) {
+	var survivor string
+	merged := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := q.QueryRowContext(ctx, `SELECT id FROM entities WHERE org_id=$1 AND source=(SELECT source FROM entities WHERE org_id=$1 AND id=$2) AND source_id=$3`, orgID, id, newSourceID).Scan(&survivor); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id=$1, project_id=NULL, classification_rationale=NULL, classified_at=NULL, last_polled_at=$2 WHERE org_id=$3 AND id=$4`, newSourceID, time.Now().UTC(), orgID, id)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return sql.ErrNoRows
+			}
+			survivor = id
+			return nil
+		}
+		if survivor == id {
+			return nil
+		}
+		merged = true
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET status='dismissed', closed_at=$1, close_reason='duplicate_entity_merged' WHERE org_id=$2 AND entity_id=$3 AND status NOT IN ('done','dismissed') AND EXISTS (SELECT 1 FROM tasks s WHERE s.org_id=$2 AND s.entity_id=$4 AND s.event_type=tasks.event_type AND s.dedup_key=tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`, time.Now().UTC(), orgID, id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=true WHERE org_id=$1 AND status='running' AND cancel_requested=false AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.org_id=$1 AND t.entity_id=$2 AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND (c.status IS NULL OR c.status NOT IN ('completed','failed')))`, orgID, id); err != nil {
+			return err
+		}
+		for _, table := range []string{"tasks", "events", "event_queue", "pending_firings", "conversation_memory"} {
+			if _, err := q.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET entity_id=$1 WHERE org_id=$2 AND entity_id=$3`, table), survivor, orgID, id); err != nil {
+				return err
+			}
+		}
+		if _, err := q.ExecContext(ctx, `INSERT INTO conversation_memory_entities(org_id,conversation_id,entity_id,role,created_at) SELECT org_id,conversation_id,$1,role,created_at FROM conversation_memory_entities WHERE entity_id=$2 ON CONFLICT DO NOTHING`, survivor, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id=$1`, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE (from_entity_id=$1 OR to_entity_id=$1) AND (CASE WHEN from_entity_id=$1 THEN $2 ELSE from_entity_id END)=(CASE WHEN to_entity_id=$1 THEN $2 ELSE to_entity_id END)`, id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `INSERT INTO entity_links(from_entity_id,to_entity_id,kind,origin,org_id,created_at) SELECT CASE WHEN from_entity_id=$1 THEN $2 ELSE from_entity_id END,CASE WHEN to_entity_id=$1 THEN $2 ELSE to_entity_id END,kind,origin,org_id,created_at FROM entity_links WHERE from_entity_id=$1 OR to_entity_id=$1 ON CONFLICT DO NOTHING`, id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id=$1 OR to_entity_id=$1`, id); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `DELETE FROM entities WHERE org_id=$1 AND id=$2`, orgID, id)
+		return err
+	})
+	return survivor, merged, err
+}
+
 func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) error {
 	return updateEntityTitle(ctx, s.q, orgID, id, title)
 }

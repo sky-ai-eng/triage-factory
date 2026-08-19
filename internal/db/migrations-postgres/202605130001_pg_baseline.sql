@@ -5907,12 +5907,6 @@ CREATE TABLE public.blueprint_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    -- entity_id denormalizes task_id's entity, backfilled from tasks at
-    -- insert time. It keys no constraint — it is the cheap entity lens for
-    -- reads that want "which PR was this run about" without joining back
-    -- through tasks. Nullable: manual runs (trigger_type='manual') never
-    -- populate it.
-    entity_id uuid,
     CONSTRAINT blueprint_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
     CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
@@ -5990,9 +5984,6 @@ CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs 
 -- CreateRunIfNotFiredSystem translates it to db.ErrTaskBusyActiveAutoRun so
 -- the caller queues the intent instead of dropping it as a replay.
 CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_task ON public.blueprint_runs (org_id, task_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text);
-
-ALTER TABLE ONLY public.blueprint_runs
-    ADD CONSTRAINT blueprint_runs_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
