@@ -38,7 +38,7 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot (multi mode, self-contained): %v", err)
 	}
-	if want := filepath.Join(runRoot, "acme", "repo", "@default"); wtPath != want {
+	if want := filepath.Join(runRoot, "acme", "repo", "default"); wtPath != want {
 		t.Fatalf("wtPath = %q, want %q", wtPath, want)
 	}
 

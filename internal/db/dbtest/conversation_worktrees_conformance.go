@@ -170,9 +170,9 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		r1 := seed.Conversation(t, "list-r1")
 		r2 := seed.Conversation(t, "list-r2")
 		for _, w := range []domain.ConversationWorktree{
-			{ConversationID: r1, RepoID: "owner/a", Path: "/p1", Ref: "@default"},
-			{ConversationID: r1, RepoID: "owner/b", Path: "/p2", Ref: "@default"},
-			{ConversationID: r2, RepoID: "owner/a", Path: "/p3", Ref: "@default"},
+			{ConversationID: r1, RepoID: "owner/a", Path: "/p1", Ref: "default"},
+			{ConversationID: r1, RepoID: "owner/b", Path: "/p2", Ref: "default"},
+			{ConversationID: r2, RepoID: "owner/a", Path: "/p3", Ref: "default"},
 		} {
 			if _, _, err := insertWorktree(t, store, seed, orgID, w); err != nil {
 				t.Fatalf("insert %s/%s: %v", w.ConversationID, w.RepoID, err)
@@ -227,12 +227,12 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "del-path")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
-			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
+			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "default",
 		}); err != nil {
 			t.Fatalf("insert a: %v", err)
 		}
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
-			ConversationID: conversationID, RepoID: "owner/b", Path: "/p2", Ref: "@default",
+			ConversationID: conversationID, RepoID: "owner/b", Path: "/p2", Ref: "default",
 		}); err != nil {
 			t.Fatalf("insert b: %v", err)
 		}
@@ -252,7 +252,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")
 		if _, _, err := insertWorktree(t, store, seed, orgID, domain.ConversationWorktree{
-			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "@default",
+			ConversationID: conversationID, RepoID: "owner/a", Path: "/p1", Ref: "default",
 		}); err != nil {
 			t.Fatalf("insert: %v", err)
 		}

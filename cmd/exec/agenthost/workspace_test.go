@@ -336,7 +336,7 @@ func TestStrictlyWithin(t *testing.T) {
 		root, path string
 		want       bool
 	}{
-		{"/tmp/runs/r1", "/tmp/runs/r1/o/r/@default", true},
+		{"/tmp/runs/r1", "/tmp/runs/r1/o/r/default", true},
 		{"/tmp/runs/r1", "/tmp/runs/r1/x", true},
 
 		{"/tmp/runs/r1", "/tmp/runs/r1", false},         // the root itself is never removable

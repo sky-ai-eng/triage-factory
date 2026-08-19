@@ -13,7 +13,7 @@ import "time"
 // conversation), so ref discriminates them. Ref is the materialization selector AND the
 // worktree's path-slug subdirectory:
 //
-//   - "@default"  — the repo's default branch (detached checkout)
+//   - "default"   — the repo's default branch (detached checkout)
 //   - "pr-<N>"    — pull request N's head
 //   - "<branch>"  — a named branch (--ref), path-slugified
 //

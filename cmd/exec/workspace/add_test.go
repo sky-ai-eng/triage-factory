@@ -378,7 +378,7 @@ func TestMaterializeWorkspace_GitHubRunCanAdd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("materializeWorkspace on a GitHub run: %v", err)
 	}
-	if path != expectedPath("gh-run", "sky", "core", "@default") {
+	if path != expectedPath("gh-run", "sky", "core", "default") {
 		t.Errorf("path = %q", path)
 	}
 	if stub.createCalls != 1 {
@@ -477,7 +477,7 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 	seedRepository(t, database, "sky", "core", "https://github.com/sky/core.git", "main")
 	stub := &stubCalls{}
 
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 	path, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub.deps())
 	if err != nil {
 		t.Fatalf("materializeWorkspace: %v", err)
@@ -496,19 +496,19 @@ func TestMaterializeWorkspace_DefaultBranchCheckout(t *testing.T) {
 		t.Errorf("spec = %+v, want zero (default-branch checkout)", args.spec)
 	}
 
-	// The row records the deterministic path and ref "@default" — a detached
+	// The row records the deterministic path and ref "default" — a detached
 	// default checkout claims no working branch (the push gate reads the
 	// worktree's live branch, set once the agent makes its own); the ref is the
 	// materialization selector, not a working branch.
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil || row == nil {
 		t.Fatalf("GetByRepoRef: row=%v err=%v", row, err)
 	}
 	if row.Path != wantPath {
 		t.Errorf("row.Path = %q, want %q", row.Path, wantPath)
 	}
-	if row.Ref != "@default" {
-		t.Errorf("row.Ref = %q, want @default for a default checkout", row.Ref)
+	if row.Ref != "default" {
+		t.Errorf("row.Ref = %q, want default for a default checkout", row.Ref)
 	}
 }
 
@@ -627,7 +627,7 @@ func TestMaterializeWorkspace_IdempotentSecondAdd(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 
 	stub := &stubCalls{}
 
@@ -658,7 +658,7 @@ func TestMaterializeWorkspace_RaceLossAtReservation(t *testing.T) {
 	winnerPath := "/tmp/somewhere-else/winner"
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepoID: "sky/core",
-		Path: winnerPath, Ref: "@default",
+		Path: winnerPath, Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
@@ -682,10 +682,10 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
 
-	winnerPath := expectedPath("r1", "sky", "core", "@default")
+	winnerPath := expectedPath("r1", "sky", "core", "default")
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepoID: "sky/core",
-		Path: winnerPath, Ref: "@default",
+		Path: winnerPath, Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed winner row: %v", err)
 	}
@@ -701,7 +701,7 @@ func TestMaterializeWorkspace_TrustsReservationEvenWhenDirMissing(t *testing.T) 
 	if stub.createCalls != 0 {
 		t.Errorf("createCalls = %d, want 0; loser must not create when a reservation already exists", stub.createCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil {
 		t.Fatalf("GetByRepoRef: %v", err)
 	}
@@ -714,11 +714,11 @@ func TestMaterializeWorkspace_LiveDirShortCircuitsAgeCheck(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepoID: "sky/core",
-		Path: wantPath, Ref: "@default",
+		Path: wantPath, Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed row: %v", err)
 	}
@@ -744,11 +744,11 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepoID: "sky/core",
-		Path: wantPath, Ref: "@default",
+		Path: wantPath, Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed stale row: %v", err)
 	}
@@ -767,7 +767,7 @@ func TestMaterializeWorkspace_StaleReservationReclaimed(t *testing.T) {
 	if stub.createCalls != 1 {
 		t.Errorf("createCalls = %d, want 1; stale reservation should not block recreate", stub.createCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil || row == nil {
 		t.Fatalf("expected fresh row after reclaim; got row=%v err=%v", row, err)
 	}
@@ -777,16 +777,16 @@ func TestMaterializeWorkspace_FreshRowMissingDirIsInFlight(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
 		ConversationID: "r1", RepoID: "sky/core",
-		Path: wantPath, Ref: "@default",
+		Path: wantPath, Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed in-flight row: %v", err)
 	}
 
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil || row == nil {
 		t.Fatalf("re-read row: %v", err)
 	}
@@ -824,7 +824,7 @@ func TestMaterializeWorkspace_CreateFailureReleasesReservation(t *testing.T) {
 		t.Errorf("createCalls = %d, want 1", stub.createCalls)
 	}
 
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil {
 		t.Fatalf("GetByRepoRef: %v", err)
 	}
@@ -837,7 +837,7 @@ func TestMaterializeWorkspace_CreateFailureRetryable(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")
 	seedRepository(t, database, "sky", "core", "https://x", "main")
-	wantPath := expectedPath("r1", "sky", "core", "@default")
+	wantPath := expectedPath("r1", "sky", "core", "default")
 
 	stub1 := &stubCalls{createErr: errors.New("network blip")}
 	if _, err := materializeWorkspace(hostFor(stores, "r1"), "sky/core", checkoutSpec{}, stub1.deps()); err == nil {
@@ -898,8 +898,8 @@ func TestMaterializeWorkspace_DualView(t *testing.T) {
 
 	const hostRoot = "/data/runs/r1"
 	const agentRoot = "/work"
-	hostPath := filepath.Join(hostRoot, "sky", "core", "@default")
-	agentPath := filepath.Join(agentRoot, "sky", "core", "@default")
+	hostPath := filepath.Join(hostRoot, "sky", "core", "default")
+	agentPath := filepath.Join(agentRoot, "sky", "core", "default")
 
 	host := dualViewHost{Client: hostFor(stores, "r1"), hostRoot: hostRoot, agentRoot: agentRoot}
 	stub := &stubCalls{createPath: hostPath} // the host-side create returns the HOST view
@@ -911,7 +911,7 @@ func TestMaterializeWorkspace_DualView(t *testing.T) {
 	if path != agentPath {
 		t.Errorf("returned path = %q, want the agent view %q", path, agentPath)
 	}
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "r1", "sky/core", "default")
 	if err != nil || row == nil {
 		t.Fatalf("GetByRepoRef: row=%v err=%v", row, err)
 	}
@@ -941,7 +941,7 @@ func TestAgentViewPath(t *testing.T) {
 		hostRoot, agentRoot string
 		in, want            string
 	}{
-		{"identity when roots equal", "/tmp/runs/r1", "/tmp/runs/r1", "/tmp/runs/r1/o/r/@default", "/tmp/runs/r1/o/r/@default"},
+		{"identity when roots equal", "/tmp/runs/r1", "/tmp/runs/r1", "/tmp/runs/r1/o/r/default", "/tmp/runs/r1/o/r/default"},
 		{"prefix swap", "/tmp/runs/r1", "/work", "/tmp/runs/r1/o/r/pr-7", "/work/o/r/pr-7"},
 		{"root itself", "/tmp/runs/r1", "/work", "/tmp/runs/r1", "/work"},
 		{"outside host root passes through", "/tmp/runs/r1", "/work", "/somewhere/else", "/somewhere/else"},
@@ -961,7 +961,7 @@ func TestRefForSpec(t *testing.T) {
 		spec checkoutSpec
 		want string
 	}{
-		{checkoutSpec{}, "@default"},
+		{checkoutSpec{}, "default"},
 		{checkoutSpec{ref: "feature-x"}, "ref-feature-x"},
 		{checkoutSpec{ref: "feature/foo"}, "ref-feature~foo"}, // '/' → '~'
 		{checkoutSpec{pr: 42}, "pr-42"},
@@ -1035,7 +1035,7 @@ func TestMaterializeWorkspace_EventTriggeredRunRouting(t *testing.T) {
 	if stub.createCalls != 1 {
 		t.Errorf("createCalls = %d, want 1; event-triggered path should reserve + create", stub.createCalls)
 	}
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e1", "sky/core", "default")
 	if err != nil || row == nil {
 		t.Fatalf("expected conversation_worktrees row from event-triggered insert; got row=%v err=%v", row, err)
 	}
@@ -1052,7 +1052,7 @@ func TestMaterializeWorkspace_EventTriggeredCreateFailureReleases(t *testing.T) 
 	if _, err := materializeWorkspace(hostFor(stores, "e2"), "sky/core", checkoutSpec{}, stub.deps()); err == nil {
 		t.Fatal("expected error from create failure, got nil")
 	}
-	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e2", "sky/core", "@default")
+	row, err := sqlitestore.New(database.Conn).ConversationWorktrees.GetByRepoRef(context.Background(), runmode.LocalDefaultOrgID, "e2", "sky/core", "default")
 	if err != nil {
 		t.Fatalf("GetByRepoRef: %v", err)
 	}

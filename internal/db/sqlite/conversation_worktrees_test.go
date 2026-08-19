@@ -55,10 +55,10 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if _, _, err := stores.ConversationWorktrees.Insert(ctx, badOrg, domain.ConversationWorktree{ConversationID: "r", RepoID: "owner/repo", Path: "/p", Ref: "@default"}); err == nil {
+	if _, _, err := stores.ConversationWorktrees.Insert(ctx, badOrg, domain.ConversationWorktree{ConversationID: "r", RepoID: "owner/repo", Path: "/p", Ref: "default"}); err == nil {
 		t.Error("Insert(non-local org) should error")
 	}
-	if _, err := stores.ConversationWorktrees.GetByRepoRef(ctx, badOrg, "r", "owner/repo", "@default"); err == nil {
+	if _, err := stores.ConversationWorktrees.GetByRepoRef(ctx, badOrg, "r", "owner/repo", "default"); err == nil {
 		t.Error("GetByRepoRef(non-local org) should error")
 	}
 	if _, err := stores.ConversationWorktrees.List(ctx, badOrg, "r"); err == nil {
@@ -67,7 +67,7 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.ConversationWorktrees.ListSystem(ctx, badOrg, "r"); err == nil {
 		t.Error("ListSystem(non-local org) should error")
 	}
-	if err := stores.ConversationWorktrees.DeleteByRepoRef(ctx, badOrg, "r", "owner/repo", "@default"); err == nil {
+	if err := stores.ConversationWorktrees.DeleteByRepoRef(ctx, badOrg, "r", "owner/repo", "default"); err == nil {
 		t.Error("DeleteByRepoRef(non-local org) should error")
 	}
 	if err := stores.ConversationWorktrees.DeleteByPathSystem(ctx, badOrg, "r", "/p"); err == nil {

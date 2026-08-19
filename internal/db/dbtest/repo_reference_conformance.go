@@ -205,7 +205,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		s, orgID, _, conversation := mk(t)
 		convID := conversation(t, "unknown")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: convID, RepoID: "ghost/repo", Ref: "@default", Path: "/tmp/wt/ghost",
+			ConversationID: convID, RepoID: "ghost/repo", Ref: "default", Path: "/tmp/wt/ghost",
 		}); err == nil {
 			t.Error("reserving a worktree for a repository with no registry row succeeded; want an error")
 		}
