@@ -177,8 +177,11 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		},
 		"public": false,
 		"default_permissions": map[string]string{
-			"issues":        "write",
-			"pull_requests": "write",
+			// User permission used only by GitHub Connect's one-time identity
+			// capture. The user token is discarded after /user/emails returns.
+			"email_addresses": "read",
+			"issues":          "write",
+			"pull_requests":   "write",
 			// contents:write — delegated agents push branches, and on a blobless
 			// clone their lazy blob fetches ride the same App token, so read alone
 			// can't mint the push credential a run needs (the gitproxy mints

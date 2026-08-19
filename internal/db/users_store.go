@@ -52,8 +52,10 @@ type UsersStore interface {
 	// half a rename doesn't touch. Passing "" (a host that reported no id, or
 	// a caller that never had one) leaves any stored id intact rather than
 	// blanking it, so the value fills in opportunistically on the next
-	// capture.
-	UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, source string) error
+	// capture. email is the verified primary address captured from GitHub;
+	// passing "" leaves an existing address intact for legacy sources that do
+	// not carry one.
+	UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error
 
 	// ClearGitHubIdentity deletes the user's GitHub identity row for a
 	// host (the disconnect path — GitHub URL/PAT cleared in Settings).

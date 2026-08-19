@@ -521,6 +521,7 @@ CREATE TABLE public.agents (
     default_autonomy_suitability real,
     github_pat_user_id uuid,
     github_org_login text,
+    github_org_email text,
     jira_service_account_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
@@ -1899,6 +1900,7 @@ CREATE TABLE public.user_github_identities (
     github_base_url text NOT NULL,
     login text NOT NULL,
     github_user_id text,
+    email text,
     source text NOT NULL,
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,

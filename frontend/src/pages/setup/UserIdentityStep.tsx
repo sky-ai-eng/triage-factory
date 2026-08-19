@@ -68,8 +68,8 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
         <p className="text-[13px] leading-relaxed text-text-tertiary">
           Triage Factory needs to know who you are on{' '}
           <span className="font-medium text-text-secondary">{host}</span> so it can match your pull
-          requests and reviews to you. This reads only your username — it doesn&rsquo;t grant access
-          to your repositories.
+          requests and reviews to you. This reads your username and verified primary email — it
+          doesn&rsquo;t grant access to your repositories.
         </p>
       </div>
 
@@ -107,8 +107,8 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
         </label>
         <p className="text-[11px] leading-relaxed text-text-tertiary">
           {state.userConnectAvailable
-            ? 'A token works too — only your username is read, and the token isn’t stored.'
-            : 'Paste a token with read access to your account. Only your username is read; the token isn’t stored.'}
+            ? 'A token works too — your username and verified primary email are read, and the token isn’t stored.'
+            : 'Paste a token with read access to your identity and email addresses. The token isn’t stored.'}
         </p>
       </div>
     </div>

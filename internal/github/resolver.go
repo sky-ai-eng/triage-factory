@@ -214,10 +214,9 @@ type Resolver interface {
 	//	       back to the plain "<slug>[bot]@users.noreply.github.com" when the id
 	//	       is unknown (an App registered before TFAC-474, or a fetch miss;
 	//	       self-heals on re-register). DB-only: no per-run GitHub API call.
-	//	PAT  → name <agents.github_org_login> (the login the org PAT
-	//	       authenticates as), email "<login>@users.noreply.github.com" — the
-	//	       plain form, which links for a user account (the numeric form is
-	//	       App-only). Returned ONLY while the org still has a PAT: the cached
+	//	PAT  → name <agents.github_org_login> and email
+	//	       <agents.github_org_email>, captured from the PAT owner together.
+	//	       Returned ONLY while the org still has a PAT: the cached
 	//	       login is gated on the same KeyGitHubPAT presence the credential
 	//	       resolver uses, so a value left behind when the PAT was cleared can't
 	//	       resurface as a stale identity for an org that no longer has it.
@@ -832,8 +831,8 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 		}
 		return name, email, true
 	}
-	// PAT tier: the login the org PAT authenticates as. agents.github_org_login
-	// is a CACHE of that login, written at PAT bind but deliberately NOT cleared
+	// PAT tier: the identity the org PAT authenticates as. The agents columns
+	// cache both values at PAT bind but are deliberately not cleared
 	// when the PAT is removed (clearing would mean chasing every scattered
 	// credential-clear path — DELETE /api/integrations, the settings PAT/base-URL
 	// clears, the App-switch teardown — and staying correct as new ones land).
@@ -846,12 +845,10 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	if pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT); err != nil || pat == "" {
 		return "", "", false
 	}
-	// PAT present: trust the cached login. The plain "<login>@..." form links for
-	// a user account, so the numeric form is App-only (locked decision 2). Empty
-	// (an org bound before TFAC-452, or a read error) → ok=false; self-heals on
-	// the next PAT re-save.
-	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" {
-		return agent.GitHubOrgLogin, agent.GitHubOrgLogin + "@users.noreply.github.com", true
+	// PAT present: trust the captured pair. A partial identity cannot stamp a
+	// commit; it self-heals on the next PAT save.
+	if agent, err := r.agents.GetForOrgSystem(ctx, orgID); err == nil && agent != nil && agent.GitHubOrgLogin != "" && agent.GitHubOrgEmail != "" {
+		return agent.GitHubOrgLogin, agent.GitHubOrgEmail, true
 	}
 	return "", "", false
 }

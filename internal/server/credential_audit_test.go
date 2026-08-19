@@ -90,14 +90,21 @@ func findCredAudit(t *testing.T, rows []credAuditRow, action, kind string) credA
 func githubUserStub(t *testing.T, login string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/user" {
+		switch r.URL.Path {
+		case "/api/v3/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, login+"@example.com")
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func writeGitHubPrimaryEmail(w http.ResponseWriter, email string) {
+	_ = json.NewEncoder(w).Encode([]map[string]any{{"email": email, "primary": true, "verified": true}})
 }
 
 // TestSetupWizard_AuditsBothOrgCredentials: the setup wizard binds a GitHub PAT
@@ -232,6 +239,10 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 		seedErr error
 	)
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "acme-bot@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return

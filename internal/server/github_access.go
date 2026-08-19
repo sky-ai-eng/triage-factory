@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -352,9 +353,9 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	// fetch) before touching anything — 422 and nothing changes on failure.
 	// Keep the resolved login: switching to PAT makes it the org's GitHub
 	// identity, so we persist it for OrgIdentityFor (TFAC-452).
-	ghUser, err := auth.ValidateGitHub(ctx, base, pat)
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, base, pat)
 	if err != nil {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + base + ". Double-check it and try again.", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubPATValidationMessage(base, err), Field: "pat"})
 		return
 	}
 
@@ -399,8 +400,8 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		}
 		// The PAT is now the org's GitHub identity (the App is torn down below) —
 		// persist its login so OrgIdentityFor resolves the PAT tier (TFAC-452).
-		if err := persistOrgGitHubLogin(ctx, tx, orgID, ghUser.Login); err != nil {
-			return fmt.Errorf("persist org github login: %w", err)
+		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
+			return fmt.Errorf("persist org github identity: %w", err)
 		}
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
@@ -744,9 +745,9 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ghUser, err := auth.ValidateGitHub(ctx, base, pat)
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, base, pat)
 	if err != nil {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + base + ". Double-check it and try again.", Field: "pat"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubPATValidationMessage(base, err), Field: "pat"})
 		return
 	}
 
@@ -769,4 +770,14 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		githubAccessDiff: buildAccessDiff(tracked, reachableSlugSet(repos)),
 		Login:            ghUser.Login,
 	})
+}
+
+func githubPATValidationMessage(base string, err error) string {
+	if errors.Is(err, auth.ErrGitHubEmailPermission) {
+		return "That token needs read access to GitHub email addresses. For a classic token, add the user:email scope."
+	}
+	if errors.Is(err, auth.ErrGitHubPrimaryEmailUnavailable) {
+		return "GitHub did not return a verified primary email for that account."
+	}
+	return "That token didn't validate against " + base + ". Double-check it and try again."
 }

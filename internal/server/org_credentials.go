@@ -117,7 +117,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ghUser, err := auth.ValidateGitHub(ctx, baseURL, pat)
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, baseURL, pat)
 	if err != nil {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub: " + err.Error(), Field: "pat"})
 		return
@@ -166,8 +166,8 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		}
 		// The org credential's OWN login, so the resolver can stamp the org
 		// commit-author identity on delegated-agent commits.
-		if err := persistOrgGitHubLogin(ctx, tx, orgID, ghUser.Login); err != nil {
-			return fmt.Errorf("persist org github login: %w", err)
+		if err := persistOrgGitHubIdentity(ctx, tx, orgID, ghUser.Login, ghUser.PrimaryEmail); err != nil {
+			return fmt.Errorf("persist org github identity: %w", err)
 		}
 		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
 		if err != nil {

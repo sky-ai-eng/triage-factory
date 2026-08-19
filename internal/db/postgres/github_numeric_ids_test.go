@@ -54,6 +54,21 @@ func TestGitHubNumericIDs_Postgres(t *testing.T) {
 				}
 				return id.String
 			},
+			GitHubEmail: func(t *testing.T, userID, githubBaseURL string) string {
+				t.Helper()
+				var email sql.NullString
+				err := h.AdminDB.QueryRow(
+					`SELECT email FROM user_github_identities WHERE user_id = $1 AND github_base_url = $2`,
+					userID, db.NormalizeGitHubHost(githubBaseURL),
+				).Scan(&email)
+				if errors.Is(err, sql.ErrNoRows) {
+					return ""
+				}
+				if err != nil {
+					t.Fatalf("read github email: %v", err)
+				}
+				return email.String
+			},
 		}
 		return dbtest.GitHubNumericIDStores{Users: stores.Users, GitHubApps: stores.GitHubApps}, seed
 	})

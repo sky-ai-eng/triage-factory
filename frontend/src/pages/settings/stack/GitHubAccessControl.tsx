@@ -293,9 +293,10 @@ export default function GitHubAccessControl({
           title="Replace your personal access token"
           detail={
             <>
-              Enter the new token, with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
-              and show what it can reach before your current token is replaced.
+              Enter the new token, with <code className="text-text-secondary">repo</code>,{' '}
+              <code className="text-text-secondary">read:org</code>, and{' '}
+              <code className="text-text-secondary">user:email</code> scopes. We&rsquo;ll validate
+              it and show what it can reach before your current token is replaced.
             </>
           }
           busy={busy}
@@ -728,9 +729,10 @@ function TokenScreen({
         <p className="text-[13px] leading-relaxed text-text-tertiary">
           {detail ?? (
             <>
-              Enter a token with <code className="text-text-secondary">repo</code> and{' '}
-              <code className="text-text-secondary">read:org</code> scopes. We&rsquo;ll validate it
-              and show which repositories it can reach before anything changes.
+              Enter a token with <code className="text-text-secondary">repo</code>,{' '}
+              <code className="text-text-secondary">read:org</code>, and{' '}
+              <code className="text-text-secondary">user:email</code> scopes. We&rsquo;ll validate
+              it and show which repositories it can reach before anything changes.
             </>
           )}
         </p>

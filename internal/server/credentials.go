@@ -14,9 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// persistOrgGitHubLogin records the org credential's OWN GitHub login on the
-// agents row so the credential resolver's OrgIdentityFor PAT tier can stamp the
-// org commit-author identity on delegated-agent commits. Called
+// persistOrgGitHubIdentity records the org credential's OWN GitHub login and
+// verified primary email on the agents row so the credential resolver's
+// OrgIdentityFor PAT tier can stamp delegated-agent commits. Called
 // inside the same WithTx that saves the org PAT, by every org-PAT writer that
 // already validated the login (the PAT bind, the App→PAT switch). This is org
 // ACCESS metadata — it deliberately does NOT touch user_github_identities (the
@@ -27,8 +27,8 @@ import (
 // the login self-heals on the next PAT re-save. A real write error propagates so
 // it rolls back with the rest of the caller's tx. The App path never calls this:
 // an App org's bot login (<slug>[bot]) resolves live from the registration.
-func persistOrgGitHubLogin(ctx context.Context, tx db.TxStores, orgID, login string) error {
-	if login == "" {
+func persistOrgGitHubIdentity(ctx context.Context, tx db.TxStores, orgID, login, email string) error {
+	if login == "" || email == "" {
 		return nil
 	}
 	agent, err := tx.Agents.GetForOrg(ctx, orgID)
@@ -38,7 +38,7 @@ func persistOrgGitHubLogin(ctx context.Context, tx db.TxStores, orgID, login str
 	if agent == nil {
 		return nil // not bootstrapped yet; nothing to stamp
 	}
-	return tx.Agents.SetGitHubOrgLogin(ctx, orgID, agent.ID, login)
+	return tx.Agents.SetGitHubOrgIdentity(ctx, orgID, agent.ID, login, email)
 }
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {

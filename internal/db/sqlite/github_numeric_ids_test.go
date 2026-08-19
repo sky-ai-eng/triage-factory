@@ -61,6 +61,21 @@ func TestGitHubNumericIDs_SQLite(t *testing.T) {
 				}
 				return id.String
 			},
+			GitHubEmail: func(t *testing.T, userID, githubBaseURL string) string {
+				t.Helper()
+				var email sql.NullString
+				err := conn.QueryRow(
+					`SELECT email FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+					userID, db.NormalizeGitHubHost(githubBaseURL),
+				).Scan(&email)
+				if errors.Is(err, sql.ErrNoRows) {
+					return ""
+				}
+				if err != nil {
+					t.Fatalf("read github email: %v", err)
+				}
+				return email.String
+			},
 		}
 		return dbtest.GitHubNumericIDStores{Users: stores.Users, GitHubApps: stores.GitHubApps}, seed
 	})

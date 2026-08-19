@@ -28,7 +28,7 @@ needs its own per-user identity binding regardless of how access is granted.
 | Layer | GitHub | Jira | Linear |
 | -- | -- | -- | -- |
 | **Access** (impersonal) | App installation token | service-account OAuth (SKY-347) | `client_credentials` app-actor |
-| **Identity** (per-user whoami) | `login` | `accountId` | `viewer.id` |
+| **Identity** (per-user whoami) | `login` + verified primary email | `accountId` | `viewer.id` |
 
 Distinct from **GoTrue's `auth.identities`**, which records *login* identities
 (who you authenticated as to get a TF session). The tables here record
@@ -40,7 +40,7 @@ layer, different schema — `auth.*` vs `public.*`.
 Each provider gets its own host/scope-scoped table:
 
 ```
-user_github_identities (user_id, github_base_url, login,          source, verified_at, …)  -- SKY-396, shipped
+user_github_identities (user_id, github_base_url, login, github_user_id, email, source, verified_at, …)  -- SKY-396, shipped
 user_jira_identities   (user_id, jira_base_url,   account_id, display_name, source, verified_at, …)  -- SKY-397, shipped
 user_linear_identities (user_id, workspace_id,    linear_user_id, display_name, source, verified_at, …)  -- SKY-398
 ```

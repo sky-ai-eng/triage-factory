@@ -50,6 +50,9 @@ func newGitHubAccessStub(t *testing.T, cfg ghAccessStub) *httptest.Server {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"login": cfg.login})
 	})
+	mux.HandleFunc("/api/v3/user/emails", func(w http.ResponseWriter, r *http.Request) {
+		writeGitHubPrimaryEmail(w, cfg.login+"@example.com")
+	})
 
 	mux.HandleFunc("/api/v3/user/repos", func(w http.ResponseWriter, r *http.Request) {
 		// ListUserRepos paginates until an empty page; serve everything on page 1.

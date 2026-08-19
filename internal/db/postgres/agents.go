@@ -50,7 +50,7 @@ func newTxAgentStore(tx queryer) db.AgentStore {
 var _ db.AgentStore = (*agentStore)(nil)
 
 const pgAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
-       github_pat_user_id, github_org_login, jira_service_account_id,
+       github_pat_user_id, github_org_login, github_org_email, jira_service_account_id,
        created_at, updated_at`
 
 func (s *agentStore) GetForOrg(ctx context.Context, orgID string) (*domain.Agent, error) {
@@ -173,7 +173,7 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 	return err
 }
 
-func (s *agentStore) SetGitHubOrgLogin(ctx context.Context, orgID, agentID, login string) error {
+func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) error {
 	if !isValidUUID(agentID) {
 		return nil
 	}
@@ -182,9 +182,10 @@ func (s *agentStore) SetGitHubOrgLogin(ctx context.Context, orgID, agentID, logi
 	// SetGitHubPATUser's user FK. Empty clears it (SQL NULL).
 	_, err := s.app.ExecContext(ctx, `
 		UPDATE agents
-		SET github_org_login = $1
-		WHERE org_id = $2 AND id = $3
-	`, nullString(login), orgID, agentID)
+		SET github_org_login = $1,
+		    github_org_email = $2
+		WHERE org_id = $3 AND id = $4
+	`, nullString(login), nullString(email), orgID, agentID)
 	return err
 }
 
@@ -231,10 +232,10 @@ func nullUUID(s string) any {
 func scanAgentRowPG(row *sql.Row) (domain.Agent, error) {
 	var a domain.Agent
 	var defaultModel, jiraSvc sql.NullString
-	var ghPATUser, ghOrgLogin sql.NullString
+	var ghPATUser, ghOrgLogin, ghOrgEmail sql.NullString
 	var defAutonomy sql.NullFloat64
 	if err := row.Scan(&a.ID, &a.DisplayName, &defaultModel, &defAutonomy,
-		&ghPATUser, &ghOrgLogin, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&ghPATUser, &ghOrgLogin, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
 	a.DefaultModel = defaultModel.String
@@ -244,6 +245,7 @@ func scanAgentRowPG(row *sql.Row) (domain.Agent, error) {
 	}
 	a.GitHubPATUserID = ghPATUser.String
 	a.GitHubOrgLogin = ghOrgLogin.String
+	a.GitHubOrgEmail = ghOrgEmail.String
 	a.JiraServiceAccountID = jiraSvc.String
 	return a, nil
 }

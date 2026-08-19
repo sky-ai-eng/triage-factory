@@ -46,7 +46,7 @@ func (s *usersStore) UserIDsForVerifiedEmailSystem(context.Context, string) ([]s
 	return nil, nil
 }
 
-func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, source string) error {
+func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error {
 	// FK on user_id enforces the row-exists contract: a missing user
 	// surfaces as a FOREIGN KEY constraint error, matching the old
 	// SetGitHubUsername "user not found" guard.
@@ -55,11 +55,14 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 	// leaves a known one alone rather than erasing it — see the interface doc.
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO user_github_identities
-			(user_id, github_base_url, login, github_user_id, source, verified_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			(user_id, github_base_url, login, github_user_id, email, source, verified_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(user_id, github_base_url) DO UPDATE SET
 			login          = excluded.login,
 			github_user_id = COALESCE(excluded.github_user_id, user_github_identities.github_user_id),
+			email           = CASE
+				WHEN user_github_identities.login <> excluded.login THEN excluded.email
+				ELSE COALESCE(excluded.email, user_github_identities.email) END,
 			source         = excluded.source,
 			verified_at    = excluded.verified_at,
 			updated_at     = CURRENT_TIMESTAMP,
@@ -70,7 +73,7 @@ func (s *usersStore) UpsertGitHubIdentity(ctx context.Context, userID, githubBas
 			dashboard_backfilled_at = CASE
 				WHEN user_github_identities.login <> excluded.login THEN NULL
 				ELSE user_github_identities.dashboard_backfilled_at END
-	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), source)
+	`, userID, db.NormalizeGitHubHost(githubBaseURL), login, nullString(githubUserID), nullString(email), source)
 	if err != nil {
 		return fmt.Errorf("upsert user_github_identities: %w", err)
 	}

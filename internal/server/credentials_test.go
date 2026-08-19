@@ -207,7 +207,7 @@ func TestIntegrationsStatus_InactiveAppNotReady(t *testing.T) {
 // It used to be pinned through the fused setup route, which bound the PAT as one
 // of the five things it did; the wizard drives this route now, so this is where
 // the property lives.
-func TestGitHubPATPut_PersistsOrgGitHubLogin(t *testing.T) {
+func TestGitHubPATPut_PersistsOrgGitHubIdentity(t *testing.T) {
 	keyring.MockInit()
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
@@ -217,6 +217,10 @@ func TestGitHubPATPut_PersistsOrgGitHubLogin(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v3/user" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"login": "acme-bot"})
+			return
+		}
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "acme-bot@example.com")
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -230,15 +234,15 @@ func TestGitHubPATPut_PersistsOrgGitHubLogin(t *testing.T) {
 		t.Fatalf("pat bind status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
-	// agents.github_org_login is the validated login.
-	var login sql.NullString
+	// The validated account identity is captured as a pair.
+	var login, email sql.NullString
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT github_org_login FROM agents WHERE org_id = ?`, org,
-	).Scan(&login); err != nil {
-		t.Fatalf("read agents.github_org_login: %v", err)
+		`SELECT github_org_login, github_org_email FROM agents WHERE org_id = ?`, org,
+	).Scan(&login, &email); err != nil {
+		t.Fatalf("read agents GitHub identity: %v", err)
 	}
-	if login.String != "acme-bot" {
-		t.Errorf("agents.github_org_login = %q, want acme-bot", login.String)
+	if login.String != "acme-bot" || email.String != "acme-bot@example.com" {
+		t.Errorf("agents GitHub identity = %q <%s>, want acme-bot <acme-bot@example.com>", login.String, email.String)
 	}
 
 	// ...and per-user identity is untouched: the bind writes ACCESS, not identity.

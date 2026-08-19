@@ -115,7 +115,7 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
     {
       kind: 'pat' as const,
       title: 'Personal access token',
-      detail: 'A classic token with repo + read:org scopes — the simpler setup.',
+      detail: 'A classic token with repo + read:org + user:email scopes — the simpler setup.',
       status: patModeStatus(state),
     },
   ]
