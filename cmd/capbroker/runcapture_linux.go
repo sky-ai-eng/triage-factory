@@ -13,7 +13,7 @@ import (
 // captureRunDeltaTo is the seam the broker's capture handler runs the
 // actual capture through. The default hands the dialed socket fd straight
 // to sandbox.CaptureRunDeltaTo, which assigns it directly as the capture
-// child's stdout — the run's bytes never enter this process. A var (like
+// child's stdout — the manifest never needs a broker-side copy. A var (like
 // launchRuntime/prepareBundle for LaunchRun) so tests can substitute a
 // stand-in that doesn't need the uid-drop/netns capabilities the real
 // capture needs, while still exercising the RPC/socket-passthrough wiring.
@@ -24,8 +24,8 @@ var captureRunDeltaTo = sandbox.CaptureRunDeltaTo
 // IPCClient.CaptureRunDelta before it issues this RPC), takes the fd, and
 // hands it straight to the capture child as stdout — the same
 // dial-take-fd-close-own-copy shape launchRun uses for the run's live
-// stdio, applied here so the park-time delta's bytes never enter the
-// broker's address space either. Like launchRun, this bypasses s.ops
+// stdio, applied here so the control manifest bypasses the broker's address
+// space; large members go directly to the staging dir. Like launchRun, this bypasses s.ops
 // entirely: it is a broker-owned handler, not a PrivilegedOps method — the
 // PrivilegedOps.CaptureRunDelta interface (buffered) still exists solely
 // for hostOps's unprivileged in-process fallback.
@@ -59,7 +59,7 @@ func (s *Server) captureRunDelta(ctx context.Context, a captureRunDeltaArgs) (an
 		return nil, fmt.Errorf("capbroker: take capture stdout fd: %w", err)
 	}
 
-	stderrTail, err := captureRunDeltaTo(ctx, a.Worktree, a.SessionID, f)
+	stderrTail, err := captureRunDeltaTo(ctx, a.Worktree, a.StagingDir, a.SessionID, f)
 	if err != nil {
 		if stderrTail != "" {
 			return nil, fmt.Errorf("capbroker: capture run delta: %w (stderr: %s)", err, stderrTail)

@@ -24,6 +24,15 @@ import (
 // fail the open (EXDEV) the instant resolution would leave root, atomically —
 // with none of the TOCTOU window a stat-then-read would leave a hostile agent.
 func readFileConfined(root, rel string) ([]byte, error) {
+	f, err := openFileConfined(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+func openFileConfined(root, rel string) (*os.File, error) {
 	dirfd, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -44,13 +53,11 @@ func readFileConfined(root, rel string) ([]byte, error) {
 			// check (mirrors internal/sandbox/runtree_linux.go's pre-5.6 path) and
 			// warn once so a silent degrade is diagnosable.
 			noteReadConfinedOpenat2Unsupported(err)
-			return readFileConfinedFallback(root, rel)
+			return openFileConfinedFallback(root, rel)
 		}
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), rel)
-	defer f.Close()
-	return io.ReadAll(f)
+	return os.NewFile(uintptr(fd), rel), nil
 }
 
 // readFileConfinedFallback is the pre-openat2 path: resolve every symlink in the
@@ -59,6 +66,15 @@ func readFileConfined(root, rel string) ([]byte, error) {
 // still can't redirect the read outside root. A narrower TOCTOU than a raw read,
 // and it only ever runs on a kernel too old to sandbox on in the first place.
 func readFileConfinedFallback(root, rel string) ([]byte, error) {
+	f, err := openFileConfinedFallback(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
+func openFileConfinedFallback(root, rel string) (*os.File, error) {
 	full := filepath.Join(root, rel)
 	resolved, err := filepath.EvalSymlinks(full)
 	if err != nil {
@@ -68,7 +84,7 @@ func readFileConfinedFallback(root, rel string) ([]byte, error) {
 	if err != nil || relResolved == ".." || strings.HasPrefix(relResolved, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("worktree: confined read of %q resolves outside the run root (%q); refusing", rel, resolved)
 	}
-	return os.ReadFile(resolved)
+	return os.Open(resolved)
 }
 
 // readConfinedOpenat2Unsupported latches the "this kernel can't do openat2"

@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,31 @@ import (
 func captureTestTree(t *testing.T) string {
 	t.Helper()
 	return t.TempDir()
+}
+
+func captureTestStaging(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "tf-capture-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(dir, 0o700)
+		_ = os.RemoveAll(dir)
+	})
+	return dir
 }
 
 // TestCaptureRunDelta_DropsPrivilegeAndNetns pins the containment the
@@ -48,13 +74,13 @@ func TestCaptureRunDelta_DropsPrivilegeAndNetns(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(diagPath) })
 
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 		script := "{ id; echo ==NET==; cat /proc/net/dev; } > " + diagPath + " 2>&1; echo null"
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	raw, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), "")
+	raw, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -135,13 +161,13 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 	t.Cleanup(func() { _ = os.Remove(diagPath) })
 
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 		script := "{ id; echo ==NETNS==; readlink /proc/self/ns/net; } > " + diagPath + " 2>&1; echo null"
 		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), ""); err != nil {
+	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), ""); err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
 
@@ -221,12 +247,12 @@ func TestTailBuffer_KeepsOnlyLastMaxBytes(t *testing.T) {
 // now-empty ": %s" stderr suffix.
 func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 		return exec.CommandContext(ctx, "/nonexistent-tf-capture-errfmt-test-binary"), nil
 	}
 	t.Cleanup(func() { captureCommand = orig })
 
-	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), "")
+	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), "")
 	if err == nil {
 		t.Fatal("expected an error for a nonexistent capture binary")
 	}
@@ -251,7 +277,7 @@ func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
 func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
 	orig := captureCommand
 	var gotCmd *exec.Cmd
-	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 		gotCmd = exec.CommandContext(ctx, "/nonexistent-tf-capture-pin-test-binary")
 		return gotCmd, nil
 	}
@@ -265,7 +291,7 @@ func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
 
 	// The child can never actually start (no such binary) — irrelevant here;
 	// CaptureRunDeltaTo still closes pw regardless of outcome.
-	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), "", pw)
+	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), captureTestStaging(t), "", pw)
 
 	if gotCmd == nil {
 		t.Fatal("captureCommand was never invoked")
@@ -273,38 +299,46 @@ func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
 	if gotCmd.Stdout != pw {
 		t.Errorf("cmd.Stdout = %#v, want the exact *os.File %v passed to CaptureRunDeltaTo", gotCmd.Stdout, pw)
 	}
+	if len(gotCmd.ExtraFiles) != 3 {
+		t.Fatalf("cmd.ExtraFiles = %d files, want bundle/patch/transcript staging descriptors", len(gotCmd.ExtraFiles))
+	}
+	for i, f := range gotCmd.ExtraFiles {
+		if f == nil {
+			t.Errorf("cmd.ExtraFiles[%d] is nil", i)
+		}
+	}
 }
 
-// TestReadCapturedDelta_UnderCapByteIdentical pins the happy path of the
-// shared cap both capture paths enforce: data at or under CaptureMaxBytes
+// TestReadCaptureManifest_UnderCapByteIdentical pins the happy path of the
+// shared cap both capture paths enforce: data at or under CaptureManifestMaxBytes
 // round-trips byte-identical.
-func TestReadCapturedDelta_UnderCapByteIdentical(t *testing.T) {
-	origCap := CaptureMaxBytes
-	CaptureMaxBytes = 1024
-	t.Cleanup(func() { CaptureMaxBytes = origCap })
+func TestReadCaptureManifest_UnderCapByteIdentical(t *testing.T) {
+	origCap := CaptureManifestMaxBytes
+	CaptureManifestMaxBytes = 1024
+	t.Cleanup(func() { CaptureManifestMaxBytes = origCap })
 
 	want := bytes.Repeat([]byte{0xAB}, 1024)
-	got, err := ReadCapturedDelta(bytes.NewReader(want))
+	got, err := ReadCaptureManifest(bytes.NewReader(want))
 	if err != nil {
-		t.Fatalf("ReadCapturedDelta: %v", err)
+		t.Fatalf("ReadCaptureManifest: %v", err)
 	}
 	if !bytes.Equal(got, want) {
 		t.Errorf("got %d bytes, want %d identical bytes", len(got), len(want))
 	}
 }
 
-// TestReadCapturedDelta_OverCapErrors pins the loss-contract half of the cap:
-// data exceeding CaptureMaxBytes by even one byte is rejected outright
+// TestReadCaptureManifest_OverCapErrors pins the loss-contract half of the cap:
+// data exceeding CaptureManifestMaxBytes by even one byte is rejected outright
 // rather than silently truncated — a truncated-but-otherwise-valid-looking
 // bundle would be worse than no delta at all (the park degrades to
 // snapshot-less either way, but a truncated one could look intact).
-func TestReadCapturedDelta_OverCapErrors(t *testing.T) {
-	origCap := CaptureMaxBytes
-	CaptureMaxBytes = 1024
-	t.Cleanup(func() { CaptureMaxBytes = origCap })
+func TestReadCaptureManifest_OverCapErrors(t *testing.T) {
+	origCap := CaptureManifestMaxBytes
+	CaptureManifestMaxBytes = 1024
+	t.Cleanup(func() { CaptureManifestMaxBytes = origCap })
 
 	over := bytes.Repeat([]byte{0xCD}, 1025)
-	if _, err := ReadCapturedDelta(bytes.NewReader(over)); err == nil {
+	if _, err := ReadCaptureManifest(bytes.NewReader(over)); err == nil {
 		t.Error("expected an over-cap error, got nil")
 	}
 }
@@ -316,7 +350,7 @@ func TestReadCapturedDelta_OverCapErrors(t *testing.T) {
 // test loudly if reached.
 func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
 	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, sessionID string) (*exec.Cmd, error) {
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
 		t.Errorf("captureCommand invoked for invalid worktree %q", wtPath)
 		return exec.Command("false"), nil
 	}
@@ -330,9 +364,156 @@ func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
 		"/tmp/../etc/cron.d",             // non-clean
 		"/nonexistent-tf-capture-test/x", // no such tree
 	} {
-		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), path, ""); err == nil {
+		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), path, captureTestStaging(t), ""); err == nil {
 			t.Errorf("CaptureRunDelta(%q) = nil error, want validation rejection", path)
 		}
+	}
+}
+
+func TestOpenCaptureStaging_RejectsWritableOrReplaceableMembers(t *testing.T) {
+	valid := captureTestStaging(t)
+	files, err := openCaptureStaging(valid)
+	if err != nil {
+		t.Fatalf("valid staging rejected: %v", err)
+	}
+	for _, f := range files {
+		_ = f.Close()
+	}
+
+	wrongMode := captureTestStaging(t)
+	if err := os.Chmod(wrongMode, 0o701); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCaptureStaging(wrongMode); err == nil {
+		t.Error("accepted a staging directory accessible by path to the sandbox uid")
+	}
+
+	symlinked := captureTestStaging(t)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle := filepath.Join(symlinked, CaptureBundleFile)
+	if err := os.Remove(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCaptureStaging(symlinked); err == nil {
+		t.Error("accepted a symlink in place of a fixed staging member")
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "do not truncate" {
+		t.Errorf("symlink target = %q, %v; broker must not truncate it", got, err)
+	}
+
+	hardLinkStaging := captureTestStaging(t)
+	victim = filepath.Join(t.TempDir(), "hardlink-victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bundle = filepath.Join(hardLinkStaging, CaptureBundleFile)
+	if err := os.Remove(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, bundle); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openCaptureStaging(hardLinkStaging); err == nil {
+		t.Error("accepted a hard link in place of a fixed staging member")
+	}
+	if got, err := os.ReadFile(victim); err != nil || string(got) != "do not truncate" {
+		t.Errorf("hardlink target = %q, %v; broker must not truncate it", got, err)
+	}
+}
+
+func TestOpenCaptureStaging_AnchorsDirectoryAcrossRename(t *testing.T) {
+	original := captureTestStaging(t)
+	dirFD, wantUID, err := openCaptureStagingDir(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(dirFD)
+
+	moved := original + "-moved"
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(moved) })
+	replacement := captureTestStaging(t)
+	if err := os.Symlink(replacement, original); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := openCaptureStagingMembers(dirFD, wantUID)
+	if err != nil {
+		t.Fatalf("open members through anchored directory: %v", err)
+	}
+	defer func() {
+		for _, f := range files {
+			_ = f.Close()
+		}
+	}()
+	if _, err := files[0].WriteString("anchored"); err != nil {
+		t.Fatal(err)
+	}
+	gotMoved, err := os.ReadFile(filepath.Join(moved, CaptureBundleFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotReplacement, err := os.ReadFile(filepath.Join(replacement, CaptureBundleFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMoved) != "anchored" || len(gotReplacement) != 0 {
+		t.Errorf("moved member = %q, replacement member = %q; want writes confined to anchored directory", gotMoved, gotReplacement)
+	}
+}
+
+func TestOpenCaptureStagingMember_AnchorsInodeAcrossReplacement(t *testing.T) {
+	dir := captureTestStaging(t)
+	dirFD, wantUID, err := openCaptureStagingDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(dirFD)
+	pinnedFD, err := pinCaptureStagingMember(dirFD, CaptureBundleFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeFd(pinnedFD)
+
+	bundle := filepath.Join(dir, CaptureBundleFile)
+	moved := bundle + ".moved"
+	if err := os.Rename(bundle, moved); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, bundle); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := openPinnedCaptureStagingMember(pinnedFD, CaptureBundleFile, wantUID)
+	if err != nil {
+		t.Fatalf("reopen pinned member after replacement: %v", err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString("anchored"); err != nil {
+		t.Fatal(err)
+	}
+	gotMoved, err := os.ReadFile(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotVictim, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotMoved) != "anchored" || string(gotVictim) != "do not truncate" {
+		t.Errorf("pinned member = %q, replacement target = %q; want writes confined to pinned inode", gotMoved, gotVictim)
 	}
 }
 

@@ -1,9 +1,11 @@
 package delegate
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -318,7 +320,7 @@ func TestEnsureWorkspace_ColdPath_LegacyGzipSnapshot(t *testing.T) {
 	writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "from an old gzip snapshot")
 	var blob bytes.Buffer
 	gzw := gzip.NewWriter(&blob)
-	if err := writeSnapshotTar(gzw, nil, src, "", nil); err != nil {
+	if err := writeSnapshotTar(gzw, worktree.CapturedState{}, src); err != nil {
 		t.Fatalf("write legacy snapshot tar: %v", err)
 	}
 	if err := gzw.Close(); err != nil {
@@ -374,11 +376,79 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 	// The transcript now rides in as bytes (captured agent-side), so pass the
 	// same JSONL the on-disk session holds.
 	var plain bytes.Buffer
-	if err := writeSnapshotTar(&plain, nil, wtPath, sessionID, []byte(jsonl.String())); err != nil {
+	if err := writeSnapshotTar(&plain, worktree.CapturedState{SessionID: sessionID, Transcript: []byte(jsonl.String())}, wtPath); err != nil {
 		t.Fatalf("writeSnapshotTar (plain): %v", err)
 	}
 	if compressedSize >= int64(plain.Len())/2 {
 		t.Errorf("compressed blob = %d bytes vs plain tar = %d bytes; compression had no real effect", compressedSize, plain.Len())
+	}
+}
+
+func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
+	staging := t.TempDir()
+	bundlePath := filepath.Join(staging, worktree.CaptureBundleFile)
+	patchPath := filepath.Join(staging, worktree.CapturePatchFile)
+	transcriptPath := filepath.Join(staging, worktree.CaptureTranscriptFile)
+	writeFile(t, bundlePath, "bundle-bytes")
+	writeFile(t, patchPath, "patch-bytes")
+	writeFile(t, transcriptPath, "transcript-bytes")
+
+	captured := worktree.CapturedState{
+		Delta:          &worktree.GitDelta{Branch: "aa/work", Head: "abc123"},
+		SessionID:      "sess-staged",
+		BundlePath:     bundlePath,
+		PatchPath:      patchPath,
+		TranscriptPath: transcriptPath,
+	}
+	var blob bytes.Buffer
+	if err := writeSnapshotTar(&blob, captured, t.TempDir()); err != nil {
+		t.Fatalf("writeSnapshotTar: %v", err)
+	}
+
+	want := map[string]string{
+		snapBundle:  "bundle-bytes",
+		snapPatch:   "patch-bytes",
+		snapSession: "transcript-bytes",
+	}
+	tr := tar.NewReader(bytes.NewReader(blob.Bytes()))
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		member, ok := want[hdr.Name]
+		if !ok {
+			continue
+		}
+		got, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != member {
+			t.Errorf("%s = %q, want %q", hdr.Name, got, member)
+		}
+		delete(want, hdr.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("snapshot omitted staged members: %v", want)
+	}
+}
+
+func TestCapturedBytesSize_RejectsStagedSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "member")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := capturedBytesSize(nil, link); err == nil {
+		t.Fatal("capturedBytesSize accepted a staged symlink")
 	}
 }
 

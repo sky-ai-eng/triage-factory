@@ -23,8 +23,8 @@ func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
 
-func captureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
-	return defaultOps.CaptureRunDelta(ctx, worktree, sessionID)
+func captureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+	return defaultOps.CaptureRunDelta(ctx, worktree, stagingDir, sessionID)
 }
 
 // runTreeHandedOff stats path and reports whether the sandbox identity owns it
@@ -178,8 +178,9 @@ func validateRunTreeShape(op, path string) error {
 // This is a path-then-separate-syscall check — exactly the TOCTOU window
 // the openat2 implementation below closes by resolving and operating
 // through one anchored fd instead. It survives only because it backs
-// chownRunTreeFallback / removeRunTreeFallback (pre-5.6-kernel path) and
-// CaptureRunDelta, which this ticket does not touch.
+// chownRunTreeFallback / removeRunTreeFallback (pre-5.6-kernel path) and the
+// capture child's unprivileged worktree input. Capture staging is instead
+// opened and validated through pinned descriptors in capture_linux.go.
 func validateRunTreeRoot(op, path string) (os.FileInfo, error) {
 	if err := validateRunTreeShape(op, path); err != nil {
 		return nil, err

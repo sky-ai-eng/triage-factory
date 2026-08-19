@@ -21,6 +21,14 @@ import (
 // equal.
 const runTreeBasename = "triagefactory-runs"
 
+// Capture staging member names are part of the privileged-op boundary: the
+// broker validates exactly these parent-owned files before starting the child.
+const (
+	CaptureBundleFile     = "repo.bundle"
+	CapturePatchFile      = "uncommitted.patch"
+	CaptureTranscriptFile = "session.jsonl"
+)
+
 // RunTreeRoot returns the ephemeral per-run worktree root for rootKey. This
 // is the ONLY legitimate shape for a delegated task run's Config.Worktree;
 // launchspec_linux.go's mount-source validation rejects any Worktree that
@@ -87,11 +95,10 @@ func RunTreeHandedOff(path string) bool {
 }
 
 // CaptureRunDelta runs the parked-run capture in a child dropped to the
-// sandbox uid inside an empty network namespace and returns its raw JSON
-// stdout (a worktree.CapturedState — the git delta plus, when sessionID is
-// set, the session transcript — decoded by the caller). Linux-only by
-// construction; the non-Linux stub errors, and the delegate caller never
-// routes here off Linux.
-func CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
-	return captureRunDelta(ctx, worktree, sessionID)
+// sandbox uid inside an empty network namespace. Large members stream into
+// parent-owned stagingDir; the returned stdout is only their JSON manifest.
+// Linux-only by construction; the non-Linux stub errors, and the delegate
+// caller never routes here off Linux.
+func CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+	return captureRunDelta(ctx, worktree, stagingDir, sessionID)
 }
