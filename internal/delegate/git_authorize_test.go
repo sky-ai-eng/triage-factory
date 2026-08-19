@@ -71,8 +71,8 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	// Ref on the rows is informational only — the gate reads the live branch,
 	// stubbed below by worktree path.
 	for _, w := range []domain.ConversationWorktree{
-		{ConversationID: "run-1", RepoID: "acme/api", Path: "/tmp/a", Ref: "@default"},
-		{ConversationID: "run-1", RepoID: "acme/materialized-only", Path: "/tmp/m", Ref: "@default"},
+		{ConversationID: "run-1", RepoID: "acme/api", Path: "/tmp/a", Ref: "default"},
+		{ConversationID: "run-1", RepoID: "acme/materialized-only", Path: "/tmp/m", Ref: "default"},
 	} {
 		if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, w); err != nil {
 			t.Fatalf("materialize %s: %v", w.RepoID, err)
@@ -205,7 +205,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 		t.Fatalf("set base branch: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-2", RepoID: "acme/api", Path: "/tmp/api", Ref: "@default",
+		ConversationID: "run-2", RepoID: "acme/api", Path: "/tmp/api", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestGitAuthorizeDecision_UniversalProtectionWithoutProfile(t *testing.T) {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", Ref: "@default",
+		ConversationID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestGitAuthorizeDecision_FailsClosedWithoutReposStore(t *testing.T) {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := full.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", Ref: "@default",
+		ConversationID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestGitAuthorizeDecision_BaseBranchPushPolicy(t *testing.T) {
 		t.Fatalf("seed repository: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-bb", RepoID: "acme/api", Path: "/tmp/bb", Ref: "@default",
+		ConversationID: "run-bb", RepoID: "acme/api", Path: "/tmp/bb", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

@@ -40,7 +40,7 @@ func TestRelayRuntime_InsertConversationWorktreeBindsConversationIdentity(t *tes
 
 	inserted, _, err := rt.InsertConversationWorktree(context.Background(), domain.ConversationWorktree{
 		ConversationID: "conversation-from-wire", RepoID: "octocat/relay",
-		Path: "/tmp/relay", Ref: "@default",
+		Path: "/tmp/relay", Ref: "default",
 	})
 	if err != nil || !inserted {
 		t.Fatalf("InsertConversationWorktree relay: inserted=%v err=%v", inserted, err)

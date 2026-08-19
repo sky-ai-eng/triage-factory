@@ -60,20 +60,24 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 // CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
 // worktree-subdir name for a default/--ref checkout. It MUST be a single
 // filesystem-safe path segment that is injective over valid refs (distinct refs
-// → distinct slugs) and disjoint from the reserved "pr-<N>" and "@default"
+// → distinct slugs) and disjoint from the reserved "pr-<N>" and "default"
 // forms. Otherwise one run would treat two different `workspace add --ref`
 // targets — or a branch literally named "pr-42" and PR #42 — as the same
 // worktree: the idempotent re-add hands back the wrong checkout, and the
 // detached worktree the agent branches/pushes from is the wrong one.
 //
-//   - ""         → "@default"      ("@" is disallowed in a validated --ref, so
-//     the default form can't collide with a branch)
+//   - ""         → "default"       (the selector "no ref named → the repo's
+//     default branch"; a plain word, chosen NOT to look like a git revision —
+//     the slug lands in every agent-visible path, and a ref-shaped name there
+//     reads as "the agent is working on the default branch", which a detached
+//     checkout precisely is not)
 //   - "<branch>" → "ref-<branch>"  with every '/' replaced by '~'
 //
 // Two properties make this collision-free:
 //
-//   - The "ref-" namespace keeps branch slugs disjoint from "pr-<N>" (a "ref-"
-//     slug never starts with "pr-") and "@default".
+//   - Every branch slug carries the "ref-" prefix and every PR slug the "pr-"
+//     prefix, so the bare word "default" collides with neither — a branch
+//     literally named "default" slugs to "ref-default".
 //   - A validated --ref's alphabet is [A-Za-z0-9._/-] (see validateGitRef), so
 //     '/' is the only path-unsafe byte AND '~' can never appear literally in the
 //     input. Replacing only '/' → '~' is therefore injective: "feature/foo" →
@@ -86,7 +90,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 // slug CreateForCheckoutInRoot lands the worktree at.
 func CheckoutRefSlug(ref string) string {
 	if ref == "" {
-		return "@default"
+		return "default"
 	}
 	return "ref-" + strings.ReplaceAll(ref, "/", "~")
 }
@@ -94,7 +98,7 @@ func CheckoutRefSlug(ref string) string {
 // CreateForCheckoutInRoot materializes a worktree at filepath.Join(runRoot,
 // owner, repo, ref-slug) checked out — in DETACHED HEAD — at the fresh tip of
 // an existing branch on origin. When ref is empty the repo's default branch is
-// detected and used (slug "@default"). This is the generalized `workspace add`
+// detected and used (slug "default"). This is the generalized `workspace add`
 // / `workspace add --ref <branch>` path (TFAC-498): unlike CreateForBranchInRoot
 // it does NOT mint a prescribed feature branch — it hands back a checkout of the
 // named branch as-is and lets the agent create its own working branch (`git

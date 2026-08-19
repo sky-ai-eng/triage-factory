@@ -303,7 +303,7 @@ func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID string, cfg runConf
 // reclaimWorkspaceAddPRConfig reclaims the per-run PR branch + push remote a
 // `workspace add --pr N` worktree left in the shared bare, keyed off the
 // conversation_worktrees row's ref (pr-<N>) and conversation_id (the conversation that created it, so the
-// per-run branch namespace matches). A no-op for non-PR refs (@default, branch
+// per-run branch namespace matches). A no-op for non-PR refs (default, branch
 // slugs) — those leave detached checkouts with no per-PR config. Folds the
 // eager path's inline cleanup into the lazy teardown so the bootstrap sweep
 // stays a pure crash backstop (Decision D / TFAC-502). Shared by both lazy
@@ -321,7 +321,7 @@ func reclaimWorkspaceAddPRConfig(w domain.ConversationWorktree) {
 }
 
 // prNumberFromRef extracts N from a "pr-<N>" conversation_worktrees ref. ok=false for any
-// non-PR ref ("@default", a branch slug), which carries no per-PR config.
+// non-PR ref ("default", a branch slug), which carries no per-PR config.
 func prNumberFromRef(ref string) (int, bool) {
 	rest, ok := strings.CutPrefix(ref, "pr-")
 	if !ok {

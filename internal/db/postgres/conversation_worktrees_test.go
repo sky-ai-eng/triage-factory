@@ -123,7 +123,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	msgs, ready := credDoorbells(t, h)
 	ready()
 
-	row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/@default", Ref: "@default"}
+	row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/default", Ref: "default"}
 	inserted, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, row)
 	if err != nil || !inserted {
 		t.Fatalf("InsertSystem: inserted=%v err=%v", inserted, err)
@@ -152,7 +152,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	expectNoCredRequest(t, msgs)
 
 	// A different repo does widen the set.
-	otherRepo := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/third-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/third-repo/@default", Ref: "@default"}
+	otherRepo := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/third-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/third-repo/default", Ref: "default"}
 	inserted, _, err = stores.ConversationWorktrees.InsertSystem(ctx, orgID, otherRepo)
 	if err != nil || !inserted {
 		t.Fatalf("InsertSystem (new repo): inserted=%v err=%v, want inserted=true", inserted, err)
@@ -187,7 +187,7 @@ func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *t
 	}
 	txStores := pgstore.NewForTx(tx, pgtest.SecretKey)
 	inserted, _, err := txStores.ConversationWorktrees.Insert(ctx, orgID, domain.ConversationWorktree{
-		ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/x", Ref: "@default",
+		ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/x", Ref: "default",
 	})
 	if err != nil || !inserted {
 		t.Fatalf("Insert in tx: inserted=%v err=%v", inserted, err)

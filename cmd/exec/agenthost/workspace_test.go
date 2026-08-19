@@ -262,6 +262,43 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	}
 }
 
+// TestLocalClient_CreateWorkspaceCheckout_ResolvesBareAdd pins the host-side
+// mirror of the workspace CLI's bare-add resolution: an empty ref reaching
+// the RPC front door targets the branch the repository row names — the
+// admin-configured base branch first, else the profiled default — so a
+// sandboxed caller speaking the RPC directly gets the same checkout the CLI
+// reserves.
+func TestLocalClient_CreateWorkspaceCheckout_ResolvesBareAdd(t *testing.T) {
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-bare", runmode.LocalDefaultUserID, "manual")
+	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git") // DefaultBranch "main"
+	rec := &createRecorder{path: "/wt/bare"}
+	stubWorkspaceCreates(t, rec)
+	client := NewLocal(stores, workspaceInfo("conv-bare"))
+
+	if _, err := client.CreateWorkspaceCheckout(context.Background(), "sky", "core", "", 0); err != nil {
+		t.Fatalf("CreateWorkspaceCheckout: %v", err)
+	}
+	if rec.coRef != "main" {
+		t.Errorf("ref = %q, want the profiled default branch (main)", rec.coRef)
+	}
+
+	// The configured base branch, when set, wins over the profiled default.
+	row, err := stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{Owner: "sky", Repo: "core"})
+	if err != nil || row == nil {
+		t.Fatalf("load repository: row=%v err=%v", row, err)
+	}
+	if _, err := stores.Repos.UpdateBaseBranch(context.Background(), runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
+		t.Fatalf("set base branch: %v", err)
+	}
+	if _, err := client.CreateWorkspaceCheckout(context.Background(), "sky", "core", "", 0); err != nil {
+		t.Fatalf("CreateWorkspaceCheckout (base set): %v", err)
+	}
+	if rec.coRef != "develop" {
+		t.Errorf("ref = %q, want the configured base branch (develop)", rec.coRef)
+	}
+}
+
 // TestLocalClient_CreateWorkspaceCheckout_PRPath pins the --pr route: the PR
 // fetch happens host-side through the run's resolver, the fork head URL is
 // derived in the upstream's protocol, WithBaseBranch carries the PR's base
@@ -336,7 +373,7 @@ func TestStrictlyWithin(t *testing.T) {
 		root, path string
 		want       bool
 	}{
-		{"/tmp/runs/r1", "/tmp/runs/r1/o/r/@default", true},
+		{"/tmp/runs/r1", "/tmp/runs/r1/o/r/default", true},
 		{"/tmp/runs/r1", "/tmp/runs/r1/x", true},
 
 		{"/tmp/runs/r1", "/tmp/runs/r1", false},         // the root itself is never removable

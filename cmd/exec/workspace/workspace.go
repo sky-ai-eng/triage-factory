@@ -5,8 +5,9 @@
 // The flow: a run that starts without a codebase (a Jira or taskless run is
 // spawned at the run-root — a throwaway dir holding only _tfac/)
 // decides which repo(s) it needs and calls `workspace add <owner/repo>` to
-// materialize a worktree. By default the repo's default branch is checked out
-// (detached); `--ref <branch>` checks out a named branch and `--pr <N>` checks
+// materialize a worktree. By default the branch the repository row names is
+// checked out, detached — the admin-configured base branch, else the profiled
+// default; `--ref <branch>` checks out a named branch and `--pr <N>` checks
 // out a PR head (fork-aware). The CLI prints the absolute worktree path; the
 // agent `cd`s in and drives git itself (creating its own branch before
 // pushing). `workspace list` returns the JSON inventory of worktrees
@@ -30,7 +31,7 @@ import (
 // from `workspace --help` and the top-level `exec --help`.
 const HelpText = `Workspace Commands:
   workspace list                       Print configured + materialized repos for this run (JSON)
-  workspace add <owner/repo>           Materialize a worktree on the repo's default branch (detached)
+  workspace add <owner/repo>           Materialize a worktree on the repo's base branch (detached)
   workspace add <owner/repo> --ref B   ... on an existing branch B (detached at its tip)
   workspace add <owner/repo> --pr N    ... on PR #N's head (fork-aware; no fork credential needed)
 

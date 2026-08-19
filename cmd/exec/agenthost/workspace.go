@@ -162,6 +162,19 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its repository row", repoID)
 	}
 
+	// Mirror the workspace CLI's bare-add resolution so the RPC front door
+	// behaves identically whichever side computed the ref: an empty ref
+	// targets the branch the repository row names (base, else default), and
+	// only a row naming neither falls through to the create's origin/HEAD
+	// detection. CreateForCheckoutInRoot guards the interpolation, so an
+	// unusable stored value fails there rather than being silently reshaped.
+	if prNumber == 0 && ref == "" {
+		ref = profile.BaseBranch
+		if ref == "" {
+			ref = profile.DefaultBranch
+		}
+	}
+
 	if prNumber > 0 {
 		pr, err := c.GithubGetPR(ctx, profile.Owner, profile.Repo, prNumber, false)
 		if err != nil {

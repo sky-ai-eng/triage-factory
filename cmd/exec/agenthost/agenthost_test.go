@@ -440,7 +440,7 @@ func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T
 	t.Cleanup(func() { _ = client.Close() })
 	row := domain.ConversationWorktree{
 		ConversationID: "conv-attacker", RepoID: "octocat/hello",
-		Path: "/tmp/conv-server/hello", Ref: "@default",
+		Path: "/tmp/conv-server/hello", Ref: "default",
 	}
 	inserted, _, err := client.InsertConversationWorktree(context.Background(), row)
 	if err != nil || !inserted {
