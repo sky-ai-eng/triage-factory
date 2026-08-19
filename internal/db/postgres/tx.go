@@ -137,9 +137,12 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 // even from inside a claims-set tx — see the Create comment).
 func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
-		Scores:    newScoreStore(tx),
-		Prompts:   newTxPromptStore(tx),
-		Swipes:    newSwipeStore(tx),
+		Scores:  newScoreStore(tx),
+		Prompts: newTxPromptStore(tx),
+		// Swipes keeps the real admin pool for its admin half even inside a
+		// claims-set tx, same as Conversations below: UndoLastSwipe's guard
+		// has to see swipe_events rows RLS hides from the requesting user.
+		Swipes:    newSwipeStore(tx, s.admin),
 		Dashboard: newDashboardStore(tx),
 		// Secrets: app half is the claims-set tx (Put/Get/Delete +
 		// per-user trio → org_secrets under tf_app + RLS); admin half

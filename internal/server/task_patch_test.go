@@ -170,6 +170,38 @@ func TestTaskPatch_RejectsUnwritableStatuses(t *testing.T) {
 	}
 }
 
+// TestTaskPatch_ValidatesTheBodyBeforeTheTaskState pins the guard ordering as
+// a decision rather than an accident: a malformed body against a closed task
+// answers for the body, not for the task. The two rounds are independent — a
+// request can be wrong in its own right regardless of what it is aimed at —
+// and reversing them would make every shape error on a closed task report a
+// state conflict the caller can do nothing about.
+func TestTaskPatch_ValidatesTheBodyBeforeTheTaskState(t *testing.T) {
+	s := newTestServer(t)
+
+	for name, tc := range map[string]struct {
+		body map[string]any
+		want int
+	}{
+		"empty_body":        {map[string]any{}, http.StatusBadRequest},
+		"unwritable_status": {map[string]any{"status": "queued"}, http.StatusBadRequest},
+		"both_axes":         {map[string]any{"status": "done", "snooze_until": nil}, http.StatusBadRequest},
+		"past_wake_time":    {map[string]any{"snooze_until": "2020-01-02T03:04:05Z"}, http.StatusUnprocessableEntity},
+	} {
+		t.Run(name, func(t *testing.T) {
+			taskID := seedLifecycleTask(t, s.db, "order-"+name, lifecycleTaskOpts{status: "dismissed"})
+			rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (the body's own fault, not the task's state); body=%s",
+					rec.Code, tc.want, rec.Body.String())
+			}
+			if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
+				t.Errorf("task.status = %q, want the seeded dismissed", got)
+			}
+		})
+	}
+}
+
 // TestTaskPatch_RejectsEmptyAndContradictoryBodies pins the two shapes that
 // aren't a partial update at all: a body naming no field wrote nothing (and
 // "updated" is the one answer a client can't tell from a real write), and a

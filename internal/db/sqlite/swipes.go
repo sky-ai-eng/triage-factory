@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"time"
 
@@ -293,47 +292,29 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 	}
 	var ok bool
 	err := inTx(ctx, s.q, func(q queryer) error {
-		// The caller's own most recent gesture on this task is what an
-		// undo reverses, so it has to exist and not itself be an undo.
-		// Both refusals roll the whole thing back via the sentinel: no
-		// audit row, no reset. Local mode is N=1, so every row's
-		// creator_user_id is the column default and userID is that same
-		// single user; the filter is here so the guard reads — and
-		// behaves — identically to the Postgres one.
-		var lastAction string
-		err := q.QueryRowContext(ctx,
-			`SELECT action FROM swipe_events
-			  WHERE task_id = ? AND creator_user_id = ?
-			  ORDER BY id DESC LIMIT 1`,
-			taskID, userID,
-		).Scan(&lastAction)
-		if errors.Is(err, sql.ErrNoRows) {
-			return errNothingToUndo
-		}
-		if err != nil {
-			return err
-		}
-		if lastAction == "undo" {
-			return errNothingToUndo
-		}
-		if _, err := q.ExecContext(ctx,
-			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
-			taskID,
-		); err != nil {
-			return err
-		}
-		// Undo mirrors requeue's full reset — claim cols
-		// also clear. A claim/delegate swipe stamps the relevant
-		// claim col; the post-swipe-handler teardown
-		// (teardownTaskArtifacts + spawner.Cancel for the
-		// dismiss/complete/claim paths) is the side-effect, but the
-		// claim col left on the row would keep the task in the
-		// owner's lane even after status returns to 'queued'. Clear
-		// both cols so the task lands back in the team's unclaimed
-		// triage queue, the same shape /requeue produces.
-		// Also clear close metadata too — undoing a dismiss /
-		// complete swipe means the task isn't terminal anymore.
-		if _, err := q.ExecContext(ctx,
+		// Undo reverses the caller's own last gesture, and only while that
+		// gesture is still the last thing that happened to the task. Both
+		// halves matter: "mine" alone would let a stale gesture reverse
+		// somebody else's later dismiss (gestures don't expire, and
+		// RequeueTask deliberately logs nothing, so a released claim stays
+		// a user's newest row indefinitely), and "not already undone"
+		// alone would let a second undo re-reverse.
+		//
+		// The predicate rides the UPDATE rather than a read before it, so
+		// the check and the write are one statement: two undos racing on
+		// the same task can't both pass. The audit row goes in AFTER, or
+		// it would be the newest row and shadow the very thing being
+		// tested. A task with no gestures at all reads NULL here, which
+		// fails the comparison and refuses — the same answer.
+		//
+		// Undo mirrors requeue's full reset — claim cols also clear. A
+		// claim/delegate gesture stamps the relevant claim col; the claim
+		// col left on the row would keep the task in the owner's lane even
+		// after status returns to 'queued'. Clear both cols so the task
+		// lands back in the team's unclaimed triage queue, the same shape
+		// /requeue produces. Close metadata clears too — undoing a dismiss
+		// or complete means the task isn't terminal anymore.
+		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
 			        snooze_until = NULL,
@@ -341,7 +322,25 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        claimed_by_user_id  = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
-			  WHERE id = ?`,
+			  WHERE id = ?
+			    AND (SELECT creator_user_id FROM swipe_events
+			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) = ?
+			    AND (SELECT action FROM swipe_events
+			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) <> 'undo'`,
+			taskID, taskID, userID, taskID,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errNothingToUndo
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
 			taskID,
 		); err != nil {
 			return err
@@ -355,7 +354,8 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 	return ok, err
 }
 
-// errNothingToUndo signals the "the caller has a gesture of their own on
-// this task" guard tripped. Distinct from a real DB error so UndoLastSwipe
-// can return (false, nil) while still triggering inTx's deferred rollback.
-var errNothingToUndo = errors.New("sqlite swipes: no gesture of the caller's to undo")
+// errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
+// gesture isn't the caller's, or is itself an undo. Distinct from a real DB
+// error so UndoLastSwipe can return (false, nil) while still triggering
+// inTx's deferred rollback.
+var errNothingToUndo = errors.New("sqlite swipes: the task's newest gesture isn't the caller's to undo")

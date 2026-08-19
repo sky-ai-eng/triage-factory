@@ -261,7 +261,7 @@ type TaskStore interface {
 	//   - current status must be one of {queued, in_progress, in_review}
 	//   - newStatus must be one of {in_progress, in_review}
 	// Refuses all other shapes — terminal transitions (done /
-	// dismissed) go through Close + handleSwipe, requeue clears the
+	// dismissed) go through Close + handleTaskPatch, requeue clears the
 	// claim entirely, and bot-claimed tasks transition via
 	// SetStatusSystem from the router. Returns ok=true when the
 	// update actually changed a row; false means a guard tripped

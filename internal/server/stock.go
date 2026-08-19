@@ -605,11 +605,12 @@ func stockActionPastTense(action string) string {
 }
 
 // validateStockBatch enforces the request-level half of the batch policy: an
-// empty list, an over-cap list, a blank key and a repeated key all fail the
-// whole call, so the per-item accounting invariant (applied + failed =
-// submitted) holds for every batch that actually runs. Dropping any of them
-// mid-loop instead would make a five-key submission answer "applied: 3" with
-// no mention of the other two.
+// empty list, an over-cap list, a blank or whitespace-padded key and a
+// repeated key all fail the whole call, so the per-item accounting invariant
+// (applied + failed = submitted) holds for every batch that actually runs, on
+// the keys the caller actually sent. Dropping any of them mid-loop instead
+// would make a five-key submission answer "applied: 3" with no mention of the
+// other two.
 func validateStockBatch(w http.ResponseWriter, raw []string) ([]string, bool) {
 	var v httpx.Validation
 	if len(raw) == 0 {
@@ -621,9 +622,16 @@ func validateStockBatch(w http.ResponseWriter, raw []string) ([]string, bool) {
 	seen := make(map[string]struct{}, len(raw))
 	keys := make([]string, 0, len(raw))
 	for _, key := range raw {
-		key = strings.TrimSpace(key)
-		if key == "" {
+		switch {
+		case strings.TrimSpace(key) == "":
 			v.Invalid("issue_keys", "issue_keys contains a blank issue key")
+			continue
+		case key != strings.TrimSpace(key):
+			// Rejected rather than trimmed. Every result row echoes the key
+			// as submitted, which is how a client matches results back to
+			// its request — silently rewriting one here would answer for a
+			// key the caller never sent.
+			v.Invalid("issue_keys", "issue_keys contains "+strings.TrimSpace(key)+" with surrounding whitespace")
 			continue
 		}
 		if _, dup := seen[key]; dup {

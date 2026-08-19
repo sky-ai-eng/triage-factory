@@ -23,28 +23,51 @@ import (
 func TestSwipeStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) dbtest.SwipeStoreHarness {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-		seed := func(t *testing.T) string {
-			t.Helper()
-			return seedPgTaskForSwipes(t, h.AdminDB, orgID, userID)
+		return dbtest.SwipeStoreHarness{
+			Store: stores.Swipes,
+			OrgID: orgID,
+			// insertSwipeEvent resolves creator_user_id through
+			// COALESCE(tf.current_user_id(), org owner); on the AdminDB pool
+			// there are no claims, so every row lands on the org owner.
+			UserID: userID,
+			SeedTask: func(t *testing.T) string {
+				t.Helper()
+				return seedPgTaskForSwipes(t, h.AdminDB, orgID, userID)
+			},
+			ReadTask: func(t *testing.T, taskID string) (string, time.Time) {
+				t.Helper()
+				return readPgTask(t, h.AdminDB, taskID)
+			},
+			ReadAudit: func(t *testing.T, taskID string) []string {
+				t.Helper()
+				return readPgSwipeAudit(t, h.AdminDB, taskID)
+			},
+			SeedForeignGesture: func(t *testing.T, taskID, action string) {
+				t.Helper()
+				// A real second org member: creator_user_id carries an FK to
+				// users, so the row can't be attributed to a made-up id.
+				other := pgtest.SeedUser(t, h, "foreign-swiper")
+				if _, err := h.AdminDB.Exec(
+					`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'member')
+					 ON CONFLICT DO NOTHING`, orgID, other,
+				); err != nil {
+					t.Fatalf("seed foreign member: %v", err)
+				}
+				if _, err := h.AdminDB.Exec(
+					`INSERT INTO swipe_events (org_id, creator_user_id, task_id, action, hesitation_ms)
+					 VALUES ($1, $2, $3, $4, 0)`,
+					orgID, other, taskID, action,
+				); err != nil {
+					t.Fatalf("seed foreign %s gesture on %s: %v", action, taskID, err)
+				}
+			},
 		}
-		read := func(t *testing.T, taskID string) (string, time.Time) {
-			t.Helper()
-			return readPgTask(t, h.AdminDB, taskID)
-		}
-		readAudit := func(t *testing.T, taskID string) []string {
-			t.Helper()
-			return readPgSwipeAudit(t, h.AdminDB, taskID)
-		}
-		// insertSwipeEvent resolves creator_user_id through
-		// COALESCE(tf.current_user_id(), org owner); on the AdminDB pool
-		// there are no claims, so every row lands on the org owner.
-		return stores.Swipes, orgID, userID, seed, read, readAudit
 	})
 }
 

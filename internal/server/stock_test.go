@@ -137,10 +137,11 @@ func TestStockQueue_PerItemAccounting(t *testing.T) {
 }
 
 // TestStockActions_RejectMalformedBatches pins the request-level half of the
-// batch policy: an empty list, an over-cap list, a blank key and a repeated
-// key fail the whole call, because each would otherwise make the accounting
-// invariant a lie for the batch that ran. Every action route enforces it
-// identically — the validator is shared rather than restated per route.
+// batch policy: an empty list, an over-cap list, a blank or whitespace-padded
+// key and a repeated key fail the whole call, because each would otherwise
+// make the accounting invariant a lie for the batch that ran — the padded key
+// by answering under a key the caller never sent. Every action route enforces
+// it identically: the validator is shared rather than restated per route.
 func TestStockActions_RejectMalformedBatches(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -153,10 +154,11 @@ func TestStockActions_RejectMalformedBatches(t *testing.T) {
 
 	for _, action := range []string{"queue", "claim", "done"} {
 		for name, keys := range map[string][]string{
-			"empty":     {},
-			"blank_key": {"SKY-1", "   "},
-			"duplicate": {"SKY-1", "SKY-1"},
-			"over_cap":  overCap,
+			"empty":      {},
+			"blank_key":  {"SKY-1", "   "},
+			"padded_key": {"SKY-1", " SKY-2 "},
+			"duplicate":  {"SKY-1", "SKY-1"},
+			"over_cap":   overCap,
 		} {
 			t.Run(action+"/"+name, func(t *testing.T) {
 				rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/"+action,

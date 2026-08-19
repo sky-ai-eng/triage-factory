@@ -10,41 +10,51 @@ import (
 )
 
 // SwipeStoreFactory is what a per-backend test file hands to
-// RunSwipeStoreConformance. The factory returns:
-//   - the wired SwipeStore impl
-//   - the orgID to pass to every method
-//   - the userID swipe_events rows written through this store are
-//     attributed to, which is what UndoLastSwipe's caller-owns-a-gesture
-//     guard is keyed on. Each dialect resolves it differently (the
-//     column default locally, the org owner under the admin pool), so
-//     the harness has to be told rather than assume.
-//   - a seedTask hook that creates a task row the harness can swipe
-//     against. The harness is schema-blind; backend tests own task
-//     creation against their dialect's columns.
-//   - a readTask hook that returns the task's current status +
-//     snooze_until so the harness can assert state transitions
-//     without touching the schema directly.
-//   - a readSwipeAudit hook that returns the ordered list of
-//     swipe_events.action values for a given task, so the harness
-//     can pin audit-row invariants (RecordSwipe writes one,
-//     RequeueTask writes none, UndoLastSwipe writes 'undo')
-//     without coupling to the events table's schema.
-type SwipeStoreFactory func(t *testing.T) (store db.SwipeStore, orgID, userID string, seedTask TaskSeederForSwipes, readTask TaskReaderForSwipes, readSwipeAudit SwipeAuditReader)
+// RunSwipeStoreConformance: one wired harness per subtest, so
+// swipe_events state doesn't leak between assertions.
+type SwipeStoreFactory func(t *testing.T) SwipeStoreHarness
 
-// TaskSeederForSwipes creates one task row in 'queued' state and
-// returns its ID. The harness calls it once per subtest.
+// TaskSeederForSwipes creates one task row in 'queued' state and returns its
+// ID. Shared with the snooze-visibility suite, which seeds the same shape.
 type TaskSeederForSwipes func(t *testing.T) string
 
-// TaskReaderForSwipes returns the task's status + snooze_until so
-// the harness can assert post-swipe state without coupling to
-// schema. snoozeUntil is the zero Time when NULL.
+// TaskReaderForSwipes returns a task's status + snooze_until so a suite can
+// assert transitions without coupling to schema. snoozeUntil is the zero Time
+// when NULL.
 type TaskReaderForSwipes func(t *testing.T, taskID string) (status string, snoozeUntil time.Time)
 
-// SwipeAuditReader returns the ordered list of action strings from
-// swipe_events for the given task. The harness uses it to pin the
-// "did the audit row get written / not written" contract that's
-// not observable through the SwipeStore interface itself.
+// SwipeAuditReader returns the ordered swipe_events.action values for a task,
+// oldest first.
 type SwipeAuditReader func(t *testing.T, taskID string) []string
+
+// SwipeStoreHarness is one backend's wiring for the shared suite. The hooks
+// are here because the suite is schema-blind: backend tests own row creation
+// against their own dialect's columns, and the suite only ever talks to the
+// SwipeStore interface plus these.
+type SwipeStoreHarness struct {
+	// Store is the wired impl under test.
+	Store db.SwipeStore
+	// OrgID is passed to every method.
+	OrgID string
+	// UserID is who swipe_events rows written through Store are attributed
+	// to, which UndoLastSwipe's guard is keyed on. Each dialect resolves it
+	// differently (the column default locally, the org owner under the admin
+	// pool), so the suite has to be told rather than assume.
+	UserID string
+	// SeedTask creates one task row in 'queued' state and returns its ID.
+	SeedTask TaskSeederForSwipes
+	// ReadTask reports the task's post-write state.
+	ReadTask TaskReaderForSwipes
+	// ReadAudit reports the task's audit rows — the "did the audit row land"
+	// contract, which isn't observable through the SwipeStore interface.
+	ReadAudit SwipeAuditReader
+	// SeedForeignGesture writes one swipe_events row attributed to a user
+	// who is NOT UserID, without touching the task. It is how the suite
+	// stages "somebody else acted after you" — the only shape that tells
+	// UndoLastSwipe's real guard (is my gesture the task's newest) apart
+	// from the weaker one it could be mistaken for (do I have any gesture).
+	SeedForeignGesture func(t *testing.T, taskID, action string)
+}
 
 // RunSwipeStoreConformance runs the shared assertion suite. The
 // invariants are the contract every SwipeStore impl must hold:
@@ -59,8 +69,8 @@ type SwipeAuditReader func(t *testing.T, taskID string) []string
 //   - ClearSnooze wakes a snoozed task without an audit row, and
 //     refuses a task that isn't snoozed.
 //   - UndoLastSwipe writes an 'undo' audit row + resets the task to
-//     queued + clears snooze_until, and refuses when the caller has no
-//     gesture of their own left to reverse.
+//     queued + clears snooze_until, and refuses unless the task's newest
+//     gesture is the caller's own and isn't already an undo.
 //   - Context cancellation fails fast.
 func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Helper()
@@ -72,7 +82,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// column separately, and the Board's derived filter (claim
 		// cols + status) is what reflects "user has this." See spec
 		// §2 three-axes framing.
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		ctx := context.Background()
 		taskID := seedTask(t)
 		newStatus, ok, err := store.RecordSwipe(ctx, orgID, taskID, "claim", 200, nil)
@@ -96,7 +107,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	})
 
 	t.Run("RecordSwipe_DismissMapsToDismissed", func(t *testing.T) {
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("RecordSwipe: %v", err)
@@ -116,7 +128,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// reachable; the audit row preserves the ORIGINAL (wrong)
 		// action so a future debug pass can find it — the test
 		// pins both halves of that contract.
-		store, orgID, _, seedTask, _, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadAudit
 		taskID := seedTask(t)
 		newStatus, ok, err := store.RecordSwipe(context.Background(), orgID, taskID, "garbage", 0, nil)
 		if err != nil || !ok {
@@ -139,7 +152,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// shares the predicate.
 		for _, action := range []string{"dismiss", "complete", "claim", "delegate", "reassign", "garbage"} {
 			t.Run(action, func(t *testing.T) {
-				store, orgID, _, seedTask, readTask, readAudit := factory(t)
+				h := factory(t)
+				store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 				ctx := context.Background()
 				taskID := seedTask(t)
 				if _, ok, err := store.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); err != nil || !ok {
@@ -174,7 +188,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// responsibility-axis action), so post-claim status reads as
 		// 'queued'. The snooze-cleared invariant still holds — that's
 		// what this test pins.
-		store, orgID, _, seedTask, readTask, _ := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask := h.Store, h.OrgID, h.SeedTask, h.ReadTask
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC()
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
@@ -196,7 +211,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// Both snooze paths (this one and SnoozeTask) must leave a real
 		// snooze_until: the queue's wake sweep requeues on that column,
 		// so a snoozed row without one never comes back.
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 		newStatus, ok, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, &until)
@@ -228,7 +244,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// status='snoozed' with snooze_until NULL, so a nil wake time is
 		// refused outright — audit row included, since the whole write is
 		// one tx and a refused gesture leaves no trace.
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "snooze", 0, nil); !errors.Is(err, db.ErrSnoozeUntilRequired) {
 			t.Fatalf("RecordSwipe(snooze, nil) error = %v, want ErrSnoozeUntilRequired", err)
@@ -243,7 +260,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	})
 
 	t.Run("SnoozeTask_SetsSnoozeUntilAndStatus", func(t *testing.T) {
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		until := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 150); err != nil || !ok {
@@ -268,7 +286,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// A closed task can have both claim columns NULL, so the claim guard
 		// alone would let a dismiss landing between the caller's read and
 		// this write park a closed task for the wake sweep to resurrect.
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		ctx := context.Background()
 		taskID := seedTask(t)
 		if _, ok, err := store.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); err != nil || !ok {
@@ -291,7 +310,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	})
 
 	t.Run("RequeueTask_FlipsToQueuedWithoutAuditRow", func(t *testing.T) {
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		// First swipe → claimed so we can observe the transition back.
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "claim", 0, nil); err != nil {
@@ -322,7 +342,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// Postgres rejects non-UUID strings at the column type
 		// level before the WHERE filter ever runs, and we want to
 		// assert the "no row matched" path, not the parse error.
-		store, orgID, _, _, _, _ := factory(t)
+		h := factory(t)
+		store, orgID := h.Store, h.OrgID
 		missing := "00000000-0000-0000-0000-000000000000"
 		ok, err := store.RequeueTask(context.Background(), orgID, missing)
 		if err != nil {
@@ -334,7 +355,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	})
 
 	t.Run("ClearSnooze_WakesSnoozedTaskWithoutAuditRow", func(t *testing.T) {
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		until := time.Now().Add(time.Hour).UTC()
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
@@ -364,7 +386,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// task is 'queued' already, so the observable is the refusal
 		// itself — and the terminal case it protects (a dismissed row
 		// resurrected by a stray clear) is the same predicate.
-		store, orgID, _, seedTask, readTask, _ := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask := h.Store, h.OrgID, h.SeedTask, h.ReadTask
 		taskID := seedTask(t)
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
@@ -382,7 +405,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	})
 
 	t.Run("UndoLastSwipe_ResetsTaskAndClearsSnooze", func(t *testing.T) {
-		store, orgID, userID, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, userID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.UserID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		// Snooze first so we can verify the undo clears snooze_until.
 		until := time.Now().Add(time.Hour).UTC()
@@ -416,7 +440,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// caller can address: a dismissed task nobody swiped comes back
 		// to the queue on a bare undo. Nothing is written on the refusal
 		// — not even the 'undo' audit row.
-		store, orgID, userID, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, userID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.UserID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		ok, err := store.UndoLastSwipe(context.Background(), orgID, taskID, userID)
 		if err != nil {
@@ -436,7 +461,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 	t.Run("UndoLastSwipe_RefusesASecondUndo", func(t *testing.T) {
 		// One gesture, one reversal. The caller's own latest row being an
 		// 'undo' means the thing they meant to reverse already is.
-		store, orgID, userID, seedTask, _, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, userID, seedTask, readAudit := h.Store, h.OrgID, h.UserID, h.SeedTask, h.ReadAudit
 		taskID := seedTask(t)
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
@@ -460,7 +486,8 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		// The gesture on the row belongs to whoever made it. Someone
 		// else's undo finds nothing of their own to reverse and leaves
 		// the task where it is.
-		store, orgID, _, seedTask, readTask, readAudit := factory(t)
+		h := factory(t)
+		store, orgID, seedTask, readTask, readAudit := h.Store, h.OrgID, h.SeedTask, h.ReadTask, h.ReadAudit
 		taskID := seedTask(t)
 		if _, _, err := store.RecordSwipe(context.Background(), orgID, taskID, "dismiss", 0, nil); err != nil {
 			t.Fatalf("seed dismiss: %v", err)
@@ -481,8 +508,44 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		}
 	})
 
+	t.Run("UndoLastSwipe_RefusesAGestureSomeoneElseHasActedPast", func(t *testing.T) {
+		// The force-reset hole in its real shape. Having *a* gesture on the
+		// task is not the same as having made the thing being reversed:
+		// gestures don't expire, and RequeueTask deliberately logs nothing,
+		// so a released claim stays that user's newest row forever. The
+		// guard therefore asks whether the caller's gesture is the task's
+		// NEWEST, not merely whether one exists.
+		h := factory(t)
+		store, orgID, caller, seedTask, readTask, readAudit := h.Store, h.OrgID, h.UserID, h.SeedTask, h.ReadTask, h.ReadAudit
+		ctx := context.Background()
+		taskID := seedTask(t)
+		// The caller's own real gesture, which closed the task.
+		if _, ok, err := store.RecordSwipe(ctx, orgID, taskID, "dismiss", 0, nil); err != nil || !ok {
+			t.Fatalf("seed the caller's dismiss: ok=%v err=%v", ok, err)
+		}
+		// Somebody else acts afterwards. From here the caller's gesture is
+		// no longer what the task's state reflects, so their undo is stale
+		// even though they genuinely have one.
+		h.SeedForeignGesture(t, taskID, "claim")
+
+		ok, err := store.UndoLastSwipe(ctx, orgID, taskID, caller)
+		if err != nil {
+			t.Fatalf("UndoLastSwipe: %v", err)
+		}
+		if ok {
+			t.Fatalf("UndoLastSwipe returned ok=true on a gesture another user has since acted past")
+		}
+		if status, _ := readTask(t, taskID); status != "dismissed" {
+			t.Fatalf("status=%q want dismissed — a stale gesture must not reopen a task, or wipe the close metadata on it", status)
+		}
+		if got := readAudit(t, taskID); !equalActions(got, []string{"dismiss", "claim"}) {
+			t.Fatalf("swipe_events actions=%v want [dismiss claim] (a refused undo leaves no trace)", got)
+		}
+	})
+
 	t.Run("CtxCancellation_FailsFast", func(t *testing.T) {
-		store, orgID, _, seedTask, _, _ := factory(t)
+		h := factory(t)
+		store, orgID, seedTask := h.Store, h.OrgID, h.SeedTask
 		taskID := seedTask(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

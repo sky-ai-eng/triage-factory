@@ -298,7 +298,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				// that existed before we started watching — the reviewer would
 				// only see them if someone re-requested. Synthesizing here lands
 				// existing review-requests in the queue on first connect.
-				// Mirrors the Jira carry-over queue path in handleJiraStockPost.
+				// Mirrors the Jira carry-over queue path in handleJiraStockQueue.
 				//
 				// Self-authored PRs are skipped: GitHub forbids self-requests,
 				// so the only way a match fires here is via a team the user is

@@ -7,7 +7,7 @@
 // onto the ticket under the org's system/bot credential (jira.Resolver.ForSystem,
 // TFAC-34), so the bot-side lifecycle is visible in Jira exactly as the
 // user-claim path already mirrors it for human-claimed tasks (the claim guard
-// in server.handleSwipe).
+// in server.handleTaskClaim).
 //
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
 // — no board/task hook writes Done anymore (runJiraMirror still has a done mode,

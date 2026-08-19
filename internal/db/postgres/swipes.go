@@ -24,9 +24,16 @@ import (
 // Atomicity matches SQLite: each mutating method wraps the
 // swipe_events INSERT + tasks UPDATE in a single tx so a partial
 // state can't leak.
-type swipeStore struct{ q queryer }
+type swipeStore struct {
+	q queryer
+	// admin is the RLS-bypassed pool, used by UndoLastSwipe alone. See the
+	// rationale on that method: its guard has to see swipe_events rows the
+	// requesting user did not write, and swipe_events_select scopes SELECT
+	// to creator_user_id = tf.current_user_id().
+	admin queryer
+}
 
-func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
+func newSwipeStore(q, admin queryer) db.SwipeStore { return &swipeStore{q: q, admin: admin} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
@@ -248,52 +255,58 @@ func (s *swipeStore) ClearSnooze(ctx context.Context, orgID string, taskID strin
 
 func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (bool, error) {
 	var ok bool
-	err := s.runInTx(ctx, func(tx *sql.Tx) error {
-		// The caller's own most recent gesture on this task is what an
-		// undo reverses, so it has to exist and not itself be an undo.
-		// Both refusals roll the whole thing back via the sentinel: no
-		// audit row, no reset. The creator_user_id filter is explicit
-		// rather than left to swipe_events_select's own creator arm,
-		// because the admin pool bypasses RLS and the guard must mean
-		// the same thing on both pools.
-		var lastAction string
-		err := tx.QueryRowContext(ctx,
-			`SELECT action FROM swipe_events
-			  WHERE org_id = $1 AND task_id = $2 AND creator_user_id = $3
-			  ORDER BY id DESC LIMIT 1`,
-			orgID, taskID, userID,
-		).Scan(&lastAction)
-		if errors.Is(err, sql.ErrNoRows) {
-			return errNothingToUndo
-		}
-		if err != nil {
-			return err
-		}
-		if lastAction == "undo" {
-			return errNothingToUndo
-		}
-		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "undo", nil); err != nil {
-			return err
-		}
-		// Undo mirrors requeue's full reset — claim cols
-		// also clear. A claim/delegate swipe stamps the relevant
-		// claim col; leaving it on the row would keep the task in
-		// the owner's lane even after status returns to 'queued'.
-		// Clear both cols so the task lands back in the team's
-		// unclaimed triage queue, matching RequeueTask's shape.
-		// Clear close metadata too — undoing a dismiss /
-		// complete swipe means the task isn't terminal anymore.
+	// The whole method runs on the admin pool, which is the only way its
+	// guard can be correct: the guard has to know whether the task's newest
+	// gesture belongs to the caller, and swipe_events_select scopes SELECT to
+	// the requesting user's own rows — under RLS "the newest row I can see"
+	// is always mine, which is exactly the question being asked. Authorizing
+	// in Go and then routing around RLS is the same shape
+	// ReassignClaimToUserSystem uses: the handler has already resolved the
+	// org from session claims, run its viewer gate, and read the task under
+	// RLS (so a task the caller can't see 404s before this is reached).
+	// org_id stays in every WHERE as defense in depth.
+	err := runInTxOn(ctx, s.admin, func(tx *sql.Tx) error {
+		// Serialize concurrent undos on this task before either evaluates
+		// its guard. Without it two callers can both pass and both write —
+		// the row lock plus READ COMMITTED's per-statement snapshot means
+		// the second one's guard below sees the first one's committed
+		// 'undo' row and refuses.
 		if _, err := tx.ExecContext(ctx,
+			`SELECT 1 FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			orgID, taskID,
+		); err != nil {
+			return err
+		}
+		// Undo reverses the caller's own last gesture, and only while that
+		// gesture is still the last thing that happened to the task. See the
+		// SQLite mirror for why both halves are load-bearing, why the
+		// predicate rides the UPDATE, and why the audit row goes in after.
+		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
-			    SET status = $1,
+			    SET status = 'queued',
 			        snooze_until = NULL,
 			        claimed_by_agent_id = NULL,
 			        claimed_by_user_id  = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
-			  WHERE org_id = $2 AND id = $3`,
-			"queued", orgID, taskID,
-		); err != nil {
+			  WHERE org_id = $1 AND id = $2
+			    AND (SELECT creator_user_id FROM swipe_events
+			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) = $3
+			    AND (SELECT action FROM swipe_events
+			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) <> 'undo'`,
+			orgID, taskID, userID,
+		)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errNothingToUndo
+		}
+		if err := insertSwipeEventAs(ctx, tx, orgID, taskID, "undo", userID, nil); err != nil {
 			return err
 		}
 		ok = true
@@ -305,11 +318,11 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 	return ok, err
 }
 
-// errNothingToUndo signals the "the caller has a gesture of their own on
-// this task" guard tripped. Sentinel distinct from real DB errors so
-// UndoLastSwipe can return (false, nil) while triggering the deferred tx
-// rollback.
-var errNothingToUndo = errors.New("postgres swipes: no gesture of the caller's to undo")
+// errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
+// gesture isn't the caller's, or is itself an undo. Sentinel distinct from
+// real DB errors so UndoLastSwipe can return (false, nil) while triggering
+// the deferred tx rollback.
+var errNothingToUndo = errors.New("postgres swipes: the task's newest gesture isn't the caller's to undo")
 
 // runInTx is the Postgres-side counterpart of sqlite's inTx — opens
 // a tx on s.q if it's a *sql.DB, or runs the closure against the
@@ -317,7 +330,13 @@ var errNothingToUndo = errors.New("postgres swipes: no gesture of the caller's t
 // store methods share atomicity-boundary code regardless of
 // composition context.
 func (s *swipeStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	switch v := s.q.(type) {
+	return runInTxOn(ctx, s.q, fn)
+}
+
+// runInTxOn is runInTx against a named queryer, so UndoLastSwipe can open its
+// transaction on the admin pool while every other method stays on s.q.
+func runInTxOn(ctx context.Context, q queryer, fn func(*sql.Tx) error) error {
+	switch v := q.(type) {
 	case *sql.Tx:
 		return fn(v)
 	case *sql.DB:
@@ -333,6 +352,24 @@ func (s *swipeStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error 
 	default:
 		return errors.New("postgres swipes: unexpected queryer type")
 	}
+}
+
+// insertSwipeEventAs writes an audit row attributed to an explicit user. The
+// admin pool has no JWT claims for tf.current_user_id() to resolve, so the
+// caller that routed around RLS has to name the creator it already
+// authorized — the COALESCE fallback would otherwise stamp the org owner.
+func insertSwipeEventAs(ctx context.Context, tx *sql.Tx, orgID, taskID, action, creatorUserID string, hesitationMs *int) error {
+	var hesitation any
+	if hesitationMs != nil {
+		hesitation = *hesitationMs
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO swipe_events (org_id, creator_user_id, task_id, action, hesitation_ms)
+		VALUES ($1, $2, $3, $4, $5)
+	`, orgID, creatorUserID, taskID, action, hesitation); err != nil {
+		return fmt.Errorf("insert swipe_events: %w", err)
+	}
+	return nil
 }
 
 func insertSwipeEvent(ctx context.Context, tx *sql.Tx, orgID, taskID, action string, hesitationMs *int) error {

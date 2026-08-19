@@ -352,11 +352,19 @@ type taskPatchRequest struct {
 // delegate reach external systems and spawn runs, requeue and undo tear down
 // artifacts and reverse an audit row.
 //
-// Guards, in the order they apply: a closed task refuses everything (409
-// ALREADY_TERMINAL — requeue and undo are how a task re-opens), the stage
-// statuses require the caller's own active claim (403), and a wake time must
-// be in the future (422). A body naming no field is a 400: it wrote nothing,
-// and "updated" is the one answer a client can't tell from a real write.
+// Guards apply in two rounds, and the order is deliberate: the body is
+// validated first (400 for shape, 422 for a value out of range), and only a
+// body that means something is measured against the task's state. So a
+// malformed request answers for its own shape even when the task also happens
+// to be closed — the task's state is not what is wrong with it. A body naming
+// no field is a 400 too: it wrote nothing, and "updated" is the one answer a
+// client can't tell from a real write.
+//
+// Then the state round: a closed task refuses everything (409
+// ALREADY_TERMINAL — requeue and undo are how a task re-opens), and the stage
+// statuses require the caller's own active claim (403). Neither round is the
+// last word on safety; the store carries its own predicates, because the row
+// can change between this handler's read and its write.
 //
 // PATCH /api/tasks/{id}
 func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
@@ -809,9 +817,9 @@ const (
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
 	// to close the race where a stale frontend conversations
-	// map could let /swipe claim slip past without /requeue's
-	// cleanup; the task routes now run the cleanup on every
-	// claim regardless of frontend state.
+	// map could let a claim slip past without /requeue's cleanup;
+	// the task routes run the cleanup on every claim regardless of
+	// frontend state.
 	discardOutcomeClaimed
 	// discardOutcomeRedelegated: user re-delegated the task while
 	// the prior conversation was still in flight (or had landed a pending
@@ -1162,7 +1170,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		}
 		return
 	}
-	// Same hot-path note as handleSwipe: requeue/undo is human-paced
+	// Same hot-path note as the claim route: requeue/undo is human-paced
 	// and rule lookup is O(projects). The rule read goes through the
 	// app-pool ListForTeam inside a WithTx so jira_rules_select RLS
 	// is enforced — matching the user's requeue claim path. If a
@@ -1181,7 +1189,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		inProgressMembers = rule.InProgressMembers
 	}
 	go func(issueKey, originalStatus string, ipMembers []string) {
-		// Detached from the request (see handleSwipe's claim guard): the
+		// Detached from the request (see syncJiraClaim's guard): the
 		// revert outlives the undo response, so use a background context.
 		bgCtx := context.Background()
 		state := jiraUserClient.GetClaimState(bgCtx, issueKey)

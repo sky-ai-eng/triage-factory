@@ -11,6 +11,82 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// TestTaskUndo_RefusesAGestureAnotherUserHasActedPast is the RLS half of the
+// undo guard, which the store conformance suite cannot reach: it runs both
+// pools for real, with two distinct users, so it proves the guard sees a row
+// the requesting user did not write. swipe_events_select scopes SELECT to
+// creator_user_id = tf.current_user_id(), so under the app pool "the newest
+// gesture I can see" is always mine — the question the guard asks would answer
+// itself, and a stale gesture would reopen a task somebody else closed.
+func TestTaskUndo_RefusesAGestureAnotherUserHasActedPast(t *testing.T) {
+	r := newViewerRig(t)
+
+	var entityID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO entities (org_id, source, source_id, kind, title)
+		VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+	`, r.orgID, "octo/undo#"+t.Name()).Scan(&entityID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	var evtID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, r.orgID, entityID).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, $4, 'github:pr:opened', $5) RETURNING id
+	`, r.orgID, r.admin, r.teamID, entityID, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	// The member's own gesture: a real claim through the route, so the audit
+	// row carries their id.
+	call := func(method, path, caller string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		req := r.req(method, path, caller, body)
+		req.SetPathValue("id", taskID)
+		rec := httptest.NewRecorder()
+		switch {
+		case strings.HasSuffix(path, "/claim"):
+			r.s.handleTaskClaim(rec, req)
+		case strings.HasSuffix(path, "/undo"):
+			r.s.handleUndo(rec, req)
+		default:
+			r.s.handleTaskPatch(rec, req)
+		}
+		return rec
+	}
+
+	if rec := call(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("member claim = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// The founder then closes it — a later gesture by a different user, which
+	// is exactly the row the member's session cannot see.
+	if rec := call(http.MethodPatch, "/api/tasks/"+taskID, r.admin,
+		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
+		t.Fatalf("admin dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := call(http.MethodPost, "/api/tasks/"+taskID+"/undo", r.member, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("member undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var status string
+	var closedAt sql.NullTime
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT status, closed_at FROM tasks WHERE id = $1`, taskID,
+	).Scan(&status, &closedAt); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "dismissed" || !closedAt.Valid {
+		t.Fatalf("task = (%q, closed_at valid=%v) after a refused undo; want the founder's close intact",
+			status, closedAt.Valid)
+	}
+}
+
 // TestTaskClaim_ReassignHappyPath pins the user↔user handoff arm's
 // core CAS behavior against local-mode SQLite: a task claimed by another user
 // gets reassigned to a third user, the claim columns land as expected, and

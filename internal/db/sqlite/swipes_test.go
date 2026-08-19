@@ -19,29 +19,51 @@ import (
 // the SQLite SwipeStore impl. Each subtest opens a fresh in-memory
 // DB so swipe_events state doesn't leak between assertions.
 func TestSwipeStore_SQLite(t *testing.T) {
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) dbtest.SwipeStoreHarness {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 
-		seed := func(t *testing.T) string {
-			t.Helper()
-			return seedSQLiteTaskForSwipes(t, conn)
+		return dbtest.SwipeStoreHarness{
+			Store: stores.Swipes,
+			OrgID: runmode.LocalDefaultOrgID,
+			// swipe_events.creator_user_id has no explicit write in local
+			// mode — N=1, so the column default is the single local user,
+			// which is exactly the subject a local request carries.
+			UserID: runmode.LocalDefaultUserID,
+			SeedTask: func(t *testing.T) string {
+				t.Helper()
+				return seedSQLiteTaskForSwipes(t, conn)
+			},
+			ReadTask: func(t *testing.T, taskID string) (string, time.Time) {
+				t.Helper()
+				return readSQLiteTask(t, conn, taskID)
+			},
+			ReadAudit: func(t *testing.T, taskID string) []string {
+				t.Helper()
+				return readSQLiteSwipeAudit(t, conn, taskID)
+			},
+			SeedForeignGesture: func(t *testing.T, taskID, action string) {
+				t.Helper()
+				// creator_user_id is written explicitly here — the point of
+				// the hook is a row the local default did NOT author.
+				if _, err := conn.Exec(
+					`INSERT INTO swipe_events (task_id, action, hesitation_ms, creator_user_id)
+					 VALUES (?, ?, 0, ?)`,
+					taskID, action, foreignSwipeUserID,
+				); err != nil {
+					t.Fatalf("seed foreign %s gesture on %s: %v", action, taskID, err)
+				}
+			},
 		}
-		read := func(t *testing.T, taskID string) (string, time.Time) {
-			t.Helper()
-			return readSQLiteTask(t, conn, taskID)
-		}
-		readAudit := func(t *testing.T, taskID string) []string {
-			t.Helper()
-			return readSQLiteSwipeAudit(t, conn, taskID)
-		}
-		// swipe_events.creator_user_id has no explicit write in local
-		// mode — N=1, so the column default is the single local user,
-		// which is exactly the subject a local request carries.
-		return stores.Swipes, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed, read, readAudit
 	})
 }
+
+// foreignSwipeUserID is a user other than the local default, for staging
+// "somebody else acted after you" in the conformance suite. Local mode is N=1
+// so no such user exists in practice; swipe_events has no FK on the column in
+// this dialect, and the row only ever has to be attributable to someone else.
+const foreignSwipeUserID = "00000000-0000-0000-0000-0000000000fe"
 
 // readSQLiteSwipeAudit returns swipe_events.action rows for a task,
 // oldest first. Used by the harness to pin the audit-log invariants
