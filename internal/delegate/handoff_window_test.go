@@ -7,7 +7,6 @@ package delegate
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"context"
 	"database/sql"
 	"errors"
@@ -260,13 +259,13 @@ func snapshotMembers(t *testing.T, blobs storage.Storage, key string) map[string
 		t.Fatalf("get snapshot %s: %v", key, err)
 	}
 	defer func() { _ = rc.Close() }()
-	gzr, err := gzip.NewReader(rc)
+	cr, _, err := snapshotReader(rc)
 	if err != nil {
-		t.Fatalf("open snapshot gzip: %v", err)
+		t.Fatalf("open compressed snapshot: %v", err)
 	}
-	defer func() { _ = gzr.Close() }()
+	defer func() { _ = cr.Close() }()
 	out := map[string]bool{}
-	tr := tar.NewReader(gzr)
+	tr := tar.NewReader(cr)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {

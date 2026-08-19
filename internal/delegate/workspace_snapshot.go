@@ -22,6 +22,7 @@ package delegate
 
 import (
 	"archive/tar"
+	"bufio"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -32,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -41,7 +43,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Snapshot tar member names. The blob is one gzip-compressed tar holding the
+// Snapshot tar member names. The blob is one compressed tar holding the
 // git delta, the ephemeral _tfac tree, the Claude session transcript, and a
 // manifest; rehydrate demuxes by these names.
 const (
@@ -88,7 +90,7 @@ type snapshotManifest struct {
 // memoryNamespace yields and the value the on-disk worktree directory is named
 // after, so the key, the namespace, and the dir name stay in lockstep.
 //
-// The "workspace.tar" leaf is the bare tar's name; the blob is gzipped inside
+// The "workspace.tar" leaf is the bare tar's name; the blob is compressed inside
 // it. Keeping the leaf avoids a dual-key dance at every discard/delete site for
 // zero benefit — nothing reads the key's extension to decide the format.
 func snapshotKey(orgID, keyID string) string {
@@ -172,7 +174,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	capSpan.End()
 
 	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", runtime)
-	f, rawBytes, gzBytes, err := stageSnapshotArchive(delta, wtPath, sessionID, transcript)
+	f, rawBytes, compressedBytes, err := stageSnapshotArchive(delta, wtPath, sessionID, transcript)
 	if err != nil {
 		recordSpanError(archSpan, err)
 		archSpan.End()
@@ -186,11 +188,11 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	// report card — ratio from the two sizes, throughput from either against
 	// the phase duration — so a compression change can prove itself from the
 	// field rather than a benchmark.
-	archSpan.SetAttributes(telemetry.SnapshotRawBytes(rawBytes), telemetry.SizeBytes(gzBytes))
+	archSpan.SetAttributes(telemetry.SnapshotRawBytes(rawBytes), telemetry.SizeBytes(compressedBytes))
 	archSpan.End()
 
 	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", runtime)
-	putSpan.SetAttributes(telemetry.SizeBytes(gzBytes))
+	putSpan.SetAttributes(telemetry.SizeBytes(compressedBytes))
 	putErr := blobs.Put(putCtx, snapshotKey(orgID, keyID), f)
 	recordSpanError(putSpan, putErr)
 	putSpan.End()
@@ -200,8 +202,8 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
 	// On the span too, where it explains the duration beside it.
-	span.SetAttributes(telemetry.SizeBytes(gzBytes))
-	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_gzipped", gzBytes)
+	span.SetAttributes(telemetry.SizeBytes(compressedBytes))
+	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_compressed", compressedBytes)
 	return nil
 }
 
@@ -219,7 +221,7 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 	return ctx, span
 }
 
-// stageSnapshotArchive writes the snapshot members to a gzipped tar staged on
+// stageSnapshotArchive writes the snapshot members to a zstd-compressed tar staged on
 // disk, returning the open staging file positioned at the start — ready to
 // stream into Put — with its pre-compression and compressed byte counts. On
 // error the staging file is already cleaned up; on success it is the caller's
@@ -228,12 +230,12 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 // Staged, not buffered: a large workspace (the _tfac tree especially) never
 // sits whole in memory — scratch files are copied into the tar file by file,
 // and Put reads the staged tar back incrementally rather than from a single
-// in-RAM buffer. The stream is gzipped on its way to the staging file — the
+// in-RAM buffer. The stream is compressed on its way to the staging file — the
 // transcript and ci-logs members that dominate the blob are highly
 // compressible text — without touching the member-by-member streaming inside
 // writeSnapshotTar.
-func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) (_ *os.File, rawBytes, gzippedBytes int64, err error) {
-	f, err := os.CreateTemp("", "tf-snapshot-*.tar.gz")
+func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, transcript []byte) (_ *os.File, rawBytes, compressedBytes int64, err error) {
+	f, err := os.CreateTemp("", "tf-snapshot-*.tar.zst")
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
 	}
@@ -243,13 +245,17 @@ func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, tr
 			_ = os.Remove(f.Name())
 		}
 	}()
-	gzw := gzip.NewWriter(f)
-	cw := countingWriter{w: gzw}
+	zw, err := zstd.NewWriter(f, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(true))
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("open zstd: %w", err)
+	}
+	cw := countingWriter{w: zw}
 	if err = writeSnapshotTar(&cw, delta, wtPath, sessionID, transcript); err != nil {
+		_ = zw.Close()
 		return nil, 0, 0, err
 	}
-	if err = gzw.Close(); err != nil {
-		return nil, 0, 0, fmt.Errorf("close gzip: %w", err)
+	if err = zw.Close(); err != nil {
+		return nil, 0, 0, fmt.Errorf("close zstd: %w", err)
 	}
 	fi, statErr := f.Stat()
 	if statErr != nil {
@@ -265,7 +271,7 @@ func stageSnapshotArchive(delta *worktree.GitDelta, wtPath, sessionID string, tr
 
 // countingWriter counts what passes through it — the archive's raw
 // (pre-compression) size, which nothing else can see: the tar stream goes
-// straight into the gzip writer, and the staging file only ever holds the
+// straight into the compression writer, and the staging file only ever holds the
 // compressed result.
 type countingWriter struct {
 	w io.Writer
@@ -509,13 +515,15 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
 	sawScratch := false
 
-	// Snapshots are gzipped tars (the writer's gzip.Writer wrapper).
-	gzr, err := gzip.NewReader(r)
+	// New snapshots use zstd, but existing gzip blobs remain durable state and
+	// must stay readable across the format migration. Sniff the outer framing;
+	// the manifest that describes the tar is inside the compressed stream.
+	cr, codec, err := snapshotReader(r)
 	if err != nil {
-		return fmt.Errorf("rehydrate: open gzip: %w", err)
+		return fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
 	}
-	defer func() { _ = gzr.Close() }()
-	tr := tar.NewReader(gzr)
+	defer func() { _ = cr.Close() }()
+	tr := tar.NewReader(cr)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -553,7 +561,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		}
 	}
 
-	// gzip validates the CRC-32 / ISIZE trailer only when the stream is read to
+	// The codecs validate their checksum only when the stream is read to
 	// its footer, but the tar reader stops at the archive's end-of-archive
 	// marker — which precedes that footer — so member reads alone never trigger
 	// the check (and gzip.Reader.Close does not force it either). Drain the
@@ -561,8 +569,8 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	// blob, and do it here, before any worktree mutation: a checksum mismatch
 	// means the snapshot is corrupt, so fail the rehydrate rather than rebuild
 	// onto untrustworthy state.
-	if _, err := io.Copy(io.Discard, gzr); err != nil {
-		return fmt.Errorf("rehydrate: gzip integrity: %w", err)
+	if _, err := io.Copy(io.Discard, cr); err != nil {
+		return fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
 	}
 
 	if man.HasGit {
@@ -617,6 +625,31 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		}
 	}
 	return nil
+}
+
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+
+// snapshotReader chooses a decoder from the blob's outer magic bytes. Anything
+// other than zstd is handed to gzip so old snapshots retain gzip's useful,
+// specific header errors rather than acquiring an ambiguous format error.
+func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
+	br := bufio.NewReader(r)
+	magic, err := br.Peek(len(zstdMagic))
+	if err != nil {
+		return nil, "", err
+	}
+	if string(magic) == string(zstdMagic) {
+		zr, err := zstd.NewReader(br)
+		if err != nil {
+			return nil, "", err
+		}
+		return zr.IOReadCloser(), "zstd", nil
+	}
+	gzr, err := gzip.NewReader(br)
+	if err != nil {
+		return nil, "", err
+	}
+	return gzr, "gzip", nil
 }
 
 // DiscardWorkspaceSnapshot is the exported seam onto the snapshot discard, for
