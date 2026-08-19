@@ -14,7 +14,7 @@ import (
 )
 
 // TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment pins the
-// first-sight path from TFAC-852. An issue assigned to somebody else matches
+// first-sight regression path. An issue assigned to somebody else matches
 // neither discovery query; after it is assigned to the polling credential, its
 // arrival through assignee=currentUser() is itself the assignment transition.
 func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testing.T) {

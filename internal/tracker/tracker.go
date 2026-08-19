@@ -1111,7 +1111,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		if created {
 			snapJSON, _ := json.Marshal(snap)
 			if state.DiscoveredAssignedToCurrentUser {
-				// TFAC-852: An issue assigned to someone else is outside both
+				// An issue assigned to someone else is outside both
 				// discovery queries, so appearing in the assigned-to-current-user
 				// result can itself be the assignment transition. Commit that initial
 				// event with the first snapshot; seeding first would make Phase 3
@@ -1584,7 +1584,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	type queryWithDone struct {
 		jql                   string
 		doneMembers           []string // for subtask classification on issues returned by this query
-		assignedToCurrentUser bool     // TFAC-852: this query's arrival is itself an assignment signal
+		assignedToCurrentUser bool     // this query's arrival is itself an assignment signal
 	}
 	var queries []queryWithDone
 
