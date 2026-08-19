@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -27,6 +28,30 @@ func (c directDispatchConn) call(ctx context.Context, namespace, op string, args
 		return nil
 	}
 	return json.Unmarshal(res, out)
+}
+
+func TestRelayRuntime_InsertConversationWorktreeBindsConversationIdentity(t *testing.T) {
+	conn, stores, info := newCaptureStoresConn(t, true)
+	if _, err := conn.Exec(`INSERT INTO repositories (id, source, owner, repo) VALUES (?, 'github', 'octocat', 'relay')`, uuid.New().String()); err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+	srv := NewRelayServer(stores, info, nil)
+	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
+
+	inserted, _, err := rt.InsertConversationWorktree(context.Background(), domain.ConversationWorktree{
+		ConversationID: "conversation-from-wire", RepoID: "octocat/relay",
+		Path: "/tmp/relay", Ref: "@default",
+	})
+	if err != nil || !inserted {
+		t.Fatalf("InsertConversationWorktree relay: inserted=%v err=%v", inserted, err)
+	}
+	got, err := stores.ConversationWorktrees.ListSystem(context.Background(), info.OrgID, info.ConversationID)
+	if err != nil {
+		t.Fatalf("ListSystem: %v", err)
+	}
+	if len(got) != 1 || got[0].ConversationID != info.ConversationID {
+		t.Fatalf("stored worktrees = %+v, want conversation %q", got, info.ConversationID)
+	}
 }
 
 func (c directDispatchConn) notify(namespace, op string, args any) {

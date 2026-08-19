@@ -407,6 +407,10 @@ func (r *directRuntime) ReviewPosture(ctx context.Context, owner, repo string) (
 }
 
 func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (bool, string, error) {
+	// Identity comes from the server-bound ConversationInfo, never from the
+	// wire. Besides owning the reservation row, this value also attributes the
+	// cred_request doorbell emitted by the Postgres store on a fresh insert.
+	row.ConversationID = r.info.ConversationID
 	if r.info.IsEventTriggered {
 		return r.stores.ConversationWorktrees.InsertSystem(ctx, r.info.OrgID, row)
 	}

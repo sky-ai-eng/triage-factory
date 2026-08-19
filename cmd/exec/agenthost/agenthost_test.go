@@ -413,6 +413,48 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	}
 }
 
+func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T) {
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-server", "", "event")
+	if _, err := conn.Exec(`INSERT INTO repositories (id, source, owner, repo) VALUES (?, 'github', 'octocat', 'hello')`, uuid.New().String()); err != nil {
+		t.Fatalf("seed repository: %v", err)
+	}
+
+	info := ConversationInfo{
+		OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
+		ConversationID: "conv-server", IsEventTriggered: true,
+	}
+	sockPath := tempSocket(t)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := NewServer(stores, info, nil)
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+
+	client := Dial(sockPath)
+	t.Cleanup(func() { _ = client.Close() })
+	row := domain.ConversationWorktree{
+		ConversationID: "conv-attacker", RepoID: "octocat/hello",
+		Path: "/tmp/conv-server/hello", Ref: "@default",
+	}
+	inserted, _, err := client.InsertConversationWorktree(context.Background(), row)
+	if err != nil || !inserted {
+		t.Fatalf("InsertConversationWorktree: inserted=%v err=%v", inserted, err)
+	}
+	got, err := stores.ConversationWorktrees.ListSystem(context.Background(), info.OrgID, info.ConversationID)
+	if err != nil {
+		t.Fatalf("ListSystem: %v", err)
+	}
+	if len(got) != 1 || got[0].ConversationID != info.ConversationID {
+		t.Fatalf("stored worktrees = %+v, want conversation %q", got, info.ConversationID)
+	}
+}
+
 // TestServer_GracefulShutdown_CompletesInFlight pins the daemon's
 // drain semantics: a mid-flight RPC continues to completion when
 // the listener stops accepting. The test sends a request, then
