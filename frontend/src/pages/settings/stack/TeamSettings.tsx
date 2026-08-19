@@ -349,15 +349,19 @@ export default function TeamSettings({
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
-      const res = await saveTeamSettings(endpointTeamId, {
-        ...baseline,
-        default_model: defaultModel,
-        auto_delegate_enabled: autoDelegate,
-        auto_mode_enabled: autoMode,
-        branch_template: branchTemplate,
-        review_posture: reviewPosture,
-        base_branch_push_policy: basePushPolicy,
-      })
+      const res = await saveTeamSettings(
+        endpointTeamId,
+        {
+          ...baseline,
+          default_model: defaultModel,
+          auto_delegate_enabled: autoDelegate,
+          auto_mode_enabled: autoMode,
+          branch_template: branchTemplate,
+          review_posture: reviewPosture,
+          base_branch_push_policy: basePushPolicy,
+        },
+        isLocal,
+      )
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -401,11 +405,15 @@ export default function TeamSettings({
       const grace = Number.isFinite(absentGraceSeconds)
         ? clampToRange(absentGraceSeconds, graceMin, graceMax)
         : baseline.permission_absent_grace_seconds
-      const res = await saveTeamSettings(endpointTeamId, {
-        ...baseline,
-        permission_absent_autodeny_enabled: absentAutodeny,
-        permission_absent_grace_seconds: grace,
-      })
+      const res = await saveTeamSettings(
+        endpointTeamId,
+        {
+          ...baseline,
+          permission_absent_autodeny_enabled: absentAutodeny,
+          permission_absent_grace_seconds: grace,
+        },
+        isLocal,
+      )
       if (!res.ok) {
         toast.error(res.error)
         return false

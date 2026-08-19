@@ -242,7 +242,11 @@ export type SaveResult = { ok: true; warning?: string } | { ok: false; error: st
 // the caller passes the whole live form; a surface that edits one field can
 // still send only that key, since absent means keep. The Jira project rules are
 // NOT part of this body — they have their own replace-set write below.
-export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
+export async function saveTeamSettings(
+  teamId: string,
+  form: TeamConfigForm,
+  isLocal: boolean,
+): Promise<SaveResult> {
   try {
     const body = await apiJSON<{ warning?: string } | null>(`${teamPath(teamId)}/settings`, {
       method: 'PATCH',
@@ -250,9 +254,9 @@ export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Pr
       body: JSON.stringify({
         ai_model: form.default_model,
         ai_auto_delegate_enabled: form.auto_delegate_enabled,
-        // "default" is the local-only team alias. Multi mode always uses auto
-        // and must not grow a hidden setup/settings write for this field.
-        ...(teamId === 'default' ? { auto_mode_enabled: form.auto_mode_enabled } : {}),
+        // Multi mode always uses auto and must not grow a hidden
+        // setup/settings write for this local-only field.
+        ...(isLocal ? { auto_mode_enabled: form.auto_mode_enabled } : {}),
         branch_template: form.branch_template,
         review_posture: form.review_posture,
         base_branch_push_policy: form.base_branch_push_policy,
@@ -406,10 +410,14 @@ function partialFailure(saved: string[], failed: string, err: string): string {
 // written — that's the no-wipe guarantee. On a mid-sequence failure the
 // earlier writes are already committed (separate endpoints, no spanning
 // transaction), so the error names exactly which slices landed.
-export async function saveTeamConfig(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
+export async function saveTeamConfig(
+  teamId: string,
+  form: TeamConfigForm,
+  isLocal: boolean,
+): Promise<SaveResult> {
   const saved: string[] = []
 
-  const settings = await saveTeamSettings(teamId, form)
+  const settings = await saveTeamSettings(teamId, form, isLocal)
   if (!settings.ok) return settings
   saved.push('Team settings')
 
