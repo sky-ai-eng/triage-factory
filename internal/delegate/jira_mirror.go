@@ -125,7 +125,7 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // NOT done. The ticket only reaches Done when its PR merges (a separate,
 // entity-driven mirror — forthcoming), never on run completion. A user takeover
 // mid-run flips claimed_by_agent_id to the user, after which the terminal Jira
-// write belongs to the user's advance/swipe path, so a no-longer-bot-owned task
+// write belongs to the user's own task-lifecycle writes, so a no-longer-bot-owned task
 // is skipped. Called from terminateBlueprint's completed branch; a
 // failed/aborted/cancelled run never reaches it. The in-progress mirror is
 // idempotent, so in the common case (the dispatch-time mirror already moved the

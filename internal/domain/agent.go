@@ -290,7 +290,7 @@ type Conversation struct {
 	ActorAgentName string
 
 	// CreatorUserID is the users.id of the human who initiated this
-	// conversation. Set for manual conversations (swipe-delegate /
+	// conversation. Set for manual conversations (the delegate route /
 	// drag-to-Agent / factory drop); empty / NULL for trigger-
 	// spawned conversations where no human asked for the work. The schema
 	// CHECK pairs this with trigger_type: 'manual' ↔ non-NULL,

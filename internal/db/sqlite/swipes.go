@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -40,11 +41,11 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	//
 	// closed_at + close_reason are written on terminal swipes
 	// so the Board's Done-column 7-day cap actually applies. They're
-	// NOT cleared on claim/delegate because the swipe handler refuses
-	// claim transitions on terminal tasks at the entry — so a row
-	// reaching this path with stale close metadata isn't a state the
-	// handler permits. Re-open paths (RequeueTask / UndoLastSwipe)
-	// clear the close columns explicitly.
+	// NOT cleared on claim/delegate because every task-action route
+	// refuses on a terminal task at the entry — so a row reaching this
+	// path with stale close metadata isn't a state the handlers
+	// permit. Re-open paths (RequeueTask / UndoLastSwipe) clear the
+	// close columns explicitly.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
 	// snoozeVal is what lands in tasks.snooze_until: the caller's wake
@@ -62,11 +63,9 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		newStatus = "done"
 		closeReason = "user_completed"
 	case "snooze":
-		// The swipe route's snooze arm; the standalone snooze route
-		// goes through SnoozeTask. Both write a real wake time — the
-		// queue's wake sweep requeues on snooze_until, so a snoozed
-		// row without one never comes back. Refuse rather than write
-		// that state.
+		// The snooze arm. It must write a real wake time — the queue's
+		// wake sweep requeues on snooze_until, so a snoozed row without
+		// one never comes back. Refuse rather than write that state.
 		if snoozeUntil == nil {
 			return "", db.ErrSnoozeUntilRequired
 		}
@@ -224,11 +223,60 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	return ok, err
 }
 
-func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) error {
+func (s *swipeStore) ClearSnooze(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	// Status predicate in the WHERE clause, not a read-then-write: the
+	// refusal and the write are then one statement, so a concurrent
+	// requeue or dismiss can't land between the check and the update.
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE tasks
+		    SET status = 'queued',
+		        snooze_until = NULL
+		  WHERE id = ?
+		    AND status = 'snoozed'`,
+		taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var ok bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// The caller's own most recent gesture on this task is what an
+		// undo reverses, so it has to exist and not itself be an undo.
+		// Both refusals roll the whole thing back via the sentinel: no
+		// audit row, no reset. Local mode is N=1, so every row's
+		// creator_user_id is the column default and userID is that same
+		// single user; the filter is here so the guard reads — and
+		// behaves — identically to the Postgres one.
+		var lastAction string
+		err := q.QueryRowContext(ctx,
+			`SELECT action FROM swipe_events
+			  WHERE task_id = ? AND creator_user_id = ?
+			  ORDER BY id DESC LIMIT 1`,
+			taskID, userID,
+		).Scan(&lastAction)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errNothingToUndo
+		}
+		if err != nil {
+			return err
+		}
+		if lastAction == "undo" {
+			return errNothingToUndo
+		}
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
 			taskID,
@@ -246,7 +294,7 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 		// triage queue, the same shape /requeue produces.
 		// Also clear close metadata too — undoing a dismiss /
 		// complete swipe means the task isn't terminal anymore.
-		_, err := q.ExecContext(ctx,
+		if _, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
 			        snooze_until = NULL,
@@ -256,7 +304,19 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 			        close_reason = NULL
 			  WHERE id = ?`,
 			taskID,
-		)
-		return err
+		); err != nil {
+			return err
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errNothingToUndo) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errNothingToUndo signals the "the caller has a gesture of their own on
+// this task" guard tripped. Distinct from a real DB error so UndoLastSwipe
+// can return (false, nil) while still triggering inTx's deferred rollback.
+var errNothingToUndo = errors.New("sqlite swipes: no gesture of the caller's to undo")

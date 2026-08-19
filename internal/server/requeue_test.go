@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -128,7 +129,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 // conversations.status — the completed conversation stays completed. The
 // live-conversation cancellation that the old park model folded in here is now
 // the spawner's job (only a still-running conversation is cancelled, by
-// swipeTeardownConversations), so a terminal conversation is left untouched.
+// teardownTaskConversations), so a terminal conversation is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
@@ -217,6 +218,20 @@ func assertPendingApprovalCleanedUp(
 	}
 }
 
+// seedCallerGesture records a swipe_events row attributed to the acting user,
+// which is what /undo reverses. Fixtures that insert a claimed task row
+// directly skip the gesture that would have produced it in production, and
+// undo refuses when the caller has nothing of their own to reverse.
+func seedCallerGesture(t *testing.T, database *sql.DB, taskID, action string) {
+	t.Helper()
+	if _, err := database.Exec(
+		`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, 0)`,
+		taskID, action,
+	); err != nil {
+		t.Fatalf("seed %s gesture on %s: %v", action, taskID, err)
+	}
+}
+
 // TestHandleUndo_CleansUpPendingApprovalConversation is the regression
 // for the swipe-toast UX path: Cards user dismissed/claimed the
 // task, agent ran and left an artifact awaiting approval, user hits Cmd-Z (or
@@ -225,6 +240,7 @@ func assertPendingApprovalCleanedUp(
 func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	seedCallerGesture(t, s.db, taskID, "claim")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
 	if rec.Code != http.StatusOK {
@@ -279,7 +295,7 @@ func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DismissCleansUpPendingApprovalConversation is the third
+// TestTaskPatch_DismissCleansUpPendingApprovalConversation is the third
 // entry point: user swipes left to dismiss a delegated card whose
 // agent already produced a review awaiting approval. Today this
 // orphans the review and leaves it hanging unresolved against a
@@ -290,12 +306,12 @@ func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 // requeue paths so a future agent reading prior memory can
 // distinguish "the human shelved this verdict but kept the entity
 // on the docket" from "the human walked away from this entity".
-func TestHandleSwipe_DismissCleansUpPendingApprovalConversation(t *testing.T) {
+func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "dismiss", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "dismissed", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -304,7 +320,7 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 		"dismissed", "dismissed the task entirely")
 }
 
-// TestHandleSwipe_CompleteCleansUpPendingApprovalConversation is the fourth
+// TestTaskPatch_CompleteCleansUpPendingApprovalConversation is the fourth
 // entry point: the Board's drag-AgentCard-to-Done gesture for a conversation
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
@@ -316,12 +332,12 @@ func TestHandleSwipe_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 // Future agents reading memory should be able to tell "the human
 // resolved this themselves without applying my prepared review" from
 // "the human walked away from the entity entirely."
-func TestHandleSwipe_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
+func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "complete", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "done", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -330,8 +346,8 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 		"done", "marked the task complete without submitting")
 }
 
-// TestHandleSwipe_ClaimCleansUpPendingApprovalConversation guards the race the PR #77
-// review flagged: Board's drag-Agent-to-You issues /swipe claim, but the
+// TestTaskClaim_CleansUpPendingApprovalConversation guards the race the PR #77
+// review flagged: Board's drag-Agent-to-You issues /claim, but the
 // frontend's conversations map can be transiently empty during a fetchTasks
 // refresh — so any frontend gating on a stale conversation-status snapshot
 // would silently skip the cleanup, stranding the prepared review and leaving an
@@ -342,12 +358,12 @@ func TestHandleSwipe_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 // no-op for tasks without one). The claim-flavored marker carries its own
 // recalibration signal — "human took over manually" — distinct from
 // requeue/dismiss/complete.
-func TestHandleSwipe_ClaimCleansUpPendingApprovalConversation(t *testing.T) {
+func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
 	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -371,12 +387,12 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalConversation(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
+// TestTaskClaim_WithoutPendingApprovalIsNoOp pins the
 // idempotency contract: teardownTaskArtifacts must be a no-op
 // when the task has no unresolved artifact, so wiring the teardown
 // into the claim path doesn't disturb the queue → claim flow used by
 // Cards.tsx and the existing Board queue → you drag.
-func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
+func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
 	// Plain queued task with no agent conversation. Mirrors what claim from
@@ -394,8 +410,8 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("seed FK chain: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000002/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000002/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -417,13 +433,13 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover pins the swipe-claim
+// TestTaskClaim_AgainstBotClaimedIsTakeover pins the swipe-claim
 // race-safe handler: when the task is bot-claimed, the handler must
 // route through TakeoverClaimFromAgent's optimistic guard and
 // produce a clean takeover (bot claim → user claim, atomic). This
 // pins the legitimate takeover branch — the steal-from-bot is
 // allowed; what's not allowed is stealing from another user.
-func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
+func TestTaskClaim_AgainstBotClaimedIsTakeover(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
@@ -447,8 +463,8 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 		t.Fatalf("seed task with bot claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000001/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000001/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -467,7 +483,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the
+// TestTaskClaim_RefusedLeavesNoAuditRow pins the
 // audit contract: swipe_events records state CHANGES, not gesture
 // ATTEMPTS. A claim swipe that's refused (different user owns the
 // task) returns 409 with no audit row, no status flip, no snooze
@@ -475,7 +491,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 // top mutates state for refused gestures" — the post-restructure
 // handler runs claim mutation first and only records the audit
 // after accept.
-func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
+func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004cc"
@@ -507,8 +523,8 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -540,11 +556,11 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateRefusedLeavesNoAuditRow is the delegate
+// TestTaskDelegate_RefusedLeavesNoAuditRow is the delegate
 // half of the audit-contract guarantee. Pre-condition: task is
 // user-claimed by ANOTHER user (the only delegate refuse path).
 // Post: 409, no swipe_events, no state change.
-func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
+func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
@@ -577,8 +593,8 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
+		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -607,7 +623,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRefusedOnTerminalTask pins the handler-level
+// TestTaskClaim_RefusedOnTerminalTask pins the handler-level
 // guard for the same-user-idempotent fall-through path. The data-
 // layer helpers refuse claim transitions on done/dismissed rows,
 // but the handler's same-user check is a no-op early-return that
@@ -617,9 +633,9 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 // audit row.
 //
 // Seeds a done task already claimed by the local user (the sticky-
-// past-close audit state), fires /swipe claim, asserts 409 +
+// past-close audit state), fires /claim, asserts 409 +
 // status preserved + no swipe_events row written.
-func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
+func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 	for _, terminalStatus := range []string{"done", "dismissed"} {
 		t.Run(terminalStatus, func(t *testing.T) {
 			s := newTestServer(t)
@@ -648,8 +664,8 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 				t.Fatalf("seed terminal task: %v", err)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/swipe",
-				map[string]any{"action": "claim", "hesitation_ms": 0})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/claim",
+				map[string]any{"hesitation_ms": 0})
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -680,7 +696,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateDifferentiatesRefusalReasons pins the
+// TestTaskDelegate_DifferentiatesRefusalReasons pins the
 // post-fix error-mapping on the swipe-delegate path. HandoffRefused
 // collapses three reasons (missing task / terminal task / different-
 // user claim); the handler pre-loads to disambiguate so the
@@ -690,11 +706,11 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 //   - terminal task → 409 "task is closed; delegate transitions
 //     aren't allowed past close"
 //   - different-user claim → 409 "task is claimed by another user"
-func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
+func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 	t.Run("missing_task_404", func(t *testing.T) {
 		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
@@ -723,8 +739,8 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		); err != nil {
 			t.Fatalf("seed terminal task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -763,8 +779,8 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		); err != nil {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -774,14 +790,14 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 	})
 }
 
-// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the
+// TestTaskDelegate_RefusedWhenBotDisabled pins the
 // acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
 // at swipe time." A team admin can toggle the bot off via SetEnabled
-// — subsequent /swipe delegate gestures must 409, with no claim
+// — subsequent /delegate gestures must 409, with no claim
 // stamp, no spawn, no audit row. Local-mode N=1 doesn't normally
 // flip this off but the data-layer enforcement is what multi-tenant
 // will need.
-func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
+func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
 	// Flip the bot OFF on the local team.
 	if _, err := s.db.Exec(
@@ -812,8 +828,8 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/delegate",
+		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
@@ -842,23 +858,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 }
 
-// TestHandleSnooze_404OnMissingTask pins missing-task parity with
-// /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
-// trip the swipe_events→tasks FK constraint inside SnoozeTask and
-// surface the SQLite error string as 500. The GetTask pre-check
-// catches the common case so legitimate 404 callers don't have to
-// parse FK error strings to tell "doesn't exist" from "real server
-// error."
-func TestHandleSnooze_404OnMissingTask(t *testing.T) {
-	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/snooze",
-		map[string]any{"until": "1h", "hesitation_ms": 0})
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestHandleSnooze_RefusesOnClaimedTask pins the
+// TestTaskPatchSnooze_RefusesOnClaimedTask pins the
 // "snoozed ↔ unclaimed" invariant from the snooze side: the
 // SnoozeTask store-level atomic UPDATE refuses on a claimed task,
 // the handler maps the refusal to 409, and no state mutates (status
@@ -868,7 +868,7 @@ func TestHandleSnooze_404OnMissingTask(t *testing.T) {
 // This is the deliberate trade we made to avoid the snoozed+claimed
 // incoherent state: users wanting to defer work on a claimed task
 // must explicitly requeue first.
-func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
+func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
@@ -892,8 +892,8 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000010/snooze",
-		map[string]any{"until": "1h", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/00000000-0000-4000-8000-000000000010",
+		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
 	}
@@ -929,7 +929,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the
+// TestTaskDelegate_TransfersOwnUserClaim pins the
 // flow: when the user drags their own claimed task from the You
 // lane to the Agent lane, the FE fires a delegate swipe. The
 // handler must accept the gesture as a legitimate user → bot
@@ -939,7 +939,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 // used a stamp helper that refused ANY non-NULL claimed_by_user_id
 // — HandoffAgentClaim is the post-fix helper that allows same-user
 // transfer while still refusing different-user theft.
-func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
+func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
@@ -973,8 +973,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	// under test and that runs before the spawn. The failed spawn is a
 	// 422 (bad blueprint reference); what we care about is that the
 	// transfer landed (claim flipped to bot) despite the error status.
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/swipe", map[string]any{
-		"action":        "delegate",
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", map[string]any{
 		"hesitation_ms": 0,
 		"blueprint_id":  "no-such-prompt",
 	})
@@ -1009,7 +1008,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409 pins the
+// TestTaskClaim_AgainstOtherUserClaimReturns409 pins the
 // anti-steal guarantee: if a different user already owns the task,
 // the swipe-claim handler must refuse with 409 rather than
 // overwriting the other user's claim. The previous unconditional
@@ -1018,7 +1017,7 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 // At N=1 local mode this can't happen via real user gestures, but
 // the helper-level race-safety is load-bearing for multi-mode and
 // the test pins the contract.
-func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
+func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	// Synthetic "other user" — distinct from LocalDefaultUserID so
@@ -1056,8 +1055,8 @@ func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
 		t.Fatalf("seed task with other-user claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1088,6 +1087,43 @@ func TestHandleUndo_404OnMissingTask(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/undo", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleUndo_RefusesWithNothingOfTheCallersToReverse closes the
+// force-reset hole: /undo used to write an 'undo' row and full-reset ANY task
+// the caller could address, whether or not they had ever touched it. It now
+// reverses the caller's own last gesture and refuses when there isn't one —
+// including a second undo, whose target was already reversed. The deliberate
+// version of "put this back in the queue" is /requeue.
+func TestHandleUndo_RefusesWithNothingOfTheCallersToReverse(t *testing.T) {
+	s := newTestServer(t)
+	taskID := seedLifecycleTask(t, s.db, "undo-guard", lifecycleTaskOpts{status: "dismissed"})
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("undo with no gesture = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	// The refusal changes nothing — in particular it does not re-open the
+	// closed task, which is the whole point of the guard.
+	if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
+		t.Errorf("task.status = %q, want dismissed (a refused undo must not re-open a closed task)", got)
+	}
+	if got := readSwipeActions(t, s.db, taskID); len(got) != 0 {
+		t.Errorf("swipe_events actions = %v, want none (a refused undo leaves no trace)", got)
+	}
+
+	// With a gesture of the caller's own to reverse, the same call succeeds —
+	// and a second one is refused, because the first already reversed it.
+	seedCallerGesture(t, s.db, taskID, "dismiss")
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusOK {
+		t.Fatalf("undo with a gesture to reverse = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readTaskStatus(t, s.db, taskID); got != "queued" {
+		t.Errorf("task.status = %q, want queued after the undo", got)
+	}
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("second undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1156,6 +1192,8 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 
+	seedCallerGesture(t, s.db, "00000000-0000-4000-8000-000000000008", "claim")
+
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000008/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -1206,6 +1244,8 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
+
+	seedCallerGesture(t, s.db, "00000000-0000-4000-8000-000000000013", "claim")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/undo", nil)
 	if rec.Code != http.StatusOK {

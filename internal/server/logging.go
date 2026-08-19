@@ -39,6 +39,6 @@ var (
 	settingsOrgLog     = logging.Component("settings/org")
 	setupLog           = logging.Component("setup")
 	stockLog           = logging.Component("stock")
-	swipeLog           = logging.Component("swipe")
+	taskActionLog      = logging.Component("task-action")
 	teamsLog           = logging.Component("teams")
 )

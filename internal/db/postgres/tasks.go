@@ -22,7 +22,7 @@ import (
 // Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
-//     consumer (server tasks handler, swipe handlers) runs here.
+//     consumer (the server's task handlers) runs here.
 //     The scorer reads tasks via the admin-pooled ScoreStore — not
 //     this store.
 //

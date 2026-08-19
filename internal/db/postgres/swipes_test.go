@@ -23,7 +23,7 @@ import (
 func TestSwipeStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID := seedPgOrgAndUserForSwipes(t, h)
@@ -41,7 +41,10 @@ func TestSwipeStore_Postgres(t *testing.T) {
 			t.Helper()
 			return readPgSwipeAudit(t, h.AdminDB, taskID)
 		}
-		return stores.Swipes, orgID, seed, read, readAudit
+		// insertSwipeEvent resolves creator_user_id through
+		// COALESCE(tf.current_user_id(), org owner); on the AdminDB pool
+		// there are no claims, so every row lands on the org owner.
+		return stores.Swipes, orgID, userID, seed, read, readAudit
 	})
 }
 

@@ -683,7 +683,7 @@ export default function Board() {
           if (!matched) {
             // Chain step conversation that isn't the active step: a new step
             // started or a prior one changed. Otherwise seed conversations
-            // so auto-delegation / cross-tab / swipe responses we
+            // so auto-delegation / cross-tab / delegate responses we
             // haven't tracked yet render immediately.
             let isChainStep = false
             for (const steps of Object.values(chainStepConversationsRef.current)) {
@@ -927,10 +927,10 @@ export default function Board() {
       try {
         // A failure (e.g. a teardown that partially failed) must surface — a
         // silent fetchTasks would repaint as if the move succeeded.
-        await apiFetch(`/api/tasks/${taskId}/swipe`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
+          body: JSON.stringify({ status: 'done' }),
         })
         fetchTasks()
       } catch (err) {
@@ -1113,25 +1113,25 @@ export default function Board() {
       // advances). Queue → Done is dismiss.
       if (sourceCol === 'queued') {
         if (targetCol === 'done') {
-          await apiFetch(`/api/tasks/${taskId}/swipe`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+            body: JSON.stringify({ status: 'dismissed' }),
           })
           fetchTasks()
           return
         }
         // Claim first, then advance if needed.
-        await apiFetch(`/api/tasks/${taskId}/swipe`, {
+        await apiFetch(`/api/tasks/${taskId}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+          body: JSON.stringify({}),
         })
         if (targetCol === 'in_progress' || targetCol === 'in_review') {
-          await apiFetch(`/api/tasks/${taskId}/advance`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to: targetCol }),
+            body: JSON.stringify({ status: targetCol }),
           })
         }
         fetchTasks()
@@ -1170,16 +1170,16 @@ export default function Board() {
         return
       }
       if (targetCol === 'in_progress' || targetCol === 'in_review') {
-        await apiFetch(`/api/tasks/${taskId}/advance`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: targetCol }),
+          body: JSON.stringify({ status: targetCol }),
         })
         fetchTasks()
         return
       }
     } catch (err) {
-      // A failed swipe/advance/requeue mutation would otherwise leave the board
+      // A failed status/claim/requeue mutation would otherwise leave the board
       // silently in the wrong state; surface it and let the next fetchTasks
       // reconcile.
       toast.error(httpErrorMessage(err, 'Could not move the task — please try again.'))
@@ -1199,10 +1199,10 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+          body: JSON.stringify({}),
         })
       } catch (err) {
         toast.error(httpErrorMessage(err, 'Could not claim the task.'))
@@ -1241,14 +1241,10 @@ export default function Board() {
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'reassign',
-            hesitation_ms: 0,
-            target_user_id: targetUserID,
-          }),
+          body: JSON.stringify({ target_user_id: targetUserID }),
         })
       } catch (err) {
         toast.error(httpErrorMessage(err, 'Could not reassign the task.'))
@@ -1265,14 +1261,10 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/swipe`, {
+        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/delegate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'delegate',
-            hesitation_ms: 0,
-            blueprint_id: promptId,
-          }),
+          body: JSON.stringify({ blueprint_id: promptId }),
         })
         const conversationID = body.conversation_id
         if (conversationID) {

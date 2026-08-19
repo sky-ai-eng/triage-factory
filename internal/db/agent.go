@@ -312,7 +312,7 @@ type ConversationStore interface {
 	HasActiveAutoConversationForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveIDsForTask returns the IDs of conversations on the task that
-	// haven't reached a terminal state. Used by the swipe handler's
+	// haven't reached a terminal state. Used by the task routes'
 	// disposition cascade to enumerate the conversations to stop.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 

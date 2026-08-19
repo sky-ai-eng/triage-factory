@@ -97,11 +97,11 @@ func TestTaskRoutes_404OnMalformedID(t *testing.T) {
 		body   map[string]any
 	}{
 		{"get", http.MethodGet, "/api/tasks/not-a-uuid", nil},
-		{"swipe", http.MethodPost, "/api/tasks/not-a-uuid/swipe", map[string]any{"action": "claim"}},
-		{"snooze", http.MethodPost, "/api/tasks/not-a-uuid/snooze", map[string]any{"until": "1h"}},
+		{"patch", http.MethodPatch, "/api/tasks/not-a-uuid", map[string]any{"status": "dismissed"}},
+		{"claim", http.MethodPost, "/api/tasks/not-a-uuid/claim", map[string]any{}},
+		{"delegate", http.MethodPost, "/api/tasks/not-a-uuid/delegate", map[string]any{}},
 		{"undo", http.MethodPost, "/api/tasks/not-a-uuid/undo", nil},
 		{"requeue", http.MethodPost, "/api/tasks/not-a-uuid/requeue", nil},
-		{"advance", http.MethodPost, "/api/tasks/not-a-uuid/advance", map[string]any{"to": "in_progress"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -146,28 +146,32 @@ func TestEntityDeckReads_StrictQueryParams(t *testing.T) {
 }
 
 // TestTaskWrites_StrictBodies pins strict decoding on the family's write
-// bodies: an unknown field is a 400 naming the field, and the swipe snooze
-// arm requires the same wake time the standalone route does.
+// bodies: an unknown field is a 400 naming the field, on every route that
+// takes one. The former `action` and `to` discriminators are among the
+// unknown fields now, so a stale client's body is rejected rather than
+// half-understood.
 func TestTaskWrites_StrictBodies(t *testing.T) {
-	t.Run("unknown body field rejected", func(t *testing.T) {
-		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost,
-			"/api/tasks/00000000-0000-4000-8000-0000000000aa/advance",
-			map[string]any{"to": "in_progress", "bogus": 1})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-		assertFirstError(t, rec, "UNKNOWN_FIELD", "bogus")
-	})
-
-	t.Run("swipe snooze requires until", func(t *testing.T) {
-		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost,
-			"/api/tasks/00000000-0000-4000-8000-0000000000aa/swipe",
-			map[string]any{"action": "snooze"})
-		if rec.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-		assertFirstError(t, rec, "MISSING_FIELD", "until")
-	})
+	const taskID = "/api/tasks/00000000-0000-4000-8000-0000000000aa"
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   map[string]any
+		field  string
+	}{
+		{"patch", http.MethodPatch, taskID, map[string]any{"status": "done", "bogus": 1}, "bogus"},
+		{"patch_stale_advance_body", http.MethodPatch, taskID, map[string]any{"to": "in_progress"}, "to"},
+		{"claim", http.MethodPost, taskID + "/claim", map[string]any{"bogus": 1}, "bogus"},
+		{"claim_stale_swipe_body", http.MethodPost, taskID + "/claim", map[string]any{"action": "claim"}, "action"},
+		{"delegate", http.MethodPost, taskID + "/delegate", map[string]any{"bogus": 1}, "bogus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			rec := doJSON(t, s, tc.method, tc.path, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, "UNKNOWN_FIELD", tc.field)
+		})
+	}
 }

@@ -19,7 +19,7 @@ import (
 // the SQLite SwipeStore impl. Each subtest opens a fresh in-memory
 // DB so swipe_events state doesn't leak between assertions.
 func TestSwipeStore_SQLite(t *testing.T) {
-	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
+	dbtest.RunSwipeStoreConformance(t, func(t *testing.T) (db.SwipeStore, string, string, dbtest.TaskSeederForSwipes, dbtest.TaskReaderForSwipes, dbtest.SwipeAuditReader) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
@@ -36,7 +36,10 @@ func TestSwipeStore_SQLite(t *testing.T) {
 			t.Helper()
 			return readSQLiteSwipeAudit(t, conn, taskID)
 		}
-		return stores.Swipes, runmode.LocalDefaultOrgID, seed, read, readAudit
+		// swipe_events.creator_user_id has no explicit write in local
+		// mode — N=1, so the column default is the single local user,
+		// which is exactly the subject a local request carries.
+		return stores.Swipes, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed, read, readAudit
 	})
 }
 

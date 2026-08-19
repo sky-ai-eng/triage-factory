@@ -221,26 +221,47 @@ func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
 	}
 }
 
-// TestViewer_Swipe_Forbidden: a viewer swiping a team task 403s; a member is not
-// 403'd (the gate keys on role, not membership).
-func TestViewer_Swipe_Forbidden(t *testing.T) {
+// TestViewer_TaskPatch_Forbidden: a viewer dismissing a team task 403s; a
+// member is not 403'd (the gate keys on role, not membership).
+func TestViewer_TaskPatch_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	taskID := r.seedTask(t)
-	body := map[string]any{"action": "dismiss"}
+	body := map[string]any{"status": "dismissed"}
 
 	rec := httptest.NewRecorder()
-	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.viewer, body)
+	req := r.req(http.MethodPatch, "/api/tasks/"+taskID, r.viewer, body)
 	req.SetPathValue("id", taskID)
-	r.s.handleSwipe(rec, req)
-	assertViewOnly403(t, rec, "viewer swipe dismiss")
+	r.s.handleTaskPatch(rec, req)
+	assertViewOnly403(t, rec, "viewer dismiss")
 
 	// Member is not blocked by the role gate.
 	rec = httptest.NewRecorder()
-	req = r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.member, body)
+	req = r.req(http.MethodPatch, "/api/tasks/"+taskID, r.member, body)
 	req.SetPathValue("id", taskID)
-	r.s.handleSwipe(rec, req)
+	r.s.handleTaskPatch(rec, req)
 	if rec.Code == http.StatusForbidden {
-		t.Fatalf("member swipe dismiss: got 403 (role gate must allow members); body=%s", rec.Body.String())
+		t.Fatalf("member dismiss: got 403 (role gate must allow members); body=%s", rec.Body.String())
+	}
+}
+
+// TestViewer_TaskClaim_Forbidden: the same gate on the claim verb, which
+// reaches the store through a different path than the field write.
+func TestViewer_TaskClaim_Forbidden(t *testing.T) {
+	r := newViewerRig(t)
+	taskID := r.seedTask(t)
+
+	rec := httptest.NewRecorder()
+	req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.viewer, map[string]any{})
+	req.SetPathValue("id", taskID)
+	r.s.handleTaskClaim(rec, req)
+	assertViewOnly403(t, rec, "viewer claim")
+
+	rec = httptest.NewRecorder()
+	req = r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, map[string]any{})
+	req.SetPathValue("id", taskID)
+	r.s.handleTaskClaim(rec, req)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("member claim: got 403 (role gate must allow members); body=%s", rec.Body.String())
 	}
 }
 

@@ -268,7 +268,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Alignment with swipe-delegate: the user's gesture is
+	// Alignment with the task delegate route: the user's gesture is
 	// commitment regardless of run outcome. Stamp the agent claim
 	// BEFORE attempting the spawn so a failed Delegate leaves the
 	// task in the bot's lane (with no run, surfacing as a "delegate
@@ -281,8 +281,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// execution axis. They're orthogonal; a failed run doesn't
 	// invalidate the assignment.
 	// Re-check team_agents.enabled at gesture
-	// time. Factory drag-to-bot is the same semantic as swipe-up
-	// "delegate to bot" — both refuse with 409 when the bot is off for
+	// time. Factory drag-to-bot is the same semantic as the task
+	// delegate route — both refuse with 409 when the bot is off for
 	// this team. Gate on claimTeamID — the team HandoffAgentClaim will
 	// consolidate the task onto — not the org default and not the
 	// pre-handoff task.TeamID (which for a found multi-team task can be a
@@ -349,8 +349,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// real regardless of whether the run materializes. The earlier
 	// "after-spawn-success only" placement meant partial-success
 	// gestures (claim stamped, spawn failed) had no audit trail —
-	// inconsistent with swipe-delegate (which audits at the top of
-	// the swipe handler) and with the semantic that
+	// inconsistent with the task delegate route (which audits as soon
+	// as the claim stamp accepts) and with the semantic that
 	// claim is commitment regardless of run outcome. RecordSwipe
 	// failure stays non-fatal because the claim col + WS broadcast
 	// already captured the state-level effect; the audit is best-
@@ -382,7 +382,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// recorded — the commitment is real, the run just didn't fire. That
 		// partial state is reported as the error it is (422 for a bad
 		// blueprint reference, 500 for a spawn/DB fault — the same mapping
-		// the swipe delegate arm uses), never a 200. Reason SPAWN_FAILED is
+		// the task delegate route uses), never a 200. Reason SPAWN_FAILED is
 		// what tells the FE the claim survived, so it refetches and renders
 		// the "delegate didn't fire, retry" affordance on the bot-claimed
 		// card instead of the plain failure toast.

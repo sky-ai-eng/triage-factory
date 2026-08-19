@@ -12,9 +12,9 @@ import (
 // (swipe_events) plus the task-status writes that follow each swipe.
 // Logically split from TaskStore because the swipe surface has a
 // distinct shape: it's append-only audit + a status transition, and
-// the only consumer is the Board's swipe-card handler. Keeping the
-// surface narrow means the handler imports a 4-method interface
-// instead of the full task lifecycle.
+// its consumers are the task-action routes. Keeping the surface
+// narrow means those handlers import this instead of the full task
+// lifecycle.
 //
 // Atomicity: every mutating method writes the swipe_events row AND
 // updates the corresponding task in a single transaction — a partial
@@ -25,7 +25,7 @@ type SwipeStore interface {
 	// task's lifecycle (status + snooze_until) in one tx. Action
 	// → status mapping: "dismiss" → dismissed, "complete" → done,
 	// "snooze" → snoozed (with snoozeUntil as the wake time);
-	// "claim" and "delegate" map to status='queued'
+	// "claim", "delegate" and "reassign" map to status='queued'
 	// — those are responsibility-axis actions and don't move
 	// lifecycle, but the no-op coercion is kept for defensive
 	// idempotency. Unknown action defaults to 'queued' so a
@@ -68,11 +68,28 @@ type SwipeStore interface {
 	// to 404 instead of a silent 200 on a bogus id).
 	RequeueTask(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 
-	// UndoLastSwipe writes an 'undo' swipe_events row + flips the
-	// task back to 'queued' with snooze_until cleared. The Board's
-	// undo button maps to this; the audit row makes the undo itself
-	// visible in the swipe-history view.
-	UndoLastSwipe(ctx context.Context, orgID string, taskID string) error
+	// ClearSnooze wakes a snoozed task early: status 'snoozed' →
+	// 'queued' with snooze_until cleared, and no swipe_events row —
+	// waking is a field write, not a card gesture, the same way
+	// RequeueTask is. Guarded on the current status: a clear against a
+	// task that isn't snoozed returns ok=false rather than dragging an
+	// in_progress or closed row back into the queue. Handler maps
+	// ok=false to 409.
+	ClearSnooze(ctx context.Context, orgID string, taskID string) (ok bool, err error)
+
+	// UndoLastSwipe reverses the caller's own last gesture on a task:
+	// it writes an 'undo' swipe_events row + flips the task back to
+	// 'queued' with snooze_until cleared. The undo toast maps to this;
+	// the audit row makes the undo itself visible in the swipe-history
+	// view.
+	//
+	// It is scoped to userID's own audit rows and refuses (ok=false,
+	// nothing written) when the caller's most recent row on this task
+	// is absent or is itself an 'undo'. Without that guard the route is
+	// a force-reset for any task the caller can see, and a second undo
+	// re-reverses a gesture that was already reversed. "Put this back
+	// in the queue" as a deliberate state change is RequeueTask.
+	UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (ok bool, err error)
 }
 
 // ErrSnoozeUntilRequired is returned by RecordSwipe when action is

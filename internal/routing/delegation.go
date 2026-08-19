@@ -93,7 +93,7 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 		// Bot-disabled-team gate. If the task's team has the bot
 		// turned off in team_agents.enabled, the auto-trigger is a no-op
 		// — the task is already in the team queue (created by HandleEvent
-		// upstream); a human will swipe-delegate later if they want a
+		// upstream); a human will delegate it later if they want a
 		// conversation. Skip silently rather than firing on a disabled team.
 		// Requires team_agents too; nil (older test wiring) degrades to "proceed".
 		if r.teamAgents != nil {
