@@ -62,9 +62,9 @@ const BinEnvVar = "TRIAGE_FACTORY_BIN"
 // only for pushes that landed, and refused pushes leave an audit failure row.
 // The hook fires BEFORE the transfer and cannot know the outcome; letting it
 // record under a proxy would mint branch artifacts for pushes GitHub refused.
-// Unset (local mode — no proxy exists), the hook is the only capture point
-// AND the only policy gate: it records at pre-push time, accepting that it
-// cannot observe the outcome, and refuses a protected-ref push itself.
+// Unset (a run with no git proxy), the hook is the fallback capture point AND
+// policy gate: it records at pre-push time, accepting that it cannot observe
+// the outcome, and refuses a protected-ref push itself.
 const PushCaptureEnvVar = "TF_GIT_PUSH_CAPTURE"
 
 // PushCaptureProxy is the PushCaptureEnvVar value that stands the pre-push
@@ -75,9 +75,9 @@ const PushCaptureProxy = "proxy"
 var readmeContent []byte
 
 // prePushHook is the embedded pre-push hook (A·3, TFAC-460) Ensure writes
-// into the hooks dir. Two passes: it enforces the team's base-branch push
-// policy via `triagefactory hook check-push` (local mode's enforcement point
-// — a safety guard against a mistaken agent, aborting only on that verb's
+// into the hooks dir. Two passes: when no proxy owns capture, it enforces the
+// team's base-branch push policy via `triagefactory hook check-push` (a safety
+// guard against a mistaken agent, aborting only on that verb's
 // dedicated "refused by policy" status, so every operational failure allows
 // the push), then records each pushed branch as a durable artifact via
 // `triagefactory hook record-push`. Recording stays best-effort and can never

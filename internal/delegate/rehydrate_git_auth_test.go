@@ -129,11 +129,10 @@ func TestGitSeedFor_ProfileReadFailureDoesNotStrandTheRebuild(t *testing.T) {
 	}
 }
 
-// TestGitSeedFor_LocalCarriesCloneURLAndNoCredential pins the local-mode half of
-// the contract: ambient git credentials are local's design, so there is no
-// sandbox and no injected credential — but the clone URL still rides along, so a
-// local rehydrate whose bare is gone can seed one instead of erroring.
-func TestGitSeedFor_LocalCarriesCloneURLAndNoCredential(t *testing.T) {
+// TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential pins the fixture
+// fallback: without a local channel the clone URL still rides along, but no
+// credential is invented. Production dispatch starts the managed channel first.
+func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 	const cloneURL = "https://github.com/acme/widgets.git"
 	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}}, nil, nil, "")
 
@@ -143,7 +142,7 @@ func TestGitSeedFor_LocalCarriesCloneURLAndNoCredential(t *testing.T) {
 		t.Errorf("seed clone URL = %q, want %q", seed.cloneURL, cloneURL)
 	}
 	if entries := seed.auth.GitConfigEntries(); len(entries) != 0 {
-		t.Errorf("local seed injected git config %v; local mode must run on the operator's own credentials", entries)
+		t.Errorf("unwired local seed injected git config %v; no channel means no invented auth", entries)
 	}
 }
 

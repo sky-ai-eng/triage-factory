@@ -675,18 +675,18 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 		TokenSource: func(_ context.Context, owner, repo string) (gitproxy.Token, error) {
 			bundle := r.currentBundle()
 			if bundle == nil {
-				return gitproxy.Token{}, fmt.Errorf("%w: no current bundle", agentproc.ErrNoSandboxGitCredentials)
+				return gitproxy.Token{}, fmt.Errorf("%w: no current bundle", agentproc.ErrNoGitCredentials)
 			}
 			token, expiresAt, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
 			if source == credbundle.RepoTokenNone {
-				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s", agentproc.ErrNoSandboxGitCredentials, owner, repo)
+				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s", agentproc.ErrNoGitCredentials, owner, repo)
 			}
 			return gitproxy.Token{Value: token, ExpiresAt: expiresAt}, nil
 		},
 		ProbeCredentials: func(_ context.Context) error {
 			bundle := r.currentBundle()
 			if bundle == nil || bundle.GitHub == nil || len(bundle.GitHub.RepoTokens) == 0 {
-				return fmt.Errorf("%w: bundle carries no GitHub credential", agentproc.ErrNoSandboxGitCredentials)
+				return fmt.Errorf("%w: bundle carries no GitHub credential", agentproc.ErrNoGitCredentials)
 			}
 			return nil
 		},

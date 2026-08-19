@@ -1,29 +1,30 @@
 // Package pushpolicy owns one definition of "which refs may a delegated agent
-// not push, and when may the team's policy lift that" — shared by the two
-// places the rule is enforced.
+// not push, and when may the team's policy lift that" — shared by the managed
+// proxy gate and the no-proxy hook fallback.
 //
-//   - Multi mode: the per-run git proxy's ref gate (internal/delegate builds
-//     the gitproxy.Decision this package's protected set shapes).
-//   - Local mode: the TF-controlled pre-push hook (internal/githooks, via
-//     `triagefactory hook check-push`).
+//   - Managed local and multi Git: the per-run git proxy's ref gate
+//     (internal/delegate builds the gitproxy.Decision this package's protected
+//     set shapes).
+//   - No-proxy fallback: the TF-controlled pre-push hook (internal/githooks,
+//     via `triagefactory hook check-push`).
 //
 // The rule lives here rather than in either enforcement point because two
 // copies of it is how they drift.
 //
 // This is a SAFETY GUARD against a mistaken agent, not a security control
 // against a hostile one. Local mode is not a security boundary and cannot be
-// made one: the agent runs as the operator with unrestricted bash, so the
-// pre-push hook is one `git push --no-verify` (or one rewritten remote) away
-// from bypass, and nothing in this package defends against an agent that tries.
+// made one: the agent runs as the operator with unrestricted bash, so it can
+// discard its process-scoped proxy routing (or skip the fallback hook), and
+// nothing in this package defends against an agent that tries.
 // What it does defend against is the failure mode that actually happens — an
 // agent that never considered the rule and ran the naive command.
 //
 // Error posture is the caller's to choose, so every function returns its
-// errors rather than picking a default. The multi-mode gate fails CLOSED (an
+// errors rather than picking a default. The proxy gate fails CLOSED (an
 // unresolvable protected set denies the push — being unable to tell whether
 // the live branch IS the base branch is exactly when a push must not go
-// through); the local-mode hook fails OPEN (a guard that blocks pushes on a
-// dead database turns a local convenience into a broken tool).
+// through); the fallback hook fails OPEN (a guard that blocks pushes on a dead
+// database turns a local convenience into a broken tool).
 package pushpolicy
 
 import (

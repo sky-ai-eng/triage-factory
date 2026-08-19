@@ -1137,7 +1137,7 @@ func TestStartProxiesForSandbox_GitNilSkipsGitProxy(t *testing.T) {
 // TestStartProxiesForSandbox_GitNoCredentialsTypedError pins the
 // ErrUnsupportedSandboxCredentials parity for git: a run whose
 // TokenSource reports no credential fails fast with the typed
-// ErrNoSandboxGitCredentials (so the caller renders an admin message),
+// ErrNoGitCredentials (so the caller renders an admin message),
 // and the bundle is nil so the deferred Shutdown is a safe no-op — the
 // already-started LLM proxy having been torn down on the way out.
 func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
@@ -1150,14 +1150,14 @@ func TestStartProxiesForSandbox_GitNoCredentialsTypedError(t *testing.T) {
 	// The no-credentials check now lives in ProbeCredentials (the run-start
 	// probe), not the per-repo TokenSource.
 	probe := func(ctx context.Context) error {
-		return fmt.Errorf("resolver said: %w", ErrNoSandboxGitCredentials)
+		return fmt.Errorf("resolver said: %w", ErrNoGitCredentials)
 	}
 	bundle, env, err := startProxiesForSandbox(context.Background(), "127.0.0.1", map[string]string{
 		"ANTHROPIC_API_KEY":  "k",
 		"ANTHROPIC_BASE_URL": upstream.URL,
 	}, true, &GitProxyConfig{TokenSource: src, ProbeCredentials: probe}, nil, nil)
-	if !errors.Is(err, ErrNoSandboxGitCredentials) {
-		t.Fatalf("err = %v, want ErrNoSandboxGitCredentials", err)
+	if !errors.Is(err, ErrNoGitCredentials) {
+		t.Fatalf("err = %v, want ErrNoGitCredentials", err)
 	}
 	if bundle != nil {
 		t.Errorf("bundle = %v, want nil on git failure (caller's defer Shutdown must no-op)", bundle)

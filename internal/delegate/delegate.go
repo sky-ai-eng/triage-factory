@@ -98,6 +98,11 @@ type runConfig struct {
 	// (PrebuiltNetwork/PrebuiltProxyEnv) and the agenthost (ProxyCredentials);
 	// the dispatcher owns its teardown (after runAgent returns).
 	sidecar *runSidecar
+
+	// localGit is the local-mode per-engagement Git credential proxy. It starts
+	// before workspace setup and is owned by the dispatcher, which keeps it live
+	// through the agent invocation and closes it afterward.
+	localGit *localGitChannel
 }
 
 // ErrTaskBusy is returned by Delegate on the event path when the fenced
@@ -478,9 +483,9 @@ func cloneHostBase(cloneURL string) string {
 // On the executor path (sidecar non-nil) the GetPR client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
-// orchestrator holds no GitHub credential for either. Elsewhere (all/local)
-// ghClient is the resolver-built client and the clone injects a real token.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar) (runConfig, error) {
+// orchestrator holds no GitHub credential for either. Local reads the PR through
+// the resolver-built client and routes the clone through its loopback proxy.
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
@@ -545,7 +550,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// pr.SSHURL is also empty there, and we leave headCloneURL = ""
 	// so CreateForPR's hasHeadRepo=false branch fires correctly.
 	upstreamCloneURL, headCloneURL := pr.BaseCloneURL, pr.CloneURL
-	if s.useSSHCloneProtocol(ctx, orgID, conversationID) {
+	if localGit == nil && s.useSSHCloneProtocol(ctx, orgID, conversationID) {
 		if pr.BaseSSHURL == "" {
 			return runConfig{}, fmt.Errorf("PR #%d on %s/%s: SSH clone protocol selected but GitHub did not return base.repo.ssh_url; switch to HTTPS in Settings or check your GHE config", prNumber, owner, repo)
 		}
@@ -562,18 +567,18 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	}
 
 	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseCloning)
-	// Resolve the host-side clone credential. In multi mode the clone routes
-	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
+	// Resolve the host-side clone credential. In both modes the clone routes
+	// through a git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the
-	// per-run placeholder, so the real App token stays in the sidecar. The
+	// per-run placeholder, so the real credential stays in the proxy. The
 	// insteadOf upstream is the clone URL's scheme+host (matching the sandbox
-	// agent's own git-proxy pairs, which use the org git base). Local keeps
-	// its existing path — the operator's SSH key or anonymous HTTPS, no
-	// injected credential (the former in-process token mint is gone with the
-	// fused single-process shape).
+	// agent's own git-proxy pairs, which use the org git base). Local uses its
+	// loopback proxy; multi uses the credential sidecar's proxy.
 	var cloneAuth worktree.CloneAuth
 	if sidecar != nil {
 		cloneAuth = worktree.CloneAuthViaGitProxy(sidecar.res.GitProxyURL, cloneHostBase(upstreamCloneURL), sidecar.res.GitProxyToken)
+	} else if localGit != nil {
+		cloneAuth = localGit.cloneAuth(upstreamCloneURL)
 	}
 	// rootKey (the blueprint run id), not this step's conversation id, keys the
 	// worktree dir + its per-run push config — the PR worktree IS the shared

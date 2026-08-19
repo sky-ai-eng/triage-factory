@@ -201,8 +201,8 @@ func prCloneURLs(originURL string, pr *ghclient.PRView) (upstream, head string) 
 // workspaceCloneAuth resolves the HTTPS credential for the host-side clone of a
 // repo, in the form the run's placement dictates:
 //
-//   - Local mode: no injection. The operator's own git (SSH agent / anonymous
-//     HTTPS) authenticates, byte-for-byte the pre-relocation behavior.
+//   - Local mode: no per-call injection. The parent agent's process-scoped Git
+//     config routes this child command through the local credential proxy.
 //   - Executor sidecar (proxyCreds set): route the clone through the run's git
 //     proxy, presenting only the per-run placeholder. The real installation
 //     token lives solely in the sidecar's bundle-backed proxy and is injected on

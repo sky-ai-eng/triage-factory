@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
@@ -255,6 +256,10 @@ type ResumeOptions struct {
 	// the dispatcher owns its teardown. nil on all/local.
 	sidecar *runSidecar
 
+	// localGit is the local-mode per-engagement Git proxy started before a
+	// cold rehydrate. The dispatcher owns its teardown.
+	localGit *localGitChannel
+
 	// claimID is the engagement driving this resume — its own claims row, not
 	// the one the run was originally claimed under (a resume is a fresh
 	// engagement, and its cost belongs to it). Threaded so teardown can stamp
@@ -381,11 +386,14 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		ConversationID:   conversationID,
 		TeamID:           opts.TeamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-	})
+	}, opts.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
 	ghChannel := opts.sidecar.ghChannel(conversationID)
 	if ghChannel == nil {
 		ghChannel = localGH
+	}
+	if opts.localGit != nil {
+		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
 	baseOpts := agentproc.RunOptions{
@@ -415,6 +423,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		PrebuiltProxyEnv: opts.sidecar.jailEnv(),
 		StartAgentHost:   startAgentHost,
 		GHChannel:        ghChannel,
+		GitConfigPairs:   opts.localGit.configPairs(ghChannel),
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.

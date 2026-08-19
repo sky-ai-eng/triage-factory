@@ -249,6 +249,31 @@ func TestNewDirectCommand_NeverCarriesSandboxMarker(t *testing.T) {
 	}
 }
 
+func TestNewDirectCommand_ComposesLocalGitProxyPairs(t *testing.T) {
+	cmd, err := newDirectCommand(context.Background(), RunOptions{
+		GitUserName:  "TF Bot",
+		GitUserEmail: "bot@example.com",
+		GitConfigPairs: [][2]string{
+			{"url.https://127.0.0.1:4443/.insteadOf", "https://github.com/"},
+			{"http.https://127.0.0.1:4443/.extraHeader", "Authorization: Basic placeholder"},
+		},
+	}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("newDirectCommand: %v", err)
+	}
+	cfg := gitConfigMap(t, cmd.Env)
+	for key, want := range map[string]string{
+		"user.name":                                "TF Bot",
+		"user.email":                               "bot@example.com",
+		"url.https://127.0.0.1:4443/.insteadOf":    "https://github.com/",
+		"http.https://127.0.0.1:4443/.extraHeader": "Authorization: Basic placeholder",
+	} {
+		if got := cfg[key]; got != want {
+			t.Errorf("git config %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 // TestNewDirectCommand_FiltersInheritedJSCJITKey pins the fix for a
 // duplicate-key ambiguity: a pre-existing BUN_JSC_useJIT in the
 // inherited env used to ride into cmd.Env alongside the one

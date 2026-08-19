@@ -67,12 +67,10 @@ func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostu
 // generated-file bots — hence a setting rather than a hard-coded rule.
 //
 // This is a safety guard against a MISTAKEN agent, not a control against a
-// hostile one. In multi mode it is enforced at the per-run git proxy's ref
-// gate; in local mode at the TF-controlled pre-push hook, which the agent runs
-// as the operator and could bypass (`git push --no-verify`, a rewritten
-// remote). A mistake does not attempt bypass — it runs the naive command — so
-// the guard catches the failure mode that actually occurs. Nothing here makes
-// local mode a security boundary.
+// hostile one. The managed Git path enforces it at the per-run git proxy's ref
+// gate in both modes. A local process can deliberately discard its run-scoped
+// routing and use the operator's machine directly; nothing here makes local
+// mode a security boundary.
 const (
 	// BaseBranchPushNever refuses every push to a protected ref.
 	BaseBranchPushNever = "never"
@@ -370,8 +368,8 @@ type TeamSettings struct {
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read
-	// by both enforcement points (the multi-mode git-proxy ref gate and the
-	// local-mode pre-push hook) through internal/pushpolicy. NOT NULL with a
+	// by the per-run git-proxy ref gate (with the pre-push hook as a no-proxy
+	// fallback) through internal/pushpolicy. NOT NULL with a
 	// schema DEFAULT; defaults to DefaultBaseBranchPushPolicy ("never"). The
 	// write path coalesces an empty string to the default so a blank never
 	// persists. Team-grained with no per-prompt override, for the same reason

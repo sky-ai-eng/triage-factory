@@ -522,11 +522,14 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		ConversationID:   conversationID,
 		TeamID:           teamID,
 		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
-	})
+	}, cfg.localGit.handler())
 	defer func() { _ = localGHCloser.Close() }()
 	ghChannel := cfg.sidecar.ghChannel(conversationID)
 	if ghChannel == nil {
 		ghChannel = localGH
+	}
+	if cfg.localGit != nil {
+		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
@@ -578,8 +581,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		MemorySourcePath: cfg.memorySourcePath,
 		// Org commit identity (TFAC-452): empty when none resolved → ambient git
 		// config inherited (today's behavior).
-		GitUserName:  commitIdentity.Name,
-		GitUserEmail: commitIdentity.Email,
+		GitUserName:    commitIdentity.Name,
+		GitUserEmail:   commitIdentity.Email,
+		GitConfigPairs: cfg.localGit.configPairs(ghChannel),
 	}
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 

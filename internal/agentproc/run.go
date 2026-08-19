@@ -110,6 +110,12 @@ type RunOptions struct {
 	GitUserName  string
 	GitUserEmail string
 
+	// GitConfigPairs are additional process-scoped git settings for the direct
+	// path. Local delegated runs use them to route GitHub remotes through their
+	// per-engagement credential proxy. The sandbox path carries its equivalent
+	// in PrebuiltProxyEnv.
+	GitConfigPairs [][2]string
+
 	// TraceID is stamped onto every emitted message's ConversationID field.
 	// Storage-neutral: delegate uses the conversation id, the curator
 	// uses its own message-group id.
@@ -959,6 +965,7 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// identity → IdentityConfigPairs returns nil → block carries hooks alone
 	// (unchanged behavior). TFAC-452.
 	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+	identityPairs = append(identityPairs, opts.GitConfigPairs...)
 	// Engine runtime tuning rides ExtraEnv's lane. Strip any inherited
 	// jscJITEnvKey from the parent env first rather than relying on
 	// duplicate-key precedence — that resolution order is

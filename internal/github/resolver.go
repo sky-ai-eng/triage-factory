@@ -99,7 +99,7 @@ type RepoIdentityResolver interface {
 // ScopedResolver is the optional extension, implemented by the production
 // resolver, that mints a per-repo down-scoped credential and probes overall
 // credential presence. Callers that need a least-privilege token narrowed to
-// one repo (the multi-mode git proxy's TokenSource) type-assert for it; an
+// one repo (the managed Git proxy's TokenSource) type-assert for it; an
 // implementation that doesn't satisfy it (a test fake) leaves the caller to
 // disable the per-repo path. Kept off the base Resolver so the many existing
 // Resolver fakes don't have to grow methods they never exercise.
@@ -122,6 +122,19 @@ type ScopedResolver interface {
 	// token — the run-start probe that decides whether a run gets a git proxy
 	// at all (a Jira-only org with no GitHub credential gets none).
 	HasAnyCredential(ctx context.Context, orgID string) (bool, error)
+}
+
+// TokenForManagedGit resolves the credential injected by a managed Git proxy.
+// A nil permission subset is intentional: an App token inherits the
+// installation's granted permissions, so a read-only installation can still
+// clone and fetch while GitHub rejects pushes. Repository and ref policy remain
+// the proxy gate's responsibility. PATs are returned unchanged because GitHub
+// cannot narrow them.
+//
+// Both local's live token source and multi's sealed-bundle provisioner use this
+// helper so their App permission request cannot drift.
+func TokenForManagedGit(ctx context.Context, resolver ScopedResolver, orgID, owner, repo string) (githubapp.Token, error) {
+	return resolver.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
 }
 
 // ScopedRepoResolver is the optional extension that resolves a *Client backed
@@ -193,7 +206,7 @@ type Resolver interface {
 	// legacy github_url secret, then the public default. It is the same
 	// resolution ClientFor/TokenFor use internally, exposed for callers that
 	// must route a subprocess at the org's git host rather than make API
-	// calls — the multi-mode sandbox git proxy uses it for its upstream and
+	// calls — the managed Git proxy uses it for its upstream and
 	// insteadOf rewrite, so the proxy forwards to (and the rewrite matches)
 	// the same host the worktree was cloned from. A backend read error
 	// propagates rather than silently defaulting to github.com: a GHES org
@@ -250,7 +263,7 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 }
 
 // The production resolver implements the optional per-repo-scoping extensions
-// the multi-mode git proxy + exec-gh channel type-assert for. Pinned here so a
+// the managed Git proxy + exec-gh channel type-assert for. Pinned here so a
 // dropped method is a compile error rather than a silent runtime fall-through
 // to the unscoped path.
 var (
@@ -781,7 +794,7 @@ func (r *resolver) appForIdentity(ctx context.Context, orgID string, class domai
 }
 
 // BaseURLFor exposes githubBaseFor to callers outside the package that need
-// the org's git host base (the multi-mode sandbox git proxy's upstream).
+// the org's git host base (the managed Git proxy's upstream).
 // Same resolution as ClientFor/TokenFor — org_settings, then the github_url
 // secret, then github.com — so the proxy routes to the host the clone used.
 func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
