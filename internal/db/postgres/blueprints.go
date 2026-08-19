@@ -712,12 +712,11 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 	if _, err := s.admin.ExecContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan, entity_id)
+			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
 		VALUES (
 			$1, $2, NULL,
 			$3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12, now(), $13,
-			(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
+			$8, $9, $10, $11, $12, now(), $13
 		)
 	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
 		// Same one-active-per-task translation as the fenced insert:
@@ -804,12 +803,11 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 		res, err := q.ExecContext(ctx, `
 			INSERT INTO blueprint_runs
 				(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
-				 actor_agent_id, status, worktree_path, started_at, step_plan, entity_id)
+				 actor_agent_id, status, worktree_path, started_at, step_plan)
 			VALUES (
 				$1, $2, NULL,
 				$3, $4, 'event', $5, $6,
-				$7, $8, $9, now(), $10,
-				(SELECT entity_id FROM tasks WHERE id = $4 AND org_id = $2)
+				$7, $8, $9, now(), $10
 			)
 			ON CONFLICT (triggering_event_id, trigger_id) WHERE triggering_event_id IS NOT NULL DO NOTHING
 		`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerID, br.TriggeringEventID, nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, stepPlan)

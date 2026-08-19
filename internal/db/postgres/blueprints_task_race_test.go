@@ -221,8 +221,11 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 
 	var count int
 	if err := h.AdminDB.QueryRow(`
-		SELECT COUNT(*) FROM blueprint_runs
-		WHERE org_id = $1 AND entity_id = $2 AND trigger_type = 'event' AND status = 'running'
+		SELECT COUNT(*)
+		FROM blueprint_runs br
+		JOIN tasks t ON t.org_id = br.org_id AND t.id = br.task_id
+		WHERE br.org_id = $1 AND t.entity_id = $2
+		  AND br.trigger_type = 'event' AND br.status = 'running'
 	`, fx.orgID, fx.entityID).Scan(&count); err != nil {
 		t.Fatalf("count active runs: %v", err)
 	}
