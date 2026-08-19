@@ -583,8 +583,7 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 //     blobs it deferred.
 //
 // Without it either step fails anonymously — "could not read Username", then
-// "could not fetch <sha> from promisor remote". Local mode masks the second
-// hop, because the operator's ambient git credentials answer it.
+// "could not fetch <sha> from promisor remote".
 func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitDelta, cloneURL string, auth CloneAuth) error {
 	if d == nil {
 		return fmt.Errorf("restore: nil git delta")

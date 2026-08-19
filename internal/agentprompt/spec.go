@@ -82,18 +82,16 @@ const (
 
 // Mode names the deployment posture — the "what is actually enforced around
 // me" axis. It is the axis that stops the prompts from asserting things that
-// are false: the two modes check the same base-branch push policy but enforce
-// it at opposite postures (the multi proxy fails closed, the local pre-push
-// hook fails open and is skippable), and only multi scopes a per-run git
-// credential or applies an egress allowlist. An agent that discovers a stated
-// rule is false has reason to doubt the rest — and one told a fail-open check
-// is a boundary will over-trust it.
+// are false. Both modes mediate the managed Git path, but only multi puts the
+// agent in a sandbox with a fail-closed egress allowlist. Local's process-scoped
+// routing is a safety and identity guarantee for ordinary behavior, not a
+// security boundary against an unsandboxed process trying to bypass it.
 type Mode string
 
 const (
 	// ModeLocal is the single-binary, single-user posture: the agent runs
-	// unsandboxed on the operator's own machine under the operator's own git
-	// credential.
+	// unsandboxed on the operator's own machine while managed Git traffic uses
+	// TF's configured identity through a loopback proxy.
 	ModeLocal Mode = "local"
 
 	// ModeMulti is the split control/executor posture: the agent runs in a

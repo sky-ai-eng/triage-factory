@@ -156,14 +156,10 @@ func (p *runProxies) Shutdown(ctx context.Context) error {
 // subprocess.
 var ErrUnsupportedSandboxCredentials = errors.New("agentproc: resolved credentials shape not supported in sandbox mode")
 
-// ErrNoSandboxGitCredentials is returned when a run that needs git
-// egress has no resolvable GitHub credential (no App installation, no
-// PAT). Surfaced as a typed error — mirroring ErrUnsupportedSandboxCredentials
-// — so the caller (delegate) produces a clear admin-facing message
-// rather than letting the agent hit a confusing 502 the first time it
-// pushes from inside the sandbox. The caller building the GitProxy
-// TokenSource wraps the resolver's no-credentials sentinel in this.
-var ErrNoSandboxGitCredentials = errors.New("agentproc: no GitHub credential resolved for sandbox git egress")
+// ErrNoGitCredentials is returned when a run that needs managed Git egress has
+// no resolvable GitHub credential (no App installation and no PAT). The caller
+// surfaces it before clone or push rather than falling back to ambient auth.
+var ErrNoGitCredentials = errors.New("agentproc: no GitHub credential resolved for managed git egress")
 
 // defaultGitUpstream is the git-over-HTTPS host the git proxy forwards
 // to, and the URL prefix the in-sandbox git is rewritten away from. GHES
@@ -178,10 +174,8 @@ const defaultGitUpstream = "https://github.com"
 // for bearer / anthropic, brain-side consumers, and local).
 type sigV4LiveSource func(ctx context.Context) (env map[string]string, expiry time.Time, err error)
 
-// GitProxyConfig is the per-run git-egress wiring the caller (delegate)
-// hands startProxiesForSandbox for a run with a GitHub repo in scope.
-// nil disables the git proxy entirely (prompt-only runs — scorer,
-// classifier — and Jira-only runs that pre-clone nothing).
+// GitProxyConfig is the per-run git-egress wiring the caller hands either the
+// local loopback proxy or the multi-mode sidecar proxy.
 type GitProxyConfig struct {
 	// TokenSource resolves the host-side GitHub credential the proxy injects
 	// on outbound git-over-HTTPS for ONE repo (owner/repo). Built over the
@@ -208,8 +202,8 @@ type GitProxyConfig struct {
 
 	// Authorize, when non-nil, is the per-request live authorization gate
 	// (gitproxy.Config.Authorize): the proxy calls it with the (owner, repo)
-	// the request targets and a !Allowed decision is a 403. In multi mode the
-	// delegate always wires it (repo ∈ the run's tracked + materialized set,
+	// the request targets and a !Allowed decision is a 403. Production delegates
+	// always wire it (repo ∈ the run's tracked + materialized set,
 	// with the per-repo allowed push refs); a nil here is allow-all (test).
 	Authorize func(ctx context.Context, owner, repo string) (gitproxy.Decision, error)
 
@@ -239,11 +233,114 @@ type GitProxyConfig struct {
 
 	// ProbeCredentials, when non-nil, is the run-start credential check: it
 	// resolves whether the org has ANY usable GitHub credential, returning
-	// ErrNoSandboxGitCredentials if not, so a no-credential org surfaces a
+	// ErrNoGitCredentials if not, so a no-credential org surfaces a
 	// clear admin failure at run start rather than a mid-push 502. Replaces
 	// the old eager repo-less TokenSource probe (which no longer type-checks
 	// now that TokenSource is per-repo).
 	ProbeCredentials func(ctx context.Context) error
+}
+
+// GitProxyHandle is one live git credential proxy. It exposes only the
+// non-secret coordinates a caller needs to route git through it; the real
+// credential stays behind TokenSource inside the server.
+type GitProxyHandle struct {
+	srv      *gitproxy.Server
+	url      string
+	token    string
+	upstream string
+}
+
+// StartGitProxy starts a per-run git proxy on bindIP. Local callers bind to
+// loopback with allowNonLoopback=false; sandbox sidecars bind to their veth
+// address and opt in explicitly.
+func StartGitProxy(ctx context.Context, bindIP string, allowNonLoopback bool, git *GitProxyConfig) (*GitProxyHandle, error) {
+	if git == nil || git.TokenSource == nil {
+		return nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
+	}
+	if git.ProbeCredentials != nil {
+		if err := git.ProbeCredentials(ctx); err != nil {
+			return nil, fmt.Errorf("agentproc: resolve git credential: %w", err)
+		}
+	}
+
+	incoming, err := randomHexToken()
+	if err != nil {
+		return nil, err
+	}
+	upstream := git.Upstream
+	if upstream == "" {
+		upstream = defaultGitUpstream
+	}
+	srv, err := gitproxy.New(gitproxy.Config{
+		TokenSource:      git.TokenSource,
+		Upstream:         upstream,
+		AllowNonLoopback: allowNonLoopback,
+		IncomingToken:    incoming,
+		RecordPush:       git.RecordPush,
+		Authorize:        git.Authorize,
+		RecordDenial:     git.RecordDenial,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agentproc: construct git proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(bindIP, "0"))
+	if err != nil {
+		return nil, fmt.Errorf("agentproc: start git proxy on %s: %w", bindIP, err)
+	}
+	return &GitProxyHandle{
+		srv:      srv,
+		url:      "http://" + addr,
+		token:    incoming,
+		upstream: upstream,
+	}, nil
+}
+
+// Coordinates returns the proxy URL and its per-run placeholder token.
+func (h *GitProxyHandle) Coordinates() (url, token string) {
+	if h == nil {
+		return "", ""
+	}
+	return h.url, h.token
+}
+
+// Handler returns the same gated handler served by the standalone listener.
+// A gh injector mounts it behind the shared fake-GHE TLS origin.
+func (h *GitProxyHandle) Handler() http.Handler {
+	if h == nil || h.srv == nil {
+		return nil
+	}
+	return h.srv.Handler()
+}
+
+// GitConfigPairs returns the process-scoped git settings that route GitHub's
+// HTTPS and common SSH-shaped remotes through this proxy. When sharedHost and
+// sharedCAPath are both present, that shared fake-GHE origin is used so gh can
+// infer the repository from git's rewritten remote.
+func (h *GitProxyHandle) GitConfigPairs(sharedHost, sharedCAPath string) [][2]string {
+	if h == nil {
+		return nil
+	}
+	return gitProxyPairs(h.url, h.upstream, h.token, sharedHost, sharedCAPath, false)
+}
+
+// GitConfigPairsWithSSH includes rewrites for GitHub's SCP-like and ssh://
+// remote forms. Local mode uses it because existing worktrees may carry the
+// operator-selected SSH form even though the managed channel speaks HTTPS.
+func (h *GitProxyHandle) GitConfigPairsWithSSH(sharedHost, sharedCAPath string) [][2]string {
+	if h == nil {
+		return nil
+	}
+	return gitProxyPairs(h.url, h.upstream, h.token, sharedHost, sharedCAPath, true)
+}
+
+// Shutdown drains the proxy. Safe on a nil handle.
+func (h *GitProxyHandle) Shutdown(ctx context.Context) error {
+	if h == nil || h.srv == nil {
+		return nil
+	}
+	err := h.srv.Shutdown(ctx)
+	h.srv = nil
+	return err
 }
 
 // RunProxyHandle is an opaque, shutdown-only handle to a run's started
@@ -357,7 +454,7 @@ func StartRunProxies(ctx context.Context, hostVethIP string, resolvedCreds map[s
 // coordinates off RunProxyHandle.LLMEnv instead.
 //
 // ctx scopes the eager git-credential probe (it surfaces a
-// no-credentials condition as ErrNoSandboxGitCredentials before the
+// no-credentials condition as ErrNoGitCredentials before the
 // run proceeds, rather than as a 502 mid-push); it does not bound the
 // proxies' own lifetime, which the caller owns via Shutdown.
 //
@@ -551,66 +648,23 @@ func startProxiesForSandbox(ctx context.Context, hostVethIP string, resolvedCred
 // core.hooksPath.
 //
 // The eager TokenSource probe runs first: it surfaces a no-credentials
-// org as ErrNoSandboxGitCredentials at run start (a clear admin-facing
+// org as ErrNoGitCredentials at run start (a clear admin-facing
 // failure) instead of a confusing 502 the first time the agent pushes.
 // For an App-installation source the minted token is cached, so the
 // proxy's own lazy resolve on first request reuses it at no extra mint;
 // a PAT source pays one extra (cheap) secret-store read at run start.
 func startGitProxyForSandbox(ctx context.Context, hostVethIP string, git *GitProxyConfig) ([][2]string, string, string, *gitproxy.Server, error) {
-	if git.TokenSource == nil {
-		return nil, "", "", nil, errors.New("agentproc: GitProxyConfig.TokenSource is required")
-	}
-
-	// Eager credential probe: surface a no-credentials org as
-	// ErrNoSandboxGitCredentials at run start (a clear admin failure) rather
-	// than a confusing 502 the first time the agent pushes. Per-repo scoped
-	// mints stay lazy — this only confirms SOME credential resolves, not any
-	// specific repo's token. (Replaces the old repo-less TokenSource probe,
-	// which no longer type-checks now that TokenSource is per-repo.)
-	if git.ProbeCredentials != nil {
-		if err := git.ProbeCredentials(ctx); err != nil {
-			// ErrNoSandboxGitCredentials propagates as-is so the run fails with
-			// the typed admin message; any other (transient) resolve error
-			// fails the run too rather than spawning a proxy that can't
-			// authenticate.
-			return nil, "", "", nil, fmt.Errorf("agentproc: resolve git credential for sandbox: %w", err)
-		}
-	}
-
-	incoming, err := randomHexToken()
+	h, err := StartGitProxy(ctx, hostVethIP, true, git)
 	if err != nil {
 		return nil, "", "", nil, err
 	}
-
-	upstream := git.Upstream
-	if upstream == "" {
-		upstream = defaultGitUpstream
-	}
-
-	srv, err := gitproxy.New(gitproxy.Config{
-		TokenSource:      git.TokenSource,
-		Upstream:         upstream,
-		AllowNonLoopback: true,
-		IncomingToken:    incoming,
-		RecordPush:       git.RecordPush,
-		Authorize:        git.Authorize,
-		RecordDenial:     git.RecordDenial,
-	})
-	if err != nil {
-		return nil, "", "", nil, fmt.Errorf("agentproc: construct git proxy: %w", err)
-	}
-	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
-	if err != nil {
-		return nil, "", "", nil, fmt.Errorf("agentproc: start git proxy on %s: %w", hostVethIP, err)
-	}
-
+	proxyURL, incoming := h.Coordinates()
 	// proxyURL + incoming are returned alongside the sandbox git-config pairs so
 	// the orchestrator's own host-side clone can route through this SAME proxy
 	// (CloneAuthViaGitProxy) holding only the placeholder — the real token stays
 	// in the proxy's TokenSource. The host reaches the veth IP too, so one proxy
 	// serves both the in-jail agent and the pre-sandbox clone.
-	proxyURL := "http://" + addr
-	return sandboxGitProxyPairs(proxyURL, upstream, incoming, git.SharedOriginHost, git.SharedOriginCAPath), proxyURL, incoming, srv, nil
+	return h.GitConfigPairs(git.SharedOriginHost, git.SharedOriginCAPath), proxyURL, incoming, h.srv, nil
 }
 
 // startEgressProxyForSandbox mints a per-run secret, starts the gating
@@ -949,6 +1003,10 @@ const gitProxyBasicUser = "x-run"
 // same gitproxy handler, so the ref gate and the base-branch push policy are
 // identical either way.
 func sandboxGitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOriginCAPath string) [][2]string {
+	return gitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOriginCAPath, false)
+}
+
+func gitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, sharedOriginCAPath string, includeSSH bool) [][2]string {
 	// Trailing slash on both the rewritten base and the matched prefix
 	// so "<upstream>/owner/repo" maps cleanly to "<base>/owner/repo".
 	base := strings.TrimRight(proxyURL, "/") + "/"
@@ -962,17 +1020,25 @@ func sandboxGitProxyPairs(proxyURL, upstream, incomingToken, sharedOriginHost, s
 	// not routing it there at all. Both-or-neither, so a half-wired caller
 	// degrades to the proxy's own address rather than to a broken remote.
 	if sharedOriginHost == "" || sharedOriginCAPath == "" {
-		return [][2]string{
-			{"url." + base + ".insteadOf", upstreamPrefix},
-			{"http." + base + ".extraHeader", extraHeader},
-		}
+		return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, "", includeSSH)
 	}
 	base = "https://" + sharedOriginHost + "/"
-	return [][2]string{
-		{"url." + base + ".insteadOf", upstreamPrefix},
-		{"http." + base + ".extraHeader", extraHeader},
-		{"http." + base + ".sslCAInfo", sharedOriginCAPath},
+	return appendGitProxyPairs(nil, base, upstreamPrefix, upstream, extraHeader, sharedOriginCAPath, includeSSH)
+}
+
+func appendGitProxyPairs(pairs [][2]string, base, upstreamPrefix, upstream, extraHeader, caPath string, includeSSH bool) [][2]string {
+	pairs = append(pairs, [2]string{"url." + base + ".insteadOf", upstreamPrefix})
+	if u, err := url.Parse(upstream); includeSSH && err == nil && u.Host != "" {
+		pairs = append(pairs,
+			[2]string{"url." + base + ".insteadOf", "git@" + u.Host + ":"},
+			[2]string{"url." + base + ".insteadOf", "ssh://git@" + u.Host + "/"},
+		)
 	}
+	pairs = append(pairs, [2]string{"http." + base + ".extraHeader", extraHeader})
+	if caPath != "" {
+		pairs = append(pairs, [2]string{"http." + base + ".sslCAInfo", caPath})
+	}
+	return pairs
 }
 
 // encodeGitConfigEnv encodes git config (key, value) pairs into git's

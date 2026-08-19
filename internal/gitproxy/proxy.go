@@ -240,8 +240,8 @@ type Config struct {
 	// client-side hooks but not the network layer — this is multi mode's
 	// authoritative push-outcome observer; the pre-push hook (which fires
 	// BEFORE the transfer and cannot know the outcome) stands down there.
-	// Local mode has no proxy, so its hook-based capture (pre-push timing,
-	// --no-verify gap) is accepted (nil here).
+	// A run with no proxy falls back to hook-based capture (pre-push timing,
+	// --no-verify gap); managed local and multi Git both wire this callback.
 	//
 	// Contract: the proxy never blocks, alters, or fails a push on account of
 	// this callback. It runs after the response is back to the client, under a

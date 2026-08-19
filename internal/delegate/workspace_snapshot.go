@@ -423,18 +423,16 @@ type gitSeed struct {
 // no PR is fetched on a later step or a resume, so there is no per-run URL to
 // inherit.
 //
-// The auth is the run's own git-proxy routing whenever an executor sandbox
-// exists, i.e. exactly the wiring setupGitHub does for the first clone: the
-// orchestrator holds no GitHub token, and the sidecar attaches the real one on
-// the upstream hop. Local mode gets the zero CloneAuth on purpose — the
-// operator's ambient git credentials are its design, and there is no sidecar to
-// route through.
+// The auth is the engagement's own git-proxy routing, matching setupGitHub's
+// first clone. Multi resolves it from the credential sidecar; local resolves it
+// from the loopback channel that holds the configured GitHub identity.
 //
 // Degradations are deliberate and independent: with no profile URL the rebuild
 // still authenticates (the insteadOf falls back to the org's git host base, the
 // same upstream the sidecar's proxy relays to) but cannot seed a missing bare;
-// with no sandbox it seeds and fetches anonymously, which is only ever local.
-func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sidecar *runSidecar) gitSeed {
+// with no engagement proxy (an unwired fixture) it seeds and fetches without
+// injected auth.
+func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sidecar *runSidecar, localChannels ...*localGitChannel) gitSeed {
 	seed := gitSeed{owner: owner, repo: repo}
 	if owner == "" || repo == "" {
 		return seed
@@ -451,6 +449,16 @@ func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sid
 		upstream = s.gitHostBaseFor(ctx, orgID)
 	}
 	seed.auth = sidecar.GitCloneAuth(upstream)
+	if seed.auth == (worktree.CloneAuth{}) && len(localChannels) > 0 && localChannels[0] != nil {
+		// The managed local channel speaks git-over-HTTPS even when the org's
+		// stored clone preference is SSH. Rebuild from the canonical HTTPS form;
+		// the agent's process-scoped rewrites cover any surviving SSH remotes.
+		upstream = s.gitHostBaseFor(ctx, orgID)
+		if upstream != "" {
+			seed.cloneURL = strings.TrimRight(upstream, "/") + "/" + owner + "/" + repo + ".git"
+		}
+		seed.auth = localChannels[0].cloneAuth(upstream)
+	}
 	return seed
 }
 
@@ -649,8 +657,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		// worktree-add checkout triggers on the blobless bare even when the bare
 		// is already here. The second is the one that bites: it needs the
 		// network on every cold rehydrate of a private repo, not just a fresh
-		// host, and local mode masks it because ambient git credentials answer
-		// it there.
+		// host. Each mode therefore supplies its engagement's proxy route.
 		if err := restoreWorkspaceGit(ctx, seed.owner, seed.repo, wtDir, delta, seed.cloneURL, seed.auth); err != nil {
 			return fmt.Errorf("rehydrate: restore git: %w", err)
 		}

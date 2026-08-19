@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -87,6 +88,10 @@ type Config struct {
 	// refuses every gated shape without recording one — see the injector's own
 	// doc for why that is the fail-closed reading rather than an off switch.
 	AuthorizeWrite ghinjector.AuthorizeWrite
+
+	// GitHandler, when non-nil, serves git smart HTTP on the same TLS origin as
+	// the GitHub API. This keeps GH_HOST and git's rewritten remote identical.
+	GitHandler http.Handler
 }
 
 // Channel is a live per-run injector and the coordinates an agent subprocess
@@ -171,6 +176,7 @@ func Start(cfg Config) (*Channel, error) {
 		Observe:        cfg.Observe,
 		ObserveWrite:   cfg.ObserveWrite,
 		AuthorizeWrite: cfg.AuthorizeWrite,
+		GitHandler:     cfg.GitHandler,
 		// Loopback only — no veth, no other host may reach this listener.
 	})
 	if err != nil {

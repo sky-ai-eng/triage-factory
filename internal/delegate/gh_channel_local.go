@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -42,7 +43,7 @@ func (noopChannelCloser) Close() error { return nil }
 // owner is the run's primary repo owner, used to resolve which credential the
 // injector injects. Empty (a Jira run with no repo yet) still resolves the org's
 // account-level credential, which is what a PAT org has anyway.
-func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID, owner string, info agenthost.ConversationInfo) (*agentproc.GHChannelParams, io.Closer) {
+func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID, owner string, info agenthost.ConversationInfo, gitHandlers ...http.Handler) (*agentproc.GHChannelParams, io.Closer) {
 	if runmode.Current() != runmode.ModeLocal {
 		return nil, noopChannelCloser{}
 	}
@@ -82,6 +83,10 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		credential = domain.CredentialGitHubPAT
 	}
 
+	var gitHandler http.Handler
+	if len(gitHandlers) > 0 {
+		gitHandler = gitHandlers[0]
+	}
 	ch, err := ghchannel.Start(ghchannel.Config{
 		ConversationID: conversationID,
 		Upstream:       s.githubAPIUpstreamFor(ctx, orgID),
@@ -130,6 +135,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			}
 			return false
 		},
+		GitHandler: gitHandler,
 	})
 	if err != nil {
 		delegateLog.Warn("start local gh channel failed; the agent continues on the scoped exec verbs", "conversation", conversationID, "error", err)

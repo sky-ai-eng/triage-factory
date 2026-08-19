@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -433,6 +434,19 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		return
 	}
 	defer sidecar.Close()
+	localGit, err := s.startLocalGitChannel(ctx, orgID, *task, agenthost.ConversationInfo{
+		OrgID:            orgID,
+		UserID:           conv.CreatorUserID,
+		ConversationID:   conv.ID,
+		TeamID:           conv.TeamID,
+		IsEventTriggered: conv.TriggerType == domain.TriggerTypeEvent,
+	})
+	if err != nil {
+		s.failEngagement(conv.ID, err)
+		s.handlePreAgentFailure(orgID, br, *conv, err)
+		return
+	}
+	defer func() { _ = localGit.Close() }()
 
 	// Sequence off the plan frozen at mint (br.StepPlan), not the live
 	// blueprint_steps/prompts — an edit to the blueprint mid-flight must not
@@ -478,7 +492,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
 	// shared workspace. A transient setup failure requeues; a persistent one
 	// fails the blueprint.
-	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *conv, gh, sidecar)
+	cfg, err := s.buildStepConfig(ctx, orgID, br, *task, *conv, gh, sidecar, localGit)
 	if err != nil {
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
@@ -491,6 +505,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
 	cfg.sidecar = sidecar
+	cfg.localGit = localGit
 
 	// Increment the step prompt's usage, routed per trigger type.
 	if conv.TriggerType == "manual" {
@@ -811,11 +826,23 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 	defer sidecar.Close()
+	localGit, lgErr := s.startLocalGitChannel(stepCtx, orgID, *task, agenthost.ConversationInfo{
+		OrgID:            orgID,
+		UserID:           userID,
+		ConversationID:   conv.ID,
+		TeamID:           conv.TeamID,
+		IsEventTriggered: false,
+	})
+	if lgErr != nil {
+		handBack(fmt.Errorf("bring up managed local Git channel for resume failed: %w", lgErr))
+		return
+	}
+	defer func() { _ = localGit.Close() }()
 
 	// The SDK path's resume carries its context in the session file rather than
 	// in rows, so it has no claim-time notice to make honest — the provenance
 	// is dropped here rather than threaded on to nothing.
-	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar))
+	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar, localGit))
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -878,6 +905,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		Namespace:         namespace,
 		TeamID:            conv.TeamID,
 		sidecar:           sidecar,
+		localGit:          localGit,
 		claimID:           conv.ClaimID,
 	}, "manual", userID)
 	if stepCtx.Err() != nil {
@@ -1182,7 +1210,11 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 // every later claim it reconstructs the lightweight config from the task and
 // guarantees the shared worktree is on disk (warm reuse, or cold rehydrate from
 // the durable snapshot via ensureWorkspace).
-func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar) (runConfig, error) {
+func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localChannels ...*localGitChannel) (runConfig, error) {
+	var localGit *localGitChannel
+	if len(localChannels) > 0 {
+		localGit = localChannels[0]
+	}
 	if br.WorktreePath == "" {
 		var (
 			cfg runConfig
@@ -1193,7 +1225,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar)
+			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar, localGit)
 		case "jira":
 			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
 		case "slack":
@@ -1236,7 +1268,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
 		// sandbox is already up (dispatchClaimedConversation brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.
-		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar))
+		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit))
 		if err != nil {
 			return runConfig{}, err
 		}

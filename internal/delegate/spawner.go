@@ -1048,10 +1048,11 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.Convers
 // credential the sidecar reports after bring-up reaches this recorder and the
 // denial recorder beside it through a single object.
 //
-// In multi mode this observer is authoritative for push capture — every push
-// transits the proxy (even `git push --no-verify`, which skips client hooks),
-// and the pre-push hook stands down there (githooks.PushCaptureEnvVar) because
-// it fires before the transfer and would record failed pushes as artifacts.
+// On the managed Git path this observer is authoritative for push capture —
+// every ordinary push transits the proxy (even `git push --no-verify`, which
+// skips client hooks), and the pre-push hook stands down there
+// (githooks.PushCaptureEnvVar) because it fires before the transfer and would
+// record failed pushes as artifacts.
 //
 // Best-effort: a non-branch ref or a record failure is dropped (logged), never
 // surfaced. By the time this runs the push has already completed upstream, so
