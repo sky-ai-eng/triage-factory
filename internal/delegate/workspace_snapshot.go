@@ -23,6 +23,7 @@ package delegate
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -638,7 +639,7 @@ func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	if string(magic) == string(zstdMagic) {
+	if bytes.Equal(magic, zstdMagic) {
 		zr, err := zstd.NewReader(br)
 		if err != nil {
 			return nil, "", err
