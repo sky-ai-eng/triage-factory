@@ -325,6 +325,14 @@ type EntityStore interface {
 	// starve every other candidate behind it.
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
+	// RekeyOrMergeSystem follows an external object's changed natural key.
+	// When newSourceID is free, the existing entity is re-keyed in place and
+	// its project classification is cleared for re-evaluation. When that key
+	// already belongs to another entity, that canonically-keyed row survives
+	// and every entity-id referent is moved to it. The operation is atomic.
+	// Returns the surviving entity id and whether a merge occurred.
+	RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (survivorID string, merged bool, err error)
+
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
 

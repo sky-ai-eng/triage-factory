@@ -1380,6 +1380,9 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 	defer span.End()
 
 	emitted := 0
+	confirmedWithoutSearch := 0
+	rekeyed := 0
+	merged := 0
 	for i, e := range candidates {
 		if i >= jiraUnreachableProbeBudget {
 			span.SetAttributes(telemetry.Outcome("partial"))
@@ -1391,17 +1394,39 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 			return emitted
 		}
 
-		_, err := client.GetIssue(ctx, e.SourceID)
+		issue, err := client.GetIssue(ctx, e.SourceID)
 		switch {
 		case err == nil:
+			if issue.Key != "" && issue.Key != e.SourceID {
+				survivorID, wasMerged, rekeyErr := t.entities.RekeyOrMergeSystem(ctx, orgID, e.ID, issue.Key)
+				if rekeyErr != nil {
+					trackerLog.WarnContext(ctx, "repairing moved jira issue key failed; entity stays a confirmation candidate",
+						"old_source_id", e.SourceID, "new_source_id", issue.Key, "entity_id", e.ID, "error", rekeyErr)
+					continue
+				}
+				if wasMerged {
+					merged++
+				} else {
+					rekeyed++
+				}
+				// Deliberately silent in the event stream: Jira changed the
+				// issue's address, not its work state. A plain re-key also clears
+				// project classification in the store, since a cross-project move
+				// invalidates the old classification. We follow the current key
+				// even when its destination project is not configured; entities
+				// are durable and leaving the discovery set is not retirement.
+				trackerLog.InfoContext(ctx, "followed moved jira issue to its current key",
+					"old_source_id", e.SourceID, "new_source_id", issue.Key,
+					"entity_id", e.ID, "survivor_entity_id", survivorID, "merged", wasMerged)
+				continue
+			}
 			// Confirmed present, and yet the refresh didn't return it. The
 			// entity is being skipped every cycle by something other than
 			// the key being unresolvable — an unindexed or archived issue, or one
 			// the credential can no longer see through search. Nothing here
 			// can repair that, but an entity silently frozen is exactly what
 			// this pass exists to stop being invisible.
-			trackerLog.WarnContext(ctx, "jira issue resolves but no search returned it; entity is tracked and not being diffed",
-				"source_id", e.SourceID, "entity_id", e.ID)
+			confirmedWithoutSearch++
 			// Stamp the read. Candidates are selected by how stale this
 			// column is and drawn oldest-first against a per-cycle budget,
 			// so an entity that will confirm present on every future pass
@@ -1422,6 +1447,13 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 			trackerLog.WarnContext(ctx, "jira reachability confirmation failed; entity left tracked",
 				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
 		}
+	}
+	if confirmedWithoutSearch > 0 {
+		trackerLog.WarnContext(ctx, "jira issues resolve but no search returned them; entities remain tracked and undiffed",
+			"count", confirmedWithoutSearch)
+	}
+	if rekeyed+merged > 0 {
+		span.SetAttributes(telemetry.Disposition("issue_keys_repaired"), telemetry.Attempt(rekeyed+merged))
 	}
 	if emitted > 0 {
 		// A disposition rather than a second Count — Count is one key, and the

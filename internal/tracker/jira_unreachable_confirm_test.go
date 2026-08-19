@@ -139,6 +139,78 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	}
 }
 
+func TestRefreshJira_MovedIssueIsRekeyedInPlace(t *testing.T) {
+	srv, probes := jiraUnreachableFixture(t, http.StatusOK,
+		`{"key":"NEW-7","fields":{"summary":"Moved","status":{"name":"In Progress"}}}`)
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	old, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "OLD-7", "issue", "History stays here", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := database.Exec(`UPDATE entities SET last_polled_at=?, classification_rationale='old context', classified_at=? WHERE id=?`, time.Now().Add(-2*jiraUnreachableGrace), time.Now(), old.ID); err != nil {
+		t.Fatalf("prepare entity: %v", err)
+	}
+	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	// NEW is intentionally not configured: durable entities follow Jira even
+	// when a move leaves the discovery set.
+	if _, err := tr.RefreshJira(ctx, client, srv.URL, JiraRules{{Key: "OLD"}}); err != nil {
+		t.Fatalf("RefreshJira: %v", err)
+	}
+	if got := atomic.LoadInt32(probes); got != 1 {
+		t.Fatalf("probes = %d, want 1", got)
+	}
+	if got, _ := stores.Entities.GetBySource(ctx, org, "jira", "OLD-7"); got != nil {
+		t.Fatal("old key still resolves to an entity")
+	}
+	got, err := stores.Entities.GetBySource(ctx, org, "jira", "NEW-7")
+	if err != nil || got == nil {
+		t.Fatalf("new key entity: %v", err)
+	}
+	if got.ID != old.ID || got.Title != "History stays here" {
+		t.Errorf("rekey lost identity/history: got id=%q title=%q", got.ID, got.Title)
+	}
+	if got.ProjectID != nil {
+		t.Errorf("project_id = %v, want cleared for reclassification", *got.ProjectID)
+	}
+	var classifiedAt any
+	if err := database.QueryRow(`SELECT classified_at FROM entities WHERE id=?`, got.ID).Scan(&classifiedAt); err != nil || classifiedAt != nil {
+		t.Errorf("classified_at = %v, err=%v; want NULL for reclassification", classifiedAt, err)
+	}
+	if evts := tr.pub.(*recordingPublisher).nonSystemEvents(); len(evts) != 0 {
+		t.Fatalf("move emitted events: %v", eventTypes(evts))
+	}
+}
+
+func TestRefreshJira_MovedIssueMergesIntoCurrentKey(t *testing.T) {
+	srv, _ := jiraUnreachableFixture(t, http.StatusOK,
+		`{"key":"NEW-9","fields":{"summary":"Moved","status":{"name":"In Progress"}}}`)
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	old, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "OLD-9", "issue", "old", "")
+	current, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "NEW-9", "issue", "current", "")
+	if _, err := database.Exec(`UPDATE entities SET last_polled_at=? WHERE id=?`, time.Now().Add(-2*jiraUnreachableGrace), old.ID); err != nil {
+		t.Fatal(err)
+	}
+	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	if _, err := tr.RefreshJira(ctx, client, srv.URL, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
+		t.Fatalf("RefreshJira: %v", err)
+	}
+	if got, _ := stores.Entities.Get(ctx, org, old.ID); got != nil {
+		t.Fatal("obsolete entity survived merge")
+	}
+	got, err := stores.Entities.GetBySource(ctx, org, "jira", "NEW-9")
+	if err != nil || got == nil || got.ID != current.ID {
+		t.Fatalf("survivor = %#v, err=%v; want %s", got, err, current.ID)
+	}
+}
+
 // A key missing for the first time is not confirmed at all. Absence from one
 // search is the weakest possible evidence, and the request is only worth
 // spending once the key looks durably unanswered.
