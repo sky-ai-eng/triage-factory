@@ -190,8 +190,16 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	return ok, err
 }
 
-func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) error {
-	return s.runInTx(ctx, func(tx *sql.Tx) error {
+func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) (bool, error) {
+	var ok bool
+	err := s.runInTx(ctx, func(tx *sql.Tx) error {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM swipe_events WHERE org_id=$1 AND task_id=$2 AND creator_user_id=tf.current_user_id() AND action <> 'undo')`, orgID, taskID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return errUndoRefused
+		}
 		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "undo", nil); err != nil {
 			return err
 		}
@@ -214,9 +222,19 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 			  WHERE org_id = $2 AND id = $3`,
 			"queued", orgID, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errUndoRefused) {
+		return false, nil
+	}
+	return ok, err
 }
+
+var errUndoRefused = errors.New("postgres swipes: no caller-owned swipe to undo")
 
 // runInTx is the Postgres-side counterpart of sqlite's inTx — opens
 // a tx on s.q if it's a *sql.DB, or runs the closure against the

@@ -72,7 +72,7 @@ type SwipeStore interface {
 	// task back to 'queued' with snooze_until cleared. The Board's
 	// undo button maps to this; the audit row makes the undo itself
 	// visible in the swipe-history view.
-	UndoLastSwipe(ctx context.Context, orgID string, taskID string) error
+	UndoLastSwipe(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 }
 
 // ErrSnoozeUntilRequired is returned by RecordSwipe when action is

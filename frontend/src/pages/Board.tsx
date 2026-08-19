@@ -927,10 +927,10 @@ export default function Board() {
       try {
         // A failure (e.g. a teardown that partially failed) must surface — a
         // silent fetchTasks would repaint as if the move succeeded.
-        await apiFetch(`/api/tasks/${taskId}/swipe`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
+          body: JSON.stringify({ status: 'done', hesitation_ms: 0 }),
         })
         fetchTasks()
       } catch (err) {
@@ -1113,25 +1113,25 @@ export default function Board() {
       // advances). Queue → Done is dismiss.
       if (sourceCol === 'queued') {
         if (targetCol === 'done') {
-          await apiFetch(`/api/tasks/${taskId}/swipe`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+            body: JSON.stringify({ status: 'dismissed', hesitation_ms: 0 }),
           })
           fetchTasks()
           return
         }
         // Claim first, then advance if needed.
-        await apiFetch(`/api/tasks/${taskId}/swipe`, {
+        await apiFetch(`/api/tasks/${taskId}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+          body: JSON.stringify({ hesitation_ms: 0 }),
         })
         if (targetCol === 'in_progress' || targetCol === 'in_review') {
-          await apiFetch(`/api/tasks/${taskId}/advance`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to: targetCol }),
+            body: JSON.stringify({ status: targetCol }),
           })
         }
         fetchTasks()
@@ -1170,10 +1170,10 @@ export default function Board() {
         return
       }
       if (targetCol === 'in_progress' || targetCol === 'in_review') {
-        await apiFetch(`/api/tasks/${taskId}/advance`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: targetCol }),
+          body: JSON.stringify({ status: targetCol }),
         })
         fetchTasks()
         return
@@ -1199,10 +1199,10 @@ export default function Board() {
   const handlePickerClaim = useCallback(
     async (task: Task) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+          body: JSON.stringify({ hesitation_ms: 0 }),
         })
       } catch (err) {
         toast.error(httpErrorMessage(err, 'Could not claim the task.'))
@@ -1241,11 +1241,10 @@ export default function Board() {
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
       try {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: 'reassign',
             hesitation_ms: 0,
             target_user_id: targetUserID,
           }),
@@ -1265,11 +1264,10 @@ export default function Board() {
       if (!task) return
       pendingDelegateTask.current = null
       try {
-        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/swipe`, {
+        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/delegate`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action: 'delegate',
             hesitation_ms: 0,
             blueprint_id: promptId,
           }),

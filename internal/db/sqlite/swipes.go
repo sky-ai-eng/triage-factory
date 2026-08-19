@@ -224,11 +224,19 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	return ok, err
 }
 
-func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) error {
+func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var ok bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var count int
+		if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM swipe_events WHERE task_id = ? AND action <> 'undo'`, taskID).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return errUndoRefused
+		}
 		if _, err := q.ExecContext(ctx,
 			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
 			taskID,
@@ -257,6 +265,16 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 			  WHERE id = ?`,
 			taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errUndoRefused) {
+		return false, nil
+	}
+	return ok, err
 }
+
+var errUndoRefused = errors.New("sqlite swipes: no swipe to undo")

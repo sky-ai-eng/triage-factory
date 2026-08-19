@@ -970,11 +970,11 @@ func (s *Server) routes() {
 	// see handleTaskList.
 	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
-	s.apiMutating("POST /api/tasks/{id}/swipe", s.handleSwipe)
-	s.apiMutating("POST /api/tasks/{id}/snooze", s.handleSnooze)
+	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
+	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
+	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
 	s.apiMutating("POST /api/tasks/{id}/undo", s.handleUndo)
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
-	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
@@ -1104,7 +1104,9 @@ func (s *Server) routes() {
 	// active Jira set, bounded by the team's tracked projects rather than by a
 	// window; the deck is meant to be dealt whole.
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
-	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
+	s.apiMutating("POST /api/jira/stock/queue", s.handleJiraStockQueue)
+	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
+	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
 
 	// Artifact-id-addressed endpoints back both the GitHub-native PR preview and
 	// the review preview (kind-dispatched inside the handlers). The review path

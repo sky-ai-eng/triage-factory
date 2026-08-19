@@ -174,18 +174,34 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     if (selectionCount === 0) return
     setSaving(true)
     try {
-      const actions = Object.entries(selections).map(([issue_key, action]) => ({
-        issue_key,
-        action,
-      }))
-      const body = await apiJSON<{
+      type BatchResult = {
         applied: number
         failed?: { issue_key: string; action: string; error: string }[]
-      }>('/api/jira/stock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ actions, team_id: team }),
-      })
+      }
+      const batches = (['queue', 'claim', 'done'] as const)
+        .map((action) => ({
+          action,
+          issue_keys: Object.entries(selections)
+            .filter(([, selected]) => selected === action)
+            .map(([issueKey]) => issueKey),
+        }))
+        .filter((batch) => batch.issue_keys.length > 0)
+      const results = await Promise.all(
+        batches.map((batch) =>
+          apiJSON<BatchResult>(
+            `/api/jira/stock/${batch.action}${team ? `?team_id=${encodeURIComponent(team)}` : ''}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ issue_keys: batch.issue_keys }),
+            },
+          ),
+        ),
+      )
+      const body: BatchResult = {
+        applied: results.reduce((total, result) => total + result.applied, 0),
+        failed: results.flatMap((result) => result.failed ?? []),
+      }
       if (team) noteWrittenTeam(team)
       const failedList = body.failed ?? []
       if (failedList.length === 0) {

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
@@ -140,7 +142,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.jiraPollReady(r.Context(), orgID) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "polling"})
+		writeJSON(w, http.StatusOK, map[string]any{"status": "polling", "assigned": []stockTicket{}, "available": []stockTicket{}})
 		return
 	}
 
@@ -333,6 +335,41 @@ type stockFailure struct {
 	IssueKey string `json:"issue_key"`
 	Action   string `json:"action"`
 	Error    string `json:"error"`
+}
+
+type stockBatchRequest struct {
+	IssueKeys []string `json:"issue_keys"`
+}
+
+func (s *Server) handleJiraStockQueue(w http.ResponseWriter, r *http.Request) {
+	s.handleJiraStockBatch(w, r, "queue")
+}
+func (s *Server) handleJiraStockClaim(w http.ResponseWriter, r *http.Request) {
+	s.handleJiraStockBatch(w, r, "claim")
+}
+func (s *Server) handleJiraStockDone(w http.ResponseWriter, r *http.Request) {
+	s.handleJiraStockBatch(w, r, "done")
+}
+
+// handleJiraStockBatch gives each stock operation a fixed-schema route while
+// retaining the existing, battle-tested per-row application policy below.
+func (s *Server) handleJiraStockBatch(w http.ResponseWriter, r *http.Request, action string) {
+	var req stockBatchRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	if len(req.IssueKeys) == 0 || len(req.IssueKeys) > 500 {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "issue_keys must contain between 1 and 500 items", Field: "issue_keys"})
+		return
+	}
+	actions := make([]stockAction, len(req.IssueKeys))
+	for i, key := range req.IssueKeys {
+		actions[i] = stockAction{IssueKey: key, Action: action}
+	}
+	teamID := r.URL.Query().Get("team_id")
+	body, _ := json.Marshal(map[string]any{"actions": actions, "team_id": teamID})
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	s.handleJiraStockPost(w, r)
 }
 
 // handleJiraStockPost applies carry-over actions. Eligibility varies by
@@ -746,7 +783,25 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"applied": applied,
 		"failed":  failed,
+		"results": stockResults(req.Actions, failed),
 	})
+}
+
+func stockResults(actions []stockAction, failures []stockFailure) []map[string]any {
+	failedByKey := make(map[string]stockFailure, len(failures))
+	for _, failure := range failures {
+		failedByKey[failure.IssueKey] = failure
+	}
+	results := make([]map[string]any, 0, len(actions))
+	for _, action := range actions {
+		result := map[string]any{"issue_key": action.IssueKey, "ok": true, "errors": []httpx.ErrorItem{}}
+		if failure, exists := failedByKey[action.IssueKey]; exists {
+			result["ok"] = false
+			result["errors"] = []httpx.ErrorItem{{Reason: httpx.ReasonConflict, Message: failure.Error}}
+		}
+		results = append(results, result)
+	}
+	return results
 }
 
 // recordCarryOverAssignedEvent writes a synthesized jira:issue:assigned event

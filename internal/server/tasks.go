@@ -421,6 +421,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	// we'd surface the SQLite error string as a 500 — leaking
 	// implementation detail and confusing legitimate 404 callers.
 	var task *domain.Task
+	var undone bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
@@ -430,13 +431,18 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		if task == nil {
 			return nil
 		}
-		return tx.Swipes.UndoLastSwipe(r.Context(), orgID, id)
+		undone, e = tx.Swipes.UndoLastSwipe(r.Context(), orgID, id)
+		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
 		return
 	}
 	if task == nil {
 		notFound(w, "task")
+		return
+	}
+	if !undone {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "no swipe by this caller exists to undo"})
 		return
 	}
 

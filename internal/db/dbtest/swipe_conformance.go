@@ -273,7 +273,7 @@ func RunSwipeStoreConformance(t *testing.T, factory SwipeStoreFactory) {
 		if ok, err := store.SnoozeTask(context.Background(), orgID, taskID, until, 0); err != nil || !ok {
 			t.Fatalf("snooze: ok=%v err=%v", ok, err)
 		}
-		if err := store.UndoLastSwipe(context.Background(), orgID, taskID); err != nil {
+		if ok, err := store.UndoLastSwipe(context.Background(), orgID, taskID); err != nil || !ok {
 			t.Fatalf("UndoLastSwipe: %v", err)
 		}
 		status, snoozeUntil := readTask(t, taskID)

@@ -131,21 +131,27 @@ export default function Cards() {
 
     try {
       if (action === 'snooze') {
-        await apiFetch(`/api/tasks/${task.id}/snooze`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-        })
-      } else {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${task.id}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            action,
+            snooze_until: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
             hesitation_ms: hesitationMs,
-            ...(promptId && { blueprint_id: promptId }),
           }),
         })
+      } else {
+        await apiFetch(
+          action === 'dismiss' ? `/api/tasks/${task.id}` : `/api/tasks/${task.id}/${action}`,
+          {
+            method: action === 'dismiss' ? 'PATCH' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              hesitation_ms: hesitationMs,
+              ...(action === 'dismiss' && { status: 'dismissed' }),
+              ...(promptId && { blueprint_id: promptId }),
+            }),
+          },
+        )
       }
     } catch {
       return
