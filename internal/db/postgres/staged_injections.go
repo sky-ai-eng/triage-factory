@@ -38,8 +38,8 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	}
 	// created_at is left to the column DEFAULT now(). RETURNING projects the
 	// same columns flushPendingInput's SELECT does, so the freshly-inserted
-	// row and a later flush of it map through the same stagedInjectionFromPending.
-	var r pendingRow
+	// row and a later flush of it map through db.StagedInjectionFromPending.
+	var r db.PendingRow
 	if err := s.admin.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES ($1::uuid, $2::uuid, 'user', $3, $4, $5::jsonb, false)
@@ -50,7 +50,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	); err != nil {
 		return domain.StagedInjection{}, err
 	}
-	return stagedInjectionFromPending(r), nil
+	return db.StagedInjectionFromPending(r), nil
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
@@ -62,7 +62,7 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	if err != nil {
 		return nil, err
 	}
-	return stagedInjectionsFromPending(flushed), nil
+	return db.StagedInjectionsFromPending(flushed), nil
 }
 
 func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id string) error {
@@ -84,43 +84,4 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 		WHERE org_id = $1::uuid AND id = $2 AND subtype = $3 AND delivered = false
 	`, orgID, rowID, stagedInjectionSubtype)
 	return err
-}
-
-// stagedInjectionFromPending maps one messages row (whether just inserted by
-// AppendSystem or claimed by a flush) onto the StagedInjection shape: the row
-// id becomes the decimal ID, content the Body, and the producer tag is
-// unpacked from metadata. The two writers share this mapper so a fresh
-// AppendSystem row and that same row read back by a later flush can never
-// disagree about what a staged injection is.
-//
-// TODO(TFAC-874): this mapper and the pendingRow it takes are duplicated
-// verbatim in the SQLite twin, so a change here that misses that copy is
-// silent drift. 874 decides whether the dialect-free helpers hoist to a
-// shared package or stay split behind an identical-helpers ratchet.
-func stagedInjectionFromPending(r pendingRow) domain.StagedInjection {
-	n := domain.StagedInjection{
-		ID:             strconv.FormatInt(r.ID, 10),
-		ConversationID: r.ConvID,
-		OrgID:          r.OrgID,
-		Body:           r.Content,
-		CreatedAt:      r.CreatedAt,
-	}
-	if r.Metadata != "" {
-		var meta struct {
-			Producer string `json:"producer"`
-		}
-		_ = json.Unmarshal([]byte(r.Metadata), &meta)
-		n.Producer = meta.Producer
-	}
-	return n
-}
-
-// stagedInjectionsFromPending maps flushed pending rows onto the
-// StagedInjection shape via stagedInjectionFromPending.
-func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
-	var out []domain.StagedInjection
-	for _, r := range flushed {
-		out = append(out, stagedInjectionFromPending(r))
-	}
-	return out
 }

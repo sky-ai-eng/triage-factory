@@ -40,9 +40,9 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	}
 	// RETURNING projects the same columns flushPendingInput's SELECT does, so
 	// the freshly-inserted row and a later flush of it map through the same
-	// stagedInjectionFromPending.
+	// db.StagedInjectionFromPending mapper.
 	var (
-		r        pendingRow
+		r        db.PendingRow
 		userID   sql.NullString
 		metadata sql.NullString
 	)
@@ -56,7 +56,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 		return domain.StagedInjection{}, err
 	}
 	r.UserID, r.Metadata = userID.String, metadata.String
-	return stagedInjectionFromPending(r), nil
+	return db.StagedInjectionFromPending(r), nil
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
@@ -70,7 +70,7 @@ func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, co
 	if err != nil {
 		return nil, err
 	}
-	out := stagedInjectionsFromPending(flushed)
+	out := db.StagedInjectionsFromPending(flushed)
 	// UPDATE … RETURNING does not honor ORDER BY in SQLite, so sort by the
 	// monotonic row id to restore oldest-first — the order the bundled
 	// block reads in.
@@ -99,45 +99,6 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 		WHERE org_id = ? AND id = ? AND subtype = ? AND delivered = 0
 	`, orgID, rowID, stagedInjectionSubtype)
 	return err
-}
-
-// stagedInjectionFromPending maps one messages row (whether just inserted by
-// AppendSystem or claimed by a flush) onto the StagedInjection shape: the row
-// id becomes the decimal ID, content the Body, and the producer tag is
-// unpacked from metadata. The two writers share this mapper so a fresh
-// AppendSystem row and that same row read back by a later flush can never
-// disagree about what a staged injection is.
-//
-// TODO(TFAC-874): this mapper and the pendingRow it takes are duplicated
-// verbatim in the Postgres twin, so a change here that misses that copy is
-// silent drift. 874 decides whether the dialect-free helpers hoist to a
-// shared package or stay split behind an identical-helpers ratchet.
-func stagedInjectionFromPending(r pendingRow) domain.StagedInjection {
-	n := domain.StagedInjection{
-		ID:             strconv.FormatInt(r.ID, 10),
-		ConversationID: r.ConvID,
-		OrgID:          r.OrgID,
-		Body:           r.Content,
-		CreatedAt:      r.CreatedAt,
-	}
-	if r.Metadata != "" {
-		var meta struct {
-			Producer string `json:"producer"`
-		}
-		_ = json.Unmarshal([]byte(r.Metadata), &meta)
-		n.Producer = meta.Producer
-	}
-	return n
-}
-
-// stagedInjectionsFromPending maps flushed pending rows onto the
-// StagedInjection shape via stagedInjectionFromPending.
-func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
-	var out []domain.StagedInjection
-	for _, r := range flushed {
-		out = append(out, stagedInjectionFromPending(r))
-	}
-	return out
 }
 
 // stagedInjectionIDLess orders decimal message-row ids numerically (a
