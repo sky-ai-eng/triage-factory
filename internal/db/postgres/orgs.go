@@ -96,7 +96,28 @@ func (s *orgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain
 	return getOrgSettings(ctx, s.admin, orgID)
 }
 
-func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
+// orgSettingsColumns is the canonical projection of an org_settings row, in
+// the order scanOrgSettings reads them. GetSettings SELECTs it and every
+// writer below RETURNs it, so the write shape cannot drift from the read
+// shape.
+//
+// EXTRACT(EPOCH FROM interval) returns numeric in PG13+; the ::double
+// precision cast pins the row-out type so pgx can scan straight into float64
+// without a string detour. Cleaner round-trip than ::text +
+// time.ParseDuration (which can't parse the Postgres "HH:MM:SS" interval
+// rendering anyway). RETURNING evaluates these expressions over the written
+// row just as SELECT does, so the same column list works in both places.
+const orgSettingsColumns = `github_base_url,
+	       EXTRACT(EPOCH FROM github_poll_interval)::double precision,
+	       github_clone_protocol,
+	       jira_base_url,
+	       EXTRACT(EPOCH FROM jira_poll_interval)::double precision,
+	       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+	       github_credential_class, version`
+
+// scanOrgSettings decodes one org_settings row in orgSettingsColumns order.
+func scanOrgSettings(scan func(...any) error) (domain.OrgSettings, error) {
 	var (
 		ghURL, jiraURL, anthRef, bedRef, maxTier sql.NullString
 		ghSecs, jiraSecs                         float64
@@ -107,38 +128,14 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		credentialClass                          string
 		version                                  int
 	)
-	// EXTRACT(EPOCH FROM interval) returns numeric in PG13+; the
-	// ::double precision cast pins the row-out type so pgx can scan
-	// straight into float64 without a string detour. Cleaner round-
-	// trip than ::text + time.ParseDuration (which can't parse the
-	// Postgres "HH:MM:SS" interval rendering anyway).
-	err := q.QueryRowContext(ctx, `
-		SELECT github_base_url,
-		       EXTRACT(EPOCH FROM github_poll_interval)::double precision,
-		       github_clone_protocol,
-		       jira_base_url,
-		       EXTRACT(EPOCH FROM jira_poll_interval)::double precision,
-		       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-		       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-		       github_credential_class, version
-		FROM org_settings WHERE org_id = $1
-	`, orgID).Scan(
+	if err := scan(
 		&ghURL, &ghSecs, &cloneProto,
 		&jiraURL, &jiraSecs,
 		&anthRef, &bedRef, &maxTier,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
 		&credentialClass, &version,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Provisioning seeds org_settings rows at org-create time
-		// (auth provisioning); this fallback covers the narrow window
-		// before the first signup runs (or test fixtures that build a
-		// DB without going through provisioning). Matches the schema
-		// DEFAULT clauses.
-		return domain.DefaultOrgSettings(), nil
-	}
-	if err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("read org_settings: %w", err)
+	); err != nil {
+		return domain.OrgSettings{}, err
 	}
 	// Clamp a stray negative up to 0. No DB CHECK guards this column, and
 	// everything downstream (the claim) reads <= 0 as unlimited — so surface a
@@ -168,6 +165,25 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 	}, nil
 }
 
+func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
+	set, err := scanOrgSettings(q.QueryRowContext(ctx, `
+		SELECT `+orgSettingsColumns+`
+		FROM org_settings WHERE org_id = $1
+	`, orgID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Provisioning seeds org_settings rows at org-create time
+		// (auth provisioning); this fallback covers the narrow window
+		// before the first signup runs (or test fixtures that build a
+		// DB without going through provisioning). Matches the schema
+		// DEFAULT clauses.
+		return domain.DefaultOrgSettings(), nil
+	}
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_settings: %w", err)
+	}
+	return set, nil
+}
+
 // UpdateSettings upserts every org_settings column this writer owns.
 //
 // github_credential_class is deliberately absent from BOTH the INSERT column
@@ -178,16 +194,17 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 // here would look like tidiness and would instead reset the class to the
 // struct's zero value on every bulk settings save, silently converting a
 // BYO-App org to PAT. u.GitHubCredentialClass is read-only; it is ignored here.
-func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) error {
+func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) (domain.OrgSettings, error) {
 	// No version guard: an unguarded save is last-writer-wins on purpose. Its
 	// callers are the credential transitions, which own the specific fields
 	// they touch and have nothing to lose a race about. It still bumps the
 	// token, so an admin's in-flight settings edit conflicts rather than
 	// landing on top of a credential change it never saw.
-	if _, err := s.upsertSettings(ctx, orgID, u, orgSettingsConflictUpdate); err != nil {
-		return fmt.Errorf("upsert org_settings: %w", err)
+	stored, err := s.upsertSettings(ctx, orgID, u, orgSettingsConflictUpdate)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("upsert org_settings: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // UpdateSettingsVersioned is UpdateSettings under the row's concurrency token.
@@ -209,27 +226,25 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 // arm, so a caller asserting a stale non-zero version against a row that had
 // since been deleted would fall through to the INSERT arm and silently CREATE
 // the row at version 1 — a create reported as a successful update.
-func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u domain.OrgSettings, expected int) error {
+func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	var (
-		res sql.Result
-		err error
+		stored domain.OrgSettings
+		err    error
 	)
 	if expected == 0 {
-		res, err = s.upsertSettings(ctx, orgID, u, `ON CONFLICT (org_id) DO NOTHING`)
+		stored, err = s.upsertSettings(ctx, orgID, u, `ON CONFLICT (org_id) DO NOTHING`)
 	} else {
-		res, err = s.updateSettingsAtVersion(ctx, orgID, u, expected)
+		stored, err = s.updateSettingsAtVersion(ctx, orgID, u, expected)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		// The conflict/no-match arm: RETURNING produced no row, which for a
+		// DO NOTHING insert or a version-guarded UPDATE means nothing landed.
+		return domain.OrgSettings{}, db.ErrOrgSettingsVersion
 	}
 	if err != nil {
-		return fmt.Errorf("write org_settings: %w", err)
+		return domain.OrgSettings{}, fmt.Errorf("write org_settings: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("write org_settings: %w", err)
-	}
-	if n == 0 {
-		return db.ErrOrgSettingsVersion
-	}
-	return nil
+	return stored, nil
 }
 
 // orgSettingsConflictUpdate is the unguarded writer's conflict action: replace
@@ -276,16 +291,18 @@ func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
 	}
 }
 
-// upsertSettings writes every org_settings column this writer owns, with the
-// caller's conflict action deciding what an existing row means: replace it
-// (the unguarded save) or leave it alone and report nothing written (the
-// create assertion).
+// upsertSettings writes every org_settings column this writer owns and
+// returns the row RETURNING produced, with the caller's conflict action
+// deciding what an existing row means: replace it (the unguarded save, which
+// always returns a row) or leave it alone (the create assertion's ON
+// CONFLICT DO NOTHING, which yields sql.ErrNoRows on conflict — the "nothing
+// written" case UpdateSettingsVersioned's create arm relies on).
 //
 // make_interval(secs => $N) takes a numeric second count and returns a
 // properly-typed interval — avoids hand-rolling the "X seconds"::interval
 // string concat.
-func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (sql.Result, error) {
-	return s.app.ExecContext(ctx, `
+func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (domain.OrgSettings, error) {
+	return scanOrgSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO org_settings (
 			org_id, github_base_url, github_poll_interval, github_clone_protocol,
 			jira_base_url, jira_poll_interval,
@@ -298,20 +315,22 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			$7, $8, $9,
 			$10, $11, $12,
 			1, now()
-		)`+conflict, orgSettingsWriteArgs(orgID, u)...)
+		)`+conflict+`
+		RETURNING `+orgSettingsColumns, orgSettingsWriteArgs(orgID, u)...).Scan)
 }
 
 // updateSettingsAtVersion writes the same columns as an ordinary UPDATE under
-// the row's concurrency token. It never creates a row: a caller that asserted a
-// version read one, and if that row is gone the honest answer is the same
-// conflict a moved version gets.
+// the row's concurrency token and returns the row RETURNING produced. It
+// never creates a row: a caller that asserted a version read one, and if that
+// row is gone the honest answer is the same sql.ErrNoRows a moved version
+// gets — WHERE matches nothing, so RETURNING produces nothing.
 //
 // Its SET list must stay in step with orgSettingsConflictUpdate above — same
 // columns, same exclusions. github_credential_class is absent from both for the
 // reason UpdateSettings' doc gives.
-func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (sql.Result, error) {
+func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	args := append(orgSettingsWriteArgs(orgID, u), expected)
-	return s.app.ExecContext(ctx, `
+	return scanOrgSettings(s.app.QueryRowContext(ctx, `
 		UPDATE org_settings SET
 			github_base_url = $2,
 			github_poll_interval = make_interval(secs => $3),
@@ -327,7 +346,7 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			version = version + 1,
 			updated_at = now()
 		WHERE org_id = $1 AND version = $13
-	`, args...)
+		RETURNING `+orgSettingsColumns, args...).Scan)
 }
 
 // SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —
@@ -345,17 +364,19 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 // The partial INSERT relies on the schema DEFAULT clauses for every other
 // org_settings column when no row exists yet, and ON CONFLICT touches only the
 // class, so the org's other settings are never clobbered.
-func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) error {
-	if _, err := s.app.ExecContext(ctx, `
+func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.OrgSettings, error) {
+	stored, err := scanOrgSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO org_settings (org_id, github_credential_class, updated_at)
 		VALUES ($1, $2, now())
 		ON CONFLICT (org_id) DO UPDATE SET
 			github_credential_class = EXCLUDED.github_credential_class,
 			updated_at = now()
-	`, orgID, string(class)); err != nil {
-		return fmt.Errorf("set org github credential class: %w", err)
+		RETURNING `+orgSettingsColumns,
+		orgID, string(class)).Scan)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("set org github credential class: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // secondsToDuration converts a Postgres EXTRACT(EPOCH FROM interval)

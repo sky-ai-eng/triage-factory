@@ -580,7 +580,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp, ok := s.readOrgSettings(w, r, orgID, userID)
+	resp, ok := s.readOrgSettings(w, r, orgID, userID, nil)
 	if !ok {
 		return
 	}
@@ -590,7 +590,12 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 // readOrgSettings assembles the org-settings resource. Shared by the GET and by
 // the PATCH's read-back, so a write answers with exactly what a follow-up read
 // would return — including the version the next PATCH has to carry.
-func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, userID string) (orgSettingsResponse, bool) {
+//
+// known, when non-nil, is the settings row a write in the same request already
+// produced (off UpdateSettingsVersioned's RETURNING) — skip the redundant
+// GetSettings and build the rest of the composite response (credentials,
+// member count, Bedrock config) around it, mirroring readTeamSettings.
+func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, userID string, known *domain.OrgSettings) (orgSettingsResponse, bool) {
 	var (
 		out    orgSettingsResponse
 		orgSet domain.OrgSettings
@@ -609,9 +614,13 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
-		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return err
+		if known != nil {
+			orgSet = *known
+		} else {
+			orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
+			if err != nil {
+				return err
+			}
 		}
 		// A vault fault is a 500, never "not configured" — the status read
 		// drives the whole settings page's connected/disconnected rendering.
@@ -773,8 +782,8 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		}
 		prevOrgSet = cur
 		apply(&cur)
-		orgSet = cur
-		return tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
+		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
+		return err
 	})
 	if errors.Is(err, db.ErrOrgSettingsVersion) {
 		// No server-side merge: the two writers disagree about fields neither of
@@ -808,7 +817,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		go s.onJiraChanged(orgID)
 	}
 
-	resp, ok := s.readOrgSettings(w, r, orgID, userID)
+	resp, ok := s.readOrgSettings(w, r, orgID, userID, &orgSet)
 	if !ok {
 		return
 	}

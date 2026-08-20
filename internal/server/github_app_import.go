@@ -489,7 +489,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// register path: the class names which system the org is in, Active
 		// names which credential is live, and this transaction is what keeps
 		// the two from disagreeing.
-		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// Store the PEM verbatim (req.PEM, not a trimmed copy): a private key's

@@ -34,10 +34,6 @@ var ErrOrgSettingsVersion = errors.New("org settings version conflict")
 //
 // SQLite collapses the pool split to one connection; the `...System`
 // variants delegate to their non-System counterparts.
-// TODO(TFAC-862): these single-row writes still return a bare error rather
-// than the row they persisted: CreateLocalTenant, SetGitHubCredentialClass,
-// UpdateSettings, UpdateSettingsVersioned. TeamsStore is the converged twin to
-// copy.
 type OrgsStore interface {
 	// GetOrg returns the org's metadata row, or nil if the org does
 	// not exist. App pool in Postgres (RLS gates by org membership);
@@ -59,6 +55,14 @@ type OrgsStore interface {
 	// state. Local-mode only: the Postgres (multi-mode) impl returns a
 	// clear "not supported in multi mode" error — multi-mode provisions
 	// real tenant rows per signup in auth_provision.go.
+	//
+	// Exempt from the returned-row rule, by shape rather than by decision: it
+	// is a bulk multi-table seed (orgs / users / org_memberships / teams /
+	// memberships / org_settings / team_settings, each INSERT OR IGNORE) —
+	// the SetConfigured bulk/sync reconciliation shape, not a single-row
+	// write with one row to hand back. Nothing renders the seeded rows;
+	// callers that need one read it back through the ordinary GetOrg /
+	// GetSettings paths.
 	CreateLocalTenant(ctx context.Context) error
 
 	// ListActiveSystem returns the IDs of every active org in
@@ -107,7 +111,11 @@ type OrgsStore interface {
 	// deliberately a last-writer-wins write, which is what every credential
 	// transition wants (it owns the fields it touches). The settings API uses
 	// UpdateSettingsVersioned instead.
-	UpdateSettings(ctx context.Context, orgID string, updates domain.OrgSettings) error
+	//
+	// Returns the persisted settings, read off RETURNING on the write
+	// statement itself rather than from a follow-up SELECT, and projecting
+	// GetSettings' column list and scanner.
+	UpdateSettings(ctx context.Context, orgID string, updates domain.OrgSettings) (domain.OrgSettings, error)
 
 	// UpdateSettingsVersioned is UpdateSettings guarded by the row's
 	// optimistic-concurrency token: the write lands only if the stored version
@@ -123,7 +131,14 @@ type OrgsStore interface {
 	// The guard is in the statement, not in a preceding read: READ COMMITTED
 	// means a re-read inside the caller's own transaction cannot see a
 	// concurrent commit, so a Go-side comparison would pass for both racers.
-	UpdateSettingsVersioned(ctx context.Context, orgID string, updates domain.OrgSettings, expected int) error
+	//
+	// On success, returns the persisted settings — the new version is the one
+	// thing a successful caller most needs and cannot compute (expected+1 is a
+	// guess, not a fact), sourced from RETURNING and projecting GetSettings'
+	// column list and scanner. On ErrOrgSettingsVersion the returned settings
+	// are the zero value: nothing was written, so there is no row to hand
+	// back.
+	UpdateSettingsVersioned(ctx context.Context, orgID string, updates domain.OrgSettings, expected int) (domain.OrgSettings, error)
 
 	// SetGitHubCredentialClass writes ONLY org_settings.github_credential_class
 	// — which credential system the org's GitHub access belongs to. Surgical by
@@ -143,5 +158,10 @@ type OrgsStore interface {
 	// app pool — every caller is an org-admin-gated handler already inside a
 	// claims-bound transaction, which is exactly what org_settings_insert /
 	// org_settings_update require.
-	SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) error
+	//
+	// Returns the persisted settings — the insert arm fills every other
+	// column from schema defaults, so the row this lands in may be one
+	// nobody has read — sourced from RETURNING and projecting GetSettings'
+	// column list and scanner.
+	SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.OrgSettings, error)
 }

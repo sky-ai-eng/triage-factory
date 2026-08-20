@@ -53,7 +53,7 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -140,7 +140,7 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -228,7 +228,7 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 
 	// Org base URL + PAT both point at the stub so ghResolver.ClientFor
 	// resolves a tier-3 PAT-borrow client aimed at our GraphQL endpoint.
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -274,7 +274,7 @@ func TestUserTeamsMulti_NoLoginIsEmpty(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	ctx := context.Background()
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")

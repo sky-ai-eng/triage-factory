@@ -314,7 +314,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 			orgSet.JiraBaseURL = creds.JiraURL
 		}
 		orgSet.GitHubCloneProtocol = cfg.cloneProtocol
-		if uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
+		if _, uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
 			return uerr
 		}
 		if uerr := persistOrgGitHubIdentity(ctx, tx, runmode.LocalDefaultOrgID, botIdentity.Login, botIdentity.PrimaryEmail); uerr != nil {

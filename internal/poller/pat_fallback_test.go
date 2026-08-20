@@ -247,7 +247,7 @@ func newMigratedSQLiteForPoller(t *testing.T) *sql.DB {
 // the class, so without it such a fixture polls as a PAT.
 func seedBYOAppCredentialClass(t *testing.T, stores db.Stores, orgID string) {
 	t.Helper()
-	if err := stores.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+	if _, err := stores.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 		t.Fatalf("SetGitHubCredentialClass: %v", err)
 	}
 }

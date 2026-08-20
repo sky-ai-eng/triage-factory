@@ -491,7 +491,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := integrations.ClearJiraOtherScheme(r.Context(), tx.Secrets, orgID, jira.AuthMethod(creds.JiraAuthMethod)); err != nil {
 			return fmt.Errorf("clear stale jira credential: %w", err)
 		}
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
 		// Audit the org Jira credential bind/rotate in the same tx,

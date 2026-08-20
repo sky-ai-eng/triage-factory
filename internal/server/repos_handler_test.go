@@ -144,7 +144,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	t.Helper()
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	if err := s.orgs.UpdateSettings(ctx, org, domain.OrgSettings{GitHubBaseURL: stub.URL}); err != nil {
+	if _, err := s.orgs.UpdateSettings(ctx, org, domain.OrgSettings{GitHubBaseURL: stub.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := s.secrets.Put(ctx, org, "pem", testRSAPEM(t), ""); err != nil {

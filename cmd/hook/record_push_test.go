@@ -175,7 +175,7 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 // github.com-only gate silently dropped before an artifact was ever written.
 func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	stores, conversationID := newTestStores(t)
-	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
+	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
 		t.Fatalf("seed org github base: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 // host).
 func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
 	stores, conversationID := newTestStores(t)
-	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
+	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
 		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
 		t.Fatalf("seed org github base: %v", err)
 	}

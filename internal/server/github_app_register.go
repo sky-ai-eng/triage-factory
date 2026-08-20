@@ -620,7 +620,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		// Two orthogonal facts, and this is the window where they differ.
 		// Written in this transaction so the class and the registration it
 		// describes can never disagree.
-		if err := tx.Orgs.SetGitHubCredentialClass(r.Context(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(r.Context(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		if err := tx.Secrets.Put(r.Context(), orgID, clientSecretKey, convResp.ClientSecret, "GitHub App client secret"); err != nil {

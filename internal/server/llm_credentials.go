@@ -128,7 +128,7 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 		}
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 		orgSet.BedrockCredentialsRef = ""
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
@@ -181,7 +181,7 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 			return fmt.Errorf("clear Anthropic key: %w", err)
 		}
 		orgSet.AnthropicAPIKeyRef = ""
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
 		if !had {
@@ -424,7 +424,7 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 			return err
 		}
 		orgSet.BedrockCredentialsRef = ""
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
 		if !had {
@@ -503,7 +503,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 
 		orgSet.AnthropicAPIKeyRef = ""
 		orgSet.BedrockCredentialsRef = b.ref
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
 		// Audit the bind/rotate in the same tx. The endpoint override is the
