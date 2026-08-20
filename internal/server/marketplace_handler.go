@@ -712,6 +712,16 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 		_, e := tx.Marketplace.Vote(r.Context(), orgID, id, userID)
 		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrNoSuchListing) {
+			// The vote itself landed (Marketplace.Vote's own doc comment) — the
+			// listing was delisted out from under the pre-check above between
+			// that read and this write. Same "raced past the gate" 404 as
+			// Delist/Relist/PublishVersion; the vote row surviving as an
+			// orphaned no-op is harmless (idempotent, and it counts again if the
+			// listing is ever relisted).
+			notFound(w, "listing")
+			return
+		}
 		internalError(w, "marketplace", err)
 		return
 	}

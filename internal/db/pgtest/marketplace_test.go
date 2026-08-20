@@ -269,6 +269,56 @@ func TestMarketplaceRLS_VotePKAndOwnerOnlyDelete(t *testing.T) {
 	}
 }
 
+// TestMarketplaceRLS_VoteAfterDelistPersistsAsErrNoSuchListing pins the race
+// Vote/RecordInstall's doc comments call out: marketplace_votes_insert's RLS
+// WITH CHECK only requires org membership (not that the listing still
+// satisfy marketplace_listings_select's published-or-publisher-writer
+// visibility), so a vote on an already-delisted listing lands in the table
+// even though the caller can no longer see the listing. The write must not
+// surface that as a bare, unmapped sql.ErrNoRows (which a handler would
+// otherwise translate to a 500 despite the write having actually
+// succeeded) — it must come back as the same db.ErrNoSuchListing sentinel
+// every other "raced past the visibility gate" case in this store answers
+// with, and the vote row must still be there afterward.
+func TestMarketplaceRLS_VoteAfterDelistPersistsAsErrNoSuchListing(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	dave := SeedUser(t, h, "dave")
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	AddOrgMember(t, h, dave, orgA, teamB, "member", "member")
+
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Soon Delisted For Dave", "")
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		return err
+	}); err != nil {
+		t.Fatalf("alice's delist: %v", err)
+	}
+
+	// dave (teamB, never a writer on teamA) votes on the now-delisted listing
+	// he can no longer see: the INSERT itself is unaffected by the listing's
+	// visibility, only the follow-up summary read is.
+	if err := h.WithUser(t, dave, orgA, func(tx *sql.Tx) error {
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Vote(t.Context(), orgA, listingID, dave)
+		if !errors.Is(err, db.ErrNoSuchListing) {
+			t.Errorf("dave's vote on a delisted listing = %v, want db.ErrNoSuchListing", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("dave's vote: %v", err)
+	}
+
+	var voteCount int
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_votes WHERE listing_id = $1 AND user_id = $2`, listingID, dave).Scan(&voteCount); err != nil {
+		t.Fatalf("count dave's vote: %v", err)
+	}
+	if voteCount != 1 {
+		t.Fatalf("dave's vote count = %d, want 1 (the write landed despite ErrNoSuchListing on the follow-up read)", voteCount)
+	}
+}
+
 // TestMarketplaceRLS_CrossOrgIsolation pins that a listing published in org
 // A is invisible under org B's tf.current_org_id() — even when the caller
 // explicitly passes org A's id as the orgID argument, RLS still scopes the
@@ -362,6 +412,51 @@ func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
 	}
 	if rootObjectID != fakeRootObjectID {
 		t.Errorf("root_object_id = %q, want %q (provenance survives the install write)", rootObjectID, fakeRootObjectID)
+	}
+}
+
+// TestMarketplaceRLS_RecordInstallAfterDelistPersistsAsErrNoSuchListing
+// mirrors TestMarketplaceRLS_VoteAfterDelistPersistsAsErrNoSuchListing for
+// RecordInstall: marketplace_installs_insert's RLS WITH CHECK only requires
+// team-write on the *installing* team, not that the listing still satisfy
+// marketplace_listings_select — so installing against an already-delisted
+// listing writes the audit row and then reports ErrNoSuchListing from the
+// follow-up summary read, rather than a bare sql.ErrNoRows.
+func TestMarketplaceRLS_RecordInstallAfterDelistPersistsAsErrNoSuchListing(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
+	teamB := SeedTeam(t, h, orgA, "teamB")
+	erin := SeedUser(t, h, "erin")
+	AddOrgMember(t, h, erin, orgA, teamB, "member", "admin")
+
+	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Installable Then Delisted", "")
+	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		return err
+	}); err != nil {
+		t.Fatalf("alice's delist: %v", err)
+	}
+
+	const fakeRootObjectID = "00000000-0000-0000-0000-0000000000bb"
+	if err := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
+		if !errors.Is(err, db.ErrNoSuchListing) {
+			t.Errorf("erin's install on a delisted listing = %v, want db.ErrNoSuchListing", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("erin's install: %v", err)
+	}
+
+	var installCount int
+	var rootObjectID string
+	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount, &rootObjectID); err != nil {
+		t.Fatalf("count installs: %v", err)
+	}
+	if installCount != 1 || rootObjectID != fakeRootObjectID {
+		t.Fatalf("install record = count=%d root=%q, want count=1 root=%q (the write landed despite ErrNoSuchListing on the follow-up read)", installCount, rootObjectID, fakeRootObjectID)
 	}
 }
 

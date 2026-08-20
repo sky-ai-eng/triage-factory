@@ -543,6 +543,25 @@ func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID stri
 	return &summary, nil
 }
 
+// summaryAfterListingChildWritePG runs the shared getListingSummaryPG
+// follow-up read for Vote/RecordInstall and maps a miss to
+// db.ErrNoSuchListing. The miss is real and reachable even right after a
+// successful write: marketplace_votes_insert/marketplace_installs_insert's
+// RLS WITH CHECK only requires org membership (+ team-write for installs) —
+// neither requires the listing itself to still satisfy
+// marketplace_listings_select ('published' OR a publisher-team writer). So a
+// listing delisted between the caller's own pre-check and this write (or
+// between the write and this read) leaves the child row landed but this
+// SELECT seeing nothing — a bare sql.ErrNoRows here would misreport an
+// actually-persisted write as an unmapped internal error.
+func summaryAfterListingChildWritePG(ctx context.Context, q queryer, orgID, listingID, userID string) (domain.ListingSummary, error) {
+	summary, err := getListingSummaryPG(ctx, q, orgID, listingID, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ListingSummary{}, db.ErrNoSuchListing
+	}
+	return summary, err
+}
+
 // Vote's INSERT is ON CONFLICT DO NOTHING (idempotent — a repeat vote is a
 // no-op), so its own RETURNING would answer zero rows on the conflict path.
 // vote_count is a computed join besides, not a column the vote row itself
@@ -556,7 +575,7 @@ func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID st
 	`, listingID, orgID, userID); err != nil {
 		return domain.ListingSummary{}, err
 	}
-	return getListingSummaryPG(ctx, s.q, orgID, listingID, userID)
+	return summaryAfterListingChildWritePG(ctx, s.q, orgID, listingID, userID)
 }
 
 func (s *marketplaceStore) Unvote(ctx context.Context, orgID, listingID, userID string) error {
@@ -578,7 +597,7 @@ func (s *marketplaceStore) RecordInstall(ctx context.Context, orgID, listingID s
 	`, listingID, orgID, version, teamID, nullIfEmpty(userID), nullIfEmpty(rootObjectID)); err != nil {
 		return domain.ListingSummary{}, err
 	}
-	return getListingSummaryPG(ctx, s.q, orgID, listingID, userID)
+	return summaryAfterListingChildWritePG(ctx, s.q, orgID, listingID, userID)
 }
 
 // MaterializeListing deep-copies snap into teamID and records the install,

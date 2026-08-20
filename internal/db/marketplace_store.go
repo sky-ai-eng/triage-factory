@@ -131,6 +131,13 @@ type MarketplaceStore interface {
 	// column, so the "row" a vote actually changes, from the caller's
 	// perspective, is the listing whose counter moved. Mirrors
 	// BlueprintStore.ReplaceSteps returning the parent a set write stamps.
+	//
+	// The vote itself can succeed while that follow-up read comes up empty —
+	// voting only requires org membership, not that the listing still satisfy
+	// the (published OR publisher-team-writer) visibility a read does, so a
+	// listing delisted between the caller's own pre-check and this call (or
+	// concurrently with it) leaves the vote recorded but ErrNoSuchListing
+	// returned in its place, rather than a raw, unmapped sql.ErrNoRows.
 	Vote(ctx context.Context, orgID, listingID, userID string) (domain.ListingSummary, error)
 
 	// Unvote removes userID's vote on listingID, if any. Removing a vote
@@ -152,7 +159,10 @@ type MarketplaceStore interface {
 	//
 	// Returns the listing summary — install_count included — the same way
 	// Vote returns it: install_count is a computed join, and the listing is
-	// what moved from the caller's perspective, not the audit row.
+	// what moved from the caller's perspective, not the audit row. Same race
+	// as Vote: the audit row can land under a looser RLS check than the
+	// listing's own visibility, so a miss on the follow-up read is
+	// ErrNoSuchListing rather than a raw sql.ErrNoRows.
 	RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) (domain.ListingSummary, error)
 
 	// MaterializeListing is the "copy to my team" install (TFAC-538): it
