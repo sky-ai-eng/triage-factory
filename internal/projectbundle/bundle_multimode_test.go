@@ -114,7 +114,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		if _, e := tx.Curator.BeginTurn(ctx, srcOrg, projectID, convID, msgID); e != nil {
 			return e
 		}
-		if e := tx.Curator.SetSDKSession(ctx, srcOrg, convID, sessionID); e != nil {
+		if _, e := tx.Curator.SetSDKSession(ctx, srcOrg, convID, sessionID); e != nil {
 			return e
 		}
 		_, e := tx.Conversations.InsertMessage(ctx, srcOrg, &domain.Message{

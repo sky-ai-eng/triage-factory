@@ -111,7 +111,8 @@ func (s *turnSink) OnSession(sessionID string) error {
 	s.sessionOnce.Do(func() {
 		ctx := context.Background()
 		err := s.curator.stores.Tx.SyntheticClaimsWithTx(ctx, s.orgID, s.creatorUserID, func(ts db.TxStores) error {
-			return ts.Curator.SetSDKSession(ctx, s.orgID, s.conversationID, sessionID)
+			_, err := ts.Curator.SetSDKSession(ctx, s.orgID, s.conversationID, sessionID)
+			return err
 		})
 		if err != nil {
 			s.sessionErrMu.Lock()

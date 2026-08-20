@@ -982,9 +982,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "session")
 		convID, msgID := seedTurn(t, h, projectID, "hello")
+		var written domain.Conversation
 		withClaims(t, h, func(ts db.TxStores) error {
-			return ts.Curator.SetSDKSession(ctx, h.OrgID, convID, "sess-123")
+			c, err := ts.Curator.SetSDKSession(ctx, h.OrgID, convID, "sess-123")
+			if c != nil {
+				written = *c
+			}
+			return err
 		})
+		if written.SessionID != "sess-123" {
+			t.Fatalf("SetSDKSession returned = %+v, want sess-123", written)
+		}
 		var live *domain.Conversation
 		withClaims(t, h, func(ts db.TxStores) error {
 			c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
@@ -994,6 +1002,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if live == nil || live.SessionID != "sess-123" {
 			t.Fatalf("conversation session = %+v, want sess-123", live)
 		}
+		AssertWriteReturnedStoredRow(t, "SetSDKSession", written, func() (*domain.Conversation, error) {
+			var got *domain.Conversation
+			err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+				c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+				got = c
+				return err
+			})
+			return got, err
+		})
 		claimTurn(t, h, convID)
 		var start *db.CuratorTurnStart
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -1003,6 +1020,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		})
 		if start.SDKSessionID != "sess-123" {
 			t.Errorf("BeginTurn session = %q, want sess-123", start.SDKSessionID)
+		}
+	})
+
+	t.Run("SDKSession_MissingConversationReportsErrNoSuch", func(t *testing.T) {
+		h := mk(t)
+		err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+			_, err := ts.Curator.SetSDKSession(ctx, h.OrgID, uuid.New().String(), "sess-ghost")
+			return err
+		})
+		if !errors.Is(err, db.ErrNoSuchCuratorConversation) {
+			t.Errorf("SetSDKSession on an unknown conversation = %v, want db.ErrNoSuchCuratorConversation", err)
 		}
 	})
 
@@ -1039,8 +1067,12 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			{ConversationID: conv.ID, UserID: h.UserID, Role: "assistant", Content: "imported compaction",
 				Delivered: &delivered, WindowState: domain.MessageWindowInactive, Seq: &seq},
 		}
-		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {
+		imported, err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs)
+		if err != nil {
 			t.Fatalf("import: %v", err)
+		}
+		if imported == nil || imported.ID != conv.ID || imported.SessionID != "sess-imported" {
+			t.Fatalf("ImportConversationStateSystem returned = %+v, want %s with sess-imported", imported, conv.ID)
 		}
 
 		var live *domain.Conversation
@@ -1052,6 +1084,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if live == nil || live.ID != conv.ID || live.SessionID != "sess-imported" {
 			t.Fatalf("imported conversation = %+v, want %s with sess-imported", live, conv.ID)
 		}
+		AssertWriteReturnedStoredRow(t, "ImportConversationStateSystem", *imported, func() (*domain.Conversation, error) {
+			var got *domain.Conversation
+			err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+				c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+				got = c
+				return err
+			})
+			return got, err
+		})
 		var claims []domain.Claim
 		var gotMsgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
