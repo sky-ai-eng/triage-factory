@@ -183,6 +183,13 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 // handler receives the PRE-mutation row and then proceeds into a world where it
 // no longer holds. Only the first call is hooked; the re-read inside the
 // critical section sees the mutation, which is the whole point.
+//
+// This wraps s.githubApps, which is NOT the store a handler's own
+// tx.GitHubApps calls run against inside s.tx.WithTx — WithTx builds a fresh
+// TxStores straight off the *sql.Tx, so a hook here only reaches the
+// pre-transaction reads (GetForOrgSystem, ListInstallationsForOrgSystem), never
+// a write made through tx. See setActiveReturnsNilTx below for the shape that
+// reaches inside the transaction.
 type ghAppsRaceHook struct {
 	db.GitHubAppsStore
 	afterGet  func() // fires once, after the first GetForOrgSystem
@@ -205,6 +212,43 @@ func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgI
 		g.listOnce.Do(g.afterList)
 	}
 	return insts, err
+}
+
+// setActiveNilStore is a GitHubAppsStore whose SetActive always answers
+// (nil, nil) — the shape SetActive takes when the row it was about to flip
+// isn't there any more (TFAC-863). Every other method delegates to the real
+// store through the embedded interface.
+type setActiveNilStore struct{ db.GitHubAppsStore }
+
+func (setActiveNilStore) SetActive(context.Context, string, bool) (*domain.OrgGitHubApp, error) {
+	return nil, nil
+}
+
+// setActiveReturnsNilTx wraps a TxRunner and swaps a setActiveNilStore into
+// every transaction it opens, leaving the rest of the stores real — the same
+// injection shape failingSecretsTx uses for tx.Secrets. This is what actually
+// reaches tx.GitHubApps.SetActive inside s.tx.WithTx, unlike ghAppsRaceHook
+// above: nothing in this codebase can make the registration vanish between
+// the cutover's authoritative GetForOrgSystem and its SetActive while the
+// lock is held (every writer of org_github_apps serializes on it), so there's
+// no real interleaving to race for. What this proves instead is that the
+// handler itself holds if SetActive ever reports it flipped nothing — the
+// same guarantee GetForOrgSystem's nil-on-absent contract gives the read
+// side, now enforced on the write side too.
+type setActiveReturnsNilTx struct{ inner db.TxRunner }
+
+func (w setActiveReturnsNilTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return w.inner.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.GitHubApps = setActiveNilStore{GitHubAppsStore: tx.GitHubApps}
+		return fn(tx)
+	})
+}
+
+func (w setActiveReturnsNilTx) SyntheticClaimsWithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return w.inner.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.GitHubApps = setActiveNilStore{GitHubAppsStore: tx.GitHubApps}
+		return fn(tx)
+	})
 }
 
 // hookGitHubApps installs the race hook on the server and returns the store it
@@ -525,6 +569,49 @@ func TestGitHubAppCutover_RegistrationVanishesUnderTheGuard(t *testing.T) {
 	// the org is still running on down with it.
 	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
 		t.Errorf("PAT = %q, want ghp_live — the cutover destroyed the org's only remaining credential", v)
+	}
+}
+
+// TestGitHubAppCutover_SetActiveReportsNoRow is the branch
+// TestGitHubAppCutover_RegistrationVanishesUnderTheGuard doesn't reach: that
+// test's discard lands before the lock, so the authoritative GetForOrgSystem
+// inside it already sees app == nil and refuses at the earlier guard — it
+// never gets as far as SetActive. Once the lock is held, nothing in this file
+// can make the registration vanish between that read and the cutover's
+// SetActive, so there is no real interleaving left to race for; this forces
+// the store's answer directly instead, to prove the handler holds on its own
+// if SetActive were ever to report it flipped nothing (TFAC-863) — the same
+// unchecked-UPDATE hole the file's header describes, now closed on the write
+// side rather than only guarded on the read side.
+func TestGitHubAppCutover_SetActiveReportsNoRow(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newGitHubAccessStub(t, ghAccessStub{
+		appInstalls: []stubInstall{{ID: 1, Login: "acme"}},
+	})
+	setOrgGitHubBase(t, s, stub.URL)
+	seedLocalApp(t, s, false) // staged
+	if err := s.secrets.Put(context.Background(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT, "ghp_live", ""); err != nil {
+		t.Fatalf("seed pat: %v", err)
+	}
+
+	s.tx = setActiveReturnsNilTx{inner: s.tx}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("cutover with SetActive reporting no row = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The whole point: a SetActive that reports nothing flipped must not let
+	// the unconditional PAT delete right after it run anyway — that exact
+	// sequence is what would strand the org with no GitHub credential at all.
+	if v := getSecret(t, s, integrations.KeyGitHubPAT); v != "ghp_live" {
+		t.Errorf("PAT = %q, want ghp_live — SetActive reporting no row still let the PAT delete run", v)
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil || app.Active {
+		t.Errorf("app = %+v, want the staged (Active=false) row left untouched", app)
 	}
 }
 

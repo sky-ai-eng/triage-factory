@@ -118,9 +118,9 @@ func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHub
 	if err != nil {
 		return domain.OrgGitHubApp{}, fmt.Errorf("insert org_github_apps: %w", err)
 	}
-	if stored == nil {
-		return domain.OrgGitHubApp{}, sql.ErrNoRows
-	}
+	// A plain INSERT ... RETURNING (no ON CONFLICT) either fails with a real
+	// error, handled above, or succeeds with exactly one row — stored is never
+	// nil here, unlike the UPDATE ... RETURNING in SetActive.
 	return *stored, nil
 }
 
