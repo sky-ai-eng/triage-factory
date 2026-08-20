@@ -78,7 +78,7 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
 // trigger-shape helpers used by drain_test + rederive_test. They
-// wrap EventHandlerStore.Create / SetEnabled, building a
+// wrap EventHandlerStore.Create / Update, building a
 // kind='trigger' EventHandler from the legacy-shaped fields.
 // createTriggerForTestRouting builds a kind='trigger' EventHandler on the
 // local default team (team A). The trigger's BlueprintID field is supplied
@@ -99,9 +99,19 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 	}
 }
 
+// setTriggerEnabledForTestRouting flips a trigger's enabled bit through the
+// same read-then-Update the PATCH route performs, so the fixture and the
+// product reach the stored row by one path.
 func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
 	t.Helper()
-	if _, err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrgID, id, enabled); err != nil {
+	ctx := context.Background()
+	store := testEventHandlerStore(database)
+	trig, err := store.Get(ctx, runmode.LocalDefaultOrgID, id)
+	if err != nil || trig == nil {
+		t.Fatalf("setTriggerEnabledForTestRouting %s: get: %v", id, err)
+	}
+	trig.Enabled = enabled
+	if _, err := store.Update(ctx, runmode.LocalDefaultOrgID, *trig); err != nil {
 		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
 	}
 }

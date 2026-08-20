@@ -121,8 +121,13 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 			t.Fatalf("sync A: %v", err)
 		}
 		r := handlerBySlug(t, stores, orgID, teamID, "hr-stale-off")
-		if _, err := stores.EventHandlers.SetEnabled(ctx, orgID, r.ID, false); err != nil {
-			t.Fatalf("SetEnabled: %v", err)
+		// Disabled the way a user disables it: an enabled-only Update, which is
+		// what the rule and trigger switches PATCH. That write must not stamp
+		// user_modified, or the sync below would skip this row as user-owned
+		// and the content assertions would pass for the wrong reason.
+		r.Enabled = false
+		if _, err := stores.EventHandlers.Update(ctx, orgID, *r); err != nil {
+			t.Fatalf("disable: %v", err)
 		}
 
 		handlersB := []db.ShippedEventHandler{

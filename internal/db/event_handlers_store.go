@@ -48,7 +48,7 @@ var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 //
 // # Every single-row write returns the row it persisted
 //
-// Create, Update, SetEnabled, Promote and RetargetBlueprint hand back the
+// Create, Update, Promote and RetargetBlueprint hand back the
 // stored row, read off RETURNING on the write statement itself rather than
 // from a follow-up SELECT, projecting the point read's column list and scanner
 // so the write shape cannot drift from the read shape. The row is the only
@@ -164,24 +164,22 @@ type EventHandlerStore interface {
 	// scope_predicate_json, name, default_priority (rules), or
 	// breaker_threshold / min_autonomy_suitability (triggers). Never stamps
 	// for enabled or sort_order alone: activation state and presentation
-	// order are the user's to own regardless of content drift, matching the
-	// dedicated SetEnabled / Reorder methods below. Determined by comparing
+	// order are the user's to own regardless of content drift, which is the
+	// same reason Reorder never stamps either. Determined by comparing
 	// against the row's current content, so a caller that resends unchanged
 	// content alongside a new enabled value does not spuriously stamp.
+	//
+	// An enabled-only update is how the product enables and disables a
+	// handler — the rule and trigger switches both PATCH this field — so that
+	// exclusion is load-bearing rather than an edge case: flipping a shipped
+	// handler off must not mark it user-modified and take it out of content
+	// sync.
 	//
 	// Returns the updated row, or ErrNoSuchEventHandler. The stamping decision
 	// above is exactly why the row and not h is the answer: whether
 	// user_modified flipped is a fact about stored content the caller never
 	// held.
 	Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error)
-
-	// SetEnabled flips just the enabled bit, taking an id rather than a row:
-	// no read, no content fields to resend. Never stamps user_modified —
-	// activation state is not content, which is also why Update declines to
-	// stamp for an enabled-only change and the two agree on the outcome.
-	//
-	// Returns the updated row, or ErrNoSuchEventHandler.
-	SetEnabled(ctx context.Context, orgID string, id string, enabled bool) (domain.EventHandler, error)
 
 	// Delete removes a handler. A row with a system_slug (a shipped copy)
 	// soft-deletes — stamps deleted_at, leaving the
