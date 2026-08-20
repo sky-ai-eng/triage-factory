@@ -41,6 +41,31 @@ through the same sidecar: `docker compose run --rm --no-deps --entrypoint sh
 seaweedfs-postinit -c 'aws --endpoint-url http://seaweedfs:8333 s3 ls
 "s3://${TF_BLOB_BUCKET:-tf-workspaces}/"'`.
 
+## Executor disk: evicting idle parked workspaces
+
+The object store bounds the **durable** copy of a workspace (snapshots are
+dropped 14 days after the last park or terminal). The **warm** copy — the actual
+worktree on an executor's disk — is bounded separately, because it costs one
+machine's disk rather than the fleet's bucket.
+
+A parked tree is kept as the warm-resume cache: a resume that lands back on the
+same executor reuses it instead of rehydrating. Left alone, an executor that
+never restarts accumulates one full checkout per parked blueprint run and slowly
+loses the disk headroom to take new work while its CPU and memory sit idle. So
+every executor sweeps hourly and reclaims trees that have been idle past a TTL:
+
+```sh
+TF_WORKSPACE_EVICT_AFTER_SEC=21600   # default 6h in multi mode; 0 disables
+```
+
+A tree is only ever evicted when the durable snapshot is recorded written *and*
+the blob store confirms the object is there, no conversation sharing the tree
+holds a live claim, and the whole key has been idle past the TTL. Anything else
+— a persist still in flight, a persist that failed, a blob that is missing
+despite the record — leaves the tree alone, because it is then the only copy of
+the agent's uncommitted work. An evicted workspace is not lost: the next resume
+rehydrates it from the snapshot, exactly as it does after an executor restart.
+
 ## Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
 
 The same `aws-sdk-go-v2` client (path-style addressing, configurable

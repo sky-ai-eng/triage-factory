@@ -231,6 +231,20 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return brID
 		},
+		SetSnapshotState: func(t *testing.T, blueprintRunID, state string) {
+			t.Helper()
+			// The writer is a real uuid because the Postgres column is one —
+			// the shared suite exists to catch exactly that kind of drift —
+			// and which engagement wrote the blob is not what the eviction
+			// enumeration reads, so a fixed value is enough.
+			if _, err := conn.Exec(`
+				INSERT INTO workspace_snapshots (org_id, blueprint_run_id, state, writer_claim_id)
+				VALUES (?, ?, ?, '11111111-1111-4111-8111-111111111111')
+				ON CONFLICT (org_id, blueprint_run_id) DO UPDATE SET state = excluded.state
+			`, runmode.LocalDefaultOrgID, blueprintRunID, state); err != nil {
+				t.Fatalf("seed workspace snapshot state: %v", err)
+			}
+		},
 		SetBlueprintRunStatus: func(t *testing.T, blueprintRunID, status string) {
 			t.Helper()
 			// Raw UPDATE — must NOT cascade onto child conversations (unlike

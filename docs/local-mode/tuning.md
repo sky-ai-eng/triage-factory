@@ -36,6 +36,27 @@ isn't reportable (for example macOS). The per-run memory ceiling
 (`TF_CLAIM_MEMORY_LIMIT_MB`) is a multi-mode sandbox control and does not apply
 locally.
 
+## Parked workspace disk
+
+A stopped run keeps its worktree on disk so resuming it is instant — a resume
+reuses the tree rather than rebuilding it from the snapshot TF also wrote. Those
+trees are full checkouts, and nothing reclaims them while the process is
+running; a restart sweeps the ones no parked run still wants.
+
+If parked runs pile up faster than you restart and the disk matters more than
+warm resumes, `TF_WORKSPACE_EVICT_AFTER_SEC` turns on an hourly sweep that
+reclaims trees idle longer than the given number of seconds:
+
+```bash
+export TF_WORKSPACE_EVICT_AFTER_SEC=21600   # reclaim trees parked >6h ago
+```
+
+It is **off unless you set it** (multi mode defaults it to 6h — there the disk
+belongs to shared infrastructure rather than to you). A tree is only reclaimed
+once its snapshot is verifiably written and no run sharing it is live, and
+resuming afterwards rebuilds the workspace from that snapshot — slower than a
+warm resume, never lost work.
+
 ## Logging
 
 Logs are structured (Go's `log/slog`) and written to stderr. Two environment
