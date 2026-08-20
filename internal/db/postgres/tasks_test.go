@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -407,7 +408,7 @@ func TestTaskStore_Postgres_ReassignClaimToUser(t *testing.T) {
 		if ok, err := stores.Tasks.ClaimQueuedForUser(ctx, orgID, taskID, userA); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		if err := stores.Tasks.Close(ctx, orgID, taskID, "test", ""); err != nil {
+		if _, err := stores.Tasks.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err := stores.Tasks.ReassignClaimToUser(ctx, orgID, taskID, userA, userB)
@@ -564,5 +565,102 @@ func TestTaskStore_Postgres_MalformedIDErrors(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	if _, err := stores.Tasks.Get(context.Background(), orgA, "not-a-uuid"); err == nil {
 		t.Fatal("Tasks.Get with a malformed id returned nil error; expected a uuid cast failure")
+	}
+}
+
+// TestTaskStore_Postgres_ReturnedRowConformance_AppPool runs the returned-row
+// standard's converted writes against the app pool under real claims — the
+// failure class TestTaskStore_Postgres (wired to AdminDB per its own doc
+// comment, so behavior stays independent of the auth path) can't see: an
+// UPDATE ... RETURNING under RLS has to satisfy the SELECT policy for the row
+// it hands back, so a policy that admits the write but not the read-back
+// yields zero rows from a statement that updated one. Same wiring
+// TestJiraAppsStore_Postgres_ReturnedRowConformance uses for a different
+// store, adapted here because TaskStore's writes need per-team RLS access
+// (tf.user_can_write_team) rather than the Jira store's single-row-per-org
+// shape, so the fixture is task-specific rather than reusing the shared
+// conformance suite (which already runs, admin-pooled, on both dialects via
+// RunTaskStoreConformance's own returned-row subtest).
+func TestTaskStore_Postgres_ReturnedRowConformance_AppPool(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, agentID := seedPgOrgUserAgent(t, h)
+	// A second team the user also admins, so SetOwnerTeam's WITH CHECK
+	// (tf.user_can_write_team on the RESULTING team_id) holds for the move,
+	// not just the read.
+	otherTeam := seedPgDefaultTeam(t, h, orgID, userID)
+
+	seed := func(suffix string) string {
+		_, _, taskID := seedPgTaskChain(t, h.AdminDB, orgID, userID, suffix)
+		return taskID
+	}
+	bumpID := seed("ap-bump")
+	closeID := seed("ap-close")
+	statusID := seed("ap-status")
+	claimAgentID := seed("ap-claim-agent")
+	claimUserID := seed("ap-claim-user")
+	ownerID := seed("ap-owner")
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
+		ctx := context.Background()
+		bareRead := func(taskID string) func() (*domain.Task, error) {
+			return func() (*domain.Task, error) {
+				full, err := store.Get(ctx, orgID, taskID)
+				if err != nil || full == nil {
+					return full, err
+				}
+				bare := *full
+				bare.Title, bare.SourceURL, bare.EntitySourceID = "", "", ""
+				bare.EntitySource, bare.EntityKind = "", ""
+				bare.OpenSubtaskCount, bare.SlackMessageCount = 0, 0
+				return &bare, nil
+			}
+		}
+
+		if _, err := store.SetStatus(ctx, orgID, bumpID, "snoozed"); err != nil {
+			return fmt.Errorf("seed snoozed: %w", err)
+		}
+		bumped, err := store.Bump(ctx, orgID, bumpID, "")
+		if err != nil {
+			return fmt.Errorf("Bump: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.Bump", bumped, bareRead(bumpID))
+
+		closed, err := store.Close(ctx, orgID, closeID, "test_close", "")
+		if err != nil {
+			return fmt.Errorf("Close: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.Close", closed, bareRead(closeID))
+
+		status, err := store.SetStatus(ctx, orgID, statusID, "in_review")
+		if err != nil {
+			return fmt.Errorf("SetStatus: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetStatus", status, bareRead(statusID))
+
+		claimedAgent, err := store.SetClaimedByAgent(ctx, orgID, claimAgentID, agentID)
+		if err != nil {
+			return fmt.Errorf("SetClaimedByAgent: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByAgent", claimedAgent, bareRead(claimAgentID))
+
+		claimedUser, err := store.SetClaimedByUser(ctx, orgID, claimUserID, userID)
+		if err != nil {
+			return fmt.Errorf("SetClaimedByUser: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByUser", claimedUser, bareRead(claimUserID))
+
+		owned, err := store.SetOwnerTeam(ctx, orgID, ownerID, otherTeam)
+		if err != nil {
+			return fmt.Errorf("SetOwnerTeam: %w", err)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "Tasks.SetOwnerTeam", owned, bareRead(ownerID))
+		if owned.TeamID == nil || *owned.TeamID != otherTeam {
+			t.Errorf("SetOwnerTeam returned team_id=%v, want %q", owned.TeamID, otherTeam)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
 	}
 }

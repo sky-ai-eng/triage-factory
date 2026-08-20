@@ -273,19 +273,19 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return s.VisibilityTeams(ctx, orgID, taskID)
 }
 
-func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	return s.SetOwnerTeam(ctx, orgID, taskID, teamID)
 }
 
-func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
 
-func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	return s.Close(ctx, orgID, taskID, closeReason, closeEventType)
 }
 
-func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	return s.SetStatus(ctx, orgID, taskID, status)
 }
 
@@ -505,45 +505,59 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	return task, true, nil
 }
 
-func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
 		WHERE id = ?
-	`, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		taskID), &t)
 }
 
-func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := closeTaskRows(ctx, s.q, taskID, closeReason, closeEventType)
-	return err
+	t, err := closeTaskRow(ctx, s.q, taskID, closeReason, closeEventType)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if t == nil {
+		return domain.Task{}, db.ErrNoSuchTask
+	}
+	return *t, nil
 }
 
-// closeTaskRows is Close's body reporting whether it actually transitioned a
-// row. The guard is the same one that makes a replayed close a no-op; the
-// caller that stamps stop intent needs to know which side of it this call
-// landed on.
-func closeTaskRows(ctx context.Context, q queryer, taskID, closeReason, closeEventType string) (int64, error) {
+// closeTaskRow is Close's body, reporting the closed row via RETURNING or
+// nil when the state-guarded WHERE matched nothing — a missing id, or a task
+// already terminal (the same guard that makes a replayed close a no-op).
+// CloseWithConversationCancelIntentSystem shares it so both close paths agree
+// on what "did this land" means, and on the SAME connection this call's
+// caller is already inside a transaction on.
+func closeTaskRow(ctx context.Context, q queryer, taskID, closeReason, closeEventType string) (*domain.Task, error) {
 	var cet *string
 	if closeEventType != "" {
 		cet = &closeEventType
 	}
-	res, err := q.ExecContext(ctx, `
+	var t domain.Task
+	row, err := scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = ?, close_event_type = ?,
 		                 closed_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'dismissed')
-	`, closeReason, cet, time.Now().UTC(), taskID)
-	if err != nil {
-		return 0, err
+		RETURNING `+sqliteTaskBareColumns,
+		closeReason, cet, time.Now().UTC(), taskID), &t)
+	if err == db.ErrNoSuchTask {
+		return nil, nil
 	}
-	return res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
 // scanActiveConversationIDs drains the task's non-terminal conversation ids and closes
@@ -578,11 +592,11 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 		conversationIDs []string
 	)
 	err := inTx(ctx, s.q, func(q queryer) error {
-		n, err := closeTaskRows(ctx, q, taskID, closeReason, closeEventType)
+		t, err := closeTaskRow(ctx, q, taskID, closeReason, closeEventType)
 		if err != nil {
 			return fmt.Errorf("close task: %w", err)
 		}
-		closed = n > 0
+		closed = t != nil
 
 		if closingEventID != "" {
 			if _, err := q.ExecContext(ctx, `
@@ -629,12 +643,15 @@ func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context,
 	return closed, conversationIDs, nil
 }
 
-func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
-	return err
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks SET status = ? WHERE id = ?
+		RETURNING `+sqliteTaskBareColumns,
+		status, taskID), &t)
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error) {
@@ -755,39 +772,45 @@ const sqliteActingTeamExpr = `COALESCE(
 		  LIMIT 1),
 		team_id)`
 
-func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	if teamID == "" {
-		return nil
-	}
-	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET team_id = ? WHERE id = ?`, teamID, taskID)
-	return err
+	// Empty teamID keeps the stored team_id (COALESCE/NULLIF, the same idiom
+	// stampAgentClaimIfUnclaimed uses below) rather than skipping the
+	// statement — the row still has to exist for the write to answer
+	// anything, so a bogus id reports ErrNoSuchTask on this path too instead
+	// of the prior silent no-op.
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks SET team_id = COALESCE(NULLIF(?, ''), team_id) WHERE id = ?
+		RETURNING `+sqliteTaskBareColumns,
+		teamID, taskID), &t)
 }
 
 // --- Claim mutations ---
 
-func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {
+func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
 	var claimedByAgentID any = agentID
 	if agentID == "" {
 		claimedByAgentID = nil
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
 		       claimed_by_user_id  = NULL
 		 WHERE id = ?
-	`, claimedByAgentID, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		claimedByAgentID, taskID), &t)
 }
 
-func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error {
+func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
 	var claimedByUserID any = userID
 	if userID == "" {
@@ -795,13 +818,14 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 		// would violate the users(id) FK on the next read.
 		claimedByUserID = nil
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
 		       claimed_by_agent_id = NULL
 		 WHERE id = ?
-	`, claimedByUserID, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		claimedByUserID, taskID), &t)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -1129,6 +1153,20 @@ const sqliteTaskColumnsWithEntity = `
 		ELSE 0
 	END`
 
+// sqliteTaskBareColumns is tasks' own columns — no entity join — in the
+// order taskScanState.bareTargets expects. It is the leading, identical
+// prefix of sqliteTaskColumnsWithEntity (kept that way so the two column
+// lists cannot drift apart) and is what every converted write's RETURNING
+// projects: see the returned-row shape note on db.TaskStore.
+const sqliteTaskBareColumns = `
+	id, entity_id, event_type, dedup_key, primary_event_id,
+	team_id,
+	status, priority_score, ai_summary, autonomy_suitability,
+	priority_reasoning, scoring_status, severity, relevance_reason,
+	source_status, snooze_until, close_reason, close_event_type,
+	closed_at, created_at,
+	claimed_by_agent_id, claimed_by_user_id`
+
 // taskScanState holds the NullX intermediates for one row of
 // sqliteTaskColumnsWithEntity. Keeping the helper here means
 // TaskStore's scan path is right next to the column list — the
@@ -1145,7 +1183,10 @@ type taskScanState struct {
 	claimedByAgentID, claimedByUserID  sql.NullString
 }
 
-func (s *taskScanState) targets(t *domain.Task) []any {
+// bareTargets is the scan-target list for sqliteTaskBareColumns — the
+// tasks-table columns only, none of the entity-join fields. targets below
+// extends it with those.
+func (s *taskScanState) bareTargets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
 		&s.teamID,
@@ -1154,9 +1195,14 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
 		&s.claimedByAgentID, &s.claimedByUserID,
+	}
+}
+
+func (s *taskScanState) targets(t *domain.Task) []any {
+	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount,
-	}
+	)
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
@@ -1204,6 +1250,22 @@ func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
 	}
 	s.finalize(t)
 	return nil
+}
+
+// scanTaskBareRow decodes a sqliteTaskBareColumns row — an id-keyed write's
+// UPDATE ... RETURNING. No row scanned means the write's WHERE clause
+// matched nothing (a missing id, or a state guard the row's current status
+// didn't satisfy), which is db.ErrNoSuchTask.
+func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
+	var s taskScanState
+	if err := row.Scan(s.bareTargets(t)...); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Task{}, db.ErrNoSuchTask
+		}
+		return domain.Task{}, err
+	}
+	s.finalize(t)
+	return *t, nil
 }
 
 func queryTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {

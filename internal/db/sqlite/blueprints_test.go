@@ -431,7 +431,7 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 		taskID, inserted, claimed := fire(t, "claim-race", db.AgentClaimStamp{AgentID: agentID}, func(taskID string) {
 			// The user claims the task in the window before the insert. They
 			// win the claim; the run must still be committed.
-			if err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
+			if _, err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
 				t.Fatalf("SetClaimedByUser: %v", err)
 			}
 		})

@@ -470,9 +470,19 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Serve the resource in the shape the reads serve it — not a status stub,
-	// and not the request body echoed back. The lifecycle stores answer with
-	// the new status rather than the row, so the row comes from a point read.
+	s.writeTaskResource(w, r, orgID, userID, id)
+}
+
+// writeTaskResource serves a task's current row in the shape the reads serve
+// it — not a status stub, and not the request body (or a caller-computed
+// guess) echoed back. The lifecycle/claim stores answer their own writes
+// with the new status or claim rather than the row (see the returned-row
+// shape note on db.TaskStore for why a write can't hand back the entity-
+// joined fields anyway), so every write-then-respond handler goes through
+// this point read instead. Writes the JSON body and returns true on success;
+// writes its own error response and returns false on a store error or a
+// task that vanished between the write and this read.
+func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var updated *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -480,13 +490,14 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return
+		return false
 	}
 	if updated == nil {
 		notFound(w, "task")
-		return
+		return false
 	}
 	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+	return true
 }
 
 // patchableTaskStatuses is the set PATCH accepts. 'queued' isn't among them:
@@ -721,7 +732,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
+	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
 // handleRequeue is the state-driven counterpart to handleUndo: same
@@ -782,7 +793,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
+	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
 // discardOutcome describes how the task ended up after the user

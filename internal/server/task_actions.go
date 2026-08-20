@@ -88,15 +88,14 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TargetUserID != nil {
-		newStatus, ok := s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, req.HesitationMs)
-		if !ok {
+		if _, ok := s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, req.HesitationMs); !ok {
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": newStatus})
+		s.writeTaskResource(w, r, orgID, userID, id)
 		return
 	}
 
-	newStatus, jiraUserClient, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
+	_, jiraUserClient, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
 	if !ok {
 		return
 	}
@@ -106,7 +105,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": newStatus})
+	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
 // selfClaim is the claim route's no-target arm: a race-safe transition to the

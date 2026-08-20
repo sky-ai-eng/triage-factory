@@ -310,7 +310,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		if err := store.Close(ctx, runmode.LocalDefaultOrgID, taskID, "test", ""); err != nil {
+		if _, err := store.Close(ctx, runmode.LocalDefaultOrgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
