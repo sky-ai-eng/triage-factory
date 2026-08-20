@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
@@ -25,9 +26,10 @@ import (
 // both answers have to flip together; a `resumable: true` beside an
 // ErrWorkspaceExpired is exactly the drift that would put the dead input back.
 //
-// Both runtimes, because the ladder is shared — a native conversation skips the
-// SDK's session/worktree/model rungs and answers identically on the two that
-// are about the world rather than the row.
+// Both runtimes, because that agreement is what the read is FOR — and the
+// engines do not answer every rung alike, so a case whose answer turns on the
+// runtime names it (sdkOnly below) rather than being asserted for one engine
+// and assumed for the other.
 func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -37,6 +39,10 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 		wantOK          bool
 		wantReason      string
 		wantErr         error
+		// sdkOnly marks a refusal only the SDK raises: a native conversation
+		// carries its context in `messages`, so a lost workspace costs it
+		// uncommitted work rather than the run.
+		sdkOnly bool
 	}{
 		{
 			name:            "warm workspace, blueprint finished",
@@ -62,6 +68,7 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 			wantOK:          false,
 			wantReason:      ResumeBlockedWorkspaceExpired,
 			wantErr:         ErrWorkspaceExpired,
+			sdkOnly:         true,
 		},
 		{
 			name:            "workspace intact, blueprint cancelled",
@@ -74,6 +81,11 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 	for _, runtime := range []string{"sdk", "native"} {
 		t.Run(runtime, func(t *testing.T) {
 			for _, tc := range cases {
+				if tc.sdkOnly && runtime == "native" {
+					// Same fixture, opposite answer: composer live, send
+					// accepted.
+					tc.wantOK, tc.wantReason, tc.wantErr = true, "", nil
+				}
 				t.Run(tc.name, func(t *testing.T) {
 					paths.SetForTest(t, t.TempDir())
 					database := newDelegateTestDB(t)
@@ -153,10 +165,15 @@ func TestResumabilityFor_FailedRunIsNotSteerable(t *testing.T) {
 
 // TestParkConversationOpen_FencedSnapshotAnnouncesResumable closes the residual window a
 // cross-pod stop leaves open. Control parks the row and announces `open`
-// seconds before the executor's teardown writes the snapshot, so every watcher
-// reads that park as unresumable — truthfully, at the time. When the blob
-// lands, the fenced teardown says so on the same conversation_update, and a
-// browser attached to some other pod enables its composer without a reload.
+// before the executor holding the workspace has recorded that it owes a
+// persist for it, so every watcher reads that park as unresumable — truthfully,
+// at the time. The fenced teardown records the persist and says so on the same
+// conversation_update, and a browser attached to some other pod enables its
+// composer without a reload.
+//
+// The state record is the precondition, not the blob: the wake gate accepts a
+// pending persist, so the announcement is true from the moment the record
+// lands, and waiting for the upload would hold it back for nothing.
 //
 // The status repeats what the row already has; that is the shape the field was
 // chosen for (failure_kind rides the failed status the same way), and it is why
@@ -193,8 +210,10 @@ func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	// The blob is the precondition for the announcement — without it there is
-	// nothing to announce.
+	// The record is what makes the announcement true and the blob follows it;
+	// both are asserted, because an announcement with neither behind it would
+	// enable a composer over a workspace nobody is producing.
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-1")
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
 	if err != nil {
 		t.Fatalf("fenced teardown wrote no snapshot: %v", err)
@@ -227,8 +246,9 @@ func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 
 // TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing is the other side of the
 // branch: a teardown fenced before it had any workspace to capture (a stop
-// during setup) has learned nothing a watcher needs, and saying "resumable"
-// there would enable a composer over a workspace that does not exist.
+// during setup) owes no persist, so it has learned nothing a watcher needs —
+// and saying "resumable" there would enable a composer over a workspace that
+// does not exist and never will.
 func TestParkConversationOpen_FencedWithoutSnapshotAnnouncesNothing(t *testing.T) {
 	s, _, conversationID, _ := setupAdvanceFixture(t, "fenced-no-snapshot")
 	hub, captured := capturingHub(t)
@@ -295,8 +315,10 @@ func TestParkConversationOpen_FencedIdleParkAnnouncesNothing(t *testing.T) {
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	// The snapshot landed, so silence here is the reason arm doing its job —
-	// not the snapshot arm failing and taking the announcement with it.
+	// The persist was recorded and landed, so silence here is the reason arm
+	// doing its job — not the workspace arm failing and taking the
+	// announcement with it.
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-1")
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
 	if err != nil {
 		t.Fatalf("fixture wrote no snapshot, so this test would pass for the wrong reason: %v", err)

@@ -580,6 +580,24 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 	return r, true, nil
 }
 
+// ClaimExecutorSystem resolves one claim id to the executor that took it. The
+// id is cast rather than compared as text so a malformed value is refused here
+// instead of matching nothing; the caller reads an error as "cannot tell",
+// which is a different answer from "no such claim".
+func (s *conversationQueueStore) ClaimExecutorSystem(ctx context.Context, orgID, claimID string) (string, bool, error) {
+	var executorID string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT executor_id FROM claims WHERE org_id = $1 AND id = $2::uuid
+	`, orgID, claimID).Scan(&executorID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return executorID, true, nil
+}
+
 // RequeueAwaitingCredentials releases a conversation whose active claim is
 // parked in phase='awaiting_credentials' — the executor-side timeout path:
 // the brain never responded to this conversation's cred_request within the

@@ -5,13 +5,20 @@
 // fast path (resume uses it directly, rehydrate is a no-op); a missing one
 // rebuilds from the snapshot — never a brick.
 //
-// Two snapshot triggers are wired today: idle hibernation to `open`
-// (markConversationOpen, live.go) and every non-failed terminal — which after the
-// terminal vocabulary shrank to completed|failed is `completed`, whatever the
-// outcome (processCompletion). A third — an executor-drain/scale-down trigger —
-// is a forward seam for the execution-plane split: there are no executors to
-// drain yet, so it is intentionally NOT wired. When it lands it calls
-// snapshotWorkspace with the same key, identically to the two triggers above.
+// Two snapshot triggers are wired today: a park to `open` — an idle
+// hibernation, a turn that ended without a conclusion, or a stop
+// (parkConversationOpen, live.go) — and every non-failed terminal, which after
+// the terminal vocabulary shrank to completed|failed is `completed`, whatever
+// the outcome (processCompletion). A third — an executor-drain/scale-down
+// trigger — is a forward seam for the execution-plane split: there are no
+// executors to drain yet, so it is intentionally NOT wired. When it lands it
+// calls snapshotWorkspace with the same key, identically to the two triggers
+// above.
+//
+// A park does NOT wait for its snapshot: it records that a persist is owed,
+// flips the conversation, and captures afterwards. The record is what makes
+// that safe — see parkConversationOpen for the ordering and workspace_wait.go
+// for the resume that reads it.
 //
 // The write policy and the retention sweep move together, always: the reaper
 // enumerates exactly the states listed above (ListReapableSnapshotKeysSystem),
@@ -169,7 +176,17 @@ func snapshotKey(orgID, keyID string) string {
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string) (err error) {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string) error {
+	return s.persistWorkspaceSnapshot(ctx, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime, false)
+}
+
+// persistWorkspaceSnapshot is snapshotWorkspace's body with the lifecycle
+// bracket's opening move made optional. leaseHeld says the caller already
+// opened the record and holds it, which a park does so the record exists
+// before the status flip a waiter reads; false opens one here — including for
+// a caller whose own open failed, since an untracked persist is precisely what
+// a resume cannot read.
+func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string, leaseHeld bool) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
@@ -215,7 +232,7 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	// pending forever and a later resume waiting out its full bound on a
 	// persist nobody is producing.
 	stateCtx := context.WithoutCancel(ctx)
-	owned := s.beginSnapshotState(stateCtx, orgID, keyID, claimID)
+	owned := leaseHeld || s.beginSnapshotState(stateCtx, orgID, keyID, claimID)
 	defer func() {
 		// A durable 'failed' is what lets a waiting resume stop waiting and
 		// fall back, so every error exit below lands here rather than leaving
@@ -378,6 +395,17 @@ func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID
 		delegateLog.Info("workspace snapshot state was re-owned by a newer engagement; outcome not recorded",
 			"org", orgID, "key_id", keyID, "claim_id", claimID, "written", ok)
 	}
+}
+
+// snapshotStateFor reads one key's lifecycle row. (nil, nil) means no persist
+// was ever owed — also what an unwired store reports. An error is passed up
+// rather than folded into that: callers deciding whether to keep waiting have
+// to tell "no record" from "cannot tell".
+func (s *Spawner) snapshotStateFor(ctx context.Context, orgID, keyID string) (*domain.WorkspaceSnapshotState, error) {
+	if s.workspaceSnapshots == nil {
+		return nil, nil
+	}
+	return s.workspaceSnapshots.GetSnapshotStateSystem(ctx, orgID, keyID)
 }
 
 // snapshotSuperseded reports whether the key's lifecycle row has moved to
@@ -653,30 +681,51 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 	return base
 }
 
-// ensureWorkspace guarantees the run's worktree exists on disk before a resume
-// re-invokes the agent, returning the cwd to resume in and how that tree came
-// to be. Warm path: the parked worktree survived on disk (the dormancy guards
-// kept it) → return it as-is, rehydrate is a no-op. Cold path: it's gone (host
-// loss, /tmp wipe, or a startup sweep) → rebuild it from the durable snapshot
-// and return the rebuilt path. seed locates, seeds and authenticates the bare
-// the git delta replays onto; its zero value is the non-git run-root.
+// freshWorkspaceBuilder builds this conversation's run tree from nothing, the
+// way its very first claim built it. The caller supplies it because only the
+// caller knows the shape: this frame holds the snapshot seed, which can replay
+// a delta onto a bare and cannot reconstruct a first launch. nil leaves the
+// fallback arm unavailable.
+type freshWorkspaceBuilder func(ctx context.Context) (string, error)
+
+// ensureWorkspace guarantees the run's worktree exists on disk before a claim
+// re-invokes the agent, returning the cwd to work in and how that tree came to
+// be. A ladder, and each rung is a different amount of the agent's remembered
+// work:
+//
+//   - warm — the parked worktree survived on disk (the dormancy guards kept
+//     it). Returned as-is; nothing is rebuilt.
+//   - rehydrated — it is gone (host loss, /tmp wipe, a startup sweep) but the
+//     durable snapshot is there, so the tree is rebuilt from it. seed locates,
+//     seeds and authenticates the bare the git delta replays onto; its zero
+//     value is the non-git run-root.
+//   - waited, then rehydrated — the snapshot is not there YET. A park flips the
+//     conversation's status before writing the blob, so this is the ordinary
+//     reading of a healthy run for as long as the capture takes; the lifecycle
+//     record says a persist is in flight and awaitSnapshotBlob waits it out.
+//   - fresh — no persist is coming (it failed, its writer died, or the wait
+//     gave up). A native conversation is rebuilt from nothing and told so, its
+//     continuity being the transcript rather than the tree. An SDK
+//     conversation cannot: its continuity WAS the session file inside the
+//     blob, so it gets the expired answer instead.
 //
 // The provenance is returned rather than inferred downstream because this is
 // the only frame that knows it: past here a warm tree and a reconstruction of
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
 //
-// conv.ClaimID is read, not just carried: a cold rebuild re-stamps
-// worktree_path, and that write is this engagement's to make only while it
-// still holds the conversation. Every caller is a claimed dispatch, so it is
-// populated at both — including the config the step builder synthesizes, which
-// copies it across for exactly this reason.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed) (_ string, prov domain.WorkspaceProvenance, err error) {
-	// The provenance IS the interesting part of this span: a warm reuse is a
-	// stat call and a cold rehydrate is a blob fetch plus a git rebuild, and
-	// nothing downstream can tell them apart afterwards — past here they are
-	// the same directory. Recorded from the named result so every exit below
-	// carries it without restating the attribute.
+// conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path,
+// and that write is this engagement's to make only while it still holds the
+// conversation. Every caller is a claimed dispatch, so it is populated at both
+// — including the config the step builder synthesizes, which copies it across
+// for exactly this reason.
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, err error) {
+	// The provenance IS the interesting part of this span — nothing downstream
+	// can tell the three rungs apart, since past here they are the same
+	// directory. Recorded from the named result so every exit below carries it
+	// without restating the attribute, with the wait beside it: a resume that
+	// sat out most of a minute behind a hung writer otherwise reads identically
+	// to one that walked straight through.
 	ctx, span := tracer.Start(ctx, "engagement.workspace.ensure")
 	defer func() {
 		if prov != "" {
@@ -707,10 +756,25 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
-	if err != nil {
-		if errors.Is(err, storage.ErrNotFound) {
-			return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from", conv.WorktreePath, keyID)
+	if errors.Is(err, storage.ErrNotFound) {
+		// Not there yet, or not there at all — the lifecycle record is what
+		// separates those, and the wait is where that question is asked.
+		appeared, waited := s.awaitSnapshotBlob(ctx, orgID, keyID)
+		span.SetAttributes(telemetry.SnapshotWaitedMs(waited.Milliseconds()))
+		if !appeared {
+			return s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
 		}
+		rc, err = blobs.Get(ctx, snapshotKey(orgID, keyID))
+		if err != nil {
+			// It existed a moment ago and now does not read: a successor's
+			// discard, or a store fault. Either way there is nothing to
+			// rehydrate from, so this takes the same answer the wait's own
+			// failure would have.
+			delegateLog.Warn("rehydrate: the snapshot the wait saw could not be fetched; falling back",
+				"conversation", conv.ID, "key_id", keyID, "error", err)
+			return s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+		}
+	} else if err != nil {
 		return "", "", fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
@@ -721,25 +785,52 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	if rErr := s.rehydrateFromSnapshot(ctx, wtDir, seed, rc); rErr != nil {
 		return "", "", rErr
 	}
-	if wtDir != conv.WorktreePath {
-		// Point the run (and the cleanup paths that key off it) at the rebuilt
-		// worktree. System write — resume goroutines hold no JWT claims.
-		// Non-fatal: the rebuilt path is returned and this resume proceeds. But
-		// conv.WorktreePath stays stale, so the NEXT resume won't find the
-		// warm copy and will cold-rehydrate again (correct, just slower) — log
-		// it distinctly so unexpected repeat rehydrates are diagnosable.
-		//
-		// A fence refusal is excluded because that diagnosis would be wrong
-		// twice over: the path is not stale, it is the successor's own, and
-		// the next resume is not this engagement's to predict. setWorktreePath
-		// has already logged the fact that actually happened — this executor
-		// lost the conversation — and saying anything further here would file
-		// a lost claim under slow rehydrates.
-		if wErr := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, wtDir); wErr != nil && !errors.Is(wErr, db.ErrClaimReleased) {
-			delegateLog.Warn("rehydrate: persist new worktree_path failed; stale path will force a repeat cold rehydrate on the next resume", "worktree_path", wtDir, "conversation", conv.ID, "error", wErr)
-		}
-	}
+	s.restampWorktreePath(ctx, orgID, conv, wtDir)
 	return wtDir, domain.WorkspaceProvenanceRehydrated, nil
+}
+
+// workspaceFromNothing is the ladder's last rung: there is no workspace to
+// recover and none is coming. The runtime decides what happens next, and that
+// is a fact about where each engine keeps the conversation rather than a
+// preference. A native one is replayed from its `messages` rows into whatever
+// tree it is given, so a workspace built from nothing is a real if lossier
+// continuation — the fresh provenance is what tells the agent which. An SDK
+// one is resumed by session id against a transcript that lived inside the
+// blob, so without it there is nothing to reconnect to.
+//
+// A caller with no builder gets the refusal whatever the runtime; the SDK
+// resume dispatch is the one such caller, and it could not use this arm anyway.
+func (s *Spawner) workspaceFromNothing(ctx context.Context, orgID string, conv *domain.Conversation, keyID string, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
+	if conv.Runtime != domain.ConversationRuntimeNative || fresh == nil {
+		return "", "", fmt.Errorf("worktree %q missing and no snapshot for %s to rehydrate from: %w", conv.WorktreePath, keyID, ErrWorkspaceExpired)
+	}
+	delegateLog.Warn("no workspace to recover; building this conversation a fresh one — uncommitted work from the prior engagement is lost",
+		"conversation", conv.ID, "key_id", keyID, "org", orgID)
+	wtDir, err := fresh(ctx)
+	if err != nil {
+		return "", "", fmt.Errorf("build fresh workspace for %s: %w", keyID, err)
+	}
+	s.restampWorktreePath(ctx, orgID, conv, wtDir)
+	return wtDir, domain.WorkspaceProvenanceFresh, nil
+}
+
+// restampWorktreePath points the conversation (and the cleanup paths that key
+// off it) at a tree this engagement just rebuilt. System write — claim
+// goroutines hold no JWT claims. Non-fatal: the rebuilt path is returned
+// either way, but a stale conv.WorktreePath costs the NEXT claim a repeat
+// rebuild, so the failure is logged distinctly to keep that diagnosable.
+//
+// A fence refusal is excluded because that diagnosis would be wrong twice
+// over: the path is not stale, it is the successor's own, and the next claim
+// is not this engagement's to predict. setWorktreePath has already logged the
+// thing that actually happened — this executor lost the conversation.
+func (s *Spawner) restampWorktreePath(ctx context.Context, orgID string, conv *domain.Conversation, wtDir string) {
+	if wtDir == conv.WorktreePath {
+		return
+	}
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, wtDir); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("persist rebuilt worktree_path failed; stale path will force a repeat rebuild on the next claim", "worktree_path", wtDir, "conversation", conv.ID, "error", err)
+	}
 }
 
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the worktree

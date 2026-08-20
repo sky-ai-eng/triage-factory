@@ -46,6 +46,7 @@ const (
 	keySnapPatch      = attribute.Key("snapshot.patch_bytes")
 	keySnapTranscript = attribute.Key("snapshot.transcript_bytes")
 	keySnapRaw        = attribute.Key("snapshot.raw_bytes")
+	keySnapWaitedMS   = attribute.Key("snapshot.waited_ms")
 	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
 	keyAgentDuration  = attribute.Key("agent.duration_ms")
 )
@@ -142,6 +143,14 @@ func SnapshotBundleBytes(n int64) attribute.KeyValue     { return keySnapBundle.
 func SnapshotPatchBytes(n int64) attribute.KeyValue      { return keySnapPatch.Int64(n) }
 func SnapshotTranscriptBytes(n int64) attribute.KeyValue { return keySnapTranscript.Int64(n) }
 func SnapshotRawBytes(n int64) attribute.KeyValue        { return keySnapRaw.Int64(n) }
+
+// SnapshotWaitedMs is how long a workspace ensure spent waiting on a persist
+// that was still in flight, on the ensure span beside the provenance. Zero on
+// every ensure that never had to wait, which is nearly all of them — the value
+// is there so a resume that sat out most of a minute behind a hung writer
+// reads differently from one that walked straight through, since the
+// provenance it ends on is the same either way.
+func SnapshotWaitedMs(ms int64) attribute.KeyValue { return keySnapWaitedMS.Int64(ms) }
 
 // AgentCostUSD and AgentDuration are the agent runtime's OWN accounting of
 // a finished engagement, carried onto the terminal span because neither is
