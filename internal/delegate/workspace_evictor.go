@@ -161,7 +161,7 @@ func (s *Spawner) EvictIdleWorkspaces(ctx context.Context, after time.Duration) 
 // used to be here".
 func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorkspace) int {
 	keyID := memoryNamespace(key.BlueprintRunID)
-	local := localRunTrees(key.WorktreePaths)
+	local := localRunTrees(keyID, key.WorktreePaths)
 	if len(local) == 0 {
 		return 0 // another executor's tree (or already gone) — nothing here to reclaim
 	}
@@ -197,6 +197,10 @@ func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorksp
 	// its ensureWorkspace would then hand a live agent the directory below. A
 	// claim minted on ANOTHER executor is not this sweep's problem — that
 	// engagement resolves its workspace over there, against its own disk.
+	//
+	// This answers for the directories about to be removed because
+	// localRunTrees kept only the trees this key names: "no engagement on
+	// keyID" and "nobody is in these directories" are the same statement.
 	busy, err := s.conversations.HasActiveClaimForBlueprintRunSystem(ctx, key.OrgID, key.BlueprintRunID)
 	if err != nil {
 		delegateLog.Warn("workspace evictor: active-claim re-check failed; keeping the warm tree",
@@ -228,16 +232,22 @@ func (s *Spawner) evictWorkspace(ctx context.Context, key domain.EvictableWorksp
 }
 
 // localRunTrees narrows recorded worktree paths to the ones this host can
-// actually evict: a directory that exists here, under TF's own ephemeral run
-// namespace. The namespace check is the guard that matters — worktree_path is
-// a value some other process wrote, and eviction hands it to a privileged
-// removal, so a path that is not one of our run trees is refused rather than
-// deleted on the strength of a database column.
-func localRunTrees(recorded []string) []string {
+// actually evict: a directory that exists here and is keyID's own run tree.
+//
+// Keyed, not merely namespaced, and that is the whole guard. worktree_path is
+// a value another process wrote and eviction hands it to a privileged removal,
+// so the sweep must not delete it on the strength of a database column alone.
+// Every other gate above — nothing claimed, snapshot written, blob present —
+// is evidence about keyID, and it transfers to the directory only while the
+// directory is keyID's. A recorded path that names a DIFFERENT key's tree is
+// one this sweep has established nothing about (that key may have a live
+// engagement in it right now), so it is refused rather than reasoned about.
+func localRunTrees(keyID string, recorded []string) []string {
 	var out []string
 	for _, p := range recorded {
-		if !worktree.IsRunWorktreePath(p) {
-			delegateLog.Warn("workspace evictor: recorded worktree_path is not a run tree; refusing to evict it", "path", p)
+		if !worktree.IsRunTreeFor(p, keyID) {
+			delegateLog.Warn("workspace evictor: recorded worktree_path is not this key's run tree; refusing to evict it",
+				"key_id", keyID, "path", p)
 			continue
 		}
 		if _, err := os.Stat(p); err != nil {

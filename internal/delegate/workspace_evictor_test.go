@@ -250,6 +250,43 @@ func TestEvictIdleWorkspaces_RefusesAPathOutsideTheRunNamespace(t *testing.T) {
 	}
 }
 
+// TestEvictIdleWorkspaces_RefusesAnotherKeysRunTree: a recorded path can be a
+// perfectly valid run tree and still belong to a different snapshot key. Every
+// gate the sweep passed — nothing claimed, snapshot written, blob present — is
+// evidence about THIS key and says nothing about that directory, whose own key
+// may have a live engagement in it right now. So the path is refused rather
+// than reasoned about.
+func TestEvictIdleWorkspaces_RefusesAnotherKeysRunTree(t *testing.T) {
+	isolateRunNamespace(t)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "evict-wrongkey")
+	wireBlobStore(t, s)
+	ctx := context.Background()
+
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
+	// A run tree in the right namespace, under someone else's key.
+	otherKey := "0f8f1b1c-0000-4000-8000-00000000beef"
+	otherTree := makeRunTree(t, otherKey)
+
+	putTestSnapshot(t, s, bpr)
+	seedSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten)
+	parkAged(t, database, conversationID, otherTree, "-2 hours")
+
+	var removed []string
+	restoreRemoveSeam(t, func(path, _ string) error {
+		removed = append(removed, path)
+		return os.RemoveAll(path)
+	})
+
+	s.EvictIdleWorkspaces(ctx, time.Hour)
+
+	if len(removed) != 0 {
+		t.Fatalf("evictor removed %v; the recorded path is %s's tree, not %s's, so nothing this sweep checked applies to it", removed, otherKey, bpr)
+	}
+	if _, err := os.Stat(otherTree); err != nil {
+		t.Fatalf("another key's workspace %s was deleted: %v", otherTree, err)
+	}
+}
+
 // TestRunWorkspaceEvictor_DisabledKnobNeverSweeps is the local-mode default:
 // with the knob unset the sweep does not start at all, so a parked tree that is
 // evictable in every other respect stays on the user's disk.
