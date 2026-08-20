@@ -14,22 +14,43 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
+// TestJiraAppsStore_Postgres_ReturnedRowConformance runs the shared
+// returned-row suite against the Postgres impl under the registrant's claims,
+// on the app pool.
+//
+// The claims are the point. Wiring both pools to AdminDB — what the other
+// store conformance suites do, so behavior stays independent of the auth path
+// — makes the connection BYPASSRLS, and a RETURNING clause on a BYPASSRLS
+// connection returns its row unconditionally. Under RLS it does not: the
+// upsert's conflict arm has to satisfy the SELECT policy for the row it hands
+// back, so a policy that admits the write but not the read-back yields zero
+// rows from a statement that updated one. That is the failure this wiring
+// exists to catch, and it is invisible on the admin pool.
+//
+// The whole suite runs inside ONE claims-carrying transaction, which is also
+// what the sequence needs: org_jira_apps is one row per org, so the conflict
+// arm is only reachable through the insert arm that preceded it. A subtest
+// added to the suite therefore inherits the table its siblings left behind.
+func TestJiraAppsStore_Postgres_ReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).JiraApps
+		dbtest.RunJiraAppsReturnedRowConformance(t, func(t *testing.T) (db.JiraAppsStore, string, string) {
+			t.Helper()
+			return store, orgID, userID
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+}
+
 // TestJiraAppsStore_Postgres_UpsertGetDelete exercises Upsert + Get + Delete
 // through the app pool with matching claims. RLS gates writes via
 // tf.user_is_org_admin(org_id); the upsert replaces in place on conflict.
-// TestJiraAppsStore_Postgres_ReturnedRowConformance runs the shared
-// returned-row suite against the Postgres impl, on the app pool so the
-// upsert's UPDATE arm has to see the row it replaces.
-func TestJiraAppsStore_Postgres_ReturnedRowConformance(t *testing.T) {
-	h := pgtest.Shared(t)
-	dbtest.RunJiraAppsReturnedRowConformance(t, func(t *testing.T) (db.JiraAppsStore, string, string) {
-		t.Helper()
-		h.Reset(t)
-		orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
-		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).JiraApps, orgID, userID
-	})
-}
-
 func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
