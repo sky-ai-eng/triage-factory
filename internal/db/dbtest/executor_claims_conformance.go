@@ -38,6 +38,10 @@ type ExecutorClaimRow struct {
 // through several subsystems, and no single store call the suite could make
 // reaches them.
 type ExecutorClaimsSeeder struct {
+	// OrgID owns the staged rows. The operator reads below are cross-org by
+	// construction and ignore it; the org-scoped claim→executor read needs it.
+	OrgID string
+
 	// Conversation stages one conversation in the given terminal state and returns its
 	// id. failureKind may be empty (an unclassified or non-failed run).
 	Conversation func(t *testing.T, status, failureKind string) (conversationID string)
@@ -251,6 +255,44 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 			if got != nil {
 				t.Errorf("ClaimByIDSystem(%q) = %+v, want nil", id, got)
 			}
+		}
+	})
+
+	t.Run("ClaimExecutorSystem_resolves_the_writing_engagement", func(t *testing.T) {
+		store, seed := mk(t)
+		conversationID := seed.Conversation(t, "open", "")
+		released := base.Add(time.Minute)
+		claimID := seed.Claim(t, ExecutorClaimRow{
+			ConversationID: conversationID, ExecutorID: "exec-writer", ClaimedAt: base,
+			ReleasedAt: &released, Outcome: "parked",
+		})
+
+		// Released, deliberately: the resume ladder asks this about the
+		// engagement that owed a snapshot, which has let the conversation go by
+		// the time anyone waits on its blob.
+		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, claimID)
+		if err != nil {
+			t.Fatalf("ClaimExecutorSystem: %v", err)
+		}
+		if !ok || got != "exec-writer" {
+			t.Errorf("ClaimExecutorSystem = (%q, %v), want (exec-writer, true)", got, ok)
+		}
+	})
+
+	t.Run("ClaimExecutorSystem_reports_an_unknown_id_as_absent", func(t *testing.T) {
+		store, seed := mk(t)
+		_ = seed.Conversation(t, "open", "")
+		// A well-formed id naming nothing is a miss. A malformed one is NOT
+		// folded into that: the dialects disagree on it (Postgres refuses the
+		// uuid cast, SQLite compares it as text), and an error reads to the
+		// caller as "cannot tell whether the writer is alive", which is the
+		// right answer for an id it had no business holding.
+		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, "33333333-3333-4333-8333-333333333333")
+		if err != nil {
+			t.Errorf("ClaimExecutorSystem(unknown) errored: %v", err)
+		}
+		if ok || got != "" {
+			t.Errorf("ClaimExecutorSystem(unknown) = (%q, %v), want (\"\", false)", got, ok)
 		}
 	})
 }

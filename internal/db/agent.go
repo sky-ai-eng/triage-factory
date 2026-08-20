@@ -202,6 +202,11 @@ type ConversationStore interface {
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.
+	//
+	// Re-stamps preferred_executor_id to the executor of the conversation's
+	// newest claim — advisory placement preference, not ownership: a resume
+	// should land where the workspace tree already is, and the last engagement
+	// is what says where that is. NULL when nothing ever claimed it.
 	// ok=false means the conversation is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.
@@ -821,6 +826,40 @@ type ConversationStore interface {
 	// retention sweep is a maintenance job that spans tenants; the admin pool
 	// is the right door (BYPASSRLS) since the reaper holds no JWT claims.
 	ListReapableSnapshotKeysSystem(ctx context.Context, cutoff time.Time) ([]domain.SnapshotReapKey, error)
+
+	// ListEvictableWorkspacesSystem returns every snapshot key whose warm
+	// on-disk workspace tree may be reclaimed, with the worktree paths its
+	// conversations recorded. The predicate is the retention sweep's grouping
+	// plus the two things that make deleting a *tree* safe where deleting a
+	// blob is not:
+	//
+	//   - Every snapshot-bearing conversation on the key (parked `open` /
+	//     `completed`) last parked or concluded before cutoff, grouped by
+	//     (org_id, blueprint_run_id) exactly as ListReapableSnapshotKeysSystem
+	//     groups — a blueprint's steps share one tree.
+	//   - No conversation on the key holds an active claim. Steps share the
+	//     tree, so a sibling step's live engagement is working in the very
+	//     directory this would delete.
+	//   - The key's workspace_snapshots row says `written`. A tree whose
+	//     snapshot is pending, failed, or absent is the ONLY copy of the
+	//     agent's uncommitted work, and the caller confirms the blob itself
+	//     before removing anything.
+	//
+	// Reads across tenants with no org scoping, like the retention sweep it
+	// sits beside: the caller is an executor-side maintenance job with no JWT
+	// claims, so the admin pool is the right door.
+	ListEvictableWorkspacesSystem(ctx context.Context, cutoff time.Time) ([]domain.EvictableWorkspace, error)
+
+	// HasActiveClaimForBlueprintRunSystem reports whether any conversation
+	// under blueprintRunID has a live claim — i.e. whether an executor is
+	// engaged on the shared workspace tree right now.
+	//
+	// It exists for the re-check the eviction sweep takes immediately before
+	// removing a tree, under the same per-key serialization the workspace
+	// paths hold: the enumeration above is a snapshot of a moment, and a
+	// dispatcher in the same process can claim a conversation on the key in
+	// between. Admin pool, for the same claims-less caller.
+	HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error)
 
 	// TokenTotalsSystem sums token usage across all assistant messages
 	// in a conversation (Model is MAX(model), preserving last-wins-alphabetically),

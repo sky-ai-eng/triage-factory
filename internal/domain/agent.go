@@ -368,12 +368,15 @@ type Conversation struct {
 	// string === SQL NULL.
 	ExecutorID string `json:"-"`
 
-	// PreferredExecutorID is the placement affinity stamp (TFAC-587): the
-	// capacity-weighted rendezvous winner for this conversation's (org, repo) key,
-	// computed at enqueue and re-stamped on each blueprint-step advance. The
-	// two-tier claim reads it (tier 1 = preferred equals the claiming
-	// executor). Advisory: empty (→ SQL NULL) means "unowned, claimable by
-	// anyone now" — placement disabled, local N=1, a non-repo key, or a
+	// PreferredExecutorID is the placement affinity stamp: which executor
+	// should get this conversation if it can. At enqueue (and on each
+	// blueprint-step advance) that is the capacity-weighted rendezvous winner
+	// for the conversation's (org, repo) key; on a resume it is instead the
+	// executor of the newest claim, which is the machine holding the workspace
+	// tree the follow-up wants to land in. The two-tier claim reads it (tier 1
+	// = preferred equals the claiming executor). Advisory: empty (→ SQL NULL)
+	// means "unowned, claimable by anyone now" — placement disabled, local
+	// N=1, a non-repo key, a conversation no engagement ever drove, or a
 	// requeue that cleared it. Set on enqueue and while the row is queued
 	// (unlike ExecutorID); read back only where placement needs it.
 	PreferredExecutorID string `json:"-"`
@@ -386,6 +389,23 @@ type Conversation struct {
 type SnapshotReapKey struct {
 	OrgID          string
 	BlueprintRunID string
+}
+
+// EvictableWorkspace is one snapshot key whose warm workspace tree may be
+// reclaimed from the executor holding it: every conversation sharing the key is
+// at rest, none is claimed, the key aged past the eviction TTL, and the durable
+// snapshot is recorded written. WorktreePaths are the distinct non-empty
+// worktree_path values those conversations recorded — normally one, since a
+// blueprint's steps share a tree, but a key resumed on a host with a different
+// $TMPDIR records a second.
+//
+// The paths are candidates, not facts about this machine: the enumerating pod
+// is not necessarily the pod holding the tree, so a caller stats each one
+// itself and evicts only what is actually here.
+type EvictableWorkspace struct {
+	OrgID          string
+	BlueprintRunID string
+	WorktreePaths  []string
 }
 
 // ModelSynthetic is the model id the agent runtime stamps on an assistant

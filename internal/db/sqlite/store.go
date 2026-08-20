@@ -193,6 +193,11 @@ func New(conn *sql.DB) db.Stores {
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
 		ClaimCredentials: newClaimCredentialsStore(conn),
+		// WorkspaceSnapshots collapses to the one connection (N=1, no RLS).
+		// Live in local mode, unlike ClaimCredentials: the single process parks
+		// and snapshots through the same writer, so the lifecycle row is
+		// recorded here exactly as it is on an executor.
+		WorkspaceSnapshots: newWorkspaceSnapshotStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

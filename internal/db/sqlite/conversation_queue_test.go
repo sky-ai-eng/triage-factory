@@ -789,6 +789,7 @@ func TestConversationQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 
 		nextStep := 0
 		seed := dbtest.ExecutorClaimsSeeder{
+			OrgID: org,
 			Conversation: func(t *testing.T, status, failureKind string) string {
 				t.Helper()
 				idx := nextStep

@@ -248,6 +248,12 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // path that puts an outcome-bearing conversation back into the mid-flight
 // (status NULL) state the needs-driving predicate claims from. See the
 // interface doc comment / the Postgres twin.
+//
+// The affinity re-stamp is inert here — placement is disabled at N=1, so the
+// tier predicate that reads the column is never built and one executor claims
+// everything regardless. It is written anyway because the column means the
+// same thing in both dialects: the executor whose engagement last held this
+// conversation's workspace.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -257,7 +263,11 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, park_reason = NULL,
-			                preferred_executor_id = NULL
+			                preferred_executor_id = (
+			                    SELECT c.executor_id FROM claims c
+			                    WHERE c.conversation_id = conversations.id
+			                    `+newestEngagementFirstSQL("c")+`
+			                    LIMIT 1)
 			WHERE id = ?
 			  AND (status = 'open'
 			       OR (status = 'completed'
@@ -305,30 +315,39 @@ func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID
 	return err
 }
 
-// PriorClaimExecutorSystem reads the predecessor engagement's executor. The
-// caller's own claim is excluded by id — it is the newest row by construction
-// (one active claim per conversation), so the predecessor is the next one back.
+// newestEngagementFirstSQL orders one conversation's claims by how recently
+// each engagement held it, nearest first, for the alias the caller gave the
+// claims table — the resume flip's affinity stamp and the predecessor lookup
+// below both take it, and "which engagement came later" is one question.
 //
 // The sort is total, for the reason the Postgres arm spells out. Ties are
 // reachable here too: the mint writes a precise Go timestamp, but the column's
 // own default is CURRENT_TIMESTAMP at whole-second resolution, so any row that
 // takes it can tie with a neighbour. released_at breaks a tie meaningfully —
 // of two claims that started together the one that finished later is the
-// nearer predecessor, and an unreleased one is nearer still, which is what the
+// nearer engagement, and an unreleased one is nearer still, which is what the
 // IS NULL term buys (SQLite sorts NULLs last under DESC, where Postgres is
 // told NULLS FIRST). rowid is the backstop that leaves nothing undecided.
 //
 // The answer is the same either way at N=1, where there is one executor to
 // name, but the ordering is part of a contract both dialects are held to.
+func newestEngagementFirstSQL(alias string) string {
+	return `ORDER BY ` + alias + `.claimed_at DESC, (` + alias + `.released_at IS NULL) DESC, ` +
+		alias + `.released_at DESC, ` + alias + `.rowid DESC`
+}
+
+// PriorClaimExecutorSystem reads the predecessor engagement's executor. The
+// caller's own claim is excluded by id — it is the newest row by construction
+// (one active claim per conversation), so the predecessor is the next one back.
 func (s *conversationStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
 	var executorID string
 	err := s.q.QueryRowContext(ctx, `
-		SELECT executor_id FROM claims
-		WHERE conversation_id = ? AND id <> ?
-		ORDER BY claimed_at DESC, (released_at IS NULL) DESC, released_at DESC, rowid DESC
+		SELECT c.executor_id FROM claims c
+		WHERE c.conversation_id = ? AND c.id <> ?
+		`+newestEngagementFirstSQL("c")+`
 		LIMIT 1
 	`, conversationID, claimID).Scan(&executorID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -781,6 +800,86 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 		keys = append(keys, k)
 	}
 	return keys, rows.Err()
+}
+
+func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, cutoff time.Time) ([]domain.EvictableWorkspace, error) {
+	// Three gates, in the order they matter. The workspace_snapshots join is
+	// the safety one: only a key whose durable blob is recorded `written` has
+	// a second copy of the agent's work, so only that key's tree is a cache
+	// rather than the original. The correlated MAX is the retention sweep's
+	// timestamp rule verbatim (parked_at for an open conversation, re-stamped
+	// each park; completed_at for a terminal; started_at a legacy fallback),
+	// scoped to the key so a blueprint's steps age as one. The NOT EXISTS is
+	// the shared-tree rule: any live claim anywhere under the key means an
+	// engagement is working in the directory this enumerates for deletion.
+	//
+	// datetime() normalizes the mixed on-disk timestamp formats
+	// (CURRENT_TIMESTAMP text vs Go-bound values) so the MAX is consistent;
+	// the cutoff binds as a canonical UTC string.
+	//
+	// DISTINCT over the paths: the steps of one blueprint each record the
+	// shared tree on their own row, so the same path arrives once per step.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT c.org_id, c.blueprint_run_id, c.worktree_path
+		FROM conversations c
+		JOIN workspace_snapshots ws
+		  ON ws.org_id = c.org_id AND ws.blueprint_run_id = c.blueprint_run_id
+		WHERE ws.state = 'written'
+		  AND c.status IN ('open', 'completed')
+		  AND COALESCE(c.worktree_path, '') <> ''
+		  AND (
+		        SELECT MAX(datetime(COALESCE(aged.parked_at, aged.completed_at, aged.started_at)))
+		        FROM conversations aged
+		        WHERE aged.org_id = c.org_id
+		          AND aged.blueprint_run_id = c.blueprint_run_id
+		          AND aged.status IN ('open', 'completed')
+		      ) < datetime(?)
+		  AND NOT EXISTS (
+		        SELECT 1
+		        FROM conversations sib
+		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
+		        WHERE sib.org_id = c.org_id AND sib.blueprint_run_id = c.blueprint_run_id
+		      )
+		ORDER BY c.org_id, c.blueprint_run_id, c.worktree_path
+	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.EvictableWorkspace
+	for rows.Next() {
+		var orgID, blueprintRunID, path string
+		if err := rows.Scan(&orgID, &blueprintRunID, &path); err != nil {
+			return nil, err
+		}
+		// The ORDER BY groups a key's paths adjacently, so one pass folds them.
+		if n := len(out); n > 0 && out[n-1].OrgID == orgID && out[n-1].BlueprintRunID == blueprintRunID {
+			out[n-1].WorktreePaths = append(out[n-1].WorktreePaths, path)
+			continue
+		}
+		out = append(out, domain.EvictableWorkspace{
+			OrgID:          orgID,
+			BlueprintRunID: blueprintRunID,
+			WorktreePaths:  []string{path},
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
+	var exists int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM conversations c
+			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
+			WHERE c.org_id = ? AND c.blueprint_run_id = ?
+		)
+	`, orgID, blueprintRunID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {

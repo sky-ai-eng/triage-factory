@@ -35,6 +35,8 @@ const snapshotRestoredBody = "Your workspace was restored from its last snapshot
 const builtFreshBody = "Your workspace was built from scratch — there was no snapshot to restore from. " +
 	"Only what reached the remote is present. Anything the interrupted engagement did not push — local commits, " +
 	"uncommitted edits, untracked files, scratch under the run root — is gone. " +
+	"What you lost is the workspace, not this conversation: everything above is the record of what was done, " +
+	"and it is why the tree may not match it. " +
 	"Check the working tree and git log before building on what you remember doing."
 
 // executorChangedSentence is said only when a predecessor engagement

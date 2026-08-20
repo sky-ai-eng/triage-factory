@@ -362,6 +362,28 @@ func (s *conversationQueueStore) GetClaim(ctx context.Context, orgID, conversati
 	return r, true, nil
 }
 
+// ClaimExecutorSystem resolves one claim id to the executor that took it.
+// Local mode is N=1, so the answer is always this process — the read is still
+// real rather than a constant, because the caller's question is about a
+// specific historical engagement and an id no claim carries has to answer
+// "unknown" here exactly as it does in Postgres.
+func (s *conversationQueueStore) ClaimExecutorSystem(ctx context.Context, orgID, claimID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var executorID string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT executor_id FROM claims WHERE org_id = ? AND id = ?
+	`, orgID, claimID).Scan(&executorID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return executorID, true, nil
+}
+
 // RequeueAwaitingCredentials mirrors the Postgres impl: releases the
 // conversation's claim parked in phase='awaiting_credentials', which leaves the
 // (still mid-flight) conversation claimable again. Never reached in

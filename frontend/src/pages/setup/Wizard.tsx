@@ -29,6 +29,7 @@ import { useNavigate } from 'react-router'
 import { Check } from 'lucide-react'
 import { AnimatePresence, cubicBezier, motion, useReducedMotion } from 'motion/react'
 import { useActiveOrgId } from '../../contexts/OrgContext'
+import { useTeams } from '../../hooks/useTeams'
 import { LOCAL_DEFAULT_ORG_ID } from '../../lib/githubApp'
 import { WIZARD_SECTIONS, type WizardState } from './types'
 import { WIZARD_STEPS, initialWizardState, jiraActive } from './steps'
@@ -85,19 +86,83 @@ function Loading() {
 
 /**
  * `isLocal` resolves the org id (local has no OrgContext, so it uses the
- * sentinel) and the finish destination (local's app is the flat root; multi's
- * is org-scoped). The wizard is mounted outside the setup gate in both modes,
- * so an incomplete founder can actually reach it without looping.
+ * sentinel), the finish destination (local's app is the flat root; multi's is
+ * org-scoped), and how the team steps address their routes: local's team
+ * endpoints take the "default" alias, while multi requires the team's uuid,
+ * resolved from the teams list before the step stack mounts. The wizard is
+ * mounted outside the setup gate in both modes, so an incomplete founder can
+ * actually reach it without looping.
  */
 export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
+  if (isLocal) {
+    return <WizardStack teamId="default" isLocal />
+  }
+  return <MultiTeamResolve />
+}
+
+// MultiTeamResolve holds the multi-mode wizard until the caller's first team
+// resolves. The {team_id} routes the team steps address accept the "default"
+// alias only in local mode — multi requires a uuid — so the wizard takes [0]
+// of the membership-scoped, oldest-first teams list: the caller's own oldest
+// team. For the founder running first-time setup that is the team
+// provisioning created — the "first team" the wizard's team section
+// configures; for a caller who isn't on the org's oldest team it is their
+// own oldest instead, which is the only kind of team the steps' reads and
+// writes are authorized against anyway. Resolving before the stack mounts
+// keeps every step's load addressed correctly on the first fan-out.
+function MultiTeamResolve() {
+  const { teams, loaded, error, refresh } = useTeams()
+  const retry = () => void refresh()
+  if (error) {
+    return (
+      <ResolveFailed
+        message="We couldn’t load your teams. Retry to continue setup."
+        retry={retry}
+      />
+    )
+  }
+  if (!loaded) return <Loading />
+  const teamId = teams[0]?.id
+  if (!teamId) {
+    // A founder is a member of the team provisioning created, so an empty
+    // list means this account isn't in any team — the team steps have
+    // nothing to configure until an org admin adds them to one.
+    return (
+      <ResolveFailed
+        message="Your account isn’t in any team yet. Ask an org admin to add you to one, then retry."
+        retry={retry}
+      />
+    )
+  }
+  return <WizardStack teamId={teamId} isLocal={false} />
+}
+
+function ResolveFailed({ message, retry }: { message: string; retry: () => void }) {
+  return (
+    <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="max-w-sm space-y-3 text-center">
+        <p className="text-[13px] text-text-secondary">{message}</p>
+        <button
+          type="button"
+          onClick={retry}
+          className="rounded-lg border border-border-subtle bg-white/50 px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-white/80"
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// The step stack itself, mounted once the team steps' address is known — the
+// alias in local mode, the resolved uuid in multi.
+function WizardStack({ teamId, isLocal }: { teamId: string; isLocal: boolean }) {
   const navigate = useNavigate()
   const ctxOrgId = useActiveOrgId()
   const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
   const reduce = !!useReducedMotion()
 
-  // Team endpoints take the "default" alias (resolves to the org's first
-  // team), so the wizard never needs the team UUID up front.
-  const identity = useMemo(() => ({ orgId, teamId: 'default', isLocal }), [orgId, isLocal])
+  const identity = useMemo(() => ({ orgId, teamId, isLocal }), [orgId, teamId, isLocal])
 
   const onFinish = useCallback(
     (state: WizardState) => {

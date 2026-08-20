@@ -916,7 +916,7 @@ func (s *Spawner) processCompletion(
 	// accepted and a claim minted — for a workspace that, the other way round, is
 	// still being written.
 	if status == "completed" {
-		if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claudeCwd, sessionID, domain.ConversationRuntimeSDK); err != nil {
+		if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK); err != nil {
 			delegateLog.Warn("snapshot workspace for completed conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
 		}
 	}

@@ -248,7 +248,9 @@ export default function OrgSettings({
 
   // The StepContext every /setup body consumes — the live draft + patch, with
   // advance a no-op (Settings has no linear flow; selfAdvancing pickers just
-  // record the choice). orgId/teamId/isLocal ride along for the App panel etc.
+  // record the choice). orgId/isLocal ride along for the App panel etc.;
+  // teamId only satisfies the context shape — no org step reads it, and the
+  // "default" alias would not resolve on a multi-mode team route.
   const ctx: StepContext = { orgId, teamId: 'default', isLocal, state: draft, patch, advance: noop }
 
   // Live GitHub mode — derived from the App registration's active bit, NOT the

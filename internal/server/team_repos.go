@@ -23,8 +23,9 @@ import (
 // profiles. GET (any team member) returns the team's tracked repo slugs; PUT
 // (team admin) replace-sets them, bringing any newly-tracked repository into
 // the registry the rows reference. Untracking removes the tracking row alone:
-// the registry row survives whatever still names it. The {team_id} segment accepts a UUID or the literal
-// "default", same as the sibling team-settings routes. The candidate
+// the registry row survives whatever still names it. The {team_id} segment
+// resolves through authz.ResolveTeamID — a UUID, plus the literal "default"
+// in local mode — same as the sibling team-settings routes. The candidate
 // list (the repos the user's token can see) is fetched separately via
 // GET /api/github/repos, mirroring how the existing repo picker sources
 // its options.

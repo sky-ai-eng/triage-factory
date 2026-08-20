@@ -452,6 +452,13 @@ type Stores struct {
 	// there is no app-pool grant at all.
 	ClaimCredentials ClaimCredentialsStore
 
+	// WorkspaceSnapshots owns the workspace_snapshots table — per snapshot key,
+	// whether the workspace blob is being written, was written, or failed, and
+	// which engagement owns the write. Admin-pool-only, same shape as
+	// ClaimCredentials: written by an executor's teardown, read by the resume
+	// path and the retention reaper, never by a request handler.
+	WorkspaceSnapshots WorkspaceSnapshotStore
+
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
 	// core holds no SSO symbols.
