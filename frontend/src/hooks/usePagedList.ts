@@ -30,7 +30,9 @@ export interface PagedList<T> {
   /** True when the server minted a token for a further page. */
   hasMore: boolean
   /** Fetch the first page for `filters`, replacing whatever is held. Resolves
-   *  to the page, or null if the request failed. */
+   *  to the page, or null if the request failed or was superseded by a later
+   *  `load` before it resolved — a caller must not read the resolved page's
+   *  data directly, since a superseded page was never applied to state. */
   load: (filters: ListRequest) => Promise<ListPage<T> | null>
   /** Fetch the next page and append it. A no-op when there is no next page or
    *  a request is already in flight. */
@@ -83,12 +85,23 @@ export function usePagedList<T>(
   const tokenRef = useRef('')
   const inFlight = useRef(false)
 
+  // Bumped on every load/loadMore call. A response applies its state only if
+  // it is still the most recent call when it resolves — otherwise a caller
+  // whose props changed mid-flight (a new `projectId`, an overlapping
+  // refetch) would let an older response land after a newer one and paint
+  // the wrong page. This is why a component-level `cancelled` flag around
+  // just its own derived state isn't enough: it has to guard the hook's
+  // own setState calls, which only the hook can do.
+  const requestIdRef = useRef(0)
+
   const load = useCallback(
     async (filters: ListRequest): Promise<ListPage<T> | null> => {
+      const requestId = ++requestIdRef.current
       inFlight.current = true
       setLoading(true)
       try {
         const page = await apiList<T>(path, filters)
+        if (requestId !== requestIdRef.current) return null
         setItems(page.items)
         setTotal(page.total_count)
         setNextToken(page.next_page_token)
@@ -97,6 +110,7 @@ export function usePagedList<T>(
         setError('')
         return page
       } catch (err) {
+        if (requestId !== requestIdRef.current) return null
         if (isEmptyStatus(err, opts.emptyOnStatus)) {
           setItems([])
           setTotal(0)
@@ -110,8 +124,10 @@ export function usePagedList<T>(
         setError(httpErrorMessage(err, fallbackError))
         return null
       } finally {
-        inFlight.current = false
-        setLoading(false)
+        if (requestId === requestIdRef.current) {
+          inFlight.current = false
+          setLoading(false)
+        }
       }
     },
     [path, fallbackError, opts.emptyOnStatus],
@@ -119,6 +135,7 @@ export function usePagedList<T>(
 
   const loadMore = useCallback(async () => {
     if (!tokenRef.current || inFlight.current) return
+    const requestId = requestIdRef.current
     inFlight.current = true
     setLoading(true)
     try {
@@ -126,18 +143,22 @@ export function usePagedList<T>(
         ...filtersRef.current,
         page_token: tokenRef.current,
       })
+      if (requestId !== requestIdRef.current) return
       setItems((prev) => [...prev, ...page.items])
       setTotal(page.total_count)
       setNextToken(page.next_page_token)
       tokenRef.current = page.next_page_token
       setError('')
     } catch (err) {
+      if (requestId !== requestIdRef.current) return
       if (!isEmptyStatus(err, opts.emptyOnStatus)) {
         setError(httpErrorMessage(err, fallbackError))
       }
     } finally {
-      inFlight.current = false
-      setLoading(false)
+      if (requestId === requestIdRef.current) {
+        inFlight.current = false
+        setLoading(false)
+      }
     }
   }, [path, fallbackError, opts.emptyOnStatus])
 
