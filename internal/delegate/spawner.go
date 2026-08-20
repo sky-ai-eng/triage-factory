@@ -288,6 +288,16 @@ type Spawner struct {
 	// their writes against the same issue (which could drag a Done ticket back
 	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
 	jiraMirrorLocks keyedMutex
+	// workspaceLocks serializes mutation of one snapshot key's workspace tree
+	// within this process. Two things in an executor touch a parked tree: an
+	// engagement materializing it (ensureWorkspace — warm stat or cold
+	// rehydrate) and the eviction sweep deleting it. They run in the same
+	// process, so a bare "is anyone claimed on this key" read is a check
+	// against a fact that can change a line later; holding this across the
+	// decision is what makes the answer still true at the removal. Keyed by
+	// (org, blueprint_run_id) — the key a tree belongs to, not a conversation.
+	// Its own keyed lock, independent of mu; zero value ready.
+	workspaceLocks keyedMutex
 
 	// blobs is the durable blob/object store handle for the blueprint
 	// workspace seam: local mode → an on-disk store under the state root,
@@ -397,6 +407,16 @@ type Spawner struct {
 	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
 	// SetSnapshotRetentionTTL. Read through snapshotRetention().
 	snapshotRetentionTTL time.Duration
+	// snapshotWaitTimeout bounds how long a cold resume waits on a workspace
+	// snapshot whose record says a persist is in flight — the hung-writer
+	// backstop, not the expected duration. Zero means DefaultSnapshotWait; set
+	// once at startup via SetSnapshotWaitTimeout (TF_SNAPSHOT_WAIT_SEC) and
+	// read through snapshotWait().
+	snapshotWaitTimeout time.Duration
+	// snapshotWaitPollInterval is how often that wait re-reads the record and
+	// the blob store. Zero means snapshotWaitPoll; tests shrink it so a wait
+	// with a real ladder behind it still runs in milliseconds.
+	snapshotWaitPollInterval time.Duration
 	// memFloorMB is the dispatch memory guardrail: when available memory
 	// (hostmem.AvailableMB — cgroup-scoped when confined)
 	// drops below this, drainConversationQueue defers claims (runs stay queued)
@@ -1371,14 +1391,18 @@ func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status stri
 
 // broadcastConversationResumable is broadcastConversationUpdate's late-workspace arm: the same
 // conversation_update carrying the parked status the row already has, plus the
-// one thing that changed — the workspace snapshot exists, so a follow-up can
-// land now.
+// one thing that changed — this conversation's workspace is accounted for, so
+// a follow-up can land now.
 //
-// It closes a window nothing else can. A cross-pod stop parks the row and
-// announces `open` from control, seconds before the executor's teardown writes
-// the snapshot; between those two moments the run read honestly answers "not
-// resumable", and without this the browser would keep that answer until
-// someone reloaded the page.
+// It closes one window and only that one. A cross-pod stop parks the row and
+// announces `open` from control, before the executor holding the workspace has
+// recorded that it owes a persist for it; between those moments the run read
+// honestly answers "not resumable", and the browser would keep that answer
+// until someone reloaded. The executor's teardown fires this the instant its
+// record lands — when the answer changes, not when the blob appears. Every
+// other park needs nothing of the sort: an engagement parking its own run
+// opens the record before its own flip, so that flip's `open` is already
+// resumable when it reaches a client.
 //
 // The status rides along rather than a new event type because resumability is
 // an attribute of the already-announced park, not a new situation — the same

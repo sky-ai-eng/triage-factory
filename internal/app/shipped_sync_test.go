@@ -77,7 +77,7 @@ func TestShippedDefaultsSync_LocalBoot(t *testing.T) {
 	}
 
 	// A store edit stamps user_modified; the next sweep must leave it alone.
-	if err := stores.Prompts.Update(ctx, org, restored.ID, "My CI Fix", "my custom body", ""); err != nil {
+	if _, err := stores.Prompts.Update(ctx, org, restored.ID, "My CI Fix", "my custom body", ""); err != nil {
 		t.Fatalf("user update: %v", err)
 	}
 	if err := db.SyncShippedDefaultsForAllTeams(ctx, stores, promptseed.Prompts(), promptseed.Blueprints()); err != nil {

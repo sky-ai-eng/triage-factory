@@ -104,6 +104,10 @@ type TeamGitHubReposStore interface {
 	// branch, clone state and poll cursor intact, because a worktree ledger
 	// entry, a pinned project or a task may still name it. It simply stops
 	// being in the tracked set, so it stops being polled and profiled.
+	//
+	// Exempt from the returned-row rule: it reconciles a team's whole tracked
+	// set in one transaction, so there is no single row a return value could
+	// name.
 	ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error
 
 	// TracksRepoSystem reports whether the team tracks (owner, repo),

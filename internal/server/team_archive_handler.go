@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -151,7 +152,8 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// RLS gates the write (org-admin via the front gate); a zero-row result means
 	// it was archived in a race past GetSystem.
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.Archive(r.Context(), teamID)
+		_, e := tx.Teams.Archive(r.Context(), teamID)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
 			conflict(w, "team is already archived")
@@ -239,8 +241,11 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	var restored domain.Team
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.Restore(r.Context(), teamID)
+		var e error
+		restored, e = tx.Teams.Restore(r.Context(), teamID)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
 			// Restored in a race past GetSystem — treat as already-restored.
@@ -252,11 +257,10 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	}
 
 	teamsLog.Info("team restored", "org", orgID, "team", teamID)
-	// team was read before the restore, so its tombstone is stale by the time
-	// we serialize it. Clear it rather than echoing an archived_at the write
-	// just removed — a response must not assert a state the request undid.
-	team.DeletedAt = nil
-	writeJSON(w, http.StatusOK, teamToJSON(*team, ""))
+	// The row the write returned, not the copy read before it: that copy still
+	// carries the tombstone this request removed, and patching the field off it
+	// by hand was a response asserting a state nobody had read.
+	writeJSON(w, http.StatusOK, teamToJSON(restored, ""))
 }
 
 // archivedTeamListRequest is the body of POST /api/teams/archived/list. The

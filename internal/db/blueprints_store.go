@@ -24,6 +24,16 @@ var (
 	// than the acting team — the endpoint is third-party-callable, so a mixed-
 	// scope id set is rejected rather than trusted.
 	ErrDuplicateCrossTeam = errors.New("db: duplicate prompt set spans more than the acting team")
+	// ErrNoSuchBlueprint means an id-keyed write named no live blueprint —
+	// either no row carries the id or the row is soft-deleted, which a caller
+	// holding only an id cannot tell apart and does not need to. Only the
+	// writes return it; Get and GetBySystemSlug keep answering a miss with
+	// (nil, nil).
+	ErrNoSuchBlueprint = errors.New("db: no live blueprint with that id")
+	// ErrNoSuchBlueprintRun means an id-keyed blueprint_runs write named no
+	// row. Same split as ErrNoSuchBlueprint: the writes refuse, GetRun answers
+	// (nil, nil).
+	ErrNoSuchBlueprintRun = errors.New("db: no blueprint run with that id")
 	// ErrBlueprintRunFenceRequiresEventAndTrigger is returned by
 	// CreateRunIfNotFiredSystem when TriggeringEventID or TriggerID is empty.
 	// Both bind to SQL NULL, which the partial unique fence index treats as
@@ -244,6 +254,34 @@ type BlueprintRunListFilter struct {
 	Statuses []string
 }
 
+// # Every single-row write returns the row it persisted
+//
+// Create, Rename, ReplaceSteps, CreateRun, SetRunWorktreePathSystem and
+// SetRunCurrentStepSystem hand back the stored row, read off RETURNING on the
+// write statement itself rather than from a follow-up SELECT, projecting the
+// point read's column list and scanner. ReplaceSteps is in that list because
+// its set write also stamps the parent blueprint (user_modified, updated_at),
+// and that stamp is a single-row write whose result the caller needs — the
+// step rows themselves are the set, and the parent row is what a caller
+// renders after replacing them.
+//
+// Exempt, each said so at the method:
+//
+//   - Delete (a delete) and IncrementUsage / IncrementUsageSystem
+//     (fire-and-forget bookkeeping on a sort heuristic).
+//   - DuplicatePrompts (bulk — it copies a set and answers with the new ids).
+//   - MergeInto, SplitAt and DeleteStep — compositions that rewrite two
+//     blueprints and their step sets in one transaction, so no single row is
+//     the outcome; the two that mint a blueprint already answer with its id.
+//   - CreateRunIfNotFiredSystem — its insert is fenced ON CONFLICT DO NOTHING,
+//     which returns zero rows exactly when the fence engages, so RETURNING
+//     cannot answer the question the method exists to ask.
+//   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
+//     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
+//     already the write's own answer about whether it landed, which is what
+//     every caller branches on. There is no miss error to retire here and no
+//     caller renders the row, so returning it would be signature churn rather
+//     than a workaround removed.
 type BlueprintStore interface {
 	// --- Blueprint header CRUD (modeled on PromptStore) ----------------
 
@@ -270,14 +308,21 @@ type BlueprintStore interface {
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	// user_modified stays false — a fresh row hasn't diverged from anything.
-	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
+	//
+	// Returns the persisted row, which carries the defaulted source, the
+	// resolved team and creator, and the server-stamped timestamps b never
+	// described.
+	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) (domain.Blueprint, error)
 
 	// Rename updates a blueprint's name (its only mutable header field — steps
 	// are managed via ReplaceSteps, composition via merge/split). Lets a
-	// blueprint carry a name independent of its entry prompt's. No-op on a
-	// missing / soft-deleted row; the handler 404s by re-reading. Stamps
+	// blueprint carry a name independent of its entry prompt's. Stamps
 	// user_modified true on the renamed row (see the stamping contract above).
-	Rename(ctx context.Context, orgID, id, name string) error
+	//
+	// Returns the renamed row, or ErrNoSuchBlueprint — which is what a missing
+	// or soft-deleted row now gets, in place of the silent no-op the handler
+	// had to detect by re-reading.
+	Rename(ctx context.Context, orgID, id, name string) (domain.Blueprint, error)
 
 	// Delete soft-deletes a blueprint (stamps deleted_at). The row + its
 	// blueprint_steps stay as the durable audit trail (a blueprint a trigger
@@ -286,6 +331,9 @@ type BlueprintStore interface {
 	// it so in-flight runs + past-run timelines still render the name. Called by
 	// the prompt-delete handler's delete-pairing when a prompt that solely
 	// constitutes a 1-step blueprint is deleted.
+	//
+	// Exempt from the returned-row rule: it is a delete. The stamp is how the
+	// row survives its RESTRICT FKs, not a state anyone renders.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// StepPromptOwner returns the id of the blueprint that holds promptID as a
@@ -302,6 +350,9 @@ type BlueprintStore interface {
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// IncrementUsage bumps usage_count by 1.
+	// IncrementUsage / IncrementUsageSystem are exempt from the returned-row
+	// rule: fire-and-forget bookkeeping. The counter is bumped on the way past
+	// and spent by the next list read; nothing reads the answer here.
 	IncrementUsage(ctx context.Context, orgID string, id string) error
 	IncrementUsageSystem(ctx context.Context, orgID string, id string) error
 
@@ -330,7 +381,13 @@ type BlueprintStore interface {
 	// transaction. step_index is densely packed 0..N-1 by the writer; briefs
 	// are taken positionally and may be empty. Stamps user_modified true on
 	// blueprintID (see the stamping contract above).
-	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) error
+	//
+	// Returns the stamped parent blueprint, or ErrNoSuchBlueprint. The steps
+	// are a set and have no single row to name, but the stamp on the parent is
+	// a single-row write — and it is the row the caller renders after
+	// replacing the steps, carrying a user_modified and an updated_at that
+	// only this statement knows.
+	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) (domain.Blueprint, error)
 
 	// MergeInto absorbs the source blueprint's steps onto the tail of the host
 	// blueprint and soft-deletes the now-empty source, atomically. The host
@@ -354,6 +411,10 @@ type BlueprintStore interface {
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.
+	//
+	// Exempt from the returned-row rule: it is a composition, not a single-row
+	// write — it moves a step set between two blueprints and retires one of
+	// them, so no one row is the outcome.
 	MergeInto(ctx context.Context, orgID string, hostID, sourceID string) error
 
 	// SplitAt partitions a blueprint at atIndex into two, atomically: steps
@@ -447,11 +508,15 @@ type BlueprintStore interface {
 
 	// --- Runs -----------------------------------------------------------
 
-	// CreateRun inserts a new blueprint instance row. TriggerType is required.
-	// Manual delegations use this path (no triggering_event_id, so the replay
-	// fence never engages). Event-triggered delegations use
-	// CreateRunIfNotFiredSystem instead.
-	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error)
+	// CreateRun inserts a new blueprint instance row and returns it.
+	// TriggerType is required. Manual delegations use this path (no
+	// triggering_event_id, so the replay fence never engages). Event-triggered
+	// delegations use CreateRunIfNotFiredSystem instead.
+	//
+	// br is an input: it carries no started_at, and the id and status are
+	// defaulted here when it leaves them empty. The returned row is where a
+	// caller learns the id it did not supply.
+	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error)
 
 	// CreateRunIfNotFiredSystem is the event-path fenced insert: it writes
 	// triggering_event_id and relies on the blueprint_runs_event_trigger_fence
@@ -477,6 +542,12 @@ type BlueprintStore interface {
 	// settled, and may not steal one the user has since taken. Returns
 	// claimed=true only when the stamp actually moved the claim; a refusal
 	// still commits the run.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape: the
+	// insert is ON CONFLICT DO NOTHING, which returns zero rows in exactly the
+	// case this method exists to detect. A RETURNING row could not tell a
+	// fenced no-op from a failure, and `inserted` is the answer the caller
+	// needs.
 	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
@@ -484,7 +555,9 @@ type BlueprintStore interface {
 	// so the replay fence commits before expensive work) with an empty path;
 	// this stamps the resolved path so the resume/cancel cleanup machinery can
 	// reconstruct the worktree later.
-	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error
+	//
+	// Returns the stamped run, or ErrNoSuchBlueprintRun.
+	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error)
 
 	// ActiveRunForTaskSystem returns the most recent still-running blueprint_run
 	// for a task, or (nil, nil) when none is active. The board-column aggregate
@@ -529,7 +602,9 @@ type BlueprintStore interface {
 	// current_step_index — the queue-driven reactor's sequencing pointer,
 	// bumped as it enqueues each next step so a mid-flight blueprint resumes by
 	// re-enqueuing this step at boot. Admin pool (reactor has no JWT claims).
-	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error
+	//
+	// Returns the stamped run, or ErrNoSuchBlueprintRun.
+	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim

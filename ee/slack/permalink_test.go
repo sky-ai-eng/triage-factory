@@ -9,6 +9,7 @@ import (
 	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func testWorkspaceForPermalinkResolver() slackstore.Workspace {
@@ -33,7 +34,7 @@ func newFakeEntityURLUpdater() *fakeEntityURLUpdater {
 	return &fakeEntityURLUpdater{urls: map[string]string{}}
 }
 
-func (f *fakeEntityURLUpdater) UpdateURLSystem(_ context.Context, _, entityID, url string) error {
+func (f *fakeEntityURLUpdater) UpdateURLSystem(_ context.Context, _, entityID, url string) (domain.Entity, error) {
 	f.mu.Lock()
 	if f.err == nil {
 		f.urls[entityID] = url
@@ -43,7 +44,7 @@ func (f *fakeEntityURLUpdater) UpdateURLSystem(_ context.Context, _, entityID, u
 	if f.done != nil {
 		f.done <- struct{}{}
 	}
-	return err
+	return domain.Entity{ID: entityID, URL: url}, err
 }
 
 func (f *fakeEntityURLUpdater) get(entityID string) string {

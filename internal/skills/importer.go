@@ -178,7 +178,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		if existing.Body == meta.Body && existing.Name == meta.Name && existing.AllowedTools == meta.AllowedTools {
 			return errSkillUnchanged
 		}
-		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrgID, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
+		if _, err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrgID, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
 			return err
 		}
 		skillsLog.Info("updated skill", "name", meta.Name, "path", path)
@@ -206,7 +206,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		AllowedTools: meta.AllowedTools,
 	}
 
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, prompt); err != nil {
+	if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, prompt); err != nil {
 		return err
 	}
 
@@ -497,7 +497,7 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 
 	hiddenCount := 0
 	for _, id := range idsToHide {
-		if err := prompts.Hide(ctx, runmode.LocalDefaultOrgID, id); err != nil {
+		if _, err := prompts.Hide(ctx, runmode.LocalDefaultOrgID, id); err != nil {
 			return hiddenCount, err
 		}
 		hiddenCount++

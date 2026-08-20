@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -199,18 +200,14 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var created *domain.Prompt
+	var created domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
-		if e := tx.Prompts.Create(r.Context(), orgID, teamID, prompt); e != nil {
-			return e
-		}
-		var ge error
-		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
-		return ge
+		created, e = tx.Prompts.Create(r.Context(), orgID, teamID, prompt)
+		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -274,15 +271,19 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var updated *domain.Prompt
+	var updated domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model); e != nil {
-			return e
-		}
-		var ge error
-		updated, ge = tx.Prompts.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		updated, e = tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model)
+		return e
 	}); err != nil {
+		// The Get above resolved the row, so a miss here is the row going away
+		// between the two transactions rather than a caller naming nothing —
+		// still a 404, because the resource the response would describe is gone.
+		if errors.Is(err, db.ErrNoSuchPrompt) {
+			notFound(w, "prompt")
+			return
+		}
 		internalError(w, "prompts", err)
 		return
 	}

@@ -54,10 +54,10 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity in orgA: %v", err)
 	}
-	if err := stores.Entities.AssignProject(ctx, orgA, ent.ID, &pidA, "rationale"); err != nil {
+	if _, err := stores.Entities.AssignProject(ctx, orgA, ent.ID, &pidA, "rationale"); err != nil {
 		t.Fatalf("assign in orgA: %v", err)
 	}
-	if err := stores.Entities.UpdateDescription(ctx, orgA, ent.ID, "describes A"); err != nil {
+	if _, err := stores.Entities.UpdateDescription(ctx, orgA, ent.ID, "describes A"); err != nil {
 		t.Fatalf("describe in orgA: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// AssignProject cross-org returns sql.ErrNoRows (entity exists in
 	// orgA but not orgB; the WHERE filter rejects the UPDATE, then
 	// the existence probe also misses on org_id=$orgB).
-	if err := stores.Entities.AssignProject(ctx, orgB, ent.ID, &pidA, "r"); err != sql.ErrNoRows {
+	if _, err := stores.Entities.AssignProject(ctx, orgB, ent.ID, &pidA, "r"); err != sql.ErrNoRows {
 		t.Errorf("cross-org AssignProject err = %v, want sql.ErrNoRows", err)
 	}
 }
@@ -395,7 +395,7 @@ func TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims(t *testing.T) 
 	}
 
 	// Below-threshold classify: project_id stays NULL, classified_at set.
-	if err := stores.Entities.AssignProjectSystem(ctx, orgID, ent.ID, nil, ""); err != nil {
+	if _, err := stores.Entities.AssignProjectSystem(ctx, orgID, ent.ID, nil, ""); err != nil {
 		t.Fatalf("AssignProjectSystem(nil): %v", err)
 	}
 	classified, exists, err = stores.Entities.ClassificationStatusSystem(ctx, orgID, ent.ID)

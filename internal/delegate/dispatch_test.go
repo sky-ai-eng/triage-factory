@@ -41,7 +41,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	}
 
 	bpID := "rbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	promptIDs := make([]string, nSteps)
@@ -50,7 +50,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 		ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
 		promptIDs[i] = pid
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	// Freeze the plan onto the run exactly as the mint path does — the reactor
@@ -62,7 +62,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 			PromptBody: "b", Source: "user",
 		}
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "rbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-" + suffix, StepPlan: plan,
@@ -70,6 +70,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
 	step0 := 0
 	step0ConversationID := "rrun0-" + suffix
@@ -450,7 +451,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 		// The advance the reactor itself performed on step 0's first
 		// conclusion: pointer first, then the row it names. Step 1 is
 		// mid-flight (NULL status) and holds the shared worktree.
-		if err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
+		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
 			t.Fatalf("SetRunCurrentStepSystem: %v", err)
 		}
 		step1 := 1

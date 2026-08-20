@@ -91,7 +91,7 @@ func seedPgBlueprintRunForSnapshot(t *testing.T, h *pgtest.Harness, orgID, userI
 	seedPgPrompt(t, h, orgID, userID, stepPromptID)
 	taskID := seedPgTask(t, h, orgID, userID)
 
-	brID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	br, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-snap-" + suffix,
 		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
@@ -99,5 +99,5 @@ func seedPgBlueprintRunForSnapshot(t *testing.T, h *pgtest.Harness, orgID, userI
 	if err != nil {
 		t.Fatalf("seed blueprint_run: %v", err)
 	}
-	return brID
+	return br.ID
 }

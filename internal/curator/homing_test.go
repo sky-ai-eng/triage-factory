@@ -39,7 +39,7 @@ func (f *fakeHomeStore) Get(_ context.Context, _, projectID string) (*domain.Cur
 	return f.rows[projectID], nil
 }
 
-func (f *fakeHomeStore) Upsert(_ context.Context, orgID, projectID, instanceID string, bootEpoch int64) error {
+func (f *fakeHomeStore) Upsert(_ context.Context, orgID, projectID, instanceID string, bootEpoch int64) (domain.CuratorHome, error) {
 	f.upserts++
 	existing := f.rows[projectID]
 	homedAt := time.Now()
@@ -50,7 +50,7 @@ func (f *fakeHomeStore) Upsert(_ context.Context, orgID, projectID, instanceID s
 		OrgID: orgID, ProjectID: projectID, HomeInstanceID: instanceID,
 		HomeBootEpoch: bootEpoch, HomedAt: homedAt, UpdatedAt: time.Now(),
 	}
-	return nil
+	return *f.rows[projectID], nil
 }
 
 func (f *fakeHomeStore) Clear(_ context.Context, _, projectID string) error {
@@ -108,7 +108,7 @@ func TestHomer_HomesEvenWhenPlacementDisabled(t *testing.T) {
 func TestHomer_StickyWhileHomeAlive(t *testing.T) {
 	homes := newFakeHomeStore()
 	// Pre-seed a home to e1; both e1 and e2 are alive.
-	_ = homes.Upsert(context.Background(), "org", "proj", "e1", 7)
+	_, _ = homes.Upsert(context.Background(), "org", "proj", "e1", 7)
 	homes.upserts = 0 // reset the counter after seeding
 	h := newHomer(t, "c1", []domain.Instance{execInstance("e1", 8), execInstance("e2", 8)}, nil, homes)
 
@@ -123,7 +123,7 @@ func TestHomer_StickyWhileHomeAlive(t *testing.T) {
 
 func TestHomer_ReHomesOnDeath(t *testing.T) {
 	homes := newFakeHomeStore()
-	_ = homes.Upsert(context.Background(), "org", "proj", "e1", 7)
+	_, _ = homes.Upsert(context.Background(), "org", "proj", "e1", 7)
 	homes.upserts = 0
 	// e1 is now heartbeat-stale (dead); e2 is alive.
 	dead := execInstance("e1", 8)

@@ -64,9 +64,9 @@ type entityCloseOutageStore struct {
 	o *outage
 }
 
-func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id string) error {
+func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	if s.o.down() {
-		return errOutage
+		return nil, errOutage
 	}
 	return s.EntityStore.CloseSystem(ctx, orgID, id)
 }

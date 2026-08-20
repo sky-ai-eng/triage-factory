@@ -121,7 +121,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 			t.Fatalf("sync A: %v", err)
 		}
 		r := handlerBySlug(t, stores, orgID, teamID, "hr-stale-off")
-		if err := stores.EventHandlers.SetEnabled(ctx, orgID, r.ID, false); err != nil {
+		if _, err := stores.EventHandlers.SetEnabled(ctx, orgID, r.ID, false); err != nil {
 			t.Fatalf("SetEnabled: %v", err)
 		}
 

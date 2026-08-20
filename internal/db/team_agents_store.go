@@ -2,10 +2,17 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// ErrNoSuchTeamAgent means a key-addressed write named no team_agents row.
+// Only the writes return it; GetForTeam keeps answering a miss with
+// (nil, nil), because "this team has no membership row yet" is the state
+// AddForTeam exists to fix.
+var ErrNoSuchTeamAgent = errors.New("no team_agents row for that (team, agent)")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TeamAgentStore --output=./mocks --case=underscore --with-expecter
 
@@ -40,6 +47,18 @@ import (
 //
 // SQLite collapses both pools to one connection; assertLocalOrg pins
 // orgID to LocalDefaultOrgID.
+//
+// # Every single-row write returns the row it persisted
+//
+// SetEnabled and SetOverrides hand back the stored row, read off RETURNING on
+// the write statement itself rather than from a follow-up SELECT, projecting
+// the point read's column list and scanner. SetOverrides normalizes an empty
+// model to NULL on the way in, so the row and the argument disagree by design.
+// A miss is ErrNoSuchTeamAgent.
+//
+// Exempt, each said so at the method: AddForTeam (ON CONFLICT DO NOTHING — it
+// returns nothing on the idempotent re-run it exists for) and Remove (a
+// delete).
 type TeamAgentStore interface {
 	// GetForTeam returns the row for (team_id, agent_id), or (nil, nil)
 	// if absent. The router calls this on every trigger fire to gate
@@ -50,21 +69,33 @@ type TeamAgentStore interface {
 	// on (team_id, agent_id) — duplicate calls leave the existing row
 	// alone (no re-flipping Enabled). Bootstrap-only path; Postgres
 	// routes through the admin pool.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape: the
+	// insert is ON CONFLICT DO NOTHING so a re-run leaves the user's toggle
+	// and overrides alone, and that returns zero rows precisely on the re-run.
+	// Bootstrap does not read the row back.
 	AddForTeam(ctx context.Context, orgID, teamID, agentID string) error
 
 	// SetEnabled flips the bot on or off for a single team. Team-
 	// member-writable per the locked architectural decision. App pool
 	// in Postgres; RLS enforces team membership.
-	SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) error
+	//
+	// Returns the updated row, or ErrNoSuchTeamAgent.
+	SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) (domain.TeamAgent, error)
 
 	// SetOverrides writes per-team model + autonomy overrides. Nil
 	// pointer / empty string clears the override and falls back to
 	// the agent defaults. App pool in Postgres.
-	SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) error
+	//
+	// Returns the updated row, or ErrNoSuchTeamAgent. The row is where the
+	// clear-on-empty rule is visible.
+	SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) (domain.TeamAgent, error)
 
 	// Remove deletes the membership entirely. Rare path — usually the
 	// caller wants SetEnabled(false) so the team_agents row persists
 	// with its overrides intact. App pool in Postgres.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Remove(ctx context.Context, orgID, teamID, agentID string) error
 
 	// ListForOrg returns every team_agents row for the org's agent.

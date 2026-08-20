@@ -33,10 +33,11 @@ func newTestDB(t *testing.T) *sql.DB {
 
 func seedProject(t *testing.T, database *sql.DB, name string) string {
 	t.Helper()
-	id, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: name})
+	created, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: name})
 	if err != nil {
 		t.Fatalf("create project %q: %v", name, err)
 	}
+	id := created.ID
 	return id
 }
 

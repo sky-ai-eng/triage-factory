@@ -40,6 +40,22 @@ func TestBlueprintStore_Postgres_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_Postgres_RunWriteConformance runs the shared returned-row
+// suite for the blueprint_runs writes against the Postgres impl.
+func TestBlueprintStore_Postgres_RunWriteConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunBlueprintRunWriteConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+		teamID := seedPgDefaultTeam(t, h, orgID, userID)
+		blueprintID := "bp-run-" + orgID[:8]
+		seedPgBlueprintInTeam(t, h, orgID, userID, teamID, blueprintID)
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).Blueprints,
+			orgID, blueprintID, seedPgTask(t, h, orgID, userID)
+	})
+}
+
 // TestBlueprintStore_Postgres_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the Postgres impl. Both pools wire
 // to AdminDB; prompts are seeded through the store so the
@@ -62,7 +78,7 @@ func TestBlueprintStore_Postgres_DuplicationConformance(t *testing.T) {
 			if p.ID == "" {
 				p.ID = uuid.New().String()
 			}
-			if err := stores.Prompts.Create(ctx, orgID, teamID, p); err != nil {
+			if _, err := stores.Prompts.Create(ctx, orgID, teamID, p); err != nil {
 				t.Fatalf("create prompt: %v", err)
 			}
 			return p.ID
@@ -102,10 +118,10 @@ func TestBlueprintStore_Postgres_DuplicatePrompts_CrossTeamRejected(t *testing.T
 	seedPgBlueprintInTeam(t, h, orgID, userID, teamB, bpB)
 	seedPgPromptInTeam(t, h, orgID, userID, teamA, pA)
 	seedPgPromptInTeam(t, h, orgID, userID, teamB, pB)
-	if err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpA, []string{pA}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpA, []string{pA}, nil); err != nil {
 		t.Fatalf("ReplaceSteps A: %v", err)
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpB, []string{pB}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, orgID, bpB, []string{pB}, nil); err != nil {
 		t.Fatalf("ReplaceSteps B: %v", err)
 	}
 
@@ -147,7 +163,7 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 	seedPgPrompt(t, h, orgID, userID, stepAID)
 	seedPgPrompt(t, h, orgID, userID, stepBID)
 
-	if err := blueprints.ReplaceSteps(ctx, orgID, blueprintID,
+	if _, err := blueprints.ReplaceSteps(ctx, orgID, blueprintID,
 		[]string{stepAID, stepBID}, []string{"brief A", "brief B"}); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
@@ -177,7 +193,7 @@ func TestBlueprintStore_Postgres_ReplaceAndListSteps(t *testing.T) {
 
 	// Re-ReplaceSteps with a smaller list — the DELETE+INSERT path
 	// inside one tx must collapse to the new list, not append.
-	if err := blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{stepBID}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{stepBID}, nil); err != nil {
 		t.Fatalf("ReplaceSteps (shrink): %v", err)
 	}
 	steps2, err := blueprints.ListSteps(ctx, orgID, blueprintID)
@@ -211,7 +227,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	seedPgPrompt(t, h, orgID, userID, stepPromptID)
 	taskID := seedPgTask(t, h, orgID, userID)
 
-	brID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	brIDRow, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-oc",
 		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
@@ -219,6 +235,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := brIDRow.ID
 	childID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID); err != nil {
 		t.Fatalf("set child running: %v", err)
@@ -265,7 +282,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 
 	// Same guarantee on the app-pool path, where the claim release lands
 	// adjacently on the admin pool instead of inside the cancel statement.
-	brID2, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	brID2Row, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-oc2",
 		StepPlan:     []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
@@ -273,6 +290,7 @@ func TestBlueprintStore_Postgres_MarkRunStatus_ParksOrphanedChild(t *testing.T) 
 	if err != nil {
 		t.Fatalf("CreateRun 2: %v", err)
 	}
+	brID2 := brID2Row.ID
 	childID2 := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, brID2, 0)
 	if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = NULL WHERE id = $1`, childID2); err != nil {
 		t.Fatalf("set child 2 running: %v", err)
@@ -309,7 +327,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	seedPgPrompt(t, h, orgID, userID, stepPromptID)
 	taskID := seedPgTask(t, h, orgID, userID)
 
-	blueprintRunID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	blueprintRunIDRow, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID:  blueprintID,
 		TaskID:       taskID,
 		TriggerType:  domain.BlueprintTriggerManual,
@@ -321,6 +339,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	blueprintRunID := blueprintRunIDRow.ID
 	if _, err := uuid.Parse(blueprintRunID); err != nil {
 		t.Errorf("CreateRun returned non-UUID id %q", blueprintRunID)
 	}
@@ -428,20 +447,22 @@ func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
 		{StepIndex: 1, PromptID: stepPromptID, PromptName: "Two", PromptBody: "body two", Source: "user"},
 		{StepIndex: 2, PromptID: stepPromptID, PromptName: "Three", PromptBody: "body three", Source: "user"},
 	}
-	threeID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	threeIDRow, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-pg-spl-3", StepPlan: plan,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun (three steps): %v", err)
 	}
-	oneID, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	threeID := threeIDRow.ID
+	oneIDRow, err := blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-pg-spl-1", StepPlan: plan[:1],
 	})
 	if err != nil {
 		t.Fatalf("CreateRun (one step): %v", err)
 	}
+	oneID := oneIDRow.ID
 	missingID := uuid.NewString()
 
 	got, err := blueprints.StepPlanLengths(ctx, orgID, []string{threeID, oneID, missingID})
@@ -503,7 +524,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 
 	// ---- Event-triggered CreateRun ----
 	// No JWT claims tx — the admin pool handles the insert directly.
-	eventBlueprintRunID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	eventBlueprintRunIDRow, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID:  blueprintID,
 		TaskID:       taskID,
 		TriggerType:  domain.BlueprintTriggerEvent,
@@ -512,6 +533,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("event-triggered CreateRun under app-pool wiring: %v", err)
 	}
+	eventBlueprintRunID := eventBlueprintRunIDRow.ID
 	var landedTrigger string
 	var landedCreator sql.NullString
 	if err := h.AdminDB.QueryRow(
@@ -532,7 +554,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// createRunManual resolves tf.current_user_id() to userID.
 	var manualBlueprintRunID string
 	if err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		id, err := tx.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+		idRow, err := tx.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 			BlueprintID:  blueprintID,
 			TaskID:       taskID,
 			TriggerType:  domain.BlueprintTriggerManual,
@@ -541,6 +563,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		id := idRow.ID
 		manualBlueprintRunID = id
 		return nil
 	}); err != nil {
@@ -614,27 +637,29 @@ func TestBlueprintStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	blueprints := stores.Blueprints
 	ctx := context.Background()
 
-	if err := blueprints.ReplaceSteps(ctx, orgA, blueprintIDA, []string{stepIDA}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, orgA, blueprintIDA, []string{stepIDA}, nil); err != nil {
 		t.Fatalf("replace A: %v", err)
 	}
-	if err := blueprints.ReplaceSteps(ctx, orgB, blueprintIDB, []string{stepIDB}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, orgB, blueprintIDB, []string{stepIDB}, nil); err != nil {
 		t.Fatalf("replace B: %v", err)
 	}
 
-	crA, err := blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
+	crARow, err := blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
 		BlueprintID: blueprintIDA, TaskID: taskA,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/leak-a",
 	})
 	if err != nil {
 		t.Fatalf("CreateRun A: %v", err)
 	}
-	crB, err := blueprints.CreateRun(ctx, orgB, domain.BlueprintRun{
+	crA := crARow.ID
+	crBRow, err := blueprints.CreateRun(ctx, orgB, domain.BlueprintRun{
 		BlueprintID: blueprintIDB, TaskID: taskB,
 		TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/leak-b",
 	})
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
+	crB := crBRow.ID
 	// Seed a step conversation under each blueprint so the cross-org
 	// ConversationsForBlueprintSystem check below has rows to (not) leak.
 	seedPgStepConversation(t, h, orgA, userA, taskA, stepIDA, crA, 0)
@@ -708,13 +733,14 @@ func TestBlueprintStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// mutate it is the question.
 	var blueprintRunA string
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		id, err := tx.Blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
+		idRow, err := tx.Blueprints.CreateRun(ctx, orgA, domain.BlueprintRun{
 			BlueprintID: blueprintIDA, TaskID: taskA,
 			TriggerType: domain.BlueprintTriggerManual, WorktreePath: "/tmp/rls-a",
 		})
 		if err != nil {
 			return err
 		}
+		id := idRow.ID
 		blueprintRunA = id
 		return nil
 	}); err != nil {
@@ -894,7 +920,7 @@ func TestBlueprintStore_Postgres_ActorAgentRoundTrip(t *testing.T) {
 		t.Fatalf("seed agent: %v", err)
 	}
 
-	brID, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
+	brIDRow, err := stores.Blueprints.CreateRun(ctx, orgID, domain.BlueprintRun{
 		BlueprintID: blueprintID, TaskID: taskID, TriggerType: domain.BlueprintTriggerManual,
 		WorktreePath: "/tmp/wt-actor", ActorAgentID: agentID,
 		StepPlan: []domain.BlueprintPlanStep{{StepIndex: 0, PromptID: stepPromptID, PromptName: "S", PromptBody: "b", Source: "user"}},
@@ -902,6 +928,7 @@ func TestBlueprintStore_Postgres_ActorAgentRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := brIDRow.ID
 	got, err := stores.Blueprints.GetRunSystem(ctx, orgID, brID)
 	if err != nil || got == nil {
 		t.Fatalf("GetRunSystem = (%v, %v)", got, err)

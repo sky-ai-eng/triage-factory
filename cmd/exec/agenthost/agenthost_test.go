@@ -78,7 +78,7 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, orgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if _, err := stores.Prompts.Create(ctx, orgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("seed prompt: %v", err)
 	}
 	evtID, err := stores.Events.Record(ctx, orgID, domain.Event{

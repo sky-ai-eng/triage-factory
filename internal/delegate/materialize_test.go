@@ -351,7 +351,7 @@ func seedMemoryFixture(t *testing.T, database *sql.DB, stores db.Stores, sourceI
 // conversation (and its conversation_memory row's blueprint_run_id) FKs to.
 func seedBlueprintRun(t *testing.T, database *sql.DB, stores db.Stores, blueprintID, blueprintRunID, taskID string) {
 	t.Helper()
-	if err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: blueprintID, Name: "BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint %s: %v", blueprintID, err)

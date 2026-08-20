@@ -23,6 +23,10 @@ type ScoreStore interface {
 	// MarkScoring flips scoring_status to 'in_progress' for the given
 	// task IDs. Called by the runner before dispatching a batch to
 	// the LLM so concurrent triggers don't re-pick the same tasks.
+	//
+	// Exempt from the returned-row rule: it writes a batch. The runner claims
+	// a whole cycle's tasks in one statement, so there is no single row a
+	// return value could name; the batch it claimed is the argument.
 	MarkScoring(ctx context.Context, orgID string, taskIDs []string) error
 
 	// ResetScoringToPending flips scoring_status back to 'pending'.
@@ -62,6 +66,10 @@ type ScoreStore interface {
 	// the obligation they create — evaluate this task's deferred triggers
 	// against the new autonomy_suitability — are one write, so no crash can
 	// land the scores without the debt.
+	//
+	// Exempt from the returned-row rule: it writes a batch atomically. The
+	// scorer applies a cycle's worth of updates in one transaction, so there
+	// is no single row to hand back.
 	UpdateTaskScores(ctx context.Context, orgID string, updates []domain.TaskScoreUpdate) error
 
 	// TasksOwedReDerive returns the org's task IDs whose scores committed
@@ -84,6 +92,9 @@ type ScoreStore interface {
 	//
 	// Re-clearing an already-clear task is a no-op, which is what a drain
 	// that races the callback sees.
+	//
+	// Exempt from the returned-row rule: it writes a batch, same as
+	// MarkScoring.
 	ClearReDeriveOwed(ctx context.Context, orgID string, taskIDs []string) error
 
 	// UnscoredTasks returns queued tasks that haven't been scored

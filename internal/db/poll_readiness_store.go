@@ -24,6 +24,9 @@ type PollReadinessStore interface {
 	// before this call (a stale pre-restart poll goroutine finishing late)
 	// can't incorrectly flip readiness back to true. Upserts — safe to call
 	// before any row exists.
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping, same as
+	// MarkPollComplete.
 	MarkRestarted(ctx context.Context, orgID, source string) error
 
 	// MarkPollComplete records a successful poll cycle's completion for
@@ -32,6 +35,10 @@ type PollReadinessStore interface {
 	// ignored (a straggler from before the restart). A zero startedAt is
 	// always accepted — "unknown generation" fails open rather than
 	// stalling readiness forever. Upserts.
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping. The row
+	// is a durable flag a later request read consults; the poll cycle that
+	// stamps it never looks back.
 	MarkPollComplete(ctx context.Context, orgID, source string, startedAt time.Time) error
 
 	// Ready reports whether (orgID, source) has completed a poll cycle
@@ -47,5 +54,8 @@ type PollReadinessStore interface {
 
 	// SetAnnouncePending arms the one-shot toast flag for (orgID, source).
 	// Upserts — safe to call before any row exists.
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping, same as
+	// MarkPollComplete.
 	SetAnnouncePending(ctx context.Context, orgID, source string) error
 }

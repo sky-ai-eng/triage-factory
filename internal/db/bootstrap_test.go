@@ -164,7 +164,7 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 		t.Fatal("no agent after provision")
 	}
 	// User disables the bot.
-	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
+	if _, err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
 		t.Fatalf("SetEnabled false: %v", err)
 	}
 	// Re-provision.

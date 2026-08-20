@@ -30,13 +30,23 @@ func NewCuratorHomeStore(admin *sql.DB) db.CuratorHomeStore {
 
 var _ db.CuratorHomeStore = (*curatorHomeStore)(nil)
 
-func (s *curatorHomeStore) Get(ctx context.Context, orgID, projectID string) (*domain.CuratorHome, error) {
+// pgCuratorHomeColumns is the canonical projection of a curator_homes row, in
+// the order scanCuratorHome reads them. Get SELECTs it and Upsert RETURNs it,
+// so the write shape cannot drift from the read shape.
+const pgCuratorHomeColumns = `org_id, project_id, home_instance_id, home_boot_epoch, homed_at, updated_at`
+
+func scanCuratorHome(scan func(...any) error) (domain.CuratorHome, error) {
 	var h domain.CuratorHome
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT org_id, project_id, home_instance_id, home_boot_epoch, homed_at, updated_at
+	err := scan(&h.OrgID, &h.ProjectID, &h.HomeInstanceID, &h.HomeBootEpoch, &h.HomedAt, &h.UpdatedAt)
+	return h, err
+}
+
+func (s *curatorHomeStore) Get(ctx context.Context, orgID, projectID string) (*domain.CuratorHome, error) {
+	h, err := scanCuratorHome(s.admin.QueryRowContext(ctx, `
+		SELECT `+pgCuratorHomeColumns+`
 		FROM curator_homes
 		WHERE org_id = $1 AND project_id = $2
-	`, orgID, projectID).Scan(&h.OrgID, &h.ProjectID, &h.HomeInstanceID, &h.HomeBootEpoch, &h.HomedAt, &h.UpdatedAt)
+	`, orgID, projectID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -46,16 +56,23 @@ func (s *curatorHomeStore) Get(ctx context.Context, orgID, projectID string) (*d
 	return &h, nil
 }
 
-func (s *curatorHomeStore) Upsert(ctx context.Context, orgID, projectID, instanceID string, bootEpoch int64) error {
-	_, err := s.admin.ExecContext(ctx, `
+func (s *curatorHomeStore) Upsert(ctx context.Context, orgID, projectID, instanceID string, bootEpoch int64) (domain.CuratorHome, error) {
+	// RETURNING carries the homed_at the conflict arm preserved — the one
+	// column this call cannot describe, because on a re-home it belongs to the
+	// call that first homed the project.
+	h, err := scanCuratorHome(s.admin.QueryRowContext(ctx, `
 		INSERT INTO curator_homes (org_id, project_id, home_instance_id, home_boot_epoch, homed_at, updated_at)
 		VALUES ($1, $2, $3, $4, now(), now())
 		ON CONFLICT (org_id, project_id) DO UPDATE SET
 			home_instance_id = EXCLUDED.home_instance_id,
 			home_boot_epoch  = EXCLUDED.home_boot_epoch,
 			updated_at       = now()
-	`, orgID, projectID, instanceID, bootEpoch)
-	return wrapAdminPoolPermErr(err, "curator_homes.Upsert")
+		RETURNING `+pgCuratorHomeColumns,
+		orgID, projectID, instanceID, bootEpoch).Scan)
+	if err != nil {
+		return domain.CuratorHome{}, wrapAdminPoolPermErr(err, "curator_homes.Upsert")
+	}
+	return h, nil
 }
 
 func (s *curatorHomeStore) Clear(ctx context.Context, orgID, projectID string) error {

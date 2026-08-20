@@ -46,7 +46,7 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	if err != nil {
 		t.Fatalf("create entity %s: %v", sourceID, err)
 	}
-	if err := st.Entities.UpdateSnapshot(ctx, runmode.LocalDefaultOrgID, entity.ID, snapshotJSON); err != nil {
+	if _, err := st.Entities.UpdateSnapshot(ctx, runmode.LocalDefaultOrgID, entity.ID, snapshotJSON); err != nil {
 		t.Fatalf("seed snapshot for %s: %v", sourceID, err)
 	}
 	for _, eventType := range taskTypes {

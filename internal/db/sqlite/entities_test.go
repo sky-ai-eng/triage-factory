@@ -107,13 +107,14 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 	return dbtest.EntitySeeder{
 		Project: func(t *testing.T, name string) string {
 			t.Helper()
-			pid, err := sqlitestore.New(conn).Projects.Create(
+			created, err := sqlitestore.New(conn).Projects.Create(
 				t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 				domain.Project{Name: name},
 			)
 			if err != nil {
 				t.Fatalf("seed project %s: %v", name, err)
 			}
+			pid := created.ID
 			return pid
 		},
 		Team: func(t *testing.T, name string) string {

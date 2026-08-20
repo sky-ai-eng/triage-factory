@@ -72,7 +72,7 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 	}
 
 	bpID := "bp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("create blueprint: %v", err)
@@ -85,10 +85,10 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		promptIDs[i] = pid
 		plan[i] = domain.BlueprintPlanStep{StepIndex: i, PromptID: pid, PromptName: pid, PromptBody: "b", Source: "user"}
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "bpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan,
@@ -96,6 +96,7 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	if _, err := database.Exec(`UPDATE blueprint_runs SET worktree_path = ? WHERE id = ?`, sharedWT, brID); err != nil {
 		t.Fatalf("stamp the blueprint's shared worktree: %v", err)
 	}

@@ -64,7 +64,23 @@ func (s *teamsStore) GetSettingsSystem(ctx context.Context, teamID string) (doma
 	return getTeamSettings(ctx, s.admin, teamID)
 }
 
-func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.TeamSettings, error) {
+// pgTeamSettingsColumns is the canonical projection of a team_settings row, in
+// the order scanTeamSettings reads them. Both reads SELECT it and both writes
+// RETURN it, so the write shape cannot drift from the read shape.
+//
+// array_to_json(...)::text round-trips text[] as a JSON literal.
+// database/sql + pgx stdlib doesn't ship a scanner for *[]string, so the JSON
+// detour is the portable shape — matches what the jira_project_status_rules
+// reader does for its array columns.
+const pgTeamSettingsColumns = `array_to_json(jira_projects)::text,
+		       ai_reprioritize_threshold, ai_preference_update_interval,
+		       default_model, auto_delegate_enabled, auto_mode_enabled,
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
+		       max_daily_cost_usd, branch_template, review_posture,
+		       base_branch_push_policy`
+
+// scanTeamSettings decodes one team_settings row in pgTeamSettingsColumns order.
+func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	var (
 		projectsJSON            string
 		aiThreshold, aiInterval int
@@ -78,39 +94,18 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		reviewPosture           string
 		basePushPolicy          string
 	)
-	// array_to_json(...)::text round-trips text[] as a JSON literal.
-	// database/sql + pgx stdlib doesn't ship a scanner for *[]string,
-	// so the JSON detour is the portable shape — matches what the
-	// jira_project_status_rules reader does for its array columns.
-	err := q.QueryRowContext(ctx, `
-		SELECT array_to_json(jira_projects)::text,
-		       ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled, auto_mode_enabled,
-		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
-		       max_daily_cost_usd, branch_template, review_posture,
-		       base_branch_push_policy
-		FROM team_settings WHERE team_id = $1
-	`, teamID).Scan(
+	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		// See OrgsStore for the rationale. Matches team_settings'
-		// schema DEFAULT clauses.
-		return domain.DefaultTeamSettings(), nil
-	}
-	if err != nil {
-		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	); err != nil {
+		return domain.TeamSettings{}, err
 	}
 	projects := []string{}
 	if projectsJSON != "" {
 		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
 			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
-		}
-		if projects == nil {
-			projects = []string{}
 		}
 	}
 	return domain.TeamSettings{
@@ -127,6 +122,22 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		ReviewPosture:                   reviewPosture,
 		BaseBranchPushPolicy:            basePushPolicy,
 	}, nil
+}
+
+func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.TeamSettings, error) {
+	set, err := scanTeamSettings(q.QueryRowContext(ctx, `
+		SELECT `+pgTeamSettingsColumns+`
+		FROM team_settings WHERE team_id = $1
+	`, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		// See OrgsStore for the rationale. Matches team_settings'
+		// schema DEFAULT clauses.
+		return domain.DefaultTeamSettings(), nil
+	}
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	}
+	return set, nil
 }
 
 func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
@@ -178,6 +189,27 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.List
 // LEFT JOIN reports their role as empty when they are not. A cross-org id is
 // invisible to the policy and comes back nil — the not-found the disclosure
 // rule asks for, produced by the database rather than by a handler predicate.
+// pgTeamRowColumns is the canonical projection of a teams ROW, in the order
+// scanTeamRow reads them. Get SELECTs it alongside the caller's membership
+// role, and the archive/restore writes RETURN it — role is not in the list
+// because it is not a column of this table: it is the caller's own membership,
+// which Get resolves through a join and a write has no view on.
+const pgTeamRowColumns = `id::text, org_id::text, slug, name, COALESCE(description, ''), created_at, deleted_at`
+
+func scanTeamRow(scan func(...any) error) (domain.Team, error) {
+	var (
+		t       domain.Team
+		deleted sql.NullTime
+	)
+	if err := scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
+		return domain.Team{}, err
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	return t, nil
+}
+
 func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
 	var (
 		t       domain.Team
@@ -204,11 +236,11 @@ func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Tea
 	return &t, nil
 }
 
-func (s *teamsStore) Archive(ctx context.Context, teamID string) error {
+func (s *teamsStore) Archive(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.app, teamID, true)
 }
 
-func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
+func (s *teamsStore) Restore(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.app, teamID, false)
 }
 
@@ -218,31 +250,29 @@ func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
 // team, restoring a live one) affects zero rows and surfaces as ErrTeamNotFound
 // so the handler answers 404/409 rather than silently succeeding. App pool:
 // teams_update RLS gates org-admin via the handler.
-func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) error {
-	var res sql.Result
-	var err error
-	if archive {
-		res, err = q.ExecContext(ctx, `
-			UPDATE teams SET deleted_at = now(), updated_at = now()
-			WHERE id = $1 AND deleted_at IS NULL
-		`, teamID)
-	} else {
-		res, err = q.ExecContext(ctx, `
+func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) (domain.Team, error) {
+	stmt := `
 			UPDATE teams SET deleted_at = NULL, updated_at = now()
 			WHERE id = $1 AND deleted_at IS NOT NULL
-		`, teamID)
+			RETURNING ` + pgTeamRowColumns
+	if archive {
+		stmt = `
+			UPDATE teams SET deleted_at = now(), updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+			RETURNING ` + pgTeamRowColumns
+	}
+	// No row scanned means the state-guarded WHERE matched nothing — already
+	// archived, already active, missing, or invisible under RLS — which is
+	// db.ErrTeamNotFound, the same answer the rows-affected probe here used to
+	// synthesize.
+	t, err := scanTeamRow(q.QueryRowContext(ctx, stmt, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Team{}, db.ErrTeamNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("set team archived=%v: %w", archive, err)
+		return domain.Team{}, fmt.Errorf("set team archived=%v: %w", archive, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set team archived: rows affected: %w", err)
-	}
-	if n == 0 {
-		return db.ErrTeamNotFound
-	}
-	return nil
+	return t, nil
 }
 
 func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
@@ -512,7 +542,7 @@ func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 	return out, rows.Err()
 }
 
-func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
+func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) (domain.TeamSettings, error) {
 	projects := u.JiraProjects
 	if projects == nil {
 		projects = []string{}
@@ -523,7 +553,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	// team admin cannot set their own cap), so its GetSettings→UpdateSettings flow
 	// writes back exactly what it read; the cap is *changed* only by the org-admin
 	// SetDailyCostCapSystem path.
-	_, err := s.app.ExecContext(ctx, `
+	stored, err := scanTeamSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
@@ -546,18 +576,18 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			review_posture = EXCLUDED.review_posture,
 			base_branch_push_policy = EXCLUDED.base_branch_push_policy,
 			updated_at = now()
-	`,
+		RETURNING `+pgTeamSettingsColumns,
 		teamID, projects, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloat(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy,
-	)
+	).Scan)
 	if err != nil {
-		return fmt.Errorf("upsert team_settings: %w", err)
+		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
@@ -570,22 +600,27 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 // and ON CONFLICT touches only the cap so the team's other settings are never
 // clobbered. org_id isn't a column on team_settings (it FKs teams), so scoping
 // is by the teamID the org-admin handler already verified is in the org.
-func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error {
+func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error) {
 	// ≤ 0 → SQL NULL ("no cap"); any positive value is the cap.
 	var capArg any
 	if capUSD > 0 {
 		capArg = capUSD
 	}
-	if _, err := s.admin.ExecContext(ctx, `
+	// RETURNING projects the whole settings row: the insert arm fills every
+	// other column from schema defaults, so the row this lands in is one the
+	// caller has never seen.
+	stored, err := scanTeamSettings(s.admin.QueryRowContext(ctx, `
 		INSERT INTO team_settings (team_id, max_daily_cost_usd, updated_at)
 		VALUES ($1, $2, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			updated_at = now()
-	`, teamID, capArg); err != nil {
-		return fmt.Errorf("set team daily cost cap: %w", err)
+		RETURNING `+pgTeamSettingsColumns,
+		teamID, capArg).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("set team daily cost cap: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error) {

@@ -6,6 +6,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -22,6 +24,13 @@ func TestJiraAppsStore_SQLite_UpsertGetDelete(t *testing.T) {
 	orgID := runmode.LocalDefaultOrgID
 	seedSQLiteOrgForApps(t, conn, orgID)
 
+	dbtest.RunJiraAppsReturnedRowConformance(t, func(t *testing.T) (db.JiraAppsStore, string, string) {
+		t.Helper()
+		fresh := openSQLiteForTest(t)
+		seedSQLiteOrgForApps(t, fresh, runmode.LocalDefaultOrgID)
+		return sqlitestore.New(fresh).JiraApps, runmode.LocalDefaultOrgID, ""
+	})
+
 	// Empty table → nil, no error.
 	got, err := stores.JiraApps.GetForOrg(ctx, orgID)
 	if err != nil {
@@ -31,7 +40,7 @@ func TestJiraAppsStore_SQLite_UpsertGetDelete(t *testing.T) {
 		t.Fatalf("GetForOrg on empty table = %+v, want nil", got)
 	}
 
-	if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+	if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 		OrgID:           orgID,
 		ClientID:        "atl-client-1",
 		ClientSecretRef: "jira_oauth_client_secret",
@@ -58,7 +67,7 @@ func TestJiraAppsStore_SQLite_UpsertGetDelete(t *testing.T) {
 	}
 
 	// Second upsert replaces client_id in place and preserves registered_at.
-	if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+	if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 		OrgID:           orgID,
 		ClientID:        "atl-client-2",
 		ClientSecretRef: "jira_oauth_client_secret",

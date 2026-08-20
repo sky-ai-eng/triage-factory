@@ -114,7 +114,7 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 		return nil, errors.New("postgres blueprints: GetBySystemSlug requires team_id")
 	}
 	b, err := scanBlueprintRowPG(s.app.QueryRowContext(ctx, `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT `+pgBlueprintColumns+`
 		FROM blueprints WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -126,9 +126,37 @@ func (s *blueprintStore) GetBySystemSlug(ctx context.Context, orgID, teamID, sys
 	return &b, nil
 }
 
+// pgBlueprintColumns is the canonical projection of a blueprints row, in the
+// order scanBlueprintRowPG reads them. Every point read SELECTs it and every
+// single-row write RETURNs it, so the write shape cannot drift from the read
+// shape as columns are added.
+const pgBlueprintColumns = `id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at`
+
+// scanUpdatedBlueprintPG decodes an id-keyed UPDATE … RETURNING on blueprints.
+// No row scanned means the id named no live blueprint — or that RLS hides
+// whatever does — and both are db.ErrNoSuchBlueprint.
+func scanUpdatedBlueprintPG(row *sql.Row) (domain.Blueprint, error) {
+	b, err := scanBlueprintRowPG(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Blueprint{}, db.ErrNoSuchBlueprint
+	}
+	return b, err
+}
+
+// scanUpdatedBlueprintRunPG decodes an id-keyed UPDATE … RETURNING on
+// blueprint_runs, with the same miss semantics against
+// db.ErrNoSuchBlueprintRun.
+func scanUpdatedBlueprintRunPG(row *sql.Row) (domain.BlueprintRun, error) {
+	br, err := scanBlueprintRun(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.BlueprintRun{}, db.ErrNoSuchBlueprintRun
+	}
+	return br, err
+}
+
 func getBlueprint(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Blueprint, error) {
 	query := `
-		SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
+		SELECT ` + pgBlueprintColumns + `
 		FROM blueprints WHERE org_id = $1 AND id = $2`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -155,9 +183,9 @@ func scanBlueprintRowPG(scanFn func(dst ...any) error) (domain.Blueprint, error)
 	return b, nil
 }
 
-func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error {
+func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) (domain.Blueprint, error) {
 	if teamID == "" {
-		return fmt.Errorf("postgres blueprints Create: team_id required (handler must thread the resolved acting team)")
+		return domain.Blueprint{}, fmt.Errorf("postgres blueprints Create: team_id required (handler must thread the resolved acting team)")
 	}
 	if b.Source == "" {
 		b.Source = "user"
@@ -166,24 +194,27 @@ func (s *blueprintStore) Create(ctx context.Context, orgID, teamID string, b dom
 	if b.SystemSlug != "" {
 		systemSlug = b.SystemSlug
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return scanBlueprintRowPG(s.app.QueryRowContext(ctx, `
 		INSERT INTO blueprints (id, org_id, creator_user_id, team_id, name, source, system_slug, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			$3::uuid, $4, $5, $6, 0, now(), now())
-	`, b.ID, orgID, teamID, b.Name, b.Source, systemSlug)
-	return err
+		RETURNING `+pgBlueprintColumns,
+		b.ID, orgID, teamID, b.Name, b.Source, systemSlug).Scan)
 }
 
 // Rename stamps user_modified=TRUE alongside the name change — the sync
 // signal (see db.BlueprintStore's stamping contract) that this team's copy
 // diverged from shipped content.
-func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) error {
-	_, err := s.app.ExecContext(ctx, `
+func (s *blueprintStore) Rename(ctx context.Context, orgID, id, name string) (domain.Blueprint, error) {
+	if !isValidUUID(id) {
+		return domain.Blueprint{}, db.ErrNoSuchBlueprint
+	}
+	return scanUpdatedBlueprintPG(s.app.QueryRowContext(ctx, `
 		UPDATE blueprints SET name = $1, updated_at = now(), user_modified = TRUE
 		WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
-	`, name, orgID, id)
-	return err
+		RETURNING `+pgBlueprintColumns,
+		name, orgID, id))
 }
 
 // Delete soft-deletes a blueprint (stamps deleted_at). Its blueprint_steps stay
@@ -329,11 +360,12 @@ func (s *blueprintStore) CountStepReferences(ctx context.Context, orgID, stepPro
 	return n, err
 }
 
-func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) error {
+func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID string, stepPromptIDs, briefs []string) (domain.Blueprint, error) {
 	if len(briefs) != 0 && len(briefs) != len(stepPromptIDs) {
-		return fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
+		return domain.Blueprint{}, fmt.Errorf("briefs length %d must match stepPromptIDs length %d", len(briefs), len(stepPromptIDs))
 	}
-	return s.runInTx(ctx, func(tx queryer) error {
+	var stamped domain.Blueprint
+	if err := s.runInTx(ctx, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx,
 			`DELETE FROM blueprint_steps WHERE org_id = $1 AND blueprint_id = $2`,
 			orgID, blueprintID); err != nil {
@@ -358,14 +390,22 @@ func (s *blueprintStore) ReplaceSteps(ctx context.Context, orgID, blueprintID st
 			}
 		}
 		// Stamp user_modified — the step list is part of the sync unit's
-		// content (see db.BlueprintStore's stamping contract).
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2`,
-			orgID, blueprintID); err != nil {
-			return fmt.Errorf("stamp user_modified: %w", err)
+		// content (see db.BlueprintStore's stamping contract). The steps are a
+		// set with no row to name; this stamp is the single-row write, and its
+		// RETURNING is what the caller renders after the replace.
+		b, err := scanUpdatedBlueprintPG(tx.QueryRowContext(ctx,
+			`UPDATE blueprints SET updated_at = now(), user_modified = TRUE WHERE org_id = $1 AND id = $2
+			 RETURNING `+pgBlueprintColumns,
+			orgID, blueprintID))
+		if err != nil {
+			return err
 		}
+		stamped = b
 		return nil
-	})
+	}); err != nil {
+		return domain.Blueprint{}, err
+	}
+	return stamped, nil
 }
 
 // reparentBlueprintStepsPG moves the steps of fromBlueprint whose step_index
@@ -687,7 +727,7 @@ func (s *blueprintStore) DuplicatePrompts(ctx context.Context, orgID, teamID str
 
 // --- Runs ----------------------------------------------------------------
 
-func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {
+func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
 	if br.ID == "" {
 		br.ID = uuid.New().String()
 	}
@@ -695,7 +735,7 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 		br.Status = domain.BlueprintRunStatusRunning
 	}
 	if br.TriggerType == "" {
-		return "", errors.New("blueprint run trigger type required")
+		return domain.BlueprintRun{}, errors.New("blueprint run trigger type required")
 	}
 	if br.TriggerType == domain.BlueprintTriggerEvent {
 		return s.createRunEventTriggered(ctx, orgID, br)
@@ -703,13 +743,21 @@ func (s *blueprintStore) CreateRun(ctx context.Context, orgID string, br domain.
 	return s.createRunManual(ctx, orgID, br)
 }
 
-func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {
+// pgBlueprintRunColumns is the canonical projection of a blueprint_runs row,
+// in the order scanBlueprintRun reads them. Both reads SELECT it and both
+// single-row run writes RETURN it, so the write shape cannot drift from the
+// read shape.
+const pgBlueprintRunColumns = `id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
+		       current_step_index, cancel_requested, step_plan,
+		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at`
+
+func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
 	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
 	if err != nil {
-		return "", fmt.Errorf("marshal step plan: %w", err)
+		return domain.BlueprintRun{}, fmt.Errorf("marshal step plan: %w", err)
 	}
-	if _, err := s.admin.ExecContext(ctx, `
+	stored, err := scanBlueprintRun(s.admin.QueryRowContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
@@ -718,7 +766,9 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 			$3, $4, $5, $6, $7,
 			$8, $9, $10, $11, $12, now(), $13
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
+		RETURNING `+pgBlueprintRunColumns,
+		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
+	if err != nil {
 		// Same one-active-per-task translation as the fenced insert:
 		// production event runs route through CreateRunIfNotFiredSystem
 		// today, but any caller reaching this path (tests seeding event
@@ -726,20 +776,20 @@ func (s *blueprintStore) createRunEventTriggered(ctx context.Context, orgID stri
 		// sentinel, not a raw unique_violation.
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == blueprintRunsOneActivePerTaskConstraint {
-			return "", db.ErrTaskBusyActiveAutoRun
+			return domain.BlueprintRun{}, db.ErrTaskBusyActiveAutoRun
 		}
-		return "", fmt.Errorf("insert blueprint_run (event): %w", err)
+		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (event): %w", err)
 	}
-	return br.ID, nil
+	return stored, nil
 }
 
-func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error) {
+func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error) {
 	triggerID, abortReason, completedAt := blueprintRunArgs(br)
 	stepPlan, err := domain.MarshalStepPlan(br.StepPlan)
 	if err != nil {
-		return "", fmt.Errorf("marshal step plan: %w", err)
+		return domain.BlueprintRun{}, fmt.Errorf("marshal step plan: %w", err)
 	}
-	if _, err := s.app.ExecContext(ctx, `
+	stored, err := scanBlueprintRun(s.app.QueryRowContext(ctx, `
 		INSERT INTO blueprint_runs
 			(id, org_id, creator_user_id, blueprint_id, task_id, trigger_type, trigger_id, triggering_event_id,
 			 actor_agent_id, status, worktree_path, abort_reason, completed_at, started_at, step_plan)
@@ -749,10 +799,12 @@ func (s *blueprintStore) createRunManual(ctx context.Context, orgID string, br d
 			$3, $4, $5, $6, $7,
 			$8, $9, $10, $11, $12, now(), $13
 		)
-	`, br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan); err != nil {
-		return "", fmt.Errorf("insert blueprint_run (manual): %w", err)
+		RETURNING `+pgBlueprintRunColumns,
+		br.ID, orgID, br.BlueprintID, br.TaskID, br.TriggerType, triggerID, nullIfEmpty(br.TriggeringEventID), nullIfEmpty(br.ActorAgentID), br.Status, br.WorktreePath, abortReason, completedAt, stepPlan).Scan)
+	if err != nil {
+		return domain.BlueprintRun{}, fmt.Errorf("insert blueprint_run (manual): %w", err)
 	}
-	return br.ID, nil
+	return stored, nil
 }
 
 // blueprintRunsOneActivePerTaskConstraint is the partial unique index name
@@ -838,10 +890,13 @@ func (s *blueprintStore) CreateRunIfNotFiredSystem(ctx context.Context, orgID st
 	return inserted, claimed, nil
 }
 
-func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error {
-	_, err := s.admin.ExecContext(ctx,
-		`UPDATE blueprint_runs SET worktree_path = $3 WHERE org_id = $1 AND id = $2`, orgID, id, worktreePath)
-	return err
+func (s *blueprintStore) SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error) {
+	if !isValidUUID(id) {
+		return domain.BlueprintRun{}, db.ErrNoSuchBlueprintRun
+	}
+	return scanUpdatedBlueprintRunPG(s.admin.QueryRowContext(ctx,
+		`UPDATE blueprint_runs SET worktree_path = $3 WHERE org_id = $1 AND id = $2
+		 RETURNING `+pgBlueprintRunColumns, orgID, id, worktreePath))
 }
 
 func (s *blueprintStore) ActiveRunForTaskSystem(ctx context.Context, orgID, taskID string) (*domain.BlueprintRun, error) {
@@ -889,9 +944,7 @@ func getBlueprintRun(ctx context.Context, q queryer, orgID, id string) (*domain.
 		return nil, nil
 	}
 	br, err := scanBlueprintRun(q.QueryRowContext(ctx, `
-		SELECT id, blueprint_id, task_id, trigger_type, trigger_id, actor_agent_id::text, status,
-		       current_step_index, cancel_requested, step_plan,
-		       abort_reason, aborted_at_step, worktree_path, started_at, completed_at
+		SELECT `+pgBlueprintRunColumns+`
 		FROM blueprint_runs WHERE org_id = $1 AND id = $2
 	`, orgID, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1217,14 +1270,14 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 	return n > 0, nil
 }
 
-func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error {
+func (s *blueprintStore) SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error) {
 	if !isValidUUID(id) {
-		return nil
+		return domain.BlueprintRun{}, db.ErrNoSuchBlueprintRun
 	}
-	_, err := s.admin.ExecContext(ctx,
-		`UPDATE blueprint_runs SET current_step_index = $1 WHERE org_id = $2 AND id = $3`,
-		stepIndex, orgID, id)
-	return err
+	return scanUpdatedBlueprintRunPG(s.admin.QueryRowContext(ctx,
+		`UPDATE blueprint_runs SET current_step_index = $1 WHERE org_id = $2 AND id = $3
+		 RETURNING `+pgBlueprintRunColumns,
+		stepIndex, orgID, id))
 }
 
 func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {

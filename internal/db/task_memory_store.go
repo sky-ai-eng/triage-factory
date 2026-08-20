@@ -50,6 +50,10 @@ import (
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
+// TODO(TFAC-867): these single-row writes still return a bare error rather
+// than the row they persisted: UpsertAgentMemory, UpsertAgentMemorySystem,
+// UpdateConversationMemoryHumanContent,
+// UpdateConversationMemoryHumanContentSystem.
 type TaskMemoryStore interface {
 	// UpsertAgentMemory writes the agent-side memory row for a conversation.
 	// Empty / whitespace-only content canonicalizes to SQL NULL on
@@ -170,6 +174,10 @@ type TaskMemoryStore interface {
 	// write with no JWT-claims context. Best-effort by contract:
 	// callers must never fail the operation that produced the touch
 	// on this method's error.
+	//
+	// Exempt from the returned-row rule: it appends to a join table with ON
+	// CONFLICT DO NOTHING, so there is no single row it can hand back on the
+	// repeat touch that is its steady state.
 	RecordEntityTouchSystem(ctx context.Context, orgID, conversationID, entityID, role string) error
 
 	// CountMemoriesForEntitySystem returns the number of conversation_memory

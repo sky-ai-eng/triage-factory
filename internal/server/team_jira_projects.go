@@ -109,7 +109,7 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 		prev = cloneJiraProjects(rulesToProjectConfigsOrdered(rules, teamSet.JiraProjects))
 
 		teamSet.JiraProjects = projectKeysFromConfigs(next)
-		if err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
+		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
 		if err := tx.JiraStatusRules.ReplaceForTeam(r.Context(), teamID, projectConfigsToRules(next)); err != nil {

@@ -114,7 +114,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		}
 		// User edits step b — stamps user_modified on that prompt row.
 		bID := promptBySlug(t, stores, orgID, teamID, "b").ID
-		if err := stores.Prompts.Update(ctx, orgID, bID, "B edited", "user edit", ""); err != nil {
+		if _, err := stores.Prompts.Update(ctx, orgID, bID, "B edited", "user edit", ""); err != nil {
 			t.Fatalf("user update b: %v", err)
 		}
 		promptsB := []domain.Prompt{
@@ -147,7 +147,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		}
 		// User renames the blueprint header — stamps user_modified on the header.
 		bpID := blueprintBySlug(t, stores, orgID, teamID, "hdr").ID
-		if err := stores.Blueprints.Rename(ctx, orgID, bpID, "Renamed"); err != nil {
+		if _, err := stores.Blueprints.Rename(ctx, orgID, bpID, "Renamed"); err != nil {
 			t.Fatalf("rename: %v", err)
 		}
 		promptsB := []domain.Prompt{syncPrompt("x", "X2", "x2", "", "")}

@@ -126,6 +126,15 @@ type TaskListFilter struct {
 //     usually surfaces 409). HandoffAgentClaim returns the
 //     three-state HandoffResult so callers can distinguish no-op
 //     from refused.
+//
+// TODO(TFAC-860): these single-row writes still return a bare error rather
+// than the row they persisted — Bump, BumpSystem, Close, CloseSystem,
+// RecordEvent, RecordEventSystem, SetClaimedByAgent, SetClaimedByUser,
+// SetOwnerTeam, SetOwnerTeamSystem, SetStatus, SetStatusSystem. Converging
+// them needs a shape decision first: the point read projects a task joined to
+// its entity, which SQLite's RETURNING cannot produce, so the ticket picks
+// between splitting the row from its annotation and reading the annotation
+// alongside.
 type TaskStore interface {
 	// --- Lookup ---
 
@@ -221,6 +230,10 @@ type TaskStore interface {
 	// originals. An empty slice is a no-op. The owning team_id stamped
 	// on the task by FindOrCreate need not be included — it grants
 	// visibility on its own — but passing it is harmless.
+	//
+	// Exempt from the returned-row rule: it reconciles a set (the task's
+	// visibility team rows), so there is no single row a return value could
+	// name.
 	SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error
 
 	// VisibilityTeams returns the team IDs in a task's visibility set.
@@ -429,6 +442,9 @@ type TaskStore interface {
 	// found an active task and no row was created or returned (task is
 	// nil); suppressed=false behaves exactly like FindOrCreateAtSystem.
 	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error)
+	//
+	// Exempt from the returned-row rule: it reconciles a set, same as
+	// SetVisibilityTeams.
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
 	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error

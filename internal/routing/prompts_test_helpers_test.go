@@ -64,12 +64,12 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 	store := sqlitestore.New(database).Blueprints
 	ctx := context.Background()
 	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, blueprintID); existing == nil {
-		if err := store.Create(ctx, runmode.LocalDefaultOrgID, teamID, domain.Blueprint{
+		if _, err := store.Create(ctx, runmode.LocalDefaultOrgID, teamID, domain.Blueprint{
 			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: teamID,
 		}); err != nil {
 			t.Fatalf("blueprintWrappingPrompt create %s (team %s): %v", blueprintID, teamID, err)
 		}
-		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("blueprintWrappingPrompt steps %s: %v", blueprintID, err)
 		}
 	}
@@ -101,7 +101,7 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 
 func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
 	t.Helper()
-	if err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrgID, id, enabled); err != nil {
+	if _, err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrgID, id, enabled); err != nil {
 		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
 	}
 }
@@ -115,7 +115,7 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
-	if err := store.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
+	if _, err := store.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
 	}
 }
@@ -193,16 +193,16 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 		// user rows satisfy it (this test resolves the trigger's blueprint through
 		// the returned slug→id map, not by system_slug). The id is a random UUID.
 		promptID := uuid.New().String()
-		if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Prompt{ID: promptID, Name: s.name, Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("seed prompt %s: %v", s.slug, err)
 		}
 		bpID := uuid.New().String()
-		if err := blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		if _, err := blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Blueprint{ID: bpID, Name: s.name, Source: "user"}); err != nil {
 			t.Fatalf("seed blueprint %s: %v", s.slug, err)
 		}
-		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {
+		if _, err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {
 			t.Fatalf("seed blueprint steps %s: %v", s.slug, err)
 		}
 		out[s.slug] = bpID

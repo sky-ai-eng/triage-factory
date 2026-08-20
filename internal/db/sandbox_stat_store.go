@@ -22,6 +22,9 @@ type SandboxStatStore interface {
 	// claim at once. An empty batch is a no-op that touches no connection:
 	// an idle executor must cost nothing. Duplicate (claim_id, at) rows are
 	// ignored rather than erroring, so a retried tick is harmless.
+	//
+	// Exempt from the returned-row rule: it writes a batch of telemetry
+	// samples, so there is no single row a return value could name.
 	RecordBatch(ctx context.Context, stats []domain.SandboxStat) error
 
 	// ListForClaim returns one claim's samples, oldest first — the series a

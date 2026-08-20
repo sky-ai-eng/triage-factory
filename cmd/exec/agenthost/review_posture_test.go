@@ -67,7 +67,7 @@ func setTeamReviewPosture(t *testing.T, stores db.Stores, teamID, posture string
 		t.Fatalf("GetSettingsSystem: %v", err)
 	}
 	set.ReviewPosture = posture
-	if err := stores.Teams.UpdateSettings(context.Background(), teamID, set); err != nil {
+	if _, err := stores.Teams.UpdateSettings(context.Background(), teamID, set); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 }

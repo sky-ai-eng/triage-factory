@@ -802,6 +802,86 @@ func (s *conversationStore) ListReapableSnapshotKeysSystem(ctx context.Context, 
 	return keys, rows.Err()
 }
 
+func (s *conversationStore) ListEvictableWorkspacesSystem(ctx context.Context, cutoff time.Time) ([]domain.EvictableWorkspace, error) {
+	// Three gates, in the order they matter. The workspace_snapshots join is
+	// the safety one: only a key whose durable blob is recorded `written` has
+	// a second copy of the agent's work, so only that key's tree is a cache
+	// rather than the original. The correlated MAX is the retention sweep's
+	// timestamp rule verbatim (parked_at for an open conversation, re-stamped
+	// each park; completed_at for a terminal; started_at a legacy fallback),
+	// scoped to the key so a blueprint's steps age as one. The NOT EXISTS is
+	// the shared-tree rule: any live claim anywhere under the key means an
+	// engagement is working in the directory this enumerates for deletion.
+	//
+	// datetime() normalizes the mixed on-disk timestamp formats
+	// (CURRENT_TIMESTAMP text vs Go-bound values) so the MAX is consistent;
+	// the cutoff binds as a canonical UTC string.
+	//
+	// DISTINCT over the paths: the steps of one blueprint each record the
+	// shared tree on their own row, so the same path arrives once per step.
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT DISTINCT c.org_id, c.blueprint_run_id, c.worktree_path
+		FROM conversations c
+		JOIN workspace_snapshots ws
+		  ON ws.org_id = c.org_id AND ws.blueprint_run_id = c.blueprint_run_id
+		WHERE ws.state = 'written'
+		  AND c.status IN ('open', 'completed')
+		  AND COALESCE(c.worktree_path, '') <> ''
+		  AND (
+		        SELECT MAX(datetime(COALESCE(aged.parked_at, aged.completed_at, aged.started_at)))
+		        FROM conversations aged
+		        WHERE aged.org_id = c.org_id
+		          AND aged.blueprint_run_id = c.blueprint_run_id
+		          AND aged.status IN ('open', 'completed')
+		      ) < datetime(?)
+		  AND NOT EXISTS (
+		        SELECT 1
+		        FROM conversations sib
+		        JOIN claims cl ON cl.conversation_id = sib.id AND cl.released_at IS NULL
+		        WHERE sib.org_id = c.org_id AND sib.blueprint_run_id = c.blueprint_run_id
+		      )
+		ORDER BY c.org_id, c.blueprint_run_id, c.worktree_path
+	`, cutoff.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.EvictableWorkspace
+	for rows.Next() {
+		var orgID, blueprintRunID, path string
+		if err := rows.Scan(&orgID, &blueprintRunID, &path); err != nil {
+			return nil, err
+		}
+		// The ORDER BY groups a key's paths adjacently, so one pass folds them.
+		if n := len(out); n > 0 && out[n-1].OrgID == orgID && out[n-1].BlueprintRunID == blueprintRunID {
+			out[n-1].WorktreePaths = append(out[n-1].WorktreePaths, path)
+			continue
+		}
+		out = append(out, domain.EvictableWorkspace{
+			OrgID:          orgID,
+			BlueprintRunID: blueprintRunID,
+			WorktreePaths:  []string{path},
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Context, orgID, blueprintRunID string) (bool, error) {
+	var exists int
+	err := s.q.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM conversations c
+			JOIN claims cl ON cl.conversation_id = c.id AND cl.released_at IS NULL
+			WHERE c.org_id = ? AND c.blueprint_run_id = ?
+		)
+	`, orgID, blueprintRunID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
+}
+
 func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
 	return s.SetSession(ctx, orgID, conversationID, sessionID)
 }

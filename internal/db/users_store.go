@@ -56,6 +56,13 @@ type UsersStore interface {
 	// Passing "" preserves an existing address when login is unchanged, for
 	// legacy sources that do not carry one; when login changes, an omitted
 	// email clears the prior account's address instead of carrying it across.
+	//
+	// Exempt from the returned-row rule: this store exposes the identity
+	// tables as column projections, not rows — its reads answer "what login"
+	// and "which account", and there is no point read whose column list and
+	// scanner a RETURNING could share. Giving one a row type is a read-shape
+	// change, not a write-shape convergence, and no caller reads back after
+	// this write.
 	UpsertGitHubIdentity(ctx context.Context, userID, githubBaseURL, login, githubUserID, email, source string) error
 
 	// ClearGitHubIdentity deletes the user's GitHub identity row for a
@@ -107,6 +114,9 @@ type UsersStore interface {
 	// there's no `...System` variant yet — a future claims-free writer
 	// (SCIM, a boot-time sync) would need one added, same as the GitHub
 	// store.
+	//
+	// Exempt from the returned-row rule: same as UpsertGitHubIdentity — a
+	// column-projection surface with no row read to project.
 	UpsertJiraIdentity(ctx context.Context, userID, jiraBaseURL, accountID, displayName, source string) error
 
 	// ClearJiraIdentity deletes the user's Jira identity row for a host
@@ -119,6 +129,8 @@ type UsersStore interface {
 	// a user-facing disconnect is still future capture-flow UI work
 	// (symmetric with ClearGitHubIdentity, which is likewise unwired). It
 	// exists now so that handler is a pure addition, not a store change.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL string) error
 
 	// --- Admin-pool variants (`...System`) ---
@@ -187,6 +199,11 @@ type UsersStore interface {
 	// rationale as DashboardBackfilledAtSystem. UpsertGitHubIdentity also clears
 	// this marker when the bound login changes (the already-completed case);
 	// together they make a rename always re-backfill the new login.
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping. The
+	// stamp is a one-shot marker the next backfill trigger reads; the guarded
+	// no-op is the outcome the caller wants and it already gets it as "no
+	// error".
 	MarkDashboardBackfilledSystem(ctx context.Context, userID, githubBaseURL, login string) error
 
 	// GetJiraIdentitySystem mirrors GetJiraIdentity but routes through
@@ -255,6 +272,11 @@ type UsersStore interface {
 	// mutates. The caller validates team membership before persisting
 	// (you can only pin a team you belong to). Postgres routes through
 	// the app pool (users_modify RLS gates id = current_user_id()).
+	//
+	// Exempt from the returned-row rule: the users table is a column-
+	// projection surface here (GetDisplayName / GetProfile answer with fields,
+	// not a row), so there is no point read a RETURNING could share a column
+	// list with.
 	SetLastActingTeam(ctx context.Context, userID, teamID string) error
 
 	// GetSettings returns the user's settings row. Empty for v1
@@ -272,5 +294,9 @@ type UsersStore interface {
 	// updated_at trigger fires either way. Future prefs land here.
 	// Postgres runs on the app pool (user_settings_modify RLS gates
 	// by user_id = current_user_id()).
+	//
+	// Exempt from the returned-row rule: domain.UserSettings is empty in v1 —
+	// the write is a touch with nothing to hand back. When per-user fields
+	// land, this is a returned-row conversion along with them.
 	UpdateSettings(ctx context.Context, userID string, updates domain.UserSettings) error
 }

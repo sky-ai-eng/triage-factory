@@ -80,7 +80,7 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if _, err := stores.Prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	dbtest.SeedConversation(t, conn, domain.Conversation{

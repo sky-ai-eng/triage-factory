@@ -274,6 +274,16 @@ func (a *App) buildExecution() error {
 	// below so that warning can say whether the floor is actually armed,
 	// rather than asserting a guardrail that TF_DISPATCH_MEM_FLOOR_MB=0
 	// may have disabled.
+	// How long a cold resume waits on a workspace persist that is still in
+	// flight before falling back. Resolved here beside the other dispatcher
+	// knobs; the default is the hung-writer backstop rather than an expected
+	// wait, so an operator normally never touches it.
+	if wait, werr := delegate.ParseSnapshotWaitTimeout(os.Getenv("TF_SNAPSHOT_WAIT_SEC")); werr != nil {
+		appLog.Warn("workspace snapshot wait", "error", werr)
+	} else if wait != delegate.DefaultSnapshotWait {
+		a.spawner.SetSnapshotWaitTimeout(wait)
+		appLog.Info("workspace snapshot wait configured", "wait", wait, "env", "TF_SNAPSHOT_WAIT_SEC")
+	}
 	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
 	a.spawner.SetDispatchMemFloor(floor)
 	if err != nil {

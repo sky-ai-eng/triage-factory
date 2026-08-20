@@ -43,7 +43,7 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 func seedConversationBlueprint(t *testing.T, database *sql.DB, suffix, taskID string) string {
 	t.Helper()
 	bpID := "seedbp-" + suffix
-	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)

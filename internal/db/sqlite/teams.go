@@ -65,6 +65,34 @@ func (s *teamsStore) GetSettingsSystem(ctx context.Context, teamID string) (doma
 }
 
 func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.TeamSettings, error) {
+	set, err := scanTeamSettings(q.QueryRowContext(ctx, `
+		SELECT `+teamSettingsColumns+`
+		FROM team_settings WHERE team_id = ?
+	`, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		// See OrgsStore for the rationale: defaults here are the
+		// belt-and-suspenders fallback for test fixtures or any
+		// caller that beats the provisioning path. Matches the
+		// schema DEFAULT clauses on team_settings.
+		return domain.DefaultTeamSettings(), nil
+	}
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	}
+	return set, nil
+}
+
+// teamSettingsColumns is the canonical projection of a team_settings row, in
+// the order scanTeamSettings reads them. Both reads SELECT it and both writes
+// RETURN it, so the write shape cannot drift from the read shape.
+const teamSettingsColumns = `jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
+		       default_model, auto_delegate_enabled, auto_mode_enabled,
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
+		       max_daily_cost_usd, branch_template, review_posture,
+		       base_branch_push_policy`
+
+// scanTeamSettings decodes one team_settings row in teamSettingsColumns order.
+func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	var (
 		projectsJSON            string
 		aiThreshold, aiInterval int
@@ -78,28 +106,13 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		reviewPosture           string
 		basePushPolicy          string
 	)
-	err := q.QueryRowContext(ctx, `
-		SELECT jira_projects, ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled, auto_mode_enabled,
-		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
-		       max_daily_cost_usd, branch_template, review_posture,
-		       base_branch_push_policy
-		FROM team_settings WHERE team_id = ?
-	`, teamID).Scan(
+	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		// See OrgsStore for the rationale: defaults here are the
-		// belt-and-suspenders fallback for test fixtures or any
-		// caller that beats the provisioning path. Matches the
-		// schema DEFAULT clauses on team_settings.
-		return domain.DefaultTeamSettings(), nil
-	}
-	if err != nil {
-		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	); err != nil {
+		return domain.TeamSettings{}, err
 	}
 	projects := []string{}
 	if projectsJSON != "" {
@@ -169,25 +182,41 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.List
 
 // Get is the canonical single read. Local is N=1, so the sole user admins
 // every team — the constant role matches ListForUser's.
-func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
+// teamRowColumns is the canonical projection of a teams ROW, in the order
+// scanTeamRow reads them. Get SELECTs it alongside the caller's membership
+// role, and the archive/restore writes RETURN it — role is not in the list
+// because it is not a column of this table: it is the caller's own membership,
+// which Get resolves separately and a write has no view on.
+const teamRowColumns = `id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at`
+
+func scanTeamRow(scan func(...any) error) (domain.Team, error) {
 	var (
 		t       domain.Team
 		deleted sql.NullTime
 	)
-	err := s.q.QueryRowContext(ctx, `
-		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at, 'admin' AS role
+	if err := scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
+		return domain.Team{}, err
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	return t, nil
+}
+
+func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
+	t, err := scanTeamRow(s.q.QueryRowContext(ctx, `
+		SELECT `+teamRowColumns+`
 		FROM teams
 		WHERE id = ? AND org_id = ?
-	`, teamID, orgID).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted, &t.Role)
+	`, teamID, orgID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get team: %w", err)
 	}
-	if deleted.Valid {
-		t.DeletedAt = &deleted.Time
-	}
+	// SQLite is N=1: the sole local user owns every team.
+	t.Role = "admin"
 	return &t, nil
 }
 
@@ -282,11 +311,11 @@ func (s *teamsStore) Update(ctx context.Context, teamID string, name, slug, desc
 	return t, nil
 }
 
-func (s *teamsStore) Archive(ctx context.Context, teamID string) error {
+func (s *teamsStore) Archive(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.q, teamID, true)
 }
 
-func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
+func (s *teamsStore) Restore(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.q, teamID, false)
 }
 
@@ -294,33 +323,28 @@ func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
 // stamps CURRENT_TIMESTAMP WHERE deleted_at IS NULL, restore clears it WHERE
 // deleted_at IS NOT NULL. The state-guarded WHERE makes a no-op flip affect zero
 // rows → ErrTeamNotFound (already archived / already active / missing).
-func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) error {
-	var (
-		res sql.Result
-		err error
-	)
-	if archive {
-		res, err = q.ExecContext(ctx, `
-			UPDATE teams SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-			WHERE id = ? AND deleted_at IS NULL
-		`, teamID)
-	} else {
-		res, err = q.ExecContext(ctx, `
+func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) (domain.Team, error) {
+	stmt := `
 			UPDATE teams SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
 			WHERE id = ? AND deleted_at IS NOT NULL
-		`, teamID)
+			RETURNING ` + teamRowColumns
+	if archive {
+		stmt = `
+			UPDATE teams SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+			WHERE id = ? AND deleted_at IS NULL
+			RETURNING ` + teamRowColumns
+	}
+	// No row scanned means the state-guarded WHERE matched nothing — already
+	// archived, already active, or missing — which is db.ErrTeamNotFound, the
+	// same answer the rows-affected probe here used to synthesize.
+	t, err := scanTeamRow(q.QueryRowContext(ctx, stmt, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Team{}, db.ErrTeamNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("set team archived=%v: %w", archive, err)
+		return domain.Team{}, fmt.Errorf("set team archived=%v: %w", archive, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set team archived: rows affected: %w", err)
-	}
-	if n == 0 {
-		return db.ErrTeamNotFound
-	}
-	return nil
+	return t, nil
 }
 
 func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
@@ -491,10 +515,10 @@ func (s *teamsStore) NamesForIDsSystem(ctx context.Context, orgID string, teamID
 	return out, rows.Err()
 }
 
-func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
+func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) (domain.TeamSettings, error) {
 	projectsJSON, err := marshalJSONArray(u.JiraProjects)
 	if err != nil {
-		return fmt.Errorf("marshal team_settings.jira_projects: %w", err)
+		return domain.TeamSettings{}, fmt.Errorf("marshal team_settings.jira_projects: %w", err)
 	}
 	// max_daily_cost_usd rides along (0 → NULL via nullFloatValue) so a read-
 	// modify-write team-settings save round-trips the org-admin-set cap untouched.
@@ -502,7 +526,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	// (a team admin cannot set their own cap), so its GetSettings→UpdateSettings
 	// flow always writes back exactly what it read. The cap is *changed* only by
 	// the org-admin SetDailyCostCapSystem path.
-	if _, err := s.q.ExecContext(ctx, `
+	stored, err := scanTeamSettings(s.q.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
@@ -525,17 +549,18 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			review_posture = excluded.review_posture,
 			base_branch_push_policy = excluded.base_branch_push_policy,
 			updated_at = CURRENT_TIMESTAMP
-	`,
+		RETURNING `+teamSettingsColumns,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
 		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloatValue(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy,
-	); err != nil {
-		return fmt.Errorf("upsert team_settings: %w", err)
+	).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
@@ -545,22 +570,27 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 // SQL NULL ("no cap"). The partial INSERT relies on the schema DEFAULT clauses
 // for every other team_settings column when no row exists yet, and ON CONFLICT
 // touches only the cap so a team's other settings are never clobbered.
-func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error {
+func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error) {
 	// ≤ 0 → SQL NULL ("no cap"); any positive value is the cap.
 	var capArg any
 	if capUSD > 0 {
 		capArg = capUSD
 	}
-	if _, err := s.q.ExecContext(ctx, `
+	// RETURNING projects the whole settings row: the insert arm fills every
+	// other column from schema defaults, so the row this lands in is one the
+	// caller has never seen.
+	stored, err := scanTeamSettings(s.q.QueryRowContext(ctx, `
 		INSERT INTO team_settings (team_id, max_daily_cost_usd, updated_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			updated_at = CURRENT_TIMESTAMP
-	`, teamID, capArg); err != nil {
-		return fmt.Errorf("set team daily cost cap: %w", err)
+		RETURNING `+teamSettingsColumns,
+		teamID, capArg).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("set team daily cost cap: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // The roster methods are a multi-mode (Postgres) surface: the team-roster

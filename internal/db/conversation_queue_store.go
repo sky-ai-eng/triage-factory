@@ -79,6 +79,10 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// TODO(TFAC-868): these single-row writes still return a bare error rather
+// than the row they persisted: EnqueueConversation, which mints the
+// conversation row a caller then has to learn the id of some other way, and
+// RequeueConversation.
 type ConversationQueueStore interface {
 	// EnqueueConversation mints a delegation conversation for a blueprint step with
 	// NO stored status — the absence of an outcome is what makes it
@@ -197,6 +201,22 @@ type ConversationQueueStore interface {
 	// live claim rather than trusting a payload that could be stale by
 	// the time it's handled. Returns ok=false when conversationID is unknown.
 	GetClaim(ctx context.Context, orgID, conversationID string) (claim AwaitingCredentialsConversation, ok bool, err error)
+
+	// ClaimExecutorSystem resolves one claim id to the executor that took it.
+	// ok=false when no such claim exists in the org, which is an answer rather
+	// than an error: a claim row can be gone (its conversation purged) while
+	// something still names its id.
+	//
+	// It exists for the resume ladder's liveness question. A workspace-snapshot
+	// state row names its writer by CLAIM, deliberately — the write belongs to
+	// one engagement, not to whichever process holds the conversation now — so
+	// "is that persist still coming" needs this hop before the instance
+	// registry can be asked, and the writing claim is usually released by then,
+	// out of reach of any live-claim read.
+	//
+	// Org-scoped rather than cross-org: the caller is an executor resolving its
+	// own conversation's history, not an operator surface.
+	ClaimExecutorSystem(ctx context.Context, orgID, claimID string) (executorID string, ok bool, err error)
 
 	// RequeueAwaitingCredentials releases a conversation whose active claim is parked
 	// in phase='awaiting_credentials', clearing ownership — the executor-side

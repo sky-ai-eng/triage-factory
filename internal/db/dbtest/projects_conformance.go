@@ -36,18 +36,62 @@ type ProjectStoreFactory func(t *testing.T) (
 //     sql.ErrNoRows on a bogus id.
 //   - Delete returns sql.ErrNoRows on a bogus id and removes the row
 //     on a real id.
+//   - Every single-row write returns the row it persisted, pinned repos
+//     included.
 func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift). PinnedRepos rides along because Get attaches it:
+		// the comparison fails if a write returns a row without its pins.
+		s, orgID, teamID := mk(t)
+		read := func(id string) func() (*domain.Project, error) {
+			return func() (*domain.Project, error) { return s.Get(ctx, orgID, id) }
+		}
+
+		created, err := s.Create(ctx, orgID, teamID, domain.Project{
+			Name: "Returned", Description: "v1", PinnedRepos: []string{"a/b"},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create", created, read(created.ID))
+		// The id is the point: a caller that supplied none has no other handle
+		// to the project it just made.
+		if created.ID == "" || created.CreatedAt.IsZero() || created.Visibility == "" {
+			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
+		}
+
+		next := created
+		next.Name = "Returned v2"
+		next.PinnedRepos = []string{"x/y", "z/w"}
+		updated, err := s.Update(ctx, orgID, next)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Update", updated, read(created.ID))
+		if !reflect.DeepEqual(updated.PinnedRepos, []string{"x/y", "z/w"}) {
+			t.Errorf("Update returned pins %v, want the reconciled set", updated.PinnedRepos)
+		}
+		if !updated.CreatedAt.Equal(created.CreatedAt) {
+			t.Errorf("Update returned created_at %v, want the create's %v", updated.CreatedAt, created.CreatedAt)
+		}
+	})
+
 	t.Run("Create_generates_id_when_empty", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		id, err := s.Create(ctx, orgID, teamID, domain.Project{
+		created, err := s.Create(ctx, orgID, teamID, domain.Project{
 			Name: "Generated", Description: "x",
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
+		id := created.ID
 		if id == "" {
 			t.Fatal("Create with empty ID should return a generated id")
 		}
@@ -66,10 +110,11 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		// would fail the cast. We don't pre-set an ID in conformance;
 		// the caller-supplied path is exercised at the call site
 		// (projectbundle.Import) which already passes uuid-shaped ids.
-		id, err := s.Create(ctx, orgID, teamID, domain.Project{Name: "supplied"})
+		created, err := s.Create(ctx, orgID, teamID, domain.Project{Name: "supplied"})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
+		id := created.ID
 		got, _ := s.Get(ctx, orgID, id)
 		if got == nil || got.ID != id {
 			t.Errorf("Get(%q) = %v, want id=%q", id, got, id)
@@ -91,10 +136,11 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 			JiraProjectKey:   "SKY",
 			LinearProjectKey: "LIN",
 		}
-		id, err := s.Create(ctx, orgID, teamID, input)
+		created, err := s.Create(ctx, orgID, teamID, input)
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
+		id := created.ID
 		got, err := s.Get(ctx, orgID, id)
 		if err != nil || got == nil {
 			t.Fatalf("Get: got=%v err=%v", got, err)
@@ -124,13 +170,14 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("Create_with_nil_pinned_repos_yields_empty_slice", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		id, err := s.Create(ctx, orgID, teamID, domain.Project{
+		created, err := s.Create(ctx, orgID, teamID, domain.Project{
 			Name:        "Nil Pinned",
 			PinnedRepos: nil,
 		})
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
+		id := created.ID
 		got, _ := s.Get(ctx, orgID, id)
 		if got.PinnedRepos == nil {
 			t.Errorf("PinnedRepos read back as nil; want non-nil empty slice for stable JSON shape")
@@ -211,9 +258,10 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("Update_writes_mutable_surface_and_stamps_updated_at", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		id, _ := s.Create(ctx, orgID, teamID, domain.Project{
+		created, _ := s.Create(ctx, orgID, teamID, domain.Project{
 			Name: "Before", Description: "before", PinnedRepos: []string{"a/b"},
 		})
+		id := created.ID
 		before, _ := s.Get(ctx, orgID, id)
 
 		updated := *before
@@ -221,7 +269,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 		updated.Description = "after"
 		updated.PinnedRepos = []string{"x/y", "z/w"}
 		updated.JiraProjectKey = "SKY"
-		if err := s.Update(ctx, orgID, updated); err != nil {
+		if _, err := s.Update(ctx, orgID, updated); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
 		got, _ := s.Get(ctx, orgID, id)
@@ -244,7 +292,7 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("Update_on_missing_id_returns_ErrNoRows", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		err := s.Update(ctx, orgID, domain.Project{
+		_, err := s.Update(ctx, orgID, domain.Project{
 			ID:   "00000000-0000-0000-0000-0000000000ee",
 			Name: "ghost",
 		})
@@ -255,7 +303,8 @@ func RunProjectStoreConformance(t *testing.T, mk ProjectStoreFactory) {
 
 	t.Run("Delete_removes_row", func(t *testing.T) {
 		s, orgID, teamID := mk(t)
-		id, _ := s.Create(ctx, orgID, teamID, domain.Project{Name: "to-delete"})
+		created, _ := s.Create(ctx, orgID, teamID, domain.Project{Name: "to-delete"})
+		id := created.ID
 		if err := s.Delete(ctx, orgID, id); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}

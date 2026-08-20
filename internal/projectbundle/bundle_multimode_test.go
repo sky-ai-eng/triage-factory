@@ -50,12 +50,12 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	// on the exporter's conversation below.
 	var projectID string
 	if err := stores.Tx.WithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
-		var e error
-		projectID, e = tx.Projects.Create(ctx, srcOrg, srcTeam, domain.Project{
+		created, e := tx.Projects.Create(ctx, srcOrg, srcTeam, domain.Project{
 			Name:        "Multi source",
 			Description: "multi fixture",
 			PinnedRepos: []string{slug},
 		})
+		projectID = created.ID
 		return e
 	}); err != nil {
 		t.Fatalf("create source project: %v", err)

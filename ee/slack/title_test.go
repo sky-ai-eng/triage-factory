@@ -26,7 +26,7 @@ func newFakeEntityTitleUpdater() *fakeEntityTitleUpdater {
 	return &fakeEntityTitleUpdater{titles: map[string]string{}}
 }
 
-func (f *fakeEntityTitleUpdater) UpdateTitleSystem(_ context.Context, _, entityID, title string) error {
+func (f *fakeEntityTitleUpdater) UpdateTitleSystem(_ context.Context, _, entityID, title string) (domain.Entity, error) {
 	f.mu.Lock()
 	if f.err == nil {
 		f.titles[entityID] = title
@@ -36,7 +36,7 @@ func (f *fakeEntityTitleUpdater) UpdateTitleSystem(_ context.Context, _, entityI
 	if f.done != nil {
 		f.done <- struct{}{}
 	}
-	return err
+	return domain.Entity{ID: entityID, Title: title}, err
 }
 
 func (f *fakeEntityTitleUpdater) get(entityID string) string {

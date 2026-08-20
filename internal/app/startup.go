@@ -86,13 +86,21 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded
-	// conversations on boot) and the workspace-snapshot retention reaper
-	// (bounds durable parked/aborted-conversation snapshot blobs by TTL; a
-	// no-op when no blob store is wired). A control pod builds the spawner
-	// but never claims delegated conversations, so neither runs there.
+	// conversations on boot), the workspace-snapshot retention reaper (bounds
+	// durable parked/aborted-conversation snapshot blobs by TTL; a no-op when
+	// no blob store is wired), and the workspace evictor (bounds the WARM
+	// copy — the parked trees on this pod's own disk — which otherwise
+	// accumulates until the process restarts). A control pod builds the
+	// spawner but never claims delegated conversations, so none of them run
+	// there.
 	if a.plan.dispatcher {
 		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
+		evictAfter, eerr := delegate.ParseWorkspaceEvictAfter(os.Getenv("TF_WORKSPACE_EVICT_AFTER_SEC"), a.local())
+		if eerr != nil {
+			appLog.Warn("workspace eviction window", "error", eerr)
+		}
+		go a.spawner.RunWorkspaceEvictor(ctx, delegate.DefaultWorkspaceEvictInterval, evictAfter)
 	}
 
 	// The shared tf_ctl control-plane listener + the cross-pod run-control

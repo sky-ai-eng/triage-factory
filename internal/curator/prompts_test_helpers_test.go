@@ -58,7 +58,7 @@ func seedTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	if existing != nil {
 		return
 	}
-	if err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
+	if _, err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("seedTestPrompt %s: %v", p.ID, err)
 	}
 }
@@ -106,13 +106,13 @@ func seedTestBlueprint(t *testing.T, database *sql.DB, promptID, systemSlug stri
 		}
 	} else {
 		blueprintID = "bp-" + promptID
-		if err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+		if _, err := stores.Blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: "bp-" + promptID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("seedTestBlueprint user %s: %v", promptID, err)
 		}
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 		t.Fatalf("seedTestBlueprint replace steps %s: %v", blueprintID, err)
 	}
 	return blueprintID

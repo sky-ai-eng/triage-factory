@@ -23,10 +23,10 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "fleet-reads")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "fr-p0", Name: "Step 0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "fr-bp", "FR Blueprint")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "fr-bp", []string{"fr-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "fr-bp", []string{"fr-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "fr-br", BlueprintID: "fr-bp", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-fr",
@@ -34,6 +34,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
 	step0 := 0
 	for _, id := range []string{"fr-run-0", "fr-run-1"} {

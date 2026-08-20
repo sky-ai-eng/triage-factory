@@ -38,7 +38,8 @@ func persistOrgGitHubIdentity(ctx context.Context, tx db.TxStores, orgID, login,
 	if agent == nil {
 		return nil // not bootstrapped yet; nothing to stamp
 	}
-	return tx.Agents.SetGitHubOrgIdentity(ctx, orgID, agent.ID, login, email)
+	_, e := tx.Agents.SetGitHubOrgIdentity(ctx, orgID, agent.ID, login, email)
+	return e
 }
 
 func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request) {

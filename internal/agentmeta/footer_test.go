@@ -86,7 +86,7 @@ func seedFooterConversation(t *testing.T, database *sql.DB, fix conversationFoot
 	prompts := sqlitestore.New(database).Prompts
 	ctx := t.Context()
 	if existing, _ := prompts.Get(ctx, runmode.LocalDefaultOrgID, "footer-test-prompt"); existing == nil {
-		if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
+		if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "footer-test-prompt", Name: "T", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("prompt: %v", err)
 		}
 	}

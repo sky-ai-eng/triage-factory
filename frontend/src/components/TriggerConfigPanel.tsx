@@ -103,11 +103,17 @@ export default function TriggerConfigPanel({
     if (!trigger) return
     setEnabled(checked)
     try {
-      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: checked }),
-      })
+      // The PATCH answers with the handler resource, so the switch settles on
+      // the stored value rather than on what we optimistically assumed.
+      const saved = await apiJSON<TriggerHandler>(
+        `${handlerBase}/${encodeURIComponent(trigger.id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: checked }),
+        },
+      )
+      setEnabled(saved.enabled)
       onRefresh?.()
     } catch (err) {
       setEnabled(!checked)

@@ -709,15 +709,16 @@ describe('useConversationDetail resumability', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('turns the composer on when the workspace snapshot is announced', async () => {
+  it('turns the composer on when the workspace is announced as accounted for', async () => {
     mockResumableFetch()
     render(<ComposerHarness />)
-    // A cross-pod stop parks the row before the executor writes the blob, so
-    // this is the honest state on arrival.
+    // A cross-pod stop parks the row from control, before the executor holding
+    // the workspace has recorded that it owes a persist for it, so this is the
+    // honest state on arrival.
     expect(await screen.findByText(/workspace expired/i)).toBeInTheDocument()
 
-    // The fenced teardown's snapshot landed. Same event, same status the row
-    // already has, one extra field.
+    // The fenced teardown recorded the persist it owes. Same event, same status
+    // the row already has, one extra field.
     send({
       type: 'conversation_update',
       conversation_id: CONVERSATION_ID,
