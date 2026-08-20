@@ -174,7 +174,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("load org settings: %w", err)
 		}
 		orgSet.GitHubBaseURL = baseURL
-		if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
 		// The org is now in the PAT credential system. Written here, in the same
@@ -182,7 +182,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		// precede the credential it describes — a crash between two separate
 		// writes would leave the class lying. UpdateSettings above does not carry
 		// it (it deliberately doesn't own the column), hence the separate call.
-		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
@@ -276,7 +276,7 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("clear credential: %w", err)
 			}
 			orgSet.GitHubBaseURL = ""
-			if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
+			if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
 				return fmt.Errorf("save org settings: %w", err)
 			}
 		}
@@ -331,7 +331,7 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 			return fmt.Errorf("clear credential: %w", err)
 		}
 		orgSet.JiraBaseURL = ""
-		if err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
 		if !had {

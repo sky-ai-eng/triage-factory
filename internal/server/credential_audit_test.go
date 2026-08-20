@@ -255,7 +255,7 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 				ClientID: "Iv1.x", Active: true,
 			})
 			if err == nil {
-				err = s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp)
+				_, err = s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp)
 			}
 			mu.Lock()
 			seedErr = err

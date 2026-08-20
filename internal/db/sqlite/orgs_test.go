@@ -4,9 +4,27 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// TestOrgsStore_SQLite_ReturnedRowConformance runs the shared returned-row
+// suite against the SQLite impl. Each call opens a fresh in-memory DB and
+// drops the seeded org_settings row — see TestSettingsStores_SQLite for why
+// the baseline migration's seed collides with a suite that starts from "no
+// row yet" (UpdateSettingsVersioned's create arm).
+func TestOrgsStore_SQLite_ReturnedRowConformance(t *testing.T) {
+	dbtest.RunOrgsReturnedRowConformance(t, func(t *testing.T) (db.OrgsStore, string) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		if _, err := conn.Exec(`DELETE FROM org_settings`); err != nil {
+			t.Fatalf("drop seeded org_settings: %v", err)
+		}
+		return sqlitestore.New(conn).Orgs, runmode.LocalDefaultOrgID
+	})
+}
 
 // TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel pins the
 // local-mode behavior: the only active org is the

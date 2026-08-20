@@ -83,7 +83,7 @@ func TestCredentialClass_PATBindRefusedForUnknownClass(t *testing.T) {
 
 	// A class from a newer peer. No App row — the shape that makes the XOR gate
 	// wave this through.
-	if err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClass("managed_app")); err != nil {
+	if _, err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClass("managed_app")); err != nil {
 		t.Fatalf("seed unknown class: %v", err)
 	}
 

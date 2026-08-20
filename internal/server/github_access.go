@@ -267,7 +267,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 			githubAppLog.Warn("credential class disagreed with the registration at cutover; re-asserting",
 				"org", orgID, "found", set.GitHubCredentialClass, "want", domain.GitHubCredentialClassBYOApp)
 		}
-		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// The cutover IS the credential change — the App goes live and
@@ -409,7 +409,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 		// The App registration is gone and the PAT saved above is the org's
 		// credential — the org has moved between credential systems, so the class
 		// moves with it, in this same transaction.
-		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// Secrets last. If this fails after DeleteForOrg has committed (in
@@ -533,7 +533,7 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		// system it never stopped running on (the staged App was never live; the
 		// PAT stayed the credential throughout). Unconditional for that reason,
 		// and in this transaction so the row and the class go together.
-		if err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}
 		if err := teardownAppSecrets(ctx, tx, orgID, app); err != nil {

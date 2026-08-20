@@ -148,7 +148,7 @@ func seedLocalApp(t *testing.T, s *Server, active bool) {
 // such a fixture is served as a PAT org.
 func seedBYOAppCredentialClass(t *testing.T, s *Server, orgID string) {
 	t.Helper()
-	if err := s.orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 		t.Fatalf("set github credential class: %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func seedInstallation(t *testing.T, s *Server, id int64, login string) {
 
 func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 	t.Helper()
-	if err := s.orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: base}); err != nil {
+	if _, err := s.orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: base}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 }

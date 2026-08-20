@@ -207,7 +207,7 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 		}
 		// The class registration writes alongside the row, in the same
 		// transaction — a fixture that skips it models an unreachable state.
-		if err := tx.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		if _, err := tx.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return err
 		}
 		return tx.Secrets.Put(context.Background(), orgID, ref, clientSecret, "test client secret")
@@ -654,7 +654,8 @@ func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
 			return err
 		}
 		set.GitHubBaseURL = host
-		return tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		_, err = tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		return err
 	}); err != nil {
 		t.Fatalf("seed org github host: %v", err)
 	}

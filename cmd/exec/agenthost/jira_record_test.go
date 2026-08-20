@@ -284,7 +284,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
-	if err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{
+	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{
 		JiraBaseURL: "https://acme.atlassian.net",
 	}); err != nil {
 		t.Fatalf("set site URL: %v", err)

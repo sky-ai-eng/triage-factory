@@ -271,7 +271,7 @@ func TestGitHubWebhook_PATOrg_IndistinguishableFromBadSignature(t *testing.T) {
 	seedWebhookApp(t, s)
 	// Flip the class out from under the registration: a PAT org has no App and
 	// so no deliveries to verify, whatever rows exist.
-	if err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassPAT); err != nil {
+	if _, err := s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassPAT); err != nil {
 		t.Fatalf("set credential class: %v", err)
 	}
 

@@ -60,7 +60,7 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 	// Seed a real settings row on orgB so the negative read has
 	// something to (fail to) return.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	if err := stores.Orgs.UpdateSettings(context.Background(), orgB, domain.OrgSettings{
+	if _, err := stores.Orgs.UpdateSettings(context.Background(), orgB, domain.OrgSettings{
 		GitHubBaseURL:       "https://b.example.com",
 		GitHubPollInterval:  5 * time.Minute,
 		GitHubCloneProtocol: "ssh",
@@ -112,7 +112,7 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 	// UPDATE branch (where RLS filters out the row) rather than the
 	// INSERT branch (which 42501-errors).
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	if err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
+	if _, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 		GitHubBaseURL:       "https://owner-set.example.com",
 		GitHubPollInterval:  5 * time.Minute,
 		GitHubCloneProtocol: "ssh",
@@ -130,12 +130,13 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 	wantPoll := 5 * time.Minute
 	memberErr := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		return stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
+		_, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 			GitHubBaseURL:       "https://member-overwrite.example.com",
 			GitHubPollInterval:  9 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    9 * time.Minute,
 		})
+		return err
 	})
 	if memberErr == nil {
 		t.Fatal("member UpdateSettings succeeded; admin gate broken")
@@ -160,12 +161,13 @@ func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
 	// Owner can update freely — pins the positive side of the gate.
 	err = h.WithUser(t, owner, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		return stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
+		_, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
 			GitHubBaseURL:       "https://owner-update.example.com",
 			GitHubPollInterval:  7 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    7 * time.Minute,
 		})
+		return err
 	})
 	if err != nil {
 		t.Fatalf("owner UpdateSettings: %v", err)
