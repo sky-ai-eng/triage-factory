@@ -67,29 +67,36 @@ func TestReviewArtifactGet_SeverityRoundTrip(t *testing.T) {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		ReviewBody  string `json:"review_body"`
-		ReviewEvent string `json:"review_event"`
-		ReviewID    string `json:"review_id"`
-		Comments    []struct {
-			Body     string `json:"body"`
-			Severity string `json:"severity"`
-		} `json:"comments"`
+		Kind       string `json:"kind"`
+		ExternalID string `json:"external_id"`
+		Details    struct {
+			ReviewBody  string `json:"review_body"`
+			ReviewEvent string `json:"review_event"`
+			Comments    []struct {
+				Body     string `json:"body"`
+				Severity string `json:"severity"`
+			} `json:"comments"`
+		} `json:"details"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// A draft has no GitHub review id yet.
-	if out.ReviewID != "" || out.ReviewEvent != "COMMENT" {
-		t.Errorf("review id/event = %q/%q, want empty/COMMENT", out.ReviewID, out.ReviewEvent)
+	// The discriminator names the payload's shape, and a draft has no GitHub
+	// review id yet.
+	if out.Kind != domain.ArtifactKindReview {
+		t.Errorf("kind = %q, want review", out.Kind)
 	}
-	if len(out.Comments) != 1 {
-		t.Fatalf("len(comments) = %d, want 1", len(out.Comments))
+	if out.ExternalID != "" || out.Details.ReviewEvent != "COMMENT" {
+		t.Errorf("review id/event = %q/%q, want empty/COMMENT", out.ExternalID, out.Details.ReviewEvent)
 	}
-	if out.Comments[0].Severity != domain.SeverityMajor {
-		t.Errorf("comment severity = %q, want MAJOR (parsed from the body badge)", out.Comments[0].Severity)
+	if len(out.Details.Comments) != 1 {
+		t.Fatalf("len(comments) = %d, want 1", len(out.Details.Comments))
 	}
-	if out.Comments[0].Body != "nit: rename" {
-		t.Errorf("comment body = %q, want the clean body with the badge stripped", out.Comments[0].Body)
+	if out.Details.Comments[0].Severity != domain.SeverityMajor {
+		t.Errorf("comment severity = %q, want MAJOR (parsed from the body badge)", out.Details.Comments[0].Severity)
+	}
+	if out.Details.Comments[0].Body != "nit: rename" {
+		t.Errorf("comment body = %q, want the clean body with the badge stripped", out.Details.Comments[0].Body)
 	}
 }
 
@@ -229,7 +236,7 @@ func TestReviewArtifactApprove_SubmitsPostClaimContent(t *testing.T) {
 	mux.HandleFunc("GET /api/v3/repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
 		if !raced && artID != "" {
 			raced = true
-			rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_body": "EDITED just before the claim"})
+			rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"body": "EDITED just before the claim"})
 			if rec.Code != http.StatusOK {
 				t.Errorf("racing PATCH = %d, want 200 (the claim hasn't been taken yet); body=%s", rec.Code, rec.Body.String())
 			}
@@ -332,20 +339,22 @@ func TestReviewArtifactGet_Submitted_URLNoFreshness(t *testing.T) {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var out struct {
-		State                string `json:"state"`
-		URL                  string `json:"url"`
-		ReviewID             string `json:"review_id"`
-		CommitsSinceFinalize *int   `json:"commits_since_finalize"`
+		State      string `json:"state"`
+		URL        string `json:"url"`
+		ExternalID string `json:"external_id"`
+		Details    struct {
+			CommitsSinceFinalize *int `json:"commits_since_finalize"`
+		} `json:"details"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.State != domain.ArtifactStateReviewSubmitted || out.ReviewID != "555" ||
+	if out.State != domain.ArtifactStateReviewSubmitted || out.ExternalID != "555" ||
 		!strings.Contains(out.URL, "pullrequestreview-555") {
-		t.Errorf("get = state %q id %q url %q, want the posted review's coordinates", out.State, out.ReviewID, out.URL)
+		t.Errorf("get = state %q id %q url %q, want the posted review's coordinates", out.State, out.ExternalID, out.URL)
 	}
-	if out.CommitsSinceFinalize != nil {
-		t.Errorf("commits_since_finalize = %v, want null for a resolved review", *out.CommitsSinceFinalize)
+	if out.Details.CommitsSinceFinalize != nil {
+		t.Errorf("commits_since_finalize = %v, want null for a resolved review", *out.Details.CommitsSinceFinalize)
 	}
 }
 
@@ -394,7 +403,7 @@ func TestReviewArtifactCommentUpdate_RebakesBadge(t *testing.T) {
 	srv := newTestServer(t)
 
 	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rcu", "acme", "api", 7, "COMMENT")
-	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/c_1", map[string]any{"body": "rename to fooBar"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/comments/c_1", map[string]any{"body": "rename to fooBar"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("comment update = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -420,7 +429,7 @@ func TestReviewArtifactCommentUpdate_NotFound_404(t *testing.T) {
 	srv := newTestServer(t)
 
 	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rcw", "acme", "api", 7, "COMMENT")
-	rec := doJSON(t, srv, http.MethodPut, "/api/artifacts/"+artID+"/comments/c_missing", map[string]any{"body": "x"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/comments/c_missing", map[string]any{"body": "x"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("update = %d, want 404 for a comment not in the staged set; body=%s", rec.Code, rec.Body.String())
 	}
@@ -457,7 +466,7 @@ func TestReviewArtifactUpdate_InvalidEvent_400(t *testing.T) {
 	srv := newTestServer(t)
 	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rie", "acme", "api", 7, "COMMENT")
 	for _, bad := range []string{"", "approve", "LGTM"} {
-		rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_event": bad})
+		rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"event": bad})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("PATCH review_event=%q = %d, want 400", bad, rec.Code)
 		}
@@ -481,7 +490,7 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
 		t.Fatalf("flip submitted: %v", err)
 	}
-	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"review_body": "edit"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"body": "edit"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("PATCH on submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -491,16 +500,19 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 	}
 }
 
-// TestReviewArtifactDismiss pins the per-artifact dismiss for reviews: POST
-// /api/artifacts/{id}/dismiss flips the artifact pending → dismissed with NO
-// GitHub call (the review is staged TF-side, TFAC-494) and never touches the
-// conversation lifecycle (the decoupled sidecar, TFAC-379).
+// TestReviewArtifactDismiss pins the per-artifact dismiss for reviews, now a
+// field write on the review sub-resource: PATCH {state:"dismissed"} flips the
+// artifact pending → dismissed with NO GitHub call (the review is staged
+// TF-side) and never touches the conversation lifecycle (the decoupled
+// sidecar). It is a field write precisely because nothing
+// external happens — which is why the /dismiss verb, which really does close a
+// PR on GitHub, no longer answers for reviews.
 func TestReviewArtifactDismiss(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
 	artID, conversationID, _ := seedReviewArtifactWithConversation(t, srv, "rdis", "acme", "api", 7, "COMMENT")
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"state": "dismissed"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -523,9 +535,56 @@ func TestReviewArtifactDismiss_NonPending_409(t *testing.T) {
 	srv := newTestServer(t)
 	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rdis409", "acme", "api", 7, "COMMENT")
 	execSQL(t, srv.db, `UPDATE artifacts SET state = ? WHERE id = ?`, domain.ArtifactStateReviewSubmitted, artID)
-	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/dismiss", nil)
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"state": "dismissed"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("dismiss of submitted review = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestReviewArtifactPatch_StateVocabulary pins what the state field accepts:
+// "dismissed" and nothing else, and never alongside a content edit. Submitting
+// is still POST /approve — a real GitHub write, not a field.
+func TestReviewArtifactPatch_StateVocabulary(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rstate", "acme", "api", 7, "COMMENT")
+
+	for name, body := range map[string]map[string]any{
+		"submitting is not a field write": {"state": "submitted"},
+		"unknown state":                   {"state": "banana"},
+		"dismiss plus an edit":            {"state": "dismissed", "body": "one more thought"},
+		"no fields at all":                {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewPending {
+		t.Errorf("state = %q after the refused patches, want pending (unchanged)", got)
+	}
+}
+
+// TestReviewArtifactCommentUpdate_RejectsSeverityInBody pins that a submitted
+// body carrying its own severity badge is refused. It used to be silently
+// stripped and the stored severity re-baked over it — a 200 for a value the
+// route threw away.
+func TestReviewArtifactCommentUpdate_RejectsSeverityInBody(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rsev", "acme", "api", 7, "COMMENT")
+
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/comments/c_1", map[string]any{
+		"body": domain.SeverityBadgeMarkdown(domain.SeverityMinor) + "rename to fooBar",
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("comment update with an embedded badge = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	d, _ := domain.ParseReviewArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
+	if sev, _ := domain.ParseSeverityBadge(d.StagedComments[0].Body); sev != domain.SeverityMajor {
+		t.Errorf("severity = %q after the refused edit, want MAJOR (unchanged)", sev)
 	}
 }
 

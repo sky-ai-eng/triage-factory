@@ -192,6 +192,35 @@ describe('ArtifactList', () => {
     expect(screen.queryByRole('button', { name: /dismiss pull request/i })).not.toBeInTheDocument()
   })
 
+  it('dismisses a review through its state field, not the PR verb', async () => {
+    const review = art({ id: 'rv1', kind: 'review', state: 'pending', target: 'org/repo#18' })
+    const onResolved = vi.fn()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([review]) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        ...jsonBody([{ ...review, state: 'dismissed' }]),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <ArtifactList conversationId="r1" pendingArtifactIds={['rv1']} onResolved={onResolved} />,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss review/i }))
+
+    await waitFor(() => expect(onResolved).toHaveBeenCalled())
+    // Abandoning a staged review reaches nothing outside the process, so it is
+    // a field write — the /dismiss verb is the draft PR's, and it closes a real
+    // PR on GitHub.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/artifacts/rv1/review',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ state: 'dismissed' }) }),
+    )
+    expect(await screen.findByText('dismissed')).toBeInTheDocument()
+  })
+
   it('soft-refetches on a refreshKey change, keeping the stale rows until the new set lands', async () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const fetchMock = vi

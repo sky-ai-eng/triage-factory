@@ -7,9 +7,9 @@
 //   - the agent-facing finalize gate (cmd/exec/agenthost), which reconciles every
 //     comment to the PR head and HARD-FAILS if any is outdated, before arming the
 //     review for approval;
-//   - the human-facing freshness read (internal/server reviewGet), which
-//     classifies each comment current/moved/outdated against the live head for a
-//     badge, degrading to "unknown" on any error;
+//   - the human-facing freshness read (internal/server reviewArtifactDetails),
+//     which classifies each comment current/moved/outdated against the live
+//     head for a badge, degrading to "unknown" on any error;
 //   - the human-facing Refresh action (internal/server), which re-pins survivors
 //     to the live head and DROPS the outdated ones.
 //

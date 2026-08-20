@@ -101,10 +101,12 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
       setRules(reordered) // Optimistic
 
       try {
+        // ids must name the caller's ENTIRE visible rule set, in the new
+        // order — the server refuses a subset rather than applying half of it.
         await apiFetch('/api/event-handlers/reorder', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reordered.map((r) => r.id)),
+          body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
         })
       } catch (err) {
         toast.error(httpErrorMessage(err, 'Could not reorder the rules.'))

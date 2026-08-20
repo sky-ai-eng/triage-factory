@@ -47,7 +47,7 @@ func TestArtifactUpdate_Success(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "Edited title", "body": "Edited body"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/pr", map[string]any{"title": "Edited title", "body": "Edited body"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("patch = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -80,7 +80,7 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "New", "body": "New body"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/pr", map[string]any{"title": "New", "body": "New body"})
 	if rec.Code < 400 {
 		t.Fatalf("patch = %d, want non-2xx on GitHub failure; body=%s", rec.Code, rec.Body.String())
 	}
@@ -88,6 +88,133 @@ func TestArtifactUpdate_GitHubFailure_Pessimistic(t *testing.T) {
 	d, _ := domain.ParsePRArtifactDetails(getArtifact(t, srv, artID).DetailsJSON)
 	if d.Snapshot.Title != "Add thing" || d.Snapshot.Body != "Body." {
 		t.Errorf("snapshot moved on a failed UpdatePR: %+v", d.Snapshot)
+	}
+}
+
+// TestArtifactWrites_KindScoped is the whole point of splitting the artifact
+// write surface: a body shaped for one kind can no longer reach the other
+// kind's write path.
+//
+// The hole it closes is specific. The merged PATCH dispatched on the ROW's
+// kind, so a review-shaped body landing on a PR artifact decoded to all-nil
+// pointers, sailed past the "partial edit" branch, and performed a real
+// UpdatePR — rewriting the PR with its own current content — plus an audit row,
+// and answered 200. The mirror case, a PR-shaped body on a review artifact, was
+// ignored with a 200 that promised a write nobody made.
+//
+// Every stub here fails the test on contact, so "no upstream call" is asserted
+// by the GitHub client never being reached at all rather than by inspecting
+// what it was asked to do.
+func TestArtifactWrites_KindScoped(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var upstreamHits []string
+	mux := newAppAPIMux()
+	for _, pattern := range []string{
+		"PATCH /api/v3/repos/{owner}/{repo}/pulls/{number}",
+		"GET /api/v3/repos/{owner}/{repo}/pulls/{number}",
+		"POST /api/v3/repos/{owner}/{repo}/pulls/{number}/reviews",
+		"POST /api/graphql",
+	} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			upstreamHits = append(upstreamHits, r.Method+" "+r.URL.Path)
+			w.WriteHeader(http.StatusInternalServerError)
+		})
+	}
+	stub := httptest.NewServer(mux)
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	prID := seedDraftPRArtifact(t, srv, "acme", "api")
+	reviewID, _, _ := seedReviewArtifactWithConversation(t, srv, "kindscope", "acme", "api", 7, "COMMENT")
+
+	for name, tc := range map[string]struct {
+		method string
+		path   string
+		body   any
+		want   int
+	}{
+		"review body on a PR artifact":    {http.MethodPatch, "/api/artifacts/" + prID + "/review", map[string]any{"body": "lgtm"}, http.StatusConflict},
+		"PR body on a review artifact":    {http.MethodPatch, "/api/artifacts/" + reviewID + "/pr", map[string]any{"title": "New"}, http.StatusConflict},
+		"comment edit on a PR artifact":   {http.MethodPatch, "/api/artifacts/" + prID + "/comments/c_1", map[string]any{"body": "x"}, http.StatusConflict},
+		"comment delete on a PR artifact": {http.MethodDelete, "/api/artifacts/" + prID + "/comments/c_1", nil, http.StatusConflict},
+		"refresh on a PR artifact":        {http.MethodPost, "/api/artifacts/" + prID + "/review/refresh", nil, http.StatusConflict},
+		"dismiss on a review artifact":    {http.MethodPost, "/api/artifacts/" + reviewID + "/dismiss", nil, http.StatusConflict},
+		// A zero-field PR patch is the other half of the same hole: it named
+		// nothing, so there is nothing to send GitHub, and the old route sent
+		// the PR its own content back anyway.
+		"zero-field PR patch": {http.MethodPatch, "/api/artifacts/" + prID + "/pr", map[string]any{}, http.StatusBadRequest},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := doJSON(t, srv, tc.method, tc.path, tc.body)
+			if rec.Code != tc.want {
+				t.Fatalf("%s %s = %d, want %d; body=%s", tc.method, tc.path, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+
+	if len(upstreamHits) != 0 {
+		t.Errorf("refused writes reached GitHub: %v", upstreamHits)
+	}
+	// And no audit row: external_actions records org-credential writes, so one
+	// here would claim a write that never happened.
+	var actions int
+	if err := srv.db.QueryRow(`SELECT COUNT(*) FROM external_actions`).Scan(&actions); err != nil {
+		t.Fatalf("count external_actions: %v", err)
+	}
+	if actions != 0 {
+		t.Errorf("external_actions = %d after refused writes, want 0", actions)
+	}
+	// Both artifacts are untouched.
+	if got := getArtifact(t, srv, prID).State; got != domain.ArtifactStatePRDraft {
+		t.Errorf("PR artifact state = %q, want draft (unchanged)", got)
+	}
+	if got := getArtifact(t, srv, reviewID).State; got != domain.ArtifactStateReviewPending {
+		t.Errorf("review artifact state = %q, want pending (unchanged)", got)
+	}
+}
+
+// TestArtifactGet_ServesEveryKind pins the read union: an artifact whose kind
+// has no composed representation answers with itself — the shared envelope,
+// `kind` naming the shape, and its stored details_json under `details`. This
+// route used to 404 those rows, which said "no such artifact" about one the
+// conversation-scoped list was serving happily.
+func TestArtifactGet_ServesEveryKind(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	conversationID := seedSteerConversation(t, srv.db, "anykind", "completed")
+
+	branch, ok := domain.NewBranchArtifact("acme/api", "refs/heads/feature/x", "deadbeef", true)
+	if !ok {
+		t.Fatal("NewBranchArtifact refused a well-formed ref")
+	}
+	branch.ConversationID = conversationID
+	branch.OrgID = runmode.LocalDefaultOrgID
+	branch.TeamID = runmode.LocalDefaultTeamID
+	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, branch)
+	if err != nil {
+		t.Fatalf("seed branch artifact: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+stored.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get branch artifact = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		ID      string         `json:"id"`
+		Kind    string         `json:"kind"`
+		State   string         `json:"state"`
+		Target  string         `json:"target"`
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.ID != stored.ID || out.Kind != domain.ArtifactKindBranch || out.Target != "acme/api" {
+		t.Errorf("envelope = %+v, want the branch artifact's own coordinates", out)
+	}
+	if out.Details["sha"] != "deadbeef" {
+		t.Errorf("details = %v, want the stored branch payload", out.Details)
 	}
 }
 
@@ -479,7 +606,7 @@ func TestArtifactUpdate_SingleField_UsesLiveBaseline(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "New title"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/pr", map[string]any{"title": "New title"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("patch = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -511,7 +638,7 @@ func TestArtifactUpdate_PartialEdit_GetPRFailure_502(t *testing.T) {
 	seedApp(t, srv, stub, acmeInstall())
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
-	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID, map[string]any{"title": "New title"})
+	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/pr", map[string]any{"title": "New title"})
 	if rec.Code < 400 {
 		t.Fatalf("patch = %d, want non-2xx when the live baseline read fails", rec.Code)
 	}

@@ -343,8 +343,7 @@ func createChainBlueprint(t *testing.T, s *Server, name string, n int) (blueprin
 // the trigger id.
 func attachTrigger(t *testing.T, s *Server, blueprintID, eventType string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               eventType,
 		"blueprint_id":             blueprintID,
 		"breaker_threshold":        3,

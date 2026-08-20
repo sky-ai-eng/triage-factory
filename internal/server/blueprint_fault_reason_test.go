@@ -53,8 +53,7 @@ func TestBlueprintMerge_FaultReasons(t *testing.T) {
 		s := newTestServer(t)
 		host, _ := createWrappedBlueprint(t, s, "Host")
 		source, _ := createWrappedBlueprint(t, s, "TriggeredSource")
-		tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-			"kind":                     "trigger",
+		tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 			"event_type":               "github:pr:ci_check_failed",
 			"blueprint_id":             source,
 			"breaker_threshold":        3,
@@ -148,8 +147,7 @@ func TestBlueprintReconnect_FaultReasons(t *testing.T) {
 			t.Fatalf("seed steps: %d: %s", put.Code, put.Body.String())
 		}
 		target, _ := createWrappedBlueprint(t, s, "TriggeredTarget")
-		tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-			"kind":                     "trigger",
+		tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 			"event_type":               "github:pr:ci_check_failed",
 			"blueprint_id":             target,
 			"breaker_threshold":        3,

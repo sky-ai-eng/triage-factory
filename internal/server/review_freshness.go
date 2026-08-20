@@ -24,10 +24,10 @@ import (
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.
-func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactJSON) {
+func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactDetailsJSON) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return // malformed target — leave everything "unknown" (reviewGet 500s a bad target before us)
+		return // malformed target — leave everything "unknown" (reviewArtifactDetails 500s a bad target before us)
 	}
 	// Resolve the per-repo client directly (not ghForArtifact, which writes an
 	// error response): a missing credential must degrade to "unknown", not 503 the

@@ -175,13 +175,12 @@ type EventHandlerStore interface {
 	// held.
 	Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error)
 
-	// SetEnabled flips just the enabled bit — the user-facing enable/disable
-	// toggle, and (per the automations-as-toggles product direction) the
-	// primary way most users interact with a shipped handler. Never stamps
-	// user_modified: activation state is not content.
+	// SetEnabled flips just the enabled bit, taking an id rather than a row:
+	// no read, no content fields to resend. Never stamps user_modified —
+	// activation state is not content, which is also why Update declines to
+	// stamp for an enabled-only change and the two agree on the outcome.
 	//
-	// Returns the updated row, or ErrNoSuchEventHandler — so the toggle
-	// answers with the handler rather than an echo of the bit it was sent.
+	// Returns the updated row, or ErrNoSuchEventHandler.
 	SetEnabled(ctx context.Context, orgID string, id string, enabled bool) (domain.EventHandler, error)
 
 	// Delete removes a handler. A row with a system_slug (a shipped copy)

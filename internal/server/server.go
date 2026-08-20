@@ -1127,13 +1127,18 @@ func (s *Server) routes() {
 	// and dismiss resolves a single artifact (per-item). The task-level
 	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
 	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	// One read for every kind; the writes are kind-scoped sub-resources, so a
+	// review-shaped body can never reach the PR write path.
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
-	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/pr", ah.handleArtifactPRUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/review", ah.handleArtifactReviewUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
 	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
+	// Pull requests only: closing one is a real GitHub write. A review is
+	// abandoned through PATCH …/review {state:"dismissed"}.
 	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
 	s.apiMutating("POST /api/artifacts/{id}/review/refresh", ah.handleReviewRefresh)
-	s.apiMutating("PUT /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
 	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)
 
 	fh := &factoryHandler{tx: s.tx}
@@ -1152,20 +1157,20 @@ func (s *Server) routes() {
 	s.api("GET /api/event-types", ph.handleEventTypes)
 	s.api("GET /api/event-schemas", handleEventSchemasList)
 	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
-	// Unified event_handlers endpoints. Replace the former
-	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
-	// on list, in the body on create, derived on update.
+	// The unified event_handlers surface — one ordered list for both kinds,
+	// with `kind` as the row discriminator on every read. The writes are split
+	// per kind, because a rule and a trigger require different fields and
+	// default `enabled` in opposite directions.
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
 	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
 	// The canonical single read: five mutation routes preloaded this row
 	// internally and none would hand it back.
 	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
-	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
+	s.apiMutating("POST /api/event-handlers/rules", eh.handleEventHandlerCreateRule)
+	s.apiMutating("POST /api/event-handlers/triggers", eh.handleEventHandlerCreateTrigger)
 	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
 	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
-	s.apiMutating("PUT /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
 	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
-	s.apiMutating("POST /api/event-handlers/{id}/toggle", eh.handleEventHandlerToggle)
 	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
 	s.apiMutating("POST /api/event-handlers/{id}/retarget", eh.handleEventHandlerRetarget)
 	// Parked event_queue rows — the operator surface over routing work the

@@ -108,11 +108,23 @@ export default function ArtifactList({
     )
   }, [artifacts, pendingArtifactIds, pendingSet])
 
+  // Resolving one artifact is two different things depending on its kind, and
+  // the routes say so: closing a draft PR is a real GitHub write (the /dismiss
+  // verb), while abandoning a staged review never leaves this process (a state
+  // field write on the review sub-resource).
   const dismissOne = async (a: Artifact) => {
     if (dismissing[a.id]) return
     setDismissing((m) => ({ ...m, [a.id]: true }))
     try {
-      await apiFetch(`/api/artifacts/${a.id}/dismiss`, { method: 'POST' })
+      if (a.kind === 'review') {
+        await apiFetch(`/api/artifacts/${a.id}/review`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ state: 'dismissed' }),
+        })
+      } else {
+        await apiFetch(`/api/artifacts/${a.id}/dismiss`, { method: 'POST' })
+      }
       // Resolution is async + non-blocking: it touches only the GitHub object +
       // artifact row, never the conversation. Reload in place (the row flips to its
       // resolved state) and let the owner re-derive the projection.

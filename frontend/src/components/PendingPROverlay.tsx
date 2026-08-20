@@ -7,22 +7,24 @@ import PendingPRSummary from './PendingPRSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
-// PRArtifact mirrors the JSON shape internal/server/artifacts_handler.go returns
-// for a pull_request artifact. title/body are the LIVE PR values (fetched from
-// GitHub via GetPR), not a local snapshot — the draft PR is a real GitHub object
-// now, edited 1:1.
+// PRArtifact mirrors GET /api/artifacts/{id} for a pull_request artifact: the
+// shared artifact envelope, with the PR-shaped payload under `details`.
+// title/body there are the LIVE PR values (fetched from GitHub via GetPR), not
+// a local snapshot — the draft PR is a real GitHub object now, edited 1:1.
 interface PRArtifact {
   id: string
-  conversation_id?: string
-  owner: string
-  repo: string
-  number: number
-  head_branch: string
-  base_branch: string
-  title: string
-  body: string
+  kind: string
   url: string
   state: string
+  details: {
+    owner: string
+    repo: string
+    number: number
+    head_branch: string
+    base_branch: string
+    title: string
+    body: string
+  }
 }
 
 interface Props {
@@ -137,7 +139,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   const patchPR = useCallback(
     async (body: object) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}`, {
+        await apiFetch(`/api/artifacts/${artifactId}/pr`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -157,7 +159,9 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       const p = patchPR({ title: normalizedTitle })
       lastSavePromise.current = p
       await p
-      setPR((prev) => (prev ? { ...prev, title: normalizedTitle } : prev))
+      setPR((prev) =>
+        prev ? { ...prev, details: { ...prev.details, title: normalizedTitle } } : prev,
+      )
     },
     [patchPR],
   )
@@ -167,7 +171,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       const p = patchPR({ body })
       lastSavePromise.current = p
       await p
-      setPR((prev) => (prev ? { ...prev, body } : prev))
+      setPR((prev) => (prev ? { ...prev, details: { ...prev.details, body } } : prev))
     },
     [patchPR],
   )
@@ -253,7 +257,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                 </h1>
                 {pr && (
                   <span className="text-[12px] text-text-tertiary font-mono">
-                    {pr.owner}/{pr.repo} #{pr.number}
+                    {pr.details.owner}/{pr.details.repo} #{pr.details.number}
                   </span>
                 )}
               </div>
@@ -290,14 +294,14 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
               ) : pr ? (
                 <div className="p-6 space-y-4 max-w-5xl mx-auto">
                   <PendingPRSummary
-                    owner={pr.owner}
-                    repo={pr.repo}
-                    number={pr.number}
-                    headBranch={pr.head_branch}
-                    baseBranch={pr.base_branch}
+                    owner={pr.details.owner}
+                    repo={pr.details.repo}
+                    number={pr.details.number}
+                    headBranch={pr.details.head_branch}
+                    baseBranch={pr.details.base_branch}
                     url={pr.url}
-                    title={pr.title}
-                    body={pr.body}
+                    title={pr.details.title}
+                    body={pr.details.body}
                     onUpdateTitle={handleUpdateTitle}
                     onUpdateBody={handleUpdateBody}
                     onSubmit={handleSubmit}

@@ -238,21 +238,16 @@ type artifactJSON struct {
 // toArtifactJSON projects a stored artifact onto the read-API wire shape,
 // emitting details_json as embedded JSON (or null when absent/corrupt).
 func toArtifactJSON(a domain.Artifact) artifactJSON {
-	var details json.RawMessage
-	switch {
-	case a.DetailsJSON == "":
-		// No details — leave nil, which marshals to null.
-	case json.Valid([]byte(a.DetailsJSON)):
-		details = json.RawMessage(a.DetailsJSON)
-	default:
-		// Corrupt payload: serve null rather than fail the whole response's
-		// marshal (json.Marshal validates a RawMessage). details_json is written
-		// by our own marshaled structs, so an invalid value is a real upstream
-		// bug worth a trace, not an expected empty — mirror the artifact handler's
-		// "details unparseable" warning so it isn't a silent drop.
-		artifactsLog.Warn("artifact details_json is not valid JSON; serving null",
-			"artifact", a.ID, "dedup_key", a.DedupKey)
-	}
+	out := artifactEnvelope(a)
+	out.Details = storedArtifactDetails(a)
+	return out
+}
+
+// artifactEnvelope fills the kind-independent half of the read shape, leaving
+// Details to the caller. The single read (GET /api/artifacts/{id}) composes a
+// live representation for two of the kinds, so it fills that slot itself
+// rather than passing the stored payload through.
+func artifactEnvelope(a domain.Artifact) artifactJSON {
 	return artifactJSON{
 		ID:         a.ID,
 		Kind:       a.Kind,
@@ -261,8 +256,28 @@ func toArtifactJSON(a domain.Artifact) artifactJSON {
 		Target:     a.Target,
 		ExternalID: a.ExternalID,
 		URL:        a.URL,
-		Details:    details,
 		CreatedAt:  a.CreatedAt,
+	}
+}
+
+// storedArtifactDetails is the details_json a row already holds, as the
+// embedded JSON object it is.
+func storedArtifactDetails(a domain.Artifact) json.RawMessage {
+	switch {
+	case a.DetailsJSON == "":
+		// No details — nil, which marshals to null.
+		return nil
+	case json.Valid([]byte(a.DetailsJSON)):
+		return json.RawMessage(a.DetailsJSON)
+	default:
+		// Corrupt payload: serve null rather than fail the whole response's
+		// marshal (json.Marshal validates a RawMessage). details_json is written
+		// by our own marshaled structs, so an invalid value is a real upstream
+		// bug worth a trace, not an expected empty — mirror the artifact handler's
+		// "details unparseable" warning so it isn't a silent drop.
+		artifactsLog.Warn("artifact details_json is not valid JSON; serving null",
+			"artifact", a.ID, "dedup_key", a.DedupKey)
+		return nil
 	}
 }
 

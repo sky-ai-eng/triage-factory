@@ -113,8 +113,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 
 	// Attach a trigger to the source — unreachable from the canvas, but a
 	// third-party caller can do it, so the endpoint must refuse to corrupt state.
-	tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             source,
 		"breaker_threshold":        3,
@@ -280,8 +279,7 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 	s := newTestServer(t)
 	seedBlueprintForTrigger(t, s, "bp-one-trigger")
-	first := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	first := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             "bp-one-trigger",
 		"breaker_threshold":        3,
@@ -292,8 +290,7 @@ func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 	}
 	// A second trigger on the same blueprint (even on a different event) is a
 	// clean 409, not a raw 500 from the partial-unique index.
-	second := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	second := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:review_changes_requested",
 		"blueprint_id":             "bp-one-trigger",
 		"breaker_threshold":        3,
@@ -307,8 +304,7 @@ func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	s := newTestServer(t)
 	seedBlueprintForTrigger(t, s, "bp-promote-conflict")
-	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             "bp-promote-conflict",
 		"breaker_threshold":        3,
@@ -316,8 +312,7 @@ func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	}); tr.Code != http.StatusCreated {
 		t.Fatalf("seed trigger: %d: %s", tr.Code, tr.Body.String())
 	}
-	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:review_changes_requested",
 		"name":             "to-promote",
 		"default_priority": 0.5,

@@ -8,7 +8,7 @@ import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
-import { handlersBase } from '../lib/scope'
+import { handlersBase, rulesCreatePath } from '../lib/scope'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface TaskRuleEditorProps {
@@ -156,7 +156,11 @@ export default function TaskRuleEditor({
     setError('')
 
     try {
-      const predicateJSON = Object.keys(predicate).length > 0 ? JSON.stringify(predicate) : null
+      // scope_predicate is an object on the wire (null clears it). The read row
+      // carries the same predicate as canonical JSON TEXT under
+      // scope_predicate_json, which is what the edit-mode diff compares.
+      const hasPredicate = Object.keys(predicate).length > 0
+      const predicateJSON = hasPredicate ? JSON.stringify(predicate) : null
 
       if (isEdit && rule) {
         // PATCH — build body with only changed fields.
@@ -167,11 +171,9 @@ export default function TaskRuleEditor({
         if (enabled !== rule.enabled) body.enabled = enabled
         if (appliesToUnowned !== rule.applies_to_unowned) body.applies_to_unowned = appliesToUnowned
 
-        // Predicate: compare serialised forms.
-        const currentJSON = predicateJSON
-        if (currentJSON !== originalPredicateJSON) {
-          // Explicit key: null clears, string sets, omitting leaves unchanged.
-          body.scope_predicate_json = currentJSON
+        // Predicate: compare serialised forms, send the object.
+        if (predicateJSON !== originalPredicateJSON) {
+          body.scope_predicate = hasPredicate ? predicate : null
         }
 
         if (Object.keys(body).length > 0) {
@@ -182,10 +184,9 @@ export default function TaskRuleEditor({
           })
         }
       } else {
-        // POST — create. kind='rule' tells the unified endpoint which
-        // per-kind shape to expect; without it the handler rejects.
+        // POST — create. The route names the kind, so the body carries only
+        // rule fields; a trigger field here is rejected, not dropped.
         const body: Record<string, unknown> = {
-          kind: 'rule',
           event_type: eventType,
           name: name.trim(),
           default_priority: priority,
@@ -194,11 +195,11 @@ export default function TaskRuleEditor({
           applies_to_unowned: appliesToUnowned,
           team_id: effectiveTeam,
         }
-        if (predicateJSON) {
-          body.scope_predicate_json = predicateJSON
+        if (hasPredicate) {
+          body.scope_predicate = predicate
         }
 
-        await apiFetch(base, {
+        await apiFetch(rulesCreatePath(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),

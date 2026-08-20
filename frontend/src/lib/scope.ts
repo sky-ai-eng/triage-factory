@@ -12,6 +12,17 @@ export function handlersBase(): string {
   return '/api/event-handlers'
 }
 
+// The two create routes. Reads and per-id writes are one surface keyed by
+// `kind`; authoring is not — a rule and a trigger need different fields and
+// default `enabled` in opposite directions, so each has its own route.
+export function rulesCreatePath(): string {
+  return `${handlersBase()}/rules`
+}
+
+export function triggersCreatePath(): string {
+  return `${handlersBase()}/triggers`
+}
+
 export function blueprintsBase(): string {
   return '/api/blueprints'
 }

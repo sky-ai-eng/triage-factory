@@ -208,14 +208,14 @@ func TestViewer_BlueprintCreate_Forbidden(t *testing.T) {
 // added alongside the RLS swap.
 func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
-	body := map[string]any{"kind": "rule", "event_type": "github:pr:opened", "name": "my-rule"}
+	body := map[string]any{"event_type": "github:pr:opened", "name": "my-rule"}
 
 	rec := httptest.NewRecorder()
-	r.eh.handleEventHandlerCreate(rec, r.req(http.MethodPost, "/api/event-handlers", r.viewer, body))
+	r.eh.handleEventHandlerCreateRule(rec, r.req(http.MethodPost, "/api/event-handlers/rules", r.viewer, body))
 	assertViewOnly403(t, rec, "viewer POST event-handler")
 
 	rec = httptest.NewRecorder()
-	r.eh.handleEventHandlerCreate(rec, r.req(http.MethodPost, "/api/event-handlers", r.member, body))
+	r.eh.handleEventHandlerCreateRule(rec, r.req(http.MethodPost, "/api/event-handlers/rules", r.member, body))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("member POST event-handler: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}

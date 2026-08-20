@@ -185,8 +185,7 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	s := newTestServer(t)
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "gated rule",
 		"default_priority": 0.5,
@@ -205,8 +204,7 @@ func TestHandleEventHandlerCreate_UngatedEventTypeUnaffected(t *testing.T) {
 	s := newTestServer(t)
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventGitHubPROpened,
 		"name":             "github rule",
 		"default_priority": 0.5,
@@ -222,8 +220,7 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "now allowed",
 		"default_priority": 0.5,
@@ -287,8 +284,7 @@ func TestEventHandlerList_GrantedFeatureKeepsBoth(t *testing.T) {
 // its id.
 func createUserRuleFor(t *testing.T, s *Server, eventType string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       eventType,
 		"name":             "rule for " + eventType,
 		"default_priority": 0.5,

@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -133,6 +134,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		missing := uuid.New().String()
 		if _, err := store.SetEnabled(ctx, orgID, missing, true); !errors.Is(err, db.ErrNoSuchEventHandler) {
 			t.Errorf("SetEnabled on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
+		}
+		next.ID = missing
+		if _, err := store.Update(ctx, orgID, next); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
 		}
 		if _, err := store.RetargetBlueprint(ctx, orgID, missing, other); !errors.Is(err, db.ErrNoSuchEventHandler) {
 			t.Errorf("RetargetBlueprint on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
@@ -677,6 +682,42 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		got, _ := store.Get(ctx, orgID, h.ID)
 		if got == nil || got.UserModified {
 			t.Errorf("UserModified=%v after SetEnabled; want false (activation state is not content)", got != nil && got.UserModified)
+		}
+	})
+
+	t.Run("Reorder_AppliesPositions", func(t *testing.T) {
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		priority := 0.5
+		ids := make([]string, 3)
+		for i := range ids {
+			sortOrder := i
+			h := domain.EventHandler{
+				ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+				EventType: domain.EventGitHubPRCICheckFailed,
+				Name:      "position-" + strconv.Itoa(i), DefaultPriority: &priority,
+				SortOrder: &sortOrder, Enabled: true,
+			}
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %d: %v", i, err)
+			}
+			ids[i] = h.ID
+		}
+
+		// Reverse the list: each id's new sort_order is its index in what was
+		// submitted, so the whole order moves, not just the pair that swapped.
+		reversed := []string{ids[2], ids[1], ids[0]}
+		if err := store.Reorder(ctx, orgID, reversed); err != nil {
+			t.Fatalf("Reorder: %v", err)
+		}
+		for want, id := range reversed {
+			got, err := store.Get(ctx, orgID, id)
+			if err != nil {
+				t.Fatalf("Get %s: %v", id, err)
+			}
+			if got == nil || got.SortOrder == nil || *got.SortOrder != want {
+				t.Errorf("id=%s sort_order=%v, want %d", id, got.SortOrder, want)
+			}
 		}
 	})
 
