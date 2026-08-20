@@ -92,6 +92,11 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 // unpacked from metadata. The two writers share this mapper so a fresh
 // AppendSystem row and that same row read back by a later flush can never
 // disagree about what a staged injection is.
+//
+// TODO(TFAC-874): this mapper and the pendingRow it takes are duplicated
+// verbatim in the SQLite twin, so a change here that misses that copy is
+// silent drift. 874 decides whether the dialect-free helpers hoist to a
+// shared package or stay split behind an identical-helpers ratchet.
 func stagedInjectionFromPending(r pendingRow) domain.StagedInjection {
 	n := domain.StagedInjection{
 		ID:             strconv.FormatInt(r.ID, 10),
