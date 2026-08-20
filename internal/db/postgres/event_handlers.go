@@ -443,16 +443,6 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	return false, nil
 }
 
-func (s *eventHandlerStore) SetEnabled(ctx context.Context, orgID, id string, enabled bool) (domain.EventHandler, error) {
-	if !isValidUUID(id) {
-		return domain.EventHandler{}, db.ErrNoSuchEventHandler
-	}
-	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
-		UPDATE event_handlers SET enabled = $1, updated_at = now() WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
-		RETURNING `+pgEventHandlerColumns,
-		enabled, orgID, id))
-}
-
 // Delete removes a handler. A system_slug row (shipped copy) soft-deletes so
 // its (org_id, team_id, system_slug) slot stays occupied for the sync's
 // never-resurrect rule; a user-created row (no system_slug) hard-deletes.

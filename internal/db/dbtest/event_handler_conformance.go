@@ -42,8 +42,7 @@ type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 //     both.
 //   - GetEnabledForEvent returns enabled rows of both kinds ordered
 //     rule-before-trigger.
-//   - SetEnabled toggles; Delete hard-removes; Update changes mutable
-//     fields per kind.
+//   - Delete hard-removes; Update changes mutable fields per kind via PATCH
 //   - Reorder updates sort_order on rules; silently skips trigger ids.
 //   - Promote atomically flips a rule to a trigger, clearing rule
 //     fields and populating trigger fields.
@@ -81,15 +80,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// server-stamped — three things the input struct never carried.
 		if created.Source != "user" || created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
-		}
-
-		toggled, err := store.SetEnabled(ctx, orgID, ruleID, false)
-		if err != nil {
-			t.Fatalf("SetEnabled: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "SetEnabled", toggled, read(ruleID))
-		if toggled.Enabled {
-			t.Error("SetEnabled returned enabled=true after disabling")
 		}
 
 		next := created
@@ -132,9 +122,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// write — that is what retires the rows-affected probes and the
 		// not-a-uuid early returns.
 		missing := uuid.New().String()
-		if _, err := store.SetEnabled(ctx, orgID, missing, true); !errors.Is(err, db.ErrNoSuchEventHandler) {
-			t.Errorf("SetEnabled on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
-		}
 		next.ID = missing
 		if _, err := store.Update(ctx, orgID, next); !errors.Is(err, db.ErrNoSuchEventHandler) {
 			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
@@ -551,27 +538,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	t.Run("SetEnabled_Toggles", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "toggle-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		if _, err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
-			t.Fatalf("SetEnabled false: %v", err)
-		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got.Enabled {
-			t.Error("SetEnabled(false) did not disable")
-		}
-	})
-
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
@@ -661,27 +627,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		})
 		if err == nil {
 			t.Error("Promote of a trigger row succeeded; want error")
-		}
-	})
-
-	t.Run("SetEnabled_DoesNotStampUserModified", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "toggle-no-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		if _, err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
-			t.Fatalf("SetEnabled: %v", err)
-		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got == nil || got.UserModified {
-			t.Errorf("UserModified=%v after SetEnabled; want false (activation state is not content)", got != nil && got.UserModified)
 		}
 	})
 
@@ -775,6 +720,11 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		afterEnabledOnly, _ := store.Get(ctx, orgID, h.ID)
 		if afterEnabledOnly == nil || afterEnabledOnly.UserModified {
 			t.Fatalf("UserModified=%v after an enabled-only Update; want false", afterEnabledOnly != nil && afterEnabledOnly.UserModified)
+		}
+		// The bit has to have actually moved, or "no stamp" proves nothing:
+		// this is the write the rule and trigger switches perform.
+		if afterEnabledOnly.Enabled {
+			t.Error("Enabled=true after an Update carrying enabled=false")
 		}
 
 		// Update changing a content field: stamps.
