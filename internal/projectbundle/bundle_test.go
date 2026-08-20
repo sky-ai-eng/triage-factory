@@ -131,7 +131,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if _, err := stores.Curator.BeginTurn(ctx, org, projectID, conv.ID, msgID); err != nil {
 		t.Fatalf("begin turn: %v", err)
 	}
-	if err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
+	if _, err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
 		t.Fatalf("set sdk session: %v", err)
 	}
 	if _, err := stores.Conversations.InsertMessage(ctx, org, &domain.Message{

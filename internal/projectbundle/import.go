@@ -257,7 +257,7 @@ func Import(
 	// any partial conversation state) so the import stays all-or-nothing
 	// from the caller's perspective.
 	if bundleConv != nil {
-		if err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
+		if _, err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
 			if delErr := txr.WithTx(context.WithoutCancel(ctx), orgID, userID, func(tx db.TxStores) error {
 				return tx.Projects.Delete(ctx, orgID, newProjectID)
 			}); delErr != nil {
