@@ -10,7 +10,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -361,11 +360,11 @@ type teamCapUpdate struct {
 }
 
 // handleUsageTeamCap sets one team's per-team daily LLM spend cap (TFAC-482).
-// Gate: the governance entitlement AND org admin. The entitlement is checked
-// first so an unlicensed deployment 404s the route entirely (the EE-feature-
-// hidden posture — per-team caps are dormant without governance, with the org
-// cap as the safety net); a non-org-admin on a licensed deployment then gets a
-// 403. A team admin can NOT set their own team's cap — this is org-admin-only by
+// Gate: org admin AND the governance entitlement, in that order — a non-admin
+// gets the same 403 licensed or not, so the status can't be read as a licence
+// tier, and an admin on an unlicensed deployment gets the 404 that hides the
+// feature (per-team caps are dormant without governance, with the org cap as
+// the safety net). A team admin can NOT set their own team's cap — this is org-admin-only by
 // design, so the write goes through the admin pool (SetDailyCostCapSystem): the
 // org admin need not be a member of the team they're capping. The org comes from
 // the session (like the GET reads), the team from the path.
@@ -380,14 +379,14 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	// EE gate first: hide the route (404) when governance isn't licensed, before
-	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
-	// route 404s there too (per-team caps are a multi-tenant EE concept).
-	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		notFound(w, "route")
+	// Role, then the EE gate — the licence must not be readable off a status
+	// code by someone who isn't an org admin (see resolveGovernedOrgAdmin).
+	// The entitlement check is mode-agnostic: local is unlicensed, so the route
+	// 404s an admin there too (per-team caps are a multi-tenant EE concept).
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 	// The one {team_id} grammar; a segment that resolves to nothing is "not
@@ -455,8 +454,8 @@ type usageTeamCapEntry struct {
 }
 
 // handleUsageTeamCaps lists EVERY active team in the org with its per-team
-// daily cap, for the governance cap editor. Gate: governance (404 unlicensed)
-// + org admin (403) — same posture as the PUT. Unlike the spend rollup's
+// daily cap, for the governance cap editor. Gate: org admin (403) then
+// governance (404 unlicensed) — same posture as the PUT. Unlike the spend rollup's
 // by_team (only teams with spend in the window), this lists all active teams
 // so an org admin can pre-cap an idle team before any runaway happens. Admin
 // pool throughout: an org admin may not be a member of every team. Archived
@@ -466,7 +465,7 @@ type usageTeamCapEntry struct {
 //
 // POST /api/orgs/{org_id}/usage/team-caps/list
 func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
-	// EE gate first (404 unlicensed), then org admin (403) — mirrors the PUT.
+	// Org admin (403) then the EE gate (404 unlicensed) — mirrors the PUT.
 	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
@@ -529,19 +528,28 @@ func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (or
 }
 
 // resolveGovernedOrgAdmin is the shared prefix of the org-scoped usage reads a
-// governance licence gates: the entitlement, then the org-admin role — both
-// keyed on the {org_id} in the path.
+// governance licence gates: the org-admin role against the {org_id} in the
+// path, THEN the entitlement.
 //
-// Entitlement first is what keeps an unlicensed deployment answering "not
-// here" to admin and member alike, rather than disclosing the route to the one
-// it would then refuse. Keying it on the raw path segment before that segment
-// is authorized is safe: the value selects a licence, not a row, and a caller
-// who cannot see the org gets the same 404 out of RequireOrgAdmin either way.
+// Role first, and the order is the whole point: a caller who is not an org
+// admin gets the same 403 whether or not the deployment is licensed, so the
+// status code they get back cannot be used to read off the org's plan tier.
+// Entitlement-first would answer them 404 on an unlicensed deployment and 403
+// on a licensed one — a licence oracle for anyone who can hit the route. What
+// it gives up is that a non-admin learns the route exists at all, which in a
+// public codebase is not a secret worth buying with the other one.
+//
+// An org admin on an unlicensed deployment still gets the 404 that hides the
+// feature, which is what the frontend's own entitlement gate renders.
 func (h *usageHandler) resolveGovernedOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	if !requireGovernance(w, r, r.PathValue("org_id")) {
+	orgID, userID, ok = h.az.RequireOrgAdmin(w, r)
+	if !ok {
 		return "", "", false
 	}
-	return h.az.RequireOrgAdmin(w, r)
+	if !requireGovernance(w, r, orgID) {
+		return "", "", false
+	}
+	return orgID, userID, true
 }
 
 // --- window parsing ---

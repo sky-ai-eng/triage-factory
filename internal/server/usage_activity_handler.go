@@ -233,14 +233,15 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 }
 
 // resolveTeamActivityCaller runs the shared front gate for both team-scoped
-// activity feeds: governance entitlement, the one {team_id} grammar, the
-// cross-org 404, and the team-admin-or-org-admin role.
+// activity feeds: the one {team_id} grammar, the cross-org 404, the
+// team-admin-or-org-admin role, and THEN the governance entitlement.
+//
+// Role before licence, for the reason resolveGovernedOrgAdmin gives: a caller
+// who fails the role check gets the same 403 licensed or not, so no non-admin
+// can read the org's plan tier off a status code.
 func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	orgID, userID, ok = h.resolveCaller(w, r)
 	if !ok {
-		return "", "", "", false
-	}
-	if !requireGovernance(w, r, orgID) {
 		return "", "", "", false
 	}
 	// The one {team_id} grammar; a segment that resolves to nothing is "not
@@ -258,6 +259,9 @@ func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.
 	if !h.requireTeamOrOrgAdmin(w, r, orgID, userID, teamID) {
 		return "", "", "", false
 	}
+	if !requireGovernance(w, r, orgID) {
+		return "", "", "", false
+	}
 	return orgID, userID, teamID, true
 }
 
@@ -267,8 +271,12 @@ func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.
 // entirely in an unlicensed build — so the route reads as "not here", not
 // "forbidden". The check is mode-agnostic (entitlements never carve out by
 // runmode): a community / unlicensed build — local mode included — answers
-// false and 404s, which is why the role checks that follow are only ever
-// reached in a licensed multi deploy.
+// false and 404s.
+//
+// It runs AFTER the caller's role check on every route that uses it, so the
+// 404 is only ever shown to someone who would otherwise have been allowed in.
+// A caller who fails the role check never reaches here, and therefore cannot
+// tell a licensed deployment from an unlicensed one by the status they get.
 func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) bool {
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
 		notFound(w, "route")
@@ -279,11 +287,12 @@ func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) boo
 
 // requireTeamOrOrgAdmin authorizes the team-scoped bot-activity feed: the caller
 // must be an admin of teamID OR an org admin. It writes a 403 and returns false
-// otherwise. Local mode short-circuits to allowed for safety — though the
-// governance gate (which 404s an unlicensed build, local included) runs first,
-// so this is only reached under a license. VerifyTeamInOrg has already confirmed
-// teamID is in the caller's org, so a non-admin here is a clean 403, never a
-// cross-org probe. The raw probes don't short-circuit local, hence the guard.
+// otherwise. Local mode short-circuits to allowed (N=1, the single user owns
+// the org) — the governance gate that follows still 404s an unlicensed build,
+// local included, so the route stays hidden there. VerifyTeamInOrg has already
+// confirmed teamID is in the caller's org, so a non-admin here is a clean 403,
+// never a cross-org probe. The raw probes don't short-circuit local, hence the
+// guard.
 func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	if runmode.Current() == runmode.ModeLocal {
 		return true

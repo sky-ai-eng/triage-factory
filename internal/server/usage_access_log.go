@@ -10,7 +10,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -57,13 +56,12 @@ type accessLogFilterKey struct {
 
 // handleUsageAccessLog serves the EE access & credential change-log viewer.
 //
-// Gate: org admin AND FeatureGovernance. The order is deliberate — the org-admin
-// check runs first (403 on a non-admin), THEN the entitlement check (a 404-and-
-// hide when unlicensed). Admin-first means a non-admin always gets a 403 and
-// never learns the deployment's license tier; an org admin on an unlicensed build
-// gets a 404 that reads as "no such route", so the feature stays invisible to
-// everyone who isn't entitled to see it. Local mode short-circuits the admin gate
-// to allowed (N=1), so a licensed local build still serves it.
+// Gate: org admin AND FeatureGovernance, in that order — the whole family's
+// rule (see resolveGovernedOrgAdmin). A non-admin always gets a 403 and so
+// never learns the deployment's licence tier; an org admin on an unlicensed
+// build gets a 404 that reads as "no such route", so the feature stays
+// invisible to everyone entitled to see it. Local mode short-circuits the admin
+// gate to allowed (N=1), so a licensed local build still serves it.
 //
 // The read runs on the app pool under the admin's claims: access_change_log's
 // org-scoped RLS (org_id = current_org_id() AND user_has_org_access) admits the
@@ -81,8 +79,7 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		notFound(w, "route")
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 
