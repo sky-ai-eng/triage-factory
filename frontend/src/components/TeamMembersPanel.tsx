@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useState } from 'react'
 import { Bot } from 'lucide-react'
-import { apiFetch, apiJSON } from '../lib/apiClient'
+import { apiFetch } from '../lib/apiClient'
+import { fetchTeamRoster } from '../lib/teamRoster'
+import type { TeamBot } from '../types'
 import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import MemberRoster from './MemberRoster'
 import TeamMemberPicker from './TeamMemberPicker'
@@ -21,29 +23,6 @@ interface TeamMembersPanelProps {
   canManage: boolean
 }
 
-// Wire shapes of GET /api/teams/{team_id}/members.
-interface TeamRosterApiRow {
-  user_id: string
-  display_name: string
-  github_username: string | null
-  jira_account_id: string | null
-  role: string
-  is_current_user: boolean
-}
-
-interface TeamRosterBot {
-  agent_id: string
-  display_name: string
-  enabled: boolean
-  model: string
-  autonomy: number | null
-}
-
-interface TeamRosterApiResponse {
-  members: TeamRosterApiRow[]
-  bot: TeamRosterBot | null
-}
-
 const TEAM_ROLES = ['admin', 'member', 'viewer']
 
 export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembersPanelProps) {
@@ -52,7 +31,7 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
   // member-list lifecycle, so a remount is the lightest way to pull the new
   // row in without lifting the hook out of the shared component.
   const [reloadKey, setReloadKey] = useState(0)
-  const [bot, setBot] = useState<TeamRosterBot | null>(null)
+  const [bot, setBot] = useState<TeamBot | null>(null)
 
   // Base adapter — referentially stable except when the team changes (the only
   // thing the I/O closures depend on). The composed adapter is memoized below
@@ -65,12 +44,15 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
       protectedRole: 'admin',
       roleLabels: TEAM_ROLE_LABELS,
       async fetchMembers(): Promise<RosterMember[]> {
-        const data = await apiJSON<TeamRosterApiResponse>(`/api/teams/${teamId}/members`)
+        const data = await fetchTeamRoster(teamId)
         // The bot is a sibling field of the same roster payload, not a member —
         // capture it here so the panel can render one row for it WITHOUT a
-        // second, identical GET. useMemberRoster owns the fetch lifecycle (mount
-        // + post-mutation reload), so this also keeps the bot row fresh. setBot
-        // is a stable setter, so it isn't a dependency of this memo.
+        // second, identical read. useMemberRoster owns the fetch lifecycle
+        // (mount + post-mutation reload), so this also keeps the bot row fresh.
+        // setBot is a stable setter, so it isn't a dependency of this memo.
+        // The RAW bot, not usableBot's: this surface reports the team's bot
+        // state, and a disabled bot is a row that says "Disabled", not an
+        // absent one.
         setBot(data.bot)
         return data.members.map((m) => ({
           userId: m.user_id,
@@ -126,7 +108,7 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
 // workload identity, not a member, so it slots into the <ul> alongside the
 // member rows. Read-only here: the enable/model/autonomy controls are the page
 // shell's concern; this surfaces the bot's current state.
-function TeamBotRow({ bot }: { bot: TeamRosterBot }) {
+function TeamBotRow({ bot }: { bot: TeamBot }) {
   return (
     <li className="flex items-center gap-4 bg-accent-soft/20 px-4 py-3">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">

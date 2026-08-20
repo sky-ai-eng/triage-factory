@@ -59,6 +59,9 @@ func TestMovedRoutes_OldPathsAreGone(t *testing.T) {
 		{http.MethodPut, "/api/usage/teams/" + team + "/cap"},
 		// The factory drop is POST /api/tasks + POST /api/tasks/{id}/delegate.
 		{http.MethodPost, "/api/factory/delegate"},
+		// The two team-roster reads, now one list route on the team.
+		{http.MethodGet, "/api/team/members"},
+		{http.MethodGet, "/api/teams/" + team + "/members"},
 	} {
 		rec := doJSON(t, s, c.method, c.path, map[string]any{})
 		if rec.Code != http.StatusNotFound {
@@ -89,6 +92,7 @@ func TestMovedRoutes_NewPathsAnswer(t *testing.T) {
 		{http.MethodGet, org + "/usage"},
 		{http.MethodGet, org + "/usage/ops"},
 		{http.MethodGet, team + "/usage"},
+		{http.MethodPost, team + "/members/list"},
 	} {
 		rec := doJSON(t, s, c.method, c.path, map[string]any{})
 		if rec.Code == http.StatusNotFound {

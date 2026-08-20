@@ -138,8 +138,8 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 
 func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
 	// SQLite is N=1: one synthetic user, so "the user's teams" is just
-	// "every team in the org" — no memberships join needed (and the
-	// local sentinel user isn't enrolled via memberships). The ordering
+	// "every team in the org" — no memberships join needed, because the sole
+	// user is the only person any team could belong to. The ordering
 	// matches GetDefaultForOrg so teams[0] is the default team. Role is a
 	// constant 'admin': the sole local user owns every team (mirrors the
 	// local-mode short-circuit in requireTeamAdmin), so the settings
@@ -593,15 +593,129 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 	return stored, nil
 }
 
-// The roster methods are a multi-mode (Postgres) surface: the team-roster
-// handlers 404 in local, and local mode keeps the synthetic single-member
-// behavior in handleTeamMembers. These stubs exist only so the local store
-// bundle satisfies the interface; reaching them at N=1 is a runmode-gate
-// escape, and a clear error beats a misleading empty roster.
-func (s *teamsStore) ListMembers(_ context.Context, _, _, _ string) ([]domain.TeamMember, error) {
-	return nil, db.ErrNotApplicableInLocal
+// ListMembers answers the same roster read the Postgres impl does, off the
+// same tables. Local mode is N=1 — the tenant seed enrolls the one implicit
+// user on the sole team with role 'admin' — so this returns exactly that
+// single member, with whatever GitHub / Jira binding they hold on the org's
+// hosts. It is a real query rather than a synthesized row because the
+// membership row genuinely exists: TeamIDsForUserInOrgSystem already resolves
+// the local user through it.
+//
+// The roster's consumers run here too — the assignee picker, the predicate
+// editor's variant choice — so this is a read local mode needs answered, not
+// a stub for interface parity. The WRITES below are the local refusals:
+// enrolling a second member is the thing N=1 has no concept of.
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+	// The filtered total, on the same FROM as the page below so the count
+	// can't describe a different set than the rows it accompanies.
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.team_id = ?
+	`, teamID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count team members: %w", err)
+	}
+
+	// display_name is nullable, so COALESCE renders the empty string (matching
+	// GetDisplayName's ""). The ORDER BY ends in m.user_id so offset paging
+	// has a total order to walk — mirroring the Postgres impl, which is what
+	// the shared conformance suite pins.
+	query := `
+		SELECT m.user_id, COALESCE(u.display_name, ''), m.role
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.team_id = ?
+		ORDER BY COALESCE(u.display_name, ''), m.user_id`
+	args := []any{teamID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team members: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.TeamMember{}
+	for rows.Next() {
+		var m domain.TeamMember
+		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.Role); err != nil {
+			return nil, 0, fmt.Errorf("scan team member: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate team members: %w", err)
+	}
+
+	// Identity enrichment, scoped to the team by the same membership join the
+	// Postgres impl uses. Host resolution is the interface's, not the raw
+	// setting's: an unset github_base_url resolves to github.com, which is
+	// where the capture paths bind (they key on github.ResolveBaseURL), and an
+	// unset jira_base_url normalizes to "" and matches nothing.
+	ghMap, err := queryIdentityMap(ctx, s.q, `
+		SELECT gh.user_id, gh.login
+		FROM user_github_identities gh
+		JOIN memberships m ON m.user_id = gh.user_id AND m.team_id = ?
+		WHERE gh.github_base_url = ?
+	`, teamID, db.EffectiveGitHubHost(githubBaseURL))
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member github identities: %w", err)
+	}
+	jiraMap, err := queryIdentityMap(ctx, s.q, `
+		SELECT j.user_id, j.account_id
+		FROM user_jira_identities j
+		JOIN memberships m ON m.user_id = j.user_id AND m.team_id = ?
+		WHERE j.jira_base_url = ?
+	`, teamID, db.NormalizeJiraHost(jiraBaseURL))
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member jira identities: %w", err)
+	}
+	// An absent (or empty) binding leaves the pointer nil — the "Not
+	// connected" state.
+	for i := range out {
+		if login, ok := ghMap[out[i].UserID]; ok {
+			out[i].GitHubUsername = &login
+		}
+		if acct, ok := jiraMap[out[i].UserID]; ok {
+			out[i].JiraAccountID = &acct
+		}
+	}
+	return out, total, nil
 }
 
+// queryIdentityMap runs a (user_id, value) query and returns the user_id →
+// value map, dropping empty values so an "" binding reads as nil ("not
+// connected") rather than a present-but-blank handle. Twin of the Postgres
+// helper of the same name, which is what keeps the two rosters answering
+// identically.
+func queryIdentityMap(ctx context.Context, q queryer, query string, args ...any) (map[string]string, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var userID, value string
+		if err := rows.Scan(&userID, &value); err != nil {
+			return nil, err
+		}
+		if value != "" {
+			out[userID] = value
+		}
+	}
+	return out, rows.Err()
+}
+
+// The roster WRITES are a multi-mode (Postgres) surface: the mutating
+// team-roster handlers 404 in local, where there is no second person to
+// enrol, promote or remove. These stubs exist only so the local store bundle
+// satisfies the interface; reaching them at N=1 is a runmode-gate escape, and
+// a clear error beats a write that looks like it landed.
 func (s *teamsStore) AddMember(_ context.Context, _, _, _ string) error {
 	return db.ErrNotApplicableInLocal
 }
