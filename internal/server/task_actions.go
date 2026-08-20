@@ -602,7 +602,7 @@ func (s *Server) teardownTaskConversations(r *http.Request, orgID, userID, id st
 	// plain conversation stop is for a user pausing work they mean to come
 	// back to.
 	for _, conversationID := range ids {
-		if err := s.spawner.StopAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
+		if err := s.spawner.StopConversationAndCancelBlueprint(orgID, conversationID, userID, delegate.StopCauseTaskDispositioned); err != nil {
 			taskActionLog.Warn("stop conversation failed", "conversation", conversationID, "task", id, "error", err)
 		}
 	}

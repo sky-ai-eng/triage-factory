@@ -28,17 +28,18 @@ type Scorer interface {
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
-	// StopAndCancelBlueprint is the teardown half: the router only stops a
-	// conversation when the layer above it has already ended — a task closed,
-	// a firing rolled back — so the owning blueprint dies with it rather than
-	// freezing 'running' over work nothing will resume. The cause names which
-	// of those it was, and reaches the stopped conversation's transcript.
-	StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error
-	// StopBlueprintRun is the same teardown addressed by blueprint run rather
-	// than by conversation, for the caller that holds the id Delegate returned
-	// and has no conversation in hand. It stops whatever steps the run has and
-	// cancels the run itself; the two verbs take different ids and neither
-	// resolves against the other's table.
+	// StopConversationAndCancelBlueprint is the teardown half: the router only
+	// stops a conversation when the layer above it has already ended — a task
+	// closed, a firing rolled back — so the owning blueprint dies with it
+	// rather than freezing 'running' over work nothing will resume. The cause
+	// names which of those it was, and reaches the stopped conversation's
+	// transcript.
+	StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error
+	// StopBlueprintRun is the same teardown addressed from the other end, for
+	// the caller that holds the id Delegate returned and has no conversation
+	// in hand: it stops whatever steps the run has and cancels the run itself.
+	// Which verb a caller wants follows from which id it is holding — neither
+	// id resolves against the other's table.
 	StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote

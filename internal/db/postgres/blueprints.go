@@ -18,7 +18,7 @@ import (
 //
 //   - app: app pool (tf_app, RLS-active). Every request-equivalent consumer
 //     (blueprints handler, artifact-PR / reviews handlers, user-initiated
-//     lifecycle entry points like CancelBlueprint and the
+//     lifecycle entry points like CancelBlueprintRun and the
 //     ResumeBlueprintAfter* paths) runs here.
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). The blueprint

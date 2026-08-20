@@ -466,7 +466,7 @@ func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversatio
 		return
 	}
 	for _, id := range conversationIDs {
-		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
+		if err := r.spawner.StopConversationAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
 			routerLog.Error("stop conversation on task close failed", "conversation", id, "task_id", taskID, "error", err)
 		}
 	}

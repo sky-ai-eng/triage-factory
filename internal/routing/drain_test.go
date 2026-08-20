@@ -107,7 +107,7 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 	return brID, nil
 }
 
-func (s *stubDelegator) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
+func (s *stubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 

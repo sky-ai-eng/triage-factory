@@ -16,7 +16,7 @@
 // parked-and-dead under a terminal one, because the claim gate only ever
 // drives steps of a running blueprint. So the stop verb leaves the blueprint
 // alone and the callers that own a lifecycle one layer up spell their own
-// cancellation (StopAndCancelBlueprint and StopBlueprintRun, below).
+// cancellation (StopConversationAndCancelBlueprint and StopBlueprintRun, below).
 //
 // The park keeps the workspace, and the retention TTL is what eventually
 // collects it, because the moment a user kills a wedged run is exactly the
@@ -133,12 +133,15 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 	return s.stop(orgID, conversationID, userID, false, note)
 }
 
-// StopAndCancelBlueprint stops the conversation and finalizes its blueprint
-// 'cancelled' alongside it. That second half belongs to callers that own a
-// lifecycle one layer up and have already decided it is over — a task closed
-// by the router, a task swiped by a user, a team archived. Nothing will resume
-// those conversations, so freezing their blueprints 'running' would hold a
-// worktree and inflate every live-blueprint count for work that is finished.
+// StopConversationAndCancelBlueprint stops the conversation its id names and
+// finalizes that conversation's blueprint_run 'cancelled' alongside it. The
+// name spells both halves because only the first is addressed: the id is a
+// conversation's, and the blueprint_run reached through it is a consequence.
+// That second half belongs to callers that own a lifecycle one layer up and
+// have already decided it is over — a task closed by the router, a task
+// swiped by a user, a team archived. Nothing will resume those conversations,
+// so freezing their blueprints 'running' would hold a worktree and inflate
+// every live-blueprint count for work that is finished.
 //
 // A conversation-level stop must never route here: the terminal blueprint is
 // exactly what makes a parked conversation unresumable.
@@ -146,26 +149,26 @@ func (s *Spawner) Stop(orgID, conversationID, userID string) error {
 // cause is the lifecycle event the caller is acting on. It reaches the
 // transcript verbatim, so the ended conversation explains its own ending to
 // whoever reads it later.
-func (s *Spawner) StopAndCancelBlueprint(orgID, conversationID, userID string, cause StopCause) error {
+func (s *Spawner) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause StopCause) error {
 	return s.stop(orgID, conversationID, userID, true, cause.note())
 }
 
 // StopBlueprintRun tears down a whole blueprint run — every live step, the
 // blueprint_run row, and the shared worktree behind them — for a system caller
 // that owns a lifecycle one layer up and has decided the run should never have
-// existed. It is the blueprint-run twin of StopAndCancelBlueprint: that verb
-// takes a conversation and cancels the blueprint under it, this one takes the
-// blueprint_runs id its caller holds and stops the conversations under it. The
-// two ids are both opaque strings and neither resolves against the other's
-// table, so a caller holding a blueprint_run reaches its steps through here.
+// existed. It is the twin of StopConversationAndCancelBlueprint, addressed
+// from the other end: that verb reaches a blueprint_run through a conversation,
+// this one reaches conversations through a blueprint_run. Both ids are opaque
+// strings and neither resolves against the other's table, so which verb a
+// caller wants follows from which id it is holding.
 //
 // The cancel signal is raised before any step is enumerated: it is what stops
 // the claim gate handing this blueprint's steps out, so the run cannot grow a
 // step behind the teardown's back and a step minted but not yet claimed is
 // covered whether or not this call sees it.
 //
-// System-attributed throughout: the user-facing cancel of a blueprint is
-// CancelBlueprint, which carries the acting user's identity into its writes.
+// System-attributed throughout: the user-facing cancel of a blueprint run is
+// CancelBlueprintRun, which carries the acting user's identity into its writes.
 // cause names the lifecycle event and reaches every stopped step's transcript.
 func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause) error {
 	if s.blueprints == nil {

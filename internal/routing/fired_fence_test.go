@@ -39,7 +39,7 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 	return stubDelegateRun(s.db, task, opts)
 }
 
-func (s *fenceStubDelegator) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
+func (s *fenceStubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 

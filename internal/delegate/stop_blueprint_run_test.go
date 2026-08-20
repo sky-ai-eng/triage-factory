@@ -118,7 +118,7 @@ func TestStopBlueprintRun_RefusesAConversationID(t *testing.T) {
 	}
 }
 
-func TestStopAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T) {
 	database := newDelegateTestDB(t)
 	const conversationID = "r-conv-verb"
 	seedConversation(t, database, conversationID, "sess-cv", "/tmp/wt-cv")
@@ -126,9 +126,9 @@ func TestStopAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, brID, "", StopCauseFiringReverted)
+	err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, brID, "", StopCauseFiringReverted)
 	if !errors.Is(err, ErrNoActiveConversation) {
-		t.Fatalf("StopAndCancelBlueprint with a blueprint_run id = %v, want ErrNoActiveConversation", err)
+		t.Fatalf("StopConversationAndCancelBlueprint with a blueprint_run id = %v, want ErrNoActiveConversation", err)
 	}
 	var convStatus string
 	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {

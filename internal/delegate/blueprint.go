@@ -91,14 +91,14 @@ func blueprintDecisionForStepConversation(runOutcome string, isFinal bool) (deci
 // when the worktree itself is already gone (worktree_lost path).
 //
 // triggerType + creatorUserID route the terminal writes. Manual blueprints
-// (and user-initiated CancelBlueprint / Resume* that pass "manual" + the
+// (and user-initiated CancelBlueprintRun / Resume* that pass "manual" + the
 // requesting user's ID) write under synthetic claims; event-triggered
 // blueprints write through the admin pool.
 //
 // The cfg here is a cleanup-scoped config (worktree fields + orgID), not the
 // full run-execution config. The run-bearing callers (dispatchClaimedConversation /
 // handlePreAgentFailure) stamp cfg.teamID off the claimed run, but the
-// CancelBlueprint / paused-cleanup callers have only a task (no claimed run)
+// CancelBlueprintRun / paused-cleanup callers have only a task (no claimed run)
 // and leave it empty — so cfg.teamID is NOT reliably set here. Any future
 // run-attributed work on the terminal path (e.g. recording a failed run's
 // artifacts, TFAC-454) must thread the team/identity explicitly rather than
@@ -410,9 +410,9 @@ func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRu
 	}
 }
 
-// CancelBlueprint cancels every step inside a blueprint run, marks the blueprint
-// row cancelled, and lets the active step's runAgent return naturally.
-// Safe to call when the blueprint is already terminal.
+// CancelBlueprintRun cancels every step inside a blueprint run, marks the
+// blueprint_run row cancelled, and lets the active step's runAgent return
+// naturally. Safe to call when the run is already terminal.
 //
 // userID identifies the actor for audit. The cancel is always a
 // user-initiated action (user clicked Cancel), so writes route under
@@ -420,7 +420,7 @@ func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRu
 // original trigger_type. In local mode callers pass
 // runmode.LocalDefaultUserID; multi-mode handlers extract the user
 // from JWT claims.
-func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
+func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error {
 	cr, err := s.blueprints.GetRunSystem(context.Background(), orgID, blueprintRunID)
 	if err != nil {
 		return fmt.Errorf("load blueprint run: %w", err)
@@ -513,11 +513,11 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 	return nil
 }
 
-// finalizeParkedBlueprintOnCancel finalizes the owning blueprint_run when a step
-// run is torn down through the spawner's DB-only path (StopAndCancelBlueprint
-// with no live orchestrator goroutine — the step had parked, so the
-// orchestrator already returned and nothing else will mark the blueprint_run
-// terminal). Without this, a lifecycle teardown of an open-parked step would
+// finalizeParkedBlueprintOnCancel finalizes the owning blueprint_run when a
+// step run is torn down through the spawner's DB-only path
+// (StopConversationAndCancelBlueprint with no live orchestrator goroutine —
+// the step had parked, so the orchestrator already returned and nothing else
+// will mark the blueprint_run terminal). Without this, a lifecycle teardown of an open-parked step would
 // park only the conversation and strand the blueprint_run in 'running' (and its
 // shared-workspace snapshot in the blob store) for work its task has already
 // finished with.
@@ -533,9 +533,9 @@ func (s *Spawner) CancelBlueprint(orgID, blueprintRunID, userID string) error {
 // So this finalizes the blueprint row + worktree + snapshot only:
 //
 //   - marks the blueprint_run cancelled, routed by userID exactly like
-//     CancelBlueprint — a user cancel (non-empty) under the user's synthetic
-//     claims, a system cancel (empty — router cleanup / drain sweep) through the
-//     admin pool;
+//     CancelBlueprintRun — a user cancel (non-empty) under the user's
+//     synthetic claims, a system cancel (empty — router cleanup / drain sweep)
+//     through the admin pool;
 //   - runs the shared-worktree cleanup;
 //   - discards the blueprint_run-keyed snapshot (idempotent — a no-op when
 //     terminateBlueprint already dropped it, or when none was taken).
@@ -586,7 +586,7 @@ func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID strin
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under
-// the given user's synthetic claims. Used by user-initiated CancelBlueprint
+// the given user's synthetic claims. Used by user-initiated CancelBlueprintRun
 // / Resume* paths that need to attribute the write to the requesting
 // user even though the blueprint's original trigger_type may have been
 // 'event'.

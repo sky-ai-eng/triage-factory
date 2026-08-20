@@ -1436,7 +1436,7 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		writeDelegationUnavailable(w)
 		return
 	}
-	if err := spawner.CancelBlueprint(orgID, id, userID); err != nil {
+	if err := spawner.CancelBlueprintRun(orgID, id, userID); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
