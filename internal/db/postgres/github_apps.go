@@ -32,6 +32,12 @@ func newGitHubAppsStore(app, admin queryer, secrets db.SecretStore) db.GitHubApp
 
 var _ db.GitHubAppsStore = (*gitHubAppsStore)(nil)
 
+// scanGitHubApp is shared by every org_github_apps reader AND writer — GetForOrg's
+// SELECT and CreateForOrg / SetActive's RETURNING all scan through it — so it
+// leaves a raw Scan failure unwrapped rather than baking in a caller-specific
+// verb ("get"/"insert"/"set"). Each caller wraps with its own context;
+// wrapping here would misname a write's failure as a read (see
+// scanSQLiteGitHubApp for the sibling that already gets this right).
 func scanGitHubApp(row interface{ Scan(...any) error }) (*domain.OrgGitHubApp, error) {
 	var (
 		a            domain.OrgGitHubApp
@@ -48,7 +54,7 @@ func scanGitHubApp(row interface{ Scan(...any) error }) (*domain.OrgGitHubApp, e
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get org_github_apps: %w", err)
+		return nil, err
 	}
 	if registeredAt.Valid {
 		a.RegisteredAt = registeredAt.Time
@@ -75,14 +81,21 @@ func (s *gitHubAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 		return nil, nil
 	}
 	app, err := scanGitHubApp(s.app.QueryRowContext(ctx, selectGitHubAppCols, orgID))
-	return app, wrapAppPoolPermErr(err, "github_apps.GetForOrg")
+	if err != nil {
+		return nil, wrapAppPoolPermErr(fmt.Errorf("get org_github_apps: %w", err), "github_apps.GetForOrg")
+	}
+	return app, nil
 }
 
 func (s *gitHubAppsStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgGitHubApp, error) {
 	if !isValidUUID(orgID) {
 		return nil, nil
 	}
-	return scanGitHubApp(s.admin.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+	app, err := scanGitHubApp(s.admin.QueryRowContext(ctx, selectGitHubAppCols, orgID))
+	if err != nil {
+		return nil, fmt.Errorf("get org_github_apps: %w", err)
+	}
+	return app, nil
 }
 
 func (s *gitHubAppsStore) CreateForOrg(ctx context.Context, app domain.OrgGitHubApp) (domain.OrgGitHubApp, error) {
@@ -131,7 +144,10 @@ func (s *gitHubAppsStore) SetActive(ctx context.Context, orgID string, active bo
 	app, err := scanGitHubApp(s.app.QueryRowContext(ctx, `
 		UPDATE org_github_apps SET active = $2 WHERE org_id = $1
 		RETURNING `+pgGitHubAppColumns, orgID, active))
-	return app, wrapAppPoolPermErr(err, "github_apps.SetActive")
+	if err != nil {
+		return nil, wrapAppPoolPermErr(fmt.Errorf("set org_github_apps active: %w", err), "github_apps.SetActive")
+	}
+	return app, nil
 }
 
 func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error {
