@@ -168,7 +168,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string, known *domain.TeamSettings) (teamSettingsResponse, bool) {
 	var resp teamSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		settings := domain.TeamSettings{}
+		var settings domain.TeamSettings
 		if known != nil {
 			settings = *known
 		} else {
