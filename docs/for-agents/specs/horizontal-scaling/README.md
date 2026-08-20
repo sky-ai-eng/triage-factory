@@ -1052,12 +1052,15 @@ should be the cheapest self-healing thing available:
   equality instead of per-claim hash evaluation. The stamp is a
   snapshot of membership and can go stale if the fleet changes while
   the run waits — but a run waits seconds-to-minutes while membership
-  changes hours-to-days apart, and the two row classes that *do*
-  outlive their stamp (reaper requeues, whose stamped executor is
-  likely the dead one; resumes of long-parked runs) are **re-stamped
-  against current membership on requeue**. Net invariant: no stamp is
-  ever older than one queue dwell, and a stale one costs a warm cache
-  via the aging tier, never correctness.
+  changes hours-to-days apart, and the row classes that *do* outlive
+  their stamp are **re-stamped as they re-enter the queue**: a reaper
+  requeue clears it (its stamped executor is likely the dead one, and
+  nothing about the corpse is worth chasing), while a **resume stamps
+  the executor of the conversation's newest claim** — at resume time
+  the last engagement's executor is better than a fresh hash, because
+  that machine still holds the workspace tree `worktree_path` names.
+  Net invariant: no stamp is ever older than one queue dwell, and a
+  stale one costs a warm cache via the aging tier, never correctness.
 - Claim is two-tier: **(1)** my queued runs (`preferred = me`), **(2)**
   anyone's queued runs older than an aging threshold (~15–30 s) or
   whose preferred executor is dead/gated/draining. Tier 2 is the
@@ -1498,7 +1501,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     (TFAC-587): `internal/placement` (pure capacity-weighted rendezvous +
     resolver), the enqueue stamp (control computes the winner over live
     registry members; re-stamped each blueprint-step advance; cleared to NULL
-    on every requeue/reset/reaper/resume path), the two-tier `ClaimNextConversation`
+    on every requeue/reset/reaper path, and re-stamped to the last
+    engagement's executor on resume), the two-tier `ClaimNextConversation`
     (tier 1 = `preferred_executor_id = me`, tier 2 = aged past
     `TF_PLACEMENT_AGING_SEC` or preferred dead/gated/draining), the
     `placement_overrides` table (pin / hot-key `replicas=K`), and the

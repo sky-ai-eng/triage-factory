@@ -229,7 +229,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	const sessionID = "sess-snap-wake"
 	cwd := t.TempDir()
 	writeSession(t, cwd, sessionID, `{"type":"summary"}`)
-	writeFile(t, filepath.Join(cwd, "_tfac", "ci-logs", "build.log"), "the turn's work")
+	writeFile(t, filepath.Join(cwd, "_tfac", "notes", "build.log"), "the turn's work")
 
 	s.processCompletion(ctx, org, conversationID, "seedbpr-"+conversationID, "", loadTask(t, s, taskID),
 		res(`{"outcome":"finish","summary":"done"}`), cwd, nil, sessionID, "event", "")
@@ -243,7 +243,7 @@ func TestFollowUp_ImmediatelyAfterAConclusionFindsACompleteSnapshot(t *testing.T
 	}
 
 	members := snapshotMembers(t, blobs, snapshotKey(org, "seedbpr-"+conversationID))
-	for _, want := range []string{snapSession, snapScratchPrefix + "ci-logs/build.log"} {
+	for _, want := range []string{snapSession, snapScratchPrefix + "notes/build.log"} {
 		if !members[want] {
 			t.Errorf("snapshot member %q missing; the resume this follow-up queued would rehydrate an incomplete workspace (members: %v)", want, members)
 		}

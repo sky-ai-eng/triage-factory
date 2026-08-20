@@ -651,7 +651,7 @@ func downloadAndExtractLogs(ctx context.Context, client ghAPI, owner, repo strin
 // path for a given workflow run via the shared, symlink-safe scratch
 // resolver. See safeScratchSubdir for the safety contract.
 func safeDestDirForRun(cwd string, runID int64) (string, error) {
-	return safeScratchSubdir(cwd, worktree.ScratchDir, "ci-logs", strconv.FormatInt(runID, 10))
+	return safeScratchSubdir(cwd, worktree.ScratchDir, worktree.CILogsDir, strconv.FormatInt(runID, 10))
 }
 
 // extractZip safely extracts zipPath into destDir. Rejects any entry whose

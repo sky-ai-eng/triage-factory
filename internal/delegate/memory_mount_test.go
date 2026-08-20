@@ -240,7 +240,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 
 	// Scratch content that DOES ride the snapshot, so the rehydrate takes the
 	// rename branch — the one that collides with an already-planted link.
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), "ci log line")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 
-	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "build.log"), "ci log line")
+	assertFileContains(t, filepath.Join(got, "_tfac", "notes", "build.log"), "scratch note")
 	link := filepath.Join(got, "_tfac", "entity-memory")
 	fi, err := os.Lstat(link)
 	if err != nil {

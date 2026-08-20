@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -45,7 +47,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 
 	// Written after the snapshot: a rehydrate rebuilds from the (older) blob and
 	// would lose this, so its survival distinguishes warm reuse from a rebuild.
-	marker := filepath.Join(wtPath, "_tfac", "ci-logs", "warm-marker.txt")
+	marker := filepath.Join(wtPath, "_tfac", "notes", "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
 	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
@@ -88,11 +90,13 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	// ...then leaves an uncommitted edit (rides in the patch).
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
 
-	// Ephemeral _tfac is snapshotted; entity-memory / project-knowledge are
-	// excluded (they re-materialize from the DB / project KB).
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), "ci log line")
+	// Ephemeral _tfac is snapshotted; entity-memory / project-knowledge /
+	// ci-logs are excluded (they re-materialize from the DB / project KB, or
+	// re-download from GitHub).
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
 	writeFile(t, filepath.Join(wtPath, "_tfac", "entity-memory", "ns", "x.md"), "memory")
 	writeFile(t, filepath.Join(wtPath, "_tfac", "project-knowledge", "kb.md"), "kb")
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "build.log"), "ci log line")
 
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
@@ -132,9 +136,13 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent") // bundle
 	assertFileContains(t, filepath.Join(got, "README.md"), "uncommitted edit")   // patch
-	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "build.log"), "ci log line")
+	assertFileContains(t, filepath.Join(got, "_tfac", "notes", "build.log"), "scratch note")
 	assertMissing(t, filepath.Join(got, "_tfac", "entity-memory", "ns", "x.md"))
 	assertMissing(t, filepath.Join(got, "_tfac", "project-knowledge", "kb.md"))
+	assertMissing(t, filepath.Join(got, "_tfac", "ci-logs", "42", "build.log"))
+	// The one exclusion the agent can notice: it gets an explanation in place
+	// of the logs, not a directory that silently emptied.
+	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", ciLogsNoticeFile), "download-logs")
 
 	// The session transcript lands under the rebuilt cwd's encoded project dir
 	// so `claude --resume` reconnects.
@@ -222,8 +230,8 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 }
 
 // TestSnapshotWorkspace_StoresZstd: the stored blob is zstd-compressed — the
-// two fat members (session transcript, ci-logs) make uncompressed storage
-// pathological, so the staged tar is wrapped in zstd before Put. Asserts on
+// session transcript alone makes uncompressed storage pathological, so the
+// staged tar is wrapped in zstd before Put. Asserts on
 // the raw stored bytes: the storage seam must carry the compressed form, not
 // just hand back something the reader can parse.
 func TestSnapshotWorkspace_StoresZstd(t *testing.T) {
@@ -271,7 +279,7 @@ func TestEnsureWorkspace_ColdPath_TruncatedZstdErrors(t *testing.T) {
 	worktree.RemoveRunRoot(conversationID)
 	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
 	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the zstd frame checksum covers")
+	writeFile(t, filepath.Join(src, "_tfac", "notes", "x.log"), "scratch bytes the zstd frame checksum covers")
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
@@ -339,6 +347,142 @@ func TestEnsureWorkspace_ColdPath_LegacyGzipSnapshot(t *testing.T) {
 	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "from an old gzip snapshot")
 }
 
+// TestSnapshotWorkspace_OmitsCILogs is the exclusion acceptance: an extracted
+// GitHub Actions log archive is re-downloadable, so it fails the snapshot's own
+// "non-recoverable state only" admission test and must contribute nothing to
+// the blob — while the scratch files that exist nowhere else still ride along.
+// The size bound is the point of the exclusion: megabytes of logs in the tree,
+// kilobytes of blob out.
+func TestSnapshotWorkspace_OmitsCILogs(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	// A non-git run-root: the git members would only add noise to the size
+	// bound, and the exclusion is decided by the scratch walk either way.
+	wtPath := t.TempDir()
+	logs := strings.Repeat("2026-08-20T12:00:00.0000000Z ##[group]Run go test ./...\n", 60_000)
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "1_build.txt"), logs)
+	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "2_test.txt"), logs)
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "keep.txt"), "the agent's own intermediate")
+
+	const conversationID = "wt-cilogs"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	members := snapshotMembers(t, s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
+	for name := range members {
+		if strings.HasPrefix(name, snapScratchPrefix+worktree.CILogsDir+"/") {
+			t.Errorf("snapshot carries %q; ci-logs is re-downloadable and must not ride in the blob", name)
+		}
+	}
+	if !members[snapScratchPrefix+"notes/keep.txt"] {
+		t.Errorf("snapshot dropped the agent's own scratch (members: %v); only the re-fetchable subtrees are excluded", members)
+	}
+
+	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
+	if err != nil {
+		t.Fatalf("get snapshot blob: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	size, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		t.Fatalf("size snapshot blob: %v", err)
+	}
+	if size > 8<<10 {
+		t.Errorf("blob = %d bytes for a workspace whose only bulk is %d bytes of CI logs; the archive phase is still paying for them", size, 2*len(logs))
+	}
+}
+
+// TestEnsureWorkspace_ColdPath_NoCILogsNoticeWithoutOmittedLogs: the notice
+// explains a specific absence, so a workspace that never downloaded any logs
+// must not get one. Otherwise every cold rehydrate would invent a ci-logs
+// directory and tell the agent about logs that never existed.
+func TestEnsureWorkspace_ColdPath_NoCILogsNoticeWithoutOmittedLogs(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const conversationID = "wt-no-cilogs"
+	worktree.RemoveRunRoot(conversationID)
+	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "scratch note")
+	// An empty ci-logs directory is nothing dropped, so it is nothing to
+	// explain — the walk must distinguish it from a populated one.
+	if err := os.MkdirAll(filepath.Join(src, "_tfac", "ci-logs"), 0o755); err != nil {
+		t.Fatalf("mkdir ci-logs: %v", err)
+	}
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+
+	wtDir := worktree.RunRoot(conversationID)
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, BlueprintRunID: conversationID}
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{})
+	if err != nil {
+		t.Fatalf("ensureWorkspace (cold): %v", err)
+	}
+	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "scratch note")
+	if _, err := os.Stat(filepath.Join(got, "_tfac", worktree.CILogsDir)); !os.IsNotExist(err) {
+		t.Errorf("rehydrate created _tfac/ci-logs for a workspace that never had logs in it (stat error = %v)", err)
+	}
+}
+
+// TestEnsureWorkspace_ColdPath_PreExclusionSnapshotRestoresItsCILogs: blobs
+// written before the exclusion are durable state that carries its logs as
+// ordinary scratch members. Those must still restore verbatim — and must not
+// acquire a notice claiming they were dropped.
+func TestEnsureWorkspace_ColdPath_PreExclusionSnapshotRestoresItsCILogs(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+
+	const conversationID = "wt-preexclusion"
+	worktree.RemoveRunRoot(conversationID)
+	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
+
+	// Hand-built, because the writer under test no longer produces this shape:
+	// scratch members under ci-logs, and a manifest with no omission recorded.
+	var blob bytes.Buffer
+	zw, err := zstd.NewWriter(&blob)
+	if err != nil {
+		t.Fatalf("open zstd: %v", err)
+	}
+	tw := tar.NewWriter(zw)
+	if err := writeTarBytes(tw, snapScratchPrefix+"ci-logs/42/1_build.txt", []byte("logs an older build captured")); err != nil {
+		t.Fatalf("write legacy ci-logs member: %v", err)
+	}
+	manifest, err := json.Marshal(snapshotManifest{})
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	if err := writeTarBytes(tw, snapManifest, manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zstd: %v", err)
+	}
+	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID), bytes.NewReader(blob.Bytes())); err != nil {
+		t.Fatalf("put pre-exclusion snapshot: %v", err)
+	}
+
+	wtDir := worktree.RunRoot(conversationID)
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, BlueprintRunID: conversationID}
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{})
+	if err != nil {
+		t.Fatalf("rehydrate pre-exclusion snapshot: %v", err)
+	}
+	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "42", "1_build.txt"), "logs an older build captured")
+	if _, err := os.Stat(filepath.Join(got, "_tfac", worktree.CILogsDir, ciLogsNoticeFile)); !os.IsNotExist(err) {
+		t.Errorf("rehydrate planted the not-restored notice beside logs it did restore (stat error = %v)", err)
+	}
+}
+
 // TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob: a JSONL-heavy
 // workspace — the dominant real-world shape, where the transcript carries
 // every tool call and result verbatim — must store measurably smaller than
@@ -355,7 +499,7 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		fmt.Fprintf(&jsonl, `{"type":"tool_result","seq":%d,"content":"$ go test ./...\nok  \tgithub.com/sky-ai-eng/triage-factory/internal/delegate\t1.2s\n"}%s`, i, "\n")
 	}
 	writeSession(t, wtPath, sessionID, jsonl.String())
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "test.log"),
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "test.log"),
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const conversationID = "wt-fat"
@@ -732,7 +876,7 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	gitT(t, wtPath, "add", "agent.txt")
 	gitT(t, wtPath, "commit", "-m", "agent work")
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), strings.Repeat("ci log line\n", 200))
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), strings.Repeat("scratch note\n", 200))
 	const sessionID = "sess-spans"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"spans"}`)
 

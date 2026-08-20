@@ -179,6 +179,16 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			}
 			return out
 		},
+		PreferredExecutor: func(t *testing.T, conversationID string) string {
+			t.Helper()
+			var pref sql.NullString
+			if err := conn.QueryRow(
+				`SELECT preferred_executor_id FROM conversations WHERE id = $1`, conversationID,
+			).Scan(&pref); err != nil {
+				t.Fatalf("read preferred_executor_id: %v", err)
+			}
+			return pref.String
+		},
 		CollapseClaimTimes: func(t *testing.T, conversationID string) {
 			t.Helper()
 			if _, err := conn.Exec(`
@@ -850,5 +860,98 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 	}
 	if !flipped {
 		t.Error("the teammate's follow-up was refused after the blueprint finished; the guard must not fail closed on an invisible row")
+	}
+}
+
+// TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator
+// pins the resume flip's affinity stamp against the trap its sibling guard
+// fell into: this statement runs on the app pool, so a subquery over a
+// creator-scoped table would read empty for a teammate and the flip would
+// silently stamp NULL — sending every teammate follow-up to a cold executor
+// while the warm tree sat idle, and doing it invisibly, since NULL is also
+// the legitimate answer for a conversation nothing ever drove.
+//
+// claims is not creator-scoped — its policy composes through the
+// conversation, so anyone who may update the row can read its claims — which
+// is what makes a plain correlated subquery the right shape here. The
+// precondition is asserted first, because that is the fact the subquery rests
+// on rather than something the assertion below would reveal on its own.
+func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, creator, teamID := pgtest.SeedOrgWithUser(t, h, "creator")
+	teammate := seedPgMember(t, h, orgID, "teammate", "member")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, teammate, teamID)
+	seedPgConversationPromptIn(t, h, "p_resume_affinity_rls", orgID, creator)
+
+	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Resume Affinity RLS', '', '{}'::jsonb, now())
+	`, entityID, orgID, "resume-affinity-"+orgID[:8])
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID)
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key,
+		                   primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:ci_check_failed', '', $6, 'queued', 'pending', 0.5)
+	`, taskID, orgID, creator, teamID, entityID, eventID)
+
+	// The creator's team-visible conversation, driven by one engagement and
+	// then stopped: a warm tree on exec-warm and a released claim naming it.
+	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
+	stepIdx := 0
+	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+		TaskID: taskID, PromptID: "p_resume_affinity_rls", Status: "running", Model: "m",
+		TriggerType: "manual", CreatorUserID: creator,
+		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+	})
+	if err := stores.Conversations.SetExecutorSystem(ctx, orgID, convID, "exec-warm", 1); err != nil {
+		t.Fatalf("mint the engagement: %v", err)
+	}
+	if ok, err := stores.Conversations.ParkOpenSystem(ctx, orgID, convID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+		t.Fatalf("park: ok=%v err=%v", ok, err)
+	}
+
+	// The precondition the subquery rests on: the teammate really can read
+	// the claim, unlike the blueprint row its sibling guard has to route past.
+	if err := h.WithUser(t, teammate, orgID, func(tx *sql.Tx) error {
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, convID).Scan(&n); err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("the teammate sees %d claims rows, want 1; claims visibility must compose through the conversation", n)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read claims as the teammate: %v", err)
+	}
+
+	// The teammate's follow-up wakes it — and routes it back to the warm tree.
+	var flipped bool
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, teammate, func(tx db.TxStores) error {
+		f, mErr := tx.Conversations.MarkQueuedForResume(ctx, orgID, convID)
+		flipped = f
+		return mErr
+	}); err != nil {
+		t.Fatalf("MarkQueuedForResume as a non-creator: %v", err)
+	}
+	if !flipped {
+		t.Fatal("the teammate's follow-up was refused on a team-visible parked conversation")
+	}
+	var preferred sql.NullString
+	if err := h.AdminDB.QueryRow(
+		`SELECT preferred_executor_id FROM conversations WHERE id = $1`, convID).Scan(&preferred); err != nil {
+		t.Fatalf("read preferred_executor_id: %v", err)
+	}
+	if preferred.String != "exec-warm" {
+		t.Errorf("preferred_executor_id = %q, want exec-warm — a teammate's resume must chase the same warm tree the creator's would", preferred.String)
 	}
 }

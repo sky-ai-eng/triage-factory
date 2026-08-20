@@ -74,6 +74,13 @@ type ConversationSeeder struct {
 	// the suite can assert mint/release bookkeeping.
 	ClaimRows func(t *testing.T, conversationID string) []ClaimRow
 
+	// PreferredExecutor reads the conversation's placement affinity stamp
+	// (conversations.preferred_executor_id), "" for SQL NULL. No store read
+	// projects the column — placement is the only consumer and it reads it
+	// in-SQL — so the suite reads it directly to assert what the resume flip
+	// writes.
+	PreferredExecutor func(t *testing.T, conversationID string) string
+
 	// CollapseClaimTimes forces every claim on the conversation to share one
 	// claimed_at and created_at, leaving released_at as recorded. It stages
 	// the tie a Postgres transaction produces for free — now() is fixed for
@@ -903,7 +910,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// open → ok, flips to queued. This flip must NOT stamp resume-time
 		// ownership — the row goes back through ClaimNextConversation, which mints
-		// the claim for whichever executor actually claims it.
+		// the claim for whichever executor actually claims it. (The advisory
+		// placement stamp it DOES write is a preference, not ownership — see
+		// MarkQueuedForResume_StampsTheLastEngagementsExecutor.)
 		if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
 			t.Fatalf("open: %v", err)
 		}
@@ -1006,6 +1015,63 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
 			t.Fatalf("stop→resume under a running blueprint: ok=%v err=%v, want true", ok, err)
+		}
+	})
+
+	// The resume flip chases the warm workspace: the executor whose engagement
+	// drove the conversation last is the one holding its tree (and, on the SDK
+	// runtime, its session file), so that is what the flip stamps as the
+	// placement preference. Nothing here depends on placement being ON — the
+	// column is written in both dialects; only multi-mode reads it.
+	t.Run("MarkQueuedForResume_StampsTheLastEngagementsExecutor", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+
+		resume := func(t *testing.T, conversationID string) {
+			t.Helper()
+			if ok, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+				t.Fatalf("park: ok=%v err=%v", ok, err)
+			}
+			if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
+				t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
+			}
+		}
+
+		// One engagement: its executor is the stamp.
+		single := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, single, "exec-1", 1); err != nil {
+			t.Fatalf("SetExecutorSystem exec-1: %v", err)
+		}
+		resume(t, single)
+		if got := seed.PreferredExecutor(t, single); got != "exec-1" {
+			t.Errorf("preferred_executor_id after a resume = %q, want exec-1 — the executor holding the warm tree", got)
+		}
+
+		// Two engagements: the NEWER one holds the tree, so an older
+		// engagement's executor must not win.
+		twice := seedConversationForTest(t, orgID, seed, "running")
+		if err := store.SetExecutorSystem(ctx, orgID, twice, "exec-1", 1); err != nil {
+			t.Fatalf("SetExecutorSystem exec-1: %v", err)
+		}
+		// The empty stamp releases the claim; without it the next call would
+		// update that engagement in place instead of starting a second one.
+		if err := store.SetExecutorSystem(ctx, orgID, twice, "", 0); err != nil {
+			t.Fatalf("release the first engagement: %v", err)
+		}
+		if err := store.SetExecutorSystem(ctx, orgID, twice, "exec-2", 2); err != nil {
+			t.Fatalf("SetExecutorSystem exec-2: %v", err)
+		}
+		resume(t, twice)
+		if got := seed.PreferredExecutor(t, twice); got != "exec-2" {
+			t.Errorf("preferred_executor_id after a second engagement = %q, want exec-2 (the newest claim)", got)
+		}
+
+		// Never claimed: nothing ever drove it, so there is no warmth to
+		// chase and the row re-queues unowned.
+		never := seedConversationForTest(t, orgID, seed, "running")
+		resume(t, never)
+		if got := seed.PreferredExecutor(t, never); got != "" {
+			t.Errorf("preferred_executor_id on a never-claimed conversation = %q, want empty", got)
 		}
 	})
 
