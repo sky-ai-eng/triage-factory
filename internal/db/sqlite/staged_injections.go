@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -29,27 +30,33 @@ var _ db.StagedInjectionStore = (*stagedInjectionStore)(nil)
 // 'text').
 const stagedInjectionSubtype = "injection:system-note"
 
-func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n *domain.StagedInjection) error {
+func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.StagedInjection{}, err
 	}
 	meta, err := json.Marshal(map[string]string{"producer": n.Producer})
 	if err != nil {
-		return err
+		return domain.StagedInjection{}, err
 	}
-	res, err := s.q.ExecContext(ctx, `
+	// RETURNING projects the same columns flushPendingInput's SELECT does, so
+	// the freshly-inserted row and a later flush of it map through the same
+	// stagedInjectionFromPending.
+	var (
+		r        pendingRow
+		userID   sql.NullString
+		metadata sql.NullString
+	)
+	if err := s.q.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES (?, ?, 'user', ?, ?, ?, 0)
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta))
-	if err != nil {
-		return err
+		RETURNING id, org_id, conversation_id, content, user_id, metadata, created_at
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(
+		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &userID, &metadata, &r.CreatedAt,
+	); err != nil {
+		return domain.StagedInjection{}, err
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return err
-	}
-	n.ID = strconv.FormatInt(id, 10)
-	return nil
+	r.UserID, r.Metadata = userID.String, metadata.String
+	return stagedInjectionFromPending(r), nil
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
@@ -94,27 +101,41 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return err
 }
 
+// stagedInjectionFromPending maps one messages row (whether just inserted by
+// AppendSystem or claimed by a flush) onto the StagedInjection shape: the row
+// id becomes the decimal ID, content the Body, and the producer tag is
+// unpacked from metadata. The two writers share this mapper so a fresh
+// AppendSystem row and that same row read back by a later flush can never
+// disagree about what a staged injection is.
+//
+// TODO(TFAC-874): this mapper and the pendingRow it takes are duplicated
+// verbatim in the Postgres twin, so a change here that misses that copy is
+// silent drift. 874 decides whether the dialect-free helpers hoist to a
+// shared package or stay split behind an identical-helpers ratchet.
+func stagedInjectionFromPending(r pendingRow) domain.StagedInjection {
+	n := domain.StagedInjection{
+		ID:             strconv.FormatInt(r.ID, 10),
+		ConversationID: r.ConvID,
+		OrgID:          r.OrgID,
+		Body:           r.Content,
+		CreatedAt:      r.CreatedAt,
+	}
+	if r.Metadata != "" {
+		var meta struct {
+			Producer string `json:"producer"`
+		}
+		_ = json.Unmarshal([]byte(r.Metadata), &meta)
+		n.Producer = meta.Producer
+	}
+	return n
+}
+
 // stagedInjectionsFromPending maps flushed pending rows onto the
-// StagedInjection shape: the row id becomes the decimal ID, content the
-// Body, and the producer tag is unpacked from metadata.
+// StagedInjection shape via stagedInjectionFromPending.
 func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
 	var out []domain.StagedInjection
 	for _, r := range flushed {
-		n := domain.StagedInjection{
-			ID:             strconv.FormatInt(r.ID, 10),
-			ConversationID: r.ConvID,
-			OrgID:          r.OrgID,
-			Body:           r.Content,
-			CreatedAt:      r.CreatedAt,
-		}
-		if r.Metadata != "" {
-			var meta struct {
-				Producer string `json:"producer"`
-			}
-			_ = json.Unmarshal([]byte(r.Metadata), &meta)
-			n.Producer = meta.Producer
-		}
-		out = append(out, n)
+		out = append(out, stagedInjectionFromPending(r))
 	}
 	return out
 }

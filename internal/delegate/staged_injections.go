@@ -58,8 +58,11 @@ func (s *Spawner) StageOrDeliverInjection(orgID, conversationID, producer, body 
 // apart from "dropped" (both false — no live process, AND the durable
 // append itself failed: the store isn't wired, or AppendSystem errored).
 // HandlePRNewCommits and any other bare-bool producer keep calling
-// StageOrDeliverInjection unchanged and tolerate a drop (the next signal
-// re-stages); the additive gate can't tolerate one — a dropped additive
+// StageOrDeliverInjection unchanged and tolerate a drop as permanent for
+// that injection — acceptable for HandlePRNewCommits because its news is
+// self-renewing (see the doc above), not because a drop is retried; a
+// producer whose news doesn't recur must not copy that posture. The
+// additive gate can't tolerate one either way — a dropped additive
 // event has no durable row to fall back on, so it must fall through to
 // pending_firings instead. Same side effects and body/producer semantics
 // as StageOrDeliverInjection; the two share stageOrDeliverInjection.
@@ -86,16 +89,16 @@ func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body 
 		delegateLog.Warn("stage injection dropped: no staged-injection store wired", "conversation", conversationID, "producer", producer)
 		return false, false, ""
 	}
-	n := &domain.StagedInjection{
+	stored, err := s.stagedInjections.AppendSystem(context.Background(), orgID, domain.StagedInjection{
 		ConversationID: conversationID,
 		Producer:       producer,
 		Body:           body,
-	}
-	if err := s.stagedInjections.AppendSystem(context.Background(), orgID, n); err != nil {
-		delegateLog.Warn("stage injection: append failed (the producer's next signal re-stages)", "conversation", conversationID, "producer", producer, "error", err)
+	})
+	if err != nil {
+		delegateLog.Warn("stage injection: append failed (dropped for good; only a later transition from a self-renewing producer might stage fresh news)", "conversation", conversationID, "producer", producer, "error", err)
 		return false, false, ""
 	}
-	return false, true, n.ID
+	return false, true, stored.ID
 }
 
 // stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and

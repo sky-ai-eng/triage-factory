@@ -41,14 +41,14 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "drain")
 
-		first := &domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"}
-		if err := store.AppendSystem(ctx, orgID, first); err != nil {
+		first, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "first"})
+		if err != nil {
 			t.Fatalf("append first: %v", err)
 		}
 		if first.ID == "" {
-			t.Error("AppendSystem must mint and write back an id")
+			t.Error("AppendSystem must return a row with a minted id")
 		}
-		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "second"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "second"}); err != nil {
 			t.Fatalf("append second: %v", err)
 		}
 
@@ -100,7 +100,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		store, orgID, seed := mk(t)
 		convA := seed.Conversation(t, "iso-a")
 		convB := seed.Conversation(t, "iso-b")
-		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: convA, Producer: "p", Body: "for-A"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: convA, Producer: "p", Body: "for-A"}); err != nil {
 			t.Fatalf("append A: %v", err)
 		}
 		got, err := store.FlushPendingSystem(ctx, orgID, convB)
@@ -125,8 +125,8 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "withdraw")
 
-		doomed := &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "withdrawn"}
-		if err := store.AppendSystem(ctx, orgID, doomed); err != nil {
+		doomed, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "withdrawn"})
+		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
 		if err := store.DeleteSystem(ctx, orgID, doomed.ID); err != nil {
@@ -141,7 +141,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		}
 
 		// The withdrawal is per-row: a note staged afterwards flushes normally.
-		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "survivor"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "survivor"}); err != nil {
 			t.Fatalf("append survivor: %v", err)
 		}
 		got, err = store.FlushPendingSystem(ctx, orgID, conversationID)
@@ -162,7 +162,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 	t.Run("Conversation_delete_cascades_pending_notes", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")
-		if err := store.AppendSystem(ctx, orgID, &domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "doomed"}); err != nil {
+		if _, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{ConversationID: conversationID, Producer: "p", Body: "doomed"}); err != nil {
 			t.Fatalf("append: %v", err)
 		}
 		seed.DeleteConversation(t, conversationID)
@@ -177,5 +177,53 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 		if len(got) != 0 {
 			t.Errorf("staged injections survived conversation deletion (cascade did not fire): %+v", got)
 		}
+	})
+}
+
+// StagedInjectionReturnedRowFactory hands the returned-row-only conformance
+// arm a wired store, the orgID to pass, and a conversation id the FK can
+// point at — already seeded by the caller, since this arm doesn't own the
+// seed/delete lifecycle RunStagedInjectionStoreConformance does.
+type StagedInjectionReturnedRowFactory func(t *testing.T) (store db.StagedInjectionStore, orgID, conversationID string)
+
+// RunStagedInjectionReturnedRowConformance covers the returned-row standard
+// (TFAC-869) on AppendSystem. StagedInjectionStore has no plain point read —
+// FlushPendingSystem, its only other read, is destructive — so the "point
+// read" this arm compares against is a flush called immediately after one
+// Append on a conversation with nothing else staged: one row went in, one row
+// must come out, and it must be the row Append reported back.
+func RunStagedInjectionReturnedRowConformance(t *testing.T, mk StagedInjectionReturnedRowFactory) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("AppendSystem_returns_the_stored_row", func(t *testing.T) {
+		store, orgID, conversationID := mk(t)
+
+		appended, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+			ConversationID: conversationID,
+			Producer:       domain.StagedInjectionProducerPRNewCommits,
+			Body:           "returned-row check",
+		})
+		if err != nil {
+			t.Fatalf("AppendSystem: %v", err)
+		}
+		if appended.ID == "" {
+			t.Error("AppendSystem must return a row with a minted id")
+		}
+		if appended.CreatedAt.IsZero() {
+			t.Error("AppendSystem must return a row with created_at stamped")
+		}
+
+		read := func() (*domain.StagedInjection, error) {
+			rows, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+			if err != nil {
+				return nil, err
+			}
+			if len(rows) == 0 {
+				return nil, nil
+			}
+			return &rows[0], nil
+		}
+		AssertWriteReturnedStoredRow(t, "AppendSystem", appended, read)
 	})
 }
