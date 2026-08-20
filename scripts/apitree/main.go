@@ -74,17 +74,21 @@ type route struct {
 // registrars maps a call's selector text to what mounting through it means.
 // Anything not named here is not a route registration.
 var registrars = map[string]authClass{
-	"s.api":              classSession,
-	"api.API":            classSession,
-	"s.apiMutating":      classMutating,
-	"api.APIMutating":    classMutating,
-	"s.mux.Handle":       classRaw,
-	"s.mux.HandleFunc":   classRaw,
-	"mux.Handle":         classRaw,
-	"mux.HandleFunc":     classRaw,
-	"s.public":           classRaw,
-	"api.Public":         classRaw,
-	"api.PublicMutating": classRaw,
+	"s.api":            classSession,
+	"api.API":          classSession,
+	"s.apiMutating":    classMutating,
+	"api.APIMutating":  classMutating,
+	"s.mux.Handle":     classRaw,
+	"s.mux.HandleFunc": classRaw,
+	"mux.Handle":       classRaw,
+	"mux.HandleFunc":   classRaw,
+	// ExtensionAPI.Raw mounts straight onto the mux with no session wrapper —
+	// it is how an ee installer registers a pre-auth endpoint (SSO discovery)
+	// or a signature-authenticated webhook receiver (Slack). Exactly the
+	// routes the "!" mark exists to surface, so omitting it was worst where
+	// the tool claims to be most useful. TestRegistrarsCoverExtensionAPI is
+	// the guard against the next one going the same way.
+	"api.Raw": classRaw,
 }
 
 func main() {

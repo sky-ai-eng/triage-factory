@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +21,9 @@ func routes() {
 	s.apiMutating("POST /api/things/list", nil)
 	s.mux.HandleFunc("GET /health", nil)
 	api.API("GET /api/fleet/overview", nil)
+	// An ee installer's pre-auth mount: no session wrapper, authenticated by
+	// a signature or not at all. The class of route the "!" mark is for.
+	api.Raw("POST /api/webhooks/thing/{org_id}", api.SignedWebhookRateLimit(nil))
 	// A registration wrapped across lines is still a registration.
 	s.api(
 		"GET /api/things/by-name/{name}",
@@ -54,7 +60,10 @@ func TestParseFileFindsEveryIdiomAndNothingElse(t *testing.T) {
 		"/health":                    classRaw,
 		"/api/fleet/overview":        classSession,
 		"/api/things/by-name/{name}": classSession,
-		"/api/":                      classRaw,
+		// Mounted through ExtensionAPI.Raw — no session wrapper, which is the
+		// whole reason it has to be found.
+		"/api/webhooks/thing/{org_id}": classRaw,
+		"/api/":                        classRaw,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("found %d routes, want %d: %+v", len(got), len(want), got)
@@ -131,6 +140,74 @@ func TestDescribeReadsBeforeWritesAndNamesOnlyForeignPackages(t *testing.T) {
 	if !strings.Contains(ee, "~ ee/fleet") {
 		t.Errorf("describe = %q, want it to name the installing package", ee)
 	}
+}
+
+// TestRegistrarsCoverExtensionAPI is the drift guard. `registrars` is a hand-
+// written list, and the first thing it got wrong was omitting ExtensionAPI.Raw
+// — so two ee routes (SSO discovery, the Slack webhook receiver) were missing
+// from the surface with nothing to say so. Read the interface itself and
+// require every mounting method to be listed: a method whose first parameter
+// is the mux pattern and whose second is an http handler mounts routes, and if
+// this tool cannot see it the output is a quiet lie rather than an error.
+func TestRegistrarsCoverExtensionAPI(t *testing.T) {
+	const decl = "../../internal/server/extension.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, decl, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", decl, err)
+	}
+
+	var iface *ast.InterfaceType
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "ExtensionAPI" {
+			return true
+		}
+		iface, _ = ts.Type.(*ast.InterfaceType)
+		return false
+	})
+	if iface == nil {
+		t.Fatalf("no ExtensionAPI interface in %s — did it move?", decl)
+	}
+
+	found := 0
+	for _, m := range iface.Methods.List {
+		fn, ok := m.Type.(*ast.FuncType)
+		if !ok || len(m.Names) != 1 || fn.Params == nil || len(fn.Params.List) != 2 {
+			continue
+		}
+		if !isIdent(fn.Params.List[0].Type, "string") {
+			continue
+		}
+		if !isHTTPHandler(fn.Params.List[1].Type) {
+			continue
+		}
+		found++
+		name := "api." + m.Names[0].Name
+		if _, ok := registrars[name]; !ok {
+			t.Errorf("ExtensionAPI.%s mounts routes but %q is not in registrars — every route it registers is silently absent from the output",
+				m.Names[0].Name, name)
+		}
+	}
+	// If the shape check ever stops matching, the loop above passes vacuously.
+	if found < 3 {
+		t.Fatalf("matched %d mounting methods, expected at least 3 (API, APIMutating, Raw) — the signature check has drifted", found)
+	}
+}
+
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
+}
+
+// isHTTPHandler matches http.Handler and http.HandlerFunc, the two second
+// parameters a mux mount takes.
+func isHTTPHandler(e ast.Expr) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || !isIdent(sel.X, "http") {
+		return false
+	}
+	return sel.Sel.Name == "Handler" || sel.Sel.Name == "HandlerFunc"
 }
 
 func keysOf(n *node) []string {
