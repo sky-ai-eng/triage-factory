@@ -260,7 +260,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 			// Advance the claim into the setup phase the dispatcher would
 			// have recorded before the workspace-setup failure fired the
 			// requeue.
-			if err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, org, "rqs-conv-0", phase); err != nil {
+			if _, err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, org, "rqs-conv-0", phase); err != nil {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 

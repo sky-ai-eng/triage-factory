@@ -876,7 +876,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 			// Advance the claim into the setup phase the dispatcher would
 			// have recorded before the workspace-setup failure fired the
 			// requeue.
-			if err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase); err != nil {
+			if _, err := stores.Conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase); err != nil {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 

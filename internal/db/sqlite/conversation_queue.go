@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -883,25 +884,56 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
 	var out []domain.ExecutorClaim
 	for rows.Next() {
-		var c domain.ExecutorClaim
-		var releasedAt sql.NullTime
-		var peakMem, cpuUsec sql.NullInt64
-		if err := rows.Scan(
-			&c.ID, &c.OrgID, &c.ConversationID,
-			&c.ClaimedAt, &releasedAt, &c.Outcome,
-			&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
-		); err != nil {
+		c, err := scanOneExecutorClaim(rows)
+		if err != nil {
 			return nil, err
 		}
-		if releasedAt.Valid {
-			v := releasedAt.Time
-			c.ReleasedAt = &v
-		}
-		c.PeakMemMB = intPtrFromNull(peakMem)
-		c.CPUUsec = int64PtrFromNull(cpuUsec)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// executorClaimScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanOneExecutorClaim serves the multi-row read above and the single-row
+// RETURNING reads on ConversationStore's claims-row writes (executorClaimCols
+// order — see the RETURNING-safe mirror in conversation.go) without
+// duplicating the column layout.
+type executorClaimScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
+	var c domain.ExecutorClaim
+	var releasedAt sql.NullTime
+	var peakMem, cpuUsec sql.NullInt64
+	if err := row.Scan(
+		&c.ID, &c.OrgID, &c.ConversationID,
+		&c.ClaimedAt, &releasedAt, &c.Outcome,
+		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+	); err != nil {
+		return domain.ExecutorClaim{}, err
+	}
+	if releasedAt.Valid {
+		v := releasedAt.Time
+		c.ReleasedAt = &v
+	}
+	c.PeakMemMB = intPtrFromNull(peakMem)
+	c.CPUUsec = int64PtrFromNull(cpuUsec)
+	return c, nil
+}
+
+// scanSqliteExecutorClaimRow scans a single RETURNING row into a
+// domain.ExecutorClaim, or (nil, nil) on sql.ErrNoRows — the guard-declined
+// shape every claims-row write in conversation.go uses for "nothing matched".
+func scanSqliteExecutorClaimRow(row *sql.Row) (*domain.ExecutorClaim, error) {
+	c, err := scanOneExecutorClaim(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &c, nil
 }
 
 func scanSqliteConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming, error) {

@@ -1023,17 +1023,26 @@ func (s *conversationQueueStore) RecentConversationTimingsForOrgSystem(ctx conte
 	return scanConversationTimings(rows)
 }
 
+// executorClaimSelectCols is the column list both operator claim reads and
+// ConversationStore's claims-row writes (conversation.go) project, so they
+// can never drift into disagreeing about the same row's shape. Split from its
+// FROM clause below: the reads select from the live `claims` table, while a
+// converted write selects from the `updated` CTE its own RETURNING produced —
+// same columns, different row source.
+const executorClaimSelectCols = `
+	c.id::text, c.org_id::text, c.conversation_id::text,
+	c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
+	c.peak_mem_mb, c.cpu_usec,
+	COALESCE(v.status, CASE WHEN c.released_at IS NULL THEN 'running' ELSE 'queued' END, ''),
+	COALESCE(v.failure_kind, '')`
+
 // executorClaimCols is the shared projection behind both operator claim reads,
 // so the per-executor list and the single-claim lookup can never drift into
 // disagreeing about the same row. LEFT JOIN on the conversation: the claim is
 // the subject here, and a claim whose conversation is gone must still report
 // its measured cost rather than vanishing from the box's occupancy.
 const executorClaimCols = `
-	SELECT c.id::text, c.org_id::text, c.conversation_id::text,
-	       c.claimed_at, c.released_at, COALESCE(c.outcome, ''),
-	       c.peak_mem_mb, c.cpu_usec,
-	       COALESCE(v.status, CASE WHEN c.released_at IS NULL THEN 'running' ELSE 'queued' END, ''),
-	       COALESCE(v.failure_kind, '')
+	SELECT ` + executorClaimSelectCols + `
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
 
@@ -1078,25 +1087,56 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 func scanExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {
 	var out []domain.ExecutorClaim
 	for rows.Next() {
-		var c domain.ExecutorClaim
-		var releasedAt sql.NullTime
-		var peakMem, cpuUsec sql.NullInt64
-		if err := rows.Scan(
-			&c.ID, &c.OrgID, &c.ConversationID,
-			&c.ClaimedAt, &releasedAt, &c.Outcome,
-			&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
-		); err != nil {
+		c, err := scanOneExecutorClaim(rows)
+		if err != nil {
 			return nil, err
 		}
-		if releasedAt.Valid {
-			v := releasedAt.Time
-			c.ReleasedAt = &v
-		}
-		c.PeakMemMB = intPtrFromNull(peakMem)
-		c.CPUUsec = int64PtrFromNull(cpuUsec)
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// executorClaimScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanOneExecutorClaim serves the multi-row read above and the single-row
+// RETURNING reads on ConversationStore's claims-row writes (conversation.go)
+// off one column layout (executorClaimSelectCols).
+type executorClaimScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
+	var c domain.ExecutorClaim
+	var releasedAt sql.NullTime
+	var peakMem, cpuUsec sql.NullInt64
+	if err := row.Scan(
+		&c.ID, &c.OrgID, &c.ConversationID,
+		&c.ClaimedAt, &releasedAt, &c.Outcome,
+		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+	); err != nil {
+		return domain.ExecutorClaim{}, err
+	}
+	if releasedAt.Valid {
+		v := releasedAt.Time
+		c.ReleasedAt = &v
+	}
+	c.PeakMemMB = intPtrFromNull(peakMem)
+	c.CPUUsec = int64PtrFromNull(cpuUsec)
+	return c, nil
+}
+
+// scanExecutorClaimRow scans a single RETURNING executorClaimSelectCols row
+// into a domain.ExecutorClaim, or (nil, nil) on sql.ErrNoRows — the
+// guard-declined shape every claims-row write in conversation.go uses for
+// "nothing matched".
+func scanExecutorClaimRow(row *sql.Row) (*domain.ExecutorClaim, error) {
+	c, err := scanOneExecutorClaim(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &c, nil
 }
 
 func scanConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming, error) {

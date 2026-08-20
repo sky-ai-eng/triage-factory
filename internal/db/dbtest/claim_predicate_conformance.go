@@ -517,14 +517,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				// copy of it: a phase added in Go and never taught to a store
 				// fails here, on both dialects.
 				for _, phase := range domain.AllClaimPhases() {
-					if err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, phase); err != nil {
+					if _, err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, phase); err != nil {
 						t.Fatalf("set phase %s: %v", phase, err)
 					}
 					if st := h.DisplayStatus(t, convID); st != phase {
 						t.Errorf("phase %s displays %q, want the phase itself", phase, st)
 					}
 				}
-				if err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, ""); err != nil {
+				if _, err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, ""); err != nil {
 					t.Fatalf("clear phase: %v", err)
 				}
 				if st := h.DisplayStatus(t, convID); st != "running" {

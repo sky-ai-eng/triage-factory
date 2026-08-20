@@ -64,134 +64,166 @@ func releaseActiveClaim(ctx context.Context, q queryer, conversationID, outcome 
 	return err
 }
 
-func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// completeConversationReturning does the terminal write Complete/CompleteSystem/
+// CompleteForClaimSystem all share, in the order the RETURNING contract needs:
+// the cost lump and the claim release run FIRST, and the conversations flip —
+// with the full Get-shaped RETURNING — runs LAST. The derived columns
+// (total_cost_usd, duration_ms, num_turns, executor_id) are correlated
+// subqueries over messages/claims, so the only way their values in the
+// returned row agree with a follow-up Get is for those tables to already
+// carry their final state by the time this statement runs. Same final
+// persisted data as the original top-to-bottom order — only the statement
+// order within the transaction changed.
+func completeConversationReturning(ctx context.Context, q queryer, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	// The active claim this terminal write releases identifies the
+	// engagement's own message rows (they insert claim-stamped), so
+	// the lump settles claim-keyed — the curator turn release's shape.
+	// Read before the release below: a released claim is no longer
+	// findable.
+	var claimID string
+	err := q.QueryRowContext(ctx, `
+		SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
+	`, conversationID).Scan(&claimID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
-	// The conversation carries no accounting cache: cost settles as one
-	// lump on the invocation's own newest ledger row, and the reported
-	// duration/turns telemetry rides the claim release. A resume's
-	// Complete stamps its own invocation's lump on its own row, so
-	// nothing accumulates or doubles.
-	return inTx(ctx, s.q, func(q queryer) error {
-		_, err := q.ExecContext(ctx, `
-			UPDATE conversations
-			SET status = ?,
-			    completed_at = ?,
-			    result_summary = ?,
-			    outcome = ?,
-			    outcome_reason = ?,
-			    failure_kind = ?
-			WHERE id = ?
-		`, status, time.Now().UTC(), resultSummary,
-			nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
-			conversationID)
+	settled := false
+	// A zero lump settles nothing, in either arm. Zero means the runtime
+	// had nothing to report at terminal time: the native loop settles
+	// spend per assistant row as it goes, and overwriting its newest
+	// stamp with 0 would erase real recorded dollars. An SDK invocation
+	// that reports zero leaves its rows NULL — price unknown — rather
+	// than asserting the run was genuinely free.
+	if claimID != "" && costUSD != 0 {
+		// Overwrite, not add: the engagement's newest claim-attributed
+		// row is its own fresh row, and the lump is that invocation's
+		// whole total. Runtime-composed rows are skipped as targets —
+		// an errored or interrupted invocation ends on one, and
+		// settling there would bill the whole invocation to a model
+		// that never ran. An engagement whose rows are all synthetic
+		// falls through to the conversation-wide arm below.
+		//
+		// Among what's left, a row that names a model wins over one
+		// that names none (a user or tool row) however much newer the
+		// latter is: only the first keeps the lump in the per-model
+		// breakdown, and this engagement did run that model. NULL is
+		// not "some other model" here — the comparison has to test IS
+		// NOT NULL explicitly, since every <> test against the
+		// sentinel admits NULL rows into the same tier as real ones.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = ?
+			WHERE conversation_id = ?
+			  AND id = (SELECT id FROM messages
+			            WHERE claim_id = ? AND (model IS NULL OR model <> ?)
+			            ORDER BY (model IS NOT NULL AND model <> ?) DESC, id DESC
+			            LIMIT 1)
+		`, costUSD, conversationID, claimID, domain.ModelSynthetic, domain.ModelSynthetic)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		settled = n > 0
+	}
+	if !settled && costUSD != 0 {
+		// An invocation can bill real tokens while streaming zero rows
+		// of its own (system-prompt/cache overhead on an errored run),
+		// and the messages ledger is the only spend record — so the
+		// lump settles on the conversation's newest existing row rather
+		// than being dropped. ADDITIVE, unlike the overwrite above: that
+		// row may already carry an earlier invocation's lump. The caveat:
+		// a rowless resume's spend lands on an older invocation's row —
+		// totals stay exact, per-row time attribution smears; accepted
+		// for this narrow corner.
+		//
+		// The ORDER BY ranks rows in three tiers, newest-first within
+		// each, and takes the first: a row naming a real model, else
+		// one naming no model (a user or tool row), else a
+		// runtime-composed one. Both keys are needed — the first alone
+		// would tie NULL with real, the second alone would tie NULL
+		// with synthetic. The bottom tier keeps the dollars on the
+		// ledger when a conversation is nothing but synthetic rows; the
+		// model breakdowns exclude them, so the spend shows in the
+		// totals without inventing a model.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + ?
+			WHERE conversation_id = ?
+			  AND id = (SELECT id FROM messages
+			            WHERE conversation_id = ?
+			            ORDER BY (model IS NOT NULL AND model <> ?) DESC,
+			                     (model IS NULL OR model <> ?) DESC,
+			                     id DESC
+			            LIMIT 1)
+		`, costUSD, conversationID, conversationID, domain.ModelSynthetic, domain.ModelSynthetic)
+		if err != nil {
+			return nil, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			// No message rows at all: the spend has no ledger row to
+			// live on. Loud, so the dropped dollars are at least
+			// observable.
+			conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
+				"conversation_id", conversationID, "cost_usd", costUSD)
+		}
+	}
+	if _, err := q.ExecContext(ctx, `
+		UPDATE claims SET released_at = ?, outcome = ?, duration_ms = ?, num_turns = ?
+		WHERE conversation_id = ? AND released_at IS NULL
+	`, time.Now().UTC(), claimOutcomeForStatus(status), durationMs, numTurns, conversationID); err != nil {
+		return nil, err
+	}
+
+	// The flip and its RETURNING run LAST — see the doc comment above — so
+	// the derived columns it returns already reflect the settlement and
+	// release just above.
+	row := q.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET status = ?,
+		    completed_at = ?,
+		    result_summary = ?,
+		    outcome = ?,
+		    outcome_reason = ?,
+		    failure_kind = ?
+		WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, status, time.Now().UTC(), resultSummary,
+		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
+		conversationID)
+	var r domain.Conversation
+	if err := scanConversation(row, &r); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrNoSuchConversation
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+// Complete settles the terminal write on the caller's own transaction — see
+// completeConversationReturning for the shared logic and why the statement
+// order inside it matters.
+func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	var result *domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
+		r, err := completeConversationReturning(ctx, q, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 		if err != nil {
 			return err
 		}
-		// The active claim this terminal write releases identifies the
-		// engagement's own message rows (they insert claim-stamped), so
-		// the lump settles claim-keyed — the curator turn release's shape.
-		// Read before the release below: a released claim is no longer
-		// findable.
-		var claimID string
-		err = q.QueryRowContext(ctx, `
-			SELECT id FROM claims WHERE conversation_id = ? AND released_at IS NULL
-		`, conversationID).Scan(&claimID)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		settled := false
-		// A zero lump settles nothing, in either arm. Zero means the runtime
-		// had nothing to report at terminal time: the native loop settles
-		// spend per assistant row as it goes, and overwriting its newest
-		// stamp with 0 would erase real recorded dollars. An SDK invocation
-		// that reports zero leaves its rows NULL — price unknown — rather
-		// than asserting the run was genuinely free.
-		if claimID != "" && costUSD != 0 {
-			// Overwrite, not add: the engagement's newest claim-attributed
-			// row is its own fresh row, and the lump is that invocation's
-			// whole total. Runtime-composed rows are skipped as targets —
-			// an errored or interrupted invocation ends on one, and
-			// settling there would bill the whole invocation to a model
-			// that never ran. An engagement whose rows are all synthetic
-			// falls through to the conversation-wide arm below.
-			//
-			// Among what's left, a row that names a model wins over one
-			// that names none (a user or tool row) however much newer the
-			// latter is: only the first keeps the lump in the per-model
-			// breakdown, and this engagement did run that model. NULL is
-			// not "some other model" here — the comparison has to test IS
-			// NOT NULL explicitly, since every <> test against the
-			// sentinel admits NULL rows into the same tier as real ones.
-			res, err := q.ExecContext(ctx, `
-				UPDATE messages SET cost_usd = ?
-				WHERE conversation_id = ?
-				  AND id = (SELECT id FROM messages
-				            WHERE claim_id = ? AND (model IS NULL OR model <> ?)
-				            ORDER BY (model IS NOT NULL AND model <> ?) DESC, id DESC
-				            LIMIT 1)
-			`, costUSD, conversationID, claimID, domain.ModelSynthetic, domain.ModelSynthetic)
-			if err != nil {
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			settled = n > 0
-		}
-		if !settled && costUSD != 0 {
-			// An invocation can bill real tokens while streaming zero rows
-			// of its own (system-prompt/cache overhead on an errored run),
-			// and the messages ledger is the only spend record — so the
-			// lump settles on the conversation's newest existing row rather
-			// than being dropped. ADDITIVE, unlike the overwrite above: that
-			// row may already carry an earlier invocation's lump. The caveat:
-			// a rowless resume's spend lands on an older invocation's row —
-			// totals stay exact, per-row time attribution smears; accepted
-			// for this narrow corner.
-			//
-			// The ORDER BY ranks rows in three tiers, newest-first within
-			// each, and takes the first: a row naming a real model, else
-			// one naming no model (a user or tool row), else a
-			// runtime-composed one. Both keys are needed — the first alone
-			// would tie NULL with real, the second alone would tie NULL
-			// with synthetic. The bottom tier keeps the dollars on the
-			// ledger when a conversation is nothing but synthetic rows; the
-			// model breakdowns exclude them, so the spend shows in the
-			// totals without inventing a model.
-			res, err := q.ExecContext(ctx, `
-				UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + ?
-				WHERE conversation_id = ?
-				  AND id = (SELECT id FROM messages
-				            WHERE conversation_id = ?
-				            ORDER BY (model IS NOT NULL AND model <> ?) DESC,
-				                     (model IS NULL OR model <> ?) DESC,
-				                     id DESC
-				            LIMIT 1)
-			`, costUSD, conversationID, conversationID, domain.ModelSynthetic, domain.ModelSynthetic)
-			if err != nil {
-				return err
-			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n == 0 {
-				// No message rows at all: the spend has no ledger row to
-				// live on. Loud, so the dropped dollars are at least
-				// observable.
-				conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
-					"conversation_id", conversationID, "cost_usd", costUSD)
-			}
-		}
-		_, err = q.ExecContext(ctx, `
-			UPDATE claims SET released_at = ?, outcome = ?, duration_ms = ?, num_turns = ?
-			WHERE conversation_id = ? AND released_at IS NULL
-		`, time.Now().UTC(), claimOutcomeForStatus(status), durationMs, numTurns, conversationID)
-		return err
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *conversationStore) ParkOpen(ctx context.Context, orgID, conversationID string, park db.Park) (bool, error) {
@@ -291,28 +323,62 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 	return flipped, err
 }
 
-func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// scanConversationReturning maps a RETURNING sqliteConversationReturningColumns
+// row into a domain.Conversation, or ErrNoSuchConversation on sql.ErrNoRows —
+// the shared miss mapping every conversations-row write below uses.
+func scanConversationReturning(row *sql.Row) (*domain.Conversation, error) {
+	var r domain.Conversation
+	if err := scanConversation(row, &r); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrNoSuchConversation
+		}
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE conversations SET sdk_session_id = ? WHERE id = ?
-	`, sessionID, conversationID)
-	return err
+	return &r, nil
 }
+
+func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	row := s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET sdk_session_id = ? WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, sessionID, conversationID)
+	return scanConversationReturning(row)
+}
+
+// sqliteClaimReturningColumns is executorClaimCols' (conversation_queue.go)
+// RETURNING-safe mirror, same column order, feeding scanOneExecutorClaim
+// unchanged: SQLite's RETURNING clause forbids the LEFT JOIN executorClaimCols
+// uses, so the conversation's raw status/failure_kind become correlated
+// scalar subqueries against the bare `claims` table name instead — the same
+// RETURNING-clause restriction sqliteConversationReturningColumns exists for.
+// Used by every claims-row write below (SetExecutorSystem, SetClaimPhaseSystem,
+// SetActiveClaimPhaseSystem, RecordClaimSandboxStatsSystem and their
+// ForClaimSystem twins) as `RETURNING ` + sqliteClaimReturningColumns.
+const sqliteClaimReturningColumns = `
+	id, org_id, conversation_id, claimed_at, released_at, COALESCE(outcome, ''),
+	peak_mem_mb, cpu_usec,
+	COALESCE(
+		(SELECT v.status FROM conversations v WHERE v.id = claims.conversation_id),
+		CASE WHEN released_at IS NULL THEN 'running' ELSE 'queued' END,
+		''),
+	COALESCE((SELECT v.failure_kind FROM conversations v WHERE v.id = claims.conversation_id), '')
+`
 
 // SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
 // released claim's phase is inert history, and a conversation with no live
-// engagement has no sub-state to record — both fall through as a no-op.
-func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error {
+// engagement has no sub-state to record — both fall through as a no-op,
+// (nil, nil), the guard declining.
+func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE claims SET phase = NULLIF(?, '')
 		WHERE conversation_id = ? AND released_at IS NULL
-	`, phase, conversationID)
-	return err
+		RETURNING `+sqliteClaimReturningColumns, phase, conversationID)
+	return scanSqliteExecutorClaimRow(row)
 }
 
 // newestEngagementFirstSQL orders one conversation's claims by how recently
@@ -367,57 +433,74 @@ func (s *conversationStore) PriorClaimExecutorSystem(ctx context.Context, orgID,
 // dual-dialect contract (identical behavior, identical conformance
 // assertions), and because "not measured" has to be a value the local
 // schema can hold rather than a mode branch at every write.
-func (s *conversationStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error {
+func (s *conversationStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE claims SET peak_mem_mb = ?, cpu_usec = ? WHERE id = ?
-	`, sqliteNullInt(peakMemMB), sqliteNullInt64(cpuUsec), claimID)
-	return err
+		RETURNING `+sqliteClaimReturningColumns, sqliteNullInt(peakMemMB), sqliteNullInt64(cpuUsec), claimID)
+	return scanSqliteExecutorClaimRow(row)
 }
 
-func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE conversations SET worktree_path = ? WHERE id = ?`, path, conversationID)
-	return err
+	row := s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET worktree_path = ? WHERE id = ?
+		RETURNING `+sqliteConversationReturningColumns, path, conversationID)
+	return scanConversationReturning(row)
 }
 
-func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) error {
+func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	// An empty executorID keeps the legacy clear semantics: the live
-	// engagement is over, so its claim releases as requeued.
+	// engagement is over, so its claim releases as requeued. Written out
+	// rather than routed through the shared releaseActiveClaim helper (which
+	// ParkOpen/MarkFailedIfActive also use, unconverted) so this arm can
+	// RETURNING the row it just released.
 	if executorID == "" {
-		return releaseActiveClaim(ctx, s.q, conversationID, "requeued")
+		row := s.q.QueryRowContext(ctx, `
+			UPDATE claims SET released_at = ?, outcome = 'requeued'
+			WHERE conversation_id = ? AND released_at IS NULL
+			RETURNING `+sqliteClaimReturningColumns, time.Now().UTC(), conversationID)
+		return scanSqliteExecutorClaimRow(row)
 	}
 	// Idempotent go-live confirmation: update the active claim's identity
 	// if one exists, mint one if none does — the live process must never
 	// run unattributed.
-	return inTx(ctx, s.q, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.q, func(q queryer) error {
+		row := q.QueryRowContext(ctx, `
 			UPDATE claims SET executor_id = ?, boot_epoch = ?
 			WHERE conversation_id = ? AND released_at IS NULL
-		`, executorID, bootEpoch, conversationID)
+			RETURNING `+sqliteClaimReturningColumns, executorID, bootEpoch, conversationID)
+		claim, err := scanSqliteExecutorClaimRow(row)
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n > 0 {
+		if claim != nil {
+			result = claim
 			return nil
 		}
-		_, err = q.ExecContext(ctx, `
+		row = q.QueryRowContext(ctx, `
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, uuid.New().String(), orgID, conversationID, executorID, bootEpoch, time.Now().UTC())
-		return err
+			RETURNING `+sqliteClaimReturningColumns, uuid.New().String(), orgID, conversationID, executorID, bootEpoch, time.Now().UTC())
+		claim, err = scanSqliteExecutorClaimRow(row)
+		if err != nil {
+			return err
+		}
+		result = claim
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *conversationStore) MarkFailedIfActive(ctx context.Context, orgID, conversationID, failureKind string) (bool, error) {
@@ -512,6 +595,63 @@ const sqliteDisplayStatusSQL = `COALESCE(
 		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)
 		     THEN 'queued' END,
 		r.status,
+		'')`
+
+// sqliteConversationReturningColumns is sqliteConversationColumns' RETURNING-safe
+// mirror: the same column list, in the same order, so it feeds scanConversation
+// unchanged, but rewritten for a context that forbids what sqliteConversationColumns
+// depends on. SQLite's RETURNING clause admits no FROM/JOIN and no alias on the
+// table being written (verified: `UPDATE conversations AS r ... RETURNING r.id`
+// fails to resolve `r`), only scalar expressions against the row's own columns
+// referenced by the bare table name — so every `r.` becomes unqualified, and the
+// two LEFT JOIN-derived fields (memory_missing, actor_agent_name) become
+// correlated scalar subqueries against the bare table name, which SQLite does
+// allow inside RETURNING. A conversation_memory/agents row that doesn't exist
+// makes the subquery itself yield NULL, matching what the LEFT JOIN yields today.
+//
+// Used by every conversations-row write below (Complete, SetSession,
+// SetWorktreePath and their System/ForClaimSystem twins) as `RETURNING ` +
+// sqliteConversationReturningColumns, always as the LAST statement of its
+// transaction — see completeConversationReturning for why order matters here.
+const sqliteConversationReturningColumns = `
+	id, COALESCE(task_id, ''), COALESCE(runtime, ''),
+	` + sqliteReturningDisplayStatusSQL + `,
+	model, started_at, queued_at,
+	(SELECT MAX(cl.claimed_at) FROM claims cl WHERE cl.conversation_id = conversations.id) AS claimed_at,
+	completed_at,
+	(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = conversations.id)     AS total_cost_usd,
+	(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = conversations.id) AS duration_ms,
+	(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = conversations.id)   AS num_turns,
+	park_reason, worktree_path,
+	result_summary, outcome, outcome_reason, failure_kind, sdk_session_id, actor_agent_id,
+	COALESCE(trigger_type, ''),
+	creator_user_id,
+	COALESCE(team_id, ''),
+	(SELECT cl.executor_id FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL) AS executor_id,
+	(SELECT COUNT(*) FROM claims cl WHERE cl.conversation_id = conversations.id) AS attempts,
+	blueprint_run_id, blueprint_step_index,
+	(SELECT COALESCE(SUM(m.input_tokens), 0)          FROM messages m WHERE m.conversation_id = conversations.id) AS input_tokens,
+	(SELECT COALESCE(SUM(m.output_tokens), 0)         FROM messages m WHERE m.conversation_id = conversations.id) AS output_tokens,
+	(SELECT COALESCE(SUM(m.cache_read_tokens), 0)     FROM messages m WHERE m.conversation_id = conversations.id) AS cache_read_tokens,
+	(SELECT COALESCE(SUM(m.cache_creation_tokens), 0) FROM messages m WHERE m.conversation_id = conversations.id) AS cache_creation_tokens,
+	(NULLIF(TRIM((SELECT rm.agent_content FROM conversation_memory rm WHERE rm.conversation_id = conversations.id),
+	              ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
+	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name
+`
+
+// sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
+// the bare `conversations` table name for the same RETURNING-clause reason
+// sqliteConversationReturningColumns exists — see that constant's doc.
+const sqliteReturningDisplayStatusSQL = `COALESCE(
+		(SELECT cl_d.phase FROM claims cl_d WHERE cl_d.conversation_id = conversations.id AND cl_d.released_at IS NULL),
+		CASE WHEN EXISTS (SELECT 1 FROM claims cl_a WHERE cl_a.conversation_id = conversations.id AND cl_a.released_at IS NULL) THEN 'running' END,
+		CASE WHEN status IS NULL
+		       OR (status = 'open' AND EXISTS (
+		             SELECT 1 FROM messages m_i
+		             WHERE m_i.conversation_id = conversations.id AND m_i.delivered = 0
+		               AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'))
+		     THEN 'queued' END,
+		status,
 		'')`
 
 func (s *conversationStore) Get(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
@@ -762,7 +902,7 @@ func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, 
 	return orgID, err
 }
 
-func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	return s.Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 }
 
@@ -882,11 +1022,11 @@ func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Cont
 	return exists == 1, nil
 }
 
-func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
+func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return s.SetSession(ctx, orgID, conversationID, sessionID)
 }
 
-func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error) {
 	return s.SetWorktreePath(ctx, orgID, conversationID, path)
 }
 
@@ -925,11 +1065,11 @@ func (s *conversationStore) InsertMessageSystem(ctx context.Context, orgID strin
 // there is none. Neither of those is the fence; both are contract, and
 // delegating would have quietly dropped the caller's claim id on the floor.
 
-func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) error {
+func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
 	return s.SetSession(ctx, orgID, conversationID, sessionID)
 }
 
-func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) error {
+func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
 	return s.SetWorktreePath(ctx, orgID, conversationID, path)
 }
 
@@ -942,7 +1082,7 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 	return s.markDelivered(ctx, orgID, conversationID, ids, subtype)
 }
 
-func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
+func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	return s.Complete(ctx, orgID, conversationID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 }
 
@@ -968,15 +1108,15 @@ func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, c
 // from. The released_at filter is the twin's own, kept for the same reason
 // SetClaimPhaseSystem keeps it — a released claim's identity is settled
 // history, and rewriting it would be a change neither dialect makes.
-func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) error {
+func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE claims SET executor_id = ?, boot_epoch = ?
 		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
-	`, executorID, bootEpoch, claimID, conversationID)
-	return err
+		RETURNING `+sqliteClaimReturningColumns, executorID, bootEpoch, claimID, conversationID)
+	return scanSqliteExecutorClaimRow(row)
 }
 
 // SetClaimPhaseSystem keeps the released_at filter its active-claim sibling
@@ -984,15 +1124,15 @@ func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID
 // call naming one stays the no-op it is today rather than rewriting it. The
 // conversation binds too — it costs nothing and keeps the row this writes
 // from drifting away from the one the caller named.
-func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
+func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE claims SET phase = NULLIF(?, '')
 		WHERE id = ? AND conversation_id = ? AND released_at IS NULL
-	`, phase, claimID, conversationID)
-	return err
+		RETURNING `+sqliteClaimReturningColumns, phase, claimID, conversationID)
+	return scanSqliteExecutorClaimRow(row)
 }
 
 // LastAgentActivityAtSystem returns the created_at of the run's newest non-user
@@ -1192,94 +1332,121 @@ const sqliteMessageColumns = `id, conversation_id, user_id, claim_id, role, cont
 func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 	var messages []domain.Message
 	for rows.Next() {
-		var m domain.Message
-		var userID, claimID sql.NullString
-		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
-		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
-		var costUSD sql.NullFloat64
-		var reasoningStr, contentBlocksStr sql.NullString
-		var delivered bool
-		var windowState string
-		var seq sql.NullFloat64
-		var durationMs sql.NullInt64
-		var stopReason sql.NullString
-
-		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
-			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &stopReason,
-		); err != nil {
+		m, err := scanOneMessage(rows)
+		if err != nil {
 			return nil, err
 		}
-
-		m.UserID = userID.String
-		m.StopReason = stopReason.String
-		m.ClaimID = claimID.String
-		m.Content = content.String
-		m.Subtype = subtype.String
-		m.ToolCallID = toolCallID.String
-		m.Model = model.String
-
-		if toolCallsStr.Valid {
-			_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
-		}
-		if metadataStr.Valid {
-			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
-		}
-		// Unlike tool_calls/metadata above, reasoning/content_blocks are part
-		// of the canonical replay context a native loop reconstructs via
-		// ListForAssembly — a decode failure here must surface, not silently
-		// yield an empty Reasoning/ContentBlocks that looks like "no
-		// reasoning on this message" when the row actually has some.
-		if reasoningStr.Valid {
-			if err := json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning); err != nil {
-				return nil, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
-			}
-		}
-		if contentBlocksStr.Valid {
-			if err := json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks); err != nil {
-				return nil, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
-			}
-		}
-		if inputTok.Valid {
-			v := int(inputTok.Int64)
-			m.InputTokens = &v
-		}
-		if outputTok.Valid {
-			v := int(outputTok.Int64)
-			m.OutputTokens = &v
-		}
-		if cacheReadTok.Valid {
-			v := int(cacheReadTok.Int64)
-			m.CacheReadTokens = &v
-		}
-		if cacheCreateTok.Valid {
-			v := int(cacheCreateTok.Int64)
-			m.CacheCreationTokens = &v
-		}
-		if costUSD.Valid {
-			v := costUSD.Float64
-			m.CostUSD = &v
-		}
-		// Read back the concrete stored value (the column is NOT NULL) —
-		// unlike on insert, nil here would just mean "unknown", which is
-		// never the case for a persisted row.
-		deliveredVal := delivered
-		m.Delivered = &deliveredVal
-		m.WindowState = domain.MessageWindowState(windowState)
-		if seq.Valid {
-			v := seq.Float64
-			m.Seq = &v
-		}
-		if durationMs.Valid {
-			v := int(durationMs.Int64)
-			m.DurationMs = &v
-		}
-
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+// messageScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanOneMessage serves the multi-row read above and single-row RETURNING
+// reads (SettleCompactionRequestForClaimSystem) off one column layout.
+type messageScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOneMessage(row messageScanner) (domain.Message, error) {
+	var m domain.Message
+	var userID, claimID sql.NullString
+	var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
+	var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+	var costUSD sql.NullFloat64
+	var reasoningStr, contentBlocksStr sql.NullString
+	var delivered bool
+	var windowState string
+	var seq sql.NullFloat64
+	var durationMs sql.NullInt64
+	var stopReason sql.NullString
+
+	if err := row.Scan(
+		&m.ID, &m.ConversationID, &userID, &claimID, &m.Role, &content, &subtype, &toolCallsStr,
+		&toolCallID, &m.IsError, &metadataStr, &model,
+		&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
+		&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &stopReason,
+	); err != nil {
+		return domain.Message{}, err
+	}
+
+	m.UserID = userID.String
+	m.StopReason = stopReason.String
+	m.ClaimID = claimID.String
+	m.Content = content.String
+	m.Subtype = subtype.String
+	m.ToolCallID = toolCallID.String
+	m.Model = model.String
+
+	if toolCallsStr.Valid {
+		_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
+	}
+	if metadataStr.Valid {
+		_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
+	}
+	// Unlike tool_calls/metadata above, reasoning/content_blocks are part
+	// of the canonical replay context a native loop reconstructs via
+	// ListForAssembly — a decode failure here must surface, not silently
+	// yield an empty Reasoning/ContentBlocks that looks like "no
+	// reasoning on this message" when the row actually has some.
+	if reasoningStr.Valid {
+		if err := json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning); err != nil {
+			return domain.Message{}, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
+		}
+	}
+	if contentBlocksStr.Valid {
+		if err := json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks); err != nil {
+			return domain.Message{}, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
+		}
+	}
+	if inputTok.Valid {
+		v := int(inputTok.Int64)
+		m.InputTokens = &v
+	}
+	if outputTok.Valid {
+		v := int(outputTok.Int64)
+		m.OutputTokens = &v
+	}
+	if cacheReadTok.Valid {
+		v := int(cacheReadTok.Int64)
+		m.CacheReadTokens = &v
+	}
+	if cacheCreateTok.Valid {
+		v := int(cacheCreateTok.Int64)
+		m.CacheCreationTokens = &v
+	}
+	if costUSD.Valid {
+		v := costUSD.Float64
+		m.CostUSD = &v
+	}
+	// Read back the concrete stored value (the column is NOT NULL) —
+	// unlike on insert, nil here would just mean "unknown", which is
+	// never the case for a persisted row.
+	deliveredVal := delivered
+	m.Delivered = &deliveredVal
+	m.WindowState = domain.MessageWindowState(windowState)
+	if seq.Valid {
+		v := seq.Float64
+		m.Seq = &v
+	}
+	if durationMs.Valid {
+		v := int(durationMs.Int64)
+		m.DurationMs = &v
+	}
+	return m, nil
+}
+
+// scanMessageRow scans a single RETURNING sqliteMessageColumns row into a
+// domain.Message, or ErrNoSuchMessage on sql.ErrNoRows.
+func scanMessageRow(row *sql.Row) (*domain.Message, error) {
+	m, err := scanOneMessage(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrNoSuchMessage
+		}
+		return nil, err
+	}
+	return &m, nil
 }
 
 // Messages is the whole-transcript display read — MessagesSince from the
@@ -1471,6 +1638,12 @@ func (s *conversationStore) markDelivered(ctx context.Context, orgID, conversati
 // CompactForClaimSystem commits one compaction atomically — see the interface
 // doc for the full contract. Unfenced on this dialect like every ForClaim
 // write (see the claim-fence block above); the claim id is attribution.
+//
+// Exempt from the returned-row rule (bare error stays the return type): this
+// writes up to two inserted rows, a batch flip, and a re-seq of every queued
+// row ahead of the result — no single row a return value could name.
+// replyRow/resultRow's assigned IDs are written back to the caller's own
+// pointers, which stands in for "the row it persisted" here.
 func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -1558,20 +1731,20 @@ func scanIntIDs(rows *sql.Rows) ([]int, error) {
 
 // SettleCompactionRequestForClaimSystem records a discarded warm attempt on
 // the request row — see the interface doc. Unfenced on this dialect.
-func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
+func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	row := s.q.QueryRowContext(ctx, `
 		UPDATE messages
 		SET input_tokens = ?, output_tokens = ?,
 		    cache_read_tokens = ?, cache_creation_tokens = ?,
 		    cost_usd = ?,
 		    metadata = json_set(COALESCE(metadata, '{}'), '$.compaction_failure', ?)
 		WHERE conversation_id = ? AND id = ?
-	`, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
+		RETURNING `+sqliteMessageColumns, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
 		sqliteNullFloat(costUSD), reason, conversationID, requestID)
-	return err
+	return scanMessageRow(row)
 }
 
 // SetWindowStateSystem is the elision/compaction primitive: a batched range flip of

@@ -89,8 +89,9 @@ func (t *nativeTranscript) Compact(ctx context.Context, orgID, conversationID st
 }
 
 func (t *nativeTranscript) SettleCompactionRequest(ctx context.Context, orgID, conversationID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
-	return t.spawner.conversations.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
+	_, err := t.spawner.conversations.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, t.claimID,
 		requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason)
+	return err
 }
 
 // spendGuard is the native loop's pre-call spend arm. It reuses the

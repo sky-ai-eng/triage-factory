@@ -30,6 +30,18 @@ func TestConversationStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestConversationStore_SQLite_ReturnedRow runs the returned-row conformance
+// suite (TFAC-861) against the SQLite impl.
+func TestConversationStore_SQLite_ReturnedRow(t *testing.T) {
+	dbtest.RunConversationReturnedRowConformance(t, func(t *testing.T) (db.ConversationStore, db.ConversationQueueStore, string, string, dbtest.ConversationSeeder) {
+		t.Helper()
+		conn := newSQLiteForConversationTest(t)
+		seed := newSQLiteConversationSeeder(conn)
+		stores := sqlitestore.New(conn)
+		return stores.Conversations, stores.ConversationQueue, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, seed
+	})
+}
+
 // newSQLiteForConversationTest opens an in-memory DB, bootstraps the
 // schema, and seeds the local default agent + the conformance
 // prompt. Returned connection is t.Cleanup-closed.

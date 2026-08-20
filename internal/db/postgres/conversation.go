@@ -83,75 +83,90 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 	return err
 }
 
-// Complete pairs the app-pool status flip + cost-lump stamp with an
-// adjacent admin-pool claim release — non-atomic by design; see
-// releaseActiveClaim for why the split is acceptable (the janitor arms make
-// both crash shapes self-healing). The cost stamp rides the app pool: the
-// messages ledger is app-writable (tf_app holds UPDATE) and the row is the
-// caller's own conversation.
-func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
-	if err := completeConversation(ctx, s.q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
-		return err
+// Complete settles the cost lump and claim release on the admin pool FIRST,
+// then flips + RETURNINGs the conversation on the app pool — non-atomic by
+// design; see releaseActiveClaim for why the split is acceptable (the
+// janitor arms make both crash shapes self-healing). The order matters
+// beyond that: updateConversationReturning's derived columns (total_cost_usd,
+// duration_ms, num_turns, executor_id) come from claims/messages, so they
+// only agree with a follow-up Get if those tables already hold this call's
+// writes by the time the flip runs. Each admin-pool statement commits before
+// the next Go call starts, and Postgres's MVCC guarantees any later
+// transaction — including the app-pool flip below, on a different connection
+// entirely — sees a prior commit regardless of which role made it.
+func (s *conversationStore) Complete(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	if err := settleCompletionCostAndClaim(ctx, s.admin, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
+		return nil, err
 	}
-	return releaseActiveClaimWithTelemetry(ctx, s.admin, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
+	return completeConversationFlip(ctx, s.q, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
 }
 
-func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
-		if err := completeConversation(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+func (s *conversationStore) CompleteSystem(ctx context.Context, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := settleCompletionCostAndClaim(ctx, q, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
 			return err
 		}
-		return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
+		r, err := completeConversationFlip(ctx, q, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // CompleteForClaimSystem is CompleteSystem with the fence in front of it, in
-// the same transaction as both the status flip and the release. The claim it
+// the same transaction as both the settlement and the flip. The claim it
 // releases is resolved the same way CompleteSystem resolves it (the
 // conversation's active claim) — which the fence has just proven to be
 // claimID, since only one claim per conversation can be unreleased at a time.
-func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		if err := completeConversation(ctx, q, orgID, conversationID, status, costUSD, resultSummary, outcome, outcomeReason, failureKind); err != nil {
+		if err := settleCompletionCostAndClaim(ctx, q, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
 			return err
 		}
-		return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
+		r, err := completeConversationFlip(ctx, q, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func completeConversation(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, resultSummary, outcome, outcomeReason, failureKind string) error {
-	// The conversation carries no accounting cache — cost settles as one
-	// lump on the invocation's last message row (the ledger) below. A
-	// resume's Complete stamps its own invocation's lump on its own last
-	// row, so nothing accumulates or doubles.
-	_, err := q.ExecContext(ctx, `
-		UPDATE conversations
-		SET status = $1,
-		    completed_at = $2,
-		    result_summary = $3,
-		    outcome = NULLIF($4, ''),
-		    outcome_reason = NULLIF($5, ''),
-		    failure_kind = NULLIF($6, '')
-		WHERE org_id = $7 AND id = $8
-	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
-	if err != nil {
-		return err
-	}
+// settleCompletionCostAndClaim does everything Complete's terminal write
+// needs to happen BEFORE the conversation flip: locate the active claim,
+// settle the cost lump onto the messages ledger, and release the claim with
+// its telemetry. Split out from the conversations UPDATE (completeConversationFlip)
+// specifically so callers can run it first — see Complete's doc for why the
+// order is load-bearing now that the flip RETURNINGs derived columns.
+func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int) error {
 	// The active claim this terminal write releases identifies the
 	// engagement's own message rows (they insert claim-stamped), so the
 	// lump settles claim-keyed — the curator turn release's shape. Read
 	// before the release below: a released claim is no longer findable.
 	var claimID string
-	err = q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		SELECT id FROM claims
 		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
 	`, orgID, conversationID).Scan(&claimID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	settled := false
 	// A zero lump settles nothing, in either arm. Zero means the runtime had
 	// nothing to report at terminal time: the native loop settles spend per
 	// assistant row as it goes, and overwriting its newest stamp with 0 would
@@ -189,56 +204,74 @@ func completeConversation(ctx context.Context, q queryer, orgID, conversationID,
 		if err != nil {
 			return err
 		}
-		if n > 0 {
-			return nil
+		settled = n > 0
+	}
+	if !settled && costUSD != 0 {
+		// An invocation can bill real tokens while streaming zero rows of its
+		// own (system-prompt/cache overhead on an errored run), and the
+		// messages ledger is the only spend record — so the lump settles on the
+		// conversation's newest existing row rather than being dropped. ADDITIVE,
+		// unlike the overwrite above: that row may already carry an earlier
+		// invocation's lump. The caveat: a rowless resume's spend lands on an
+		// older invocation's row — totals stay exact, per-row time attribution
+		// smears; accepted for this narrow corner.
+		//
+		// The ORDER BY ranks rows in three tiers, newest-first within each, and
+		// takes the first: a row naming a real model, else one naming no model
+		// (a user or tool row), else a runtime-composed one. Both keys are
+		// needed — the first alone would tie NULL with real, the second alone
+		// would tie NULL with synthetic — and neither may be written as a bare
+		// <> against the sentinel, which evaluates to NULL (falsy, so the row
+		// sinks a tier) for exactly the NULL rows the middle tier is about.
+		// The bottom tier keeps the dollars on the ledger when a conversation
+		// is nothing but synthetic rows; the model breakdowns exclude them, so
+		// the spend shows in the totals without inventing a model.
+		res, err := q.ExecContext(ctx, `
+			UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
+			WHERE org_id = $2 AND conversation_id = $3
+			  AND id = (SELECT id FROM messages
+			            WHERE org_id = $2 AND conversation_id = $3
+			            ORDER BY (model IS NOT NULL AND model <> $4) DESC,
+			                     (model IS DISTINCT FROM $4) DESC,
+			                     id DESC
+			            LIMIT 1)
+		`, costUSD, orgID, conversationID, domain.ModelSynthetic)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			// No message rows at all: the spend has no ledger row to live on.
+			// Loud, so the dropped dollars are at least observable.
+			conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
+				"conversation_id", conversationID, "org_id", orgID, "cost_usd", costUSD)
 		}
 	}
-	if costUSD == 0 {
-		return nil
-	}
-	// An invocation can bill real tokens while streaming zero rows of its
-	// own (system-prompt/cache overhead on an errored run), and the
-	// messages ledger is the only spend record — so the lump settles on the
-	// conversation's newest existing row rather than being dropped. ADDITIVE,
-	// unlike the overwrite above: that row may already carry an earlier
-	// invocation's lump. The caveat: a rowless resume's spend lands on an
-	// older invocation's row — totals stay exact, per-row time attribution
-	// smears; accepted for this narrow corner.
-	//
-	// The ORDER BY ranks rows in three tiers, newest-first within each, and
-	// takes the first: a row naming a real model, else one naming no model
-	// (a user or tool row), else a runtime-composed one. Both keys are
-	// needed — the first alone would tie NULL with real, the second alone
-	// would tie NULL with synthetic — and neither may be written as a bare
-	// <> against the sentinel, which evaluates to NULL (falsy, so the row
-	// sinks a tier) for exactly the NULL rows the middle tier is about.
-	// The bottom tier keeps the dollars on the ledger when a conversation
-	// is nothing but synthetic rows; the model breakdowns exclude them, so
-	// the spend shows in the totals without inventing a model.
-	res, err := q.ExecContext(ctx, `
-		UPDATE messages SET cost_usd = COALESCE(cost_usd, 0) + $1
-		WHERE org_id = $2 AND conversation_id = $3
-		  AND id = (SELECT id FROM messages
-		            WHERE org_id = $2 AND conversation_id = $3
-		            ORDER BY (model IS NOT NULL AND model <> $4) DESC,
-		                     (model IS DISTINCT FROM $4) DESC,
-		                     id DESC
-		            LIMIT 1)
-	`, costUSD, orgID, conversationID, domain.ModelSynthetic)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		// No message rows at all: the spend has no ledger row to live on.
-		// Loud, so the dropped dollars are at least observable.
-		conversationLog.Warn("conversation cost has no message row to settle on; spend unrecorded",
-			"conversation_id", conversationID, "org_id", orgID, "cost_usd", costUSD)
-	}
-	return nil
+	return releaseActiveClaimWithTelemetry(ctx, q, orgID, conversationID, claimOutcomeForStatus(status), durationMs, numTurns)
+}
+
+// completeConversationFlip is the terminal status flip, RETURNING the
+// conversation row exactly as Get would read it. Always the LAST statement of
+// its caller's write — see settleCompletionCostAndClaim's doc.
+func completeConversationFlip(ctx context.Context, q queryer, orgID, conversationID, status, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	// The conversation carries no accounting cache — cost settled as one
+	// lump on the invocation's last message row above. A resume's Complete
+	// stamps its own invocation's lump on its own last row, so nothing
+	// accumulates or doubles.
+	return updateConversationReturning(ctx, q, `
+		UPDATE conversations
+		SET status = $1,
+		    completed_at = $2,
+		    result_summary = $3,
+		    outcome = NULLIF($4, ''),
+		    outcome_reason = NULLIF($5, ''),
+		    failure_kind = NULLIF($6, '')
+		WHERE org_id = $7 AND id = $8
+		RETURNING *
+	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
 }
 
 // releaseActiveClaimWithTelemetry is releaseActiveClaim plus the terminal
@@ -520,90 +553,142 @@ func (s *conversationStore) HasActiveClaimForBlueprintRunSystem(ctx context.Cont
 	return exists, nil
 }
 
-func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) error {
+func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return setConversationSession(ctx, s.q, orgID, conversationID, sessionID)
 }
 
-func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
+func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	return setConversationSession(ctx, s.admin, orgID, conversationID, sessionID)
 }
 
 // SetSessionForClaimSystem is SetSessionSystem behind the fence. The write is
 // byte-identical; what the transaction adds is that a zombie's late init can no
 // longer land the successor's resume coordinate on a dead session.
-func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		return setConversationSession(ctx, q, orgID, conversationID, sessionID)
+		r, err := setConversationSession(ctx, q, orgID, conversationID, sessionID)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) error {
-	_, err := q.ExecContext(ctx, `
+func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
+	return updateConversationReturning(ctx, q, `
 		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
+		RETURNING *
 	`, sessionID, orgID, conversationID)
-	return err
 }
 
-func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) error {
+// updateClaimReturning is updateConversationReturning's claims-row twin: wrap
+// a single-row UPDATE/INSERT on claims in a data-modifying CTE, then re-join
+// its output through executorClaimSelectCols exactly as executorClaimCols
+// does for the live table — see updateConversationReturning for the shared
+// caveats (one data-modifying CTE only; any dependent write runs earlier, its
+// own statement). updateSQL must itself end in `RETURNING *`.
+func updateClaimReturning(ctx context.Context, q queryer, updateSQL string, args ...any) (*domain.ExecutorClaim, error) {
+	row := q.QueryRowContext(ctx, `
+		WITH updated AS (`+updateSQL+`)
+		SELECT `+executorClaimSelectCols+`
+		FROM updated c
+		LEFT JOIN conversations v ON v.id = c.conversation_id
+	`, args...)
+	return scanExecutorClaimRow(row)
+}
+
+func (s *conversationStore) SetExecutorSystem(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
 	// An empty executorID keeps the legacy clear semantics: the live
-	// engagement is over, so its claim releases as requeued.
+	// engagement is over, so its claim releases as requeued. Written out
+	// rather than routed through the shared releaseActiveClaim helper (which
+	// ParkOpen/MarkFailedIfActive also use, unconverted) so this arm can
+	// RETURNING the row it just released.
 	if executorID == "" {
-		return releaseActiveClaim(ctx, s.admin, orgID, conversationID, "requeued")
+		return updateClaimReturning(ctx, s.admin, `
+			UPDATE claims SET released_at = now(), outcome = 'requeued'
+			WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+			RETURNING *
+		`, orgID, conversationID)
 	}
 	// Idempotent go-live confirmation: update the active claim's identity
 	// if one exists, mint one if none does — the live process must never
 	// run unattributed.
-	return inTx(ctx, s.admin, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		claim, err := updateClaimReturning(ctx, q, `
 			UPDATE claims SET executor_id = $1, boot_epoch = $2
 			WHERE org_id = $3 AND conversation_id = $4 AND released_at IS NULL
+			RETURNING *
 		`, executorID, bootEpoch, orgID, conversationID)
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
+		if claim != nil {
+			result = claim
+			return nil
+		}
+		claim, err = updateClaimReturning(ctx, q, `
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+			VALUES ($1, $2, $3, $4, now())
+			RETURNING *
+		`, orgID, conversationID, executorID, bootEpoch)
 		if err != nil {
 			return err
 		}
-		if n > 0 {
-			return nil
-		}
-		_, err = q.ExecContext(ctx, `
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
-			VALUES ($1, $2, $3, $4, now())
-		`, orgID, conversationID, executorID, bootEpoch)
-		return err
+		result = claim
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // SetExecutorForClaimSystem writes the identity onto the NAMED claim rather
 // than whichever one is active, so the fence and the write cannot disagree
 // about their target. No mint arm — see the interface doc.
-func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) (*domain.ExecutorClaim, error) {
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `
+		claim, err := updateClaimReturning(ctx, q, `
 			UPDATE claims SET executor_id = $1, boot_epoch = $2
 			WHERE org_id = $3 AND id = $4 AND conversation_id = $5
+			RETURNING *
 		`, executorID, bootEpoch, orgID, claimID, conversationID)
-		return err
+		if err != nil {
+			return err
+		}
+		result = claim
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
 // released claim's phase is inert history, and a conversation with no live
-// engagement has no sub-state to record — both fall through as a no-op.
-func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) error {
-	_, err := s.admin.ExecContext(ctx, `
+// engagement has no sub-state to record — both fall through as a no-op,
+// (nil, nil), the guard declining.
+func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID, conversationID, phase string) (*domain.ExecutorClaim, error) {
+	return updateClaimReturning(ctx, s.admin, `
 		UPDATE claims SET phase = NULLIF($1, '')
 		WHERE org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+		RETURNING *
 	`, phase, orgID, conversationID)
-	return err
 }
 
 // SetClaimPhaseSystem is the claim-keyed phase write, fenced: an engagement
@@ -611,17 +696,27 @@ func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID
 // the fence a zombie's stale phase would land on whatever claim happened to
 // be active — the successor's — and surface as its setup sub-state on every
 // display read.
-func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (*domain.ExecutorClaim, error) {
+	var result *domain.ExecutorClaim
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `
+		claim, err := updateClaimReturning(ctx, q, `
 			UPDATE claims SET phase = NULLIF($1, '')
 			WHERE org_id = $2 AND id = $3 AND conversation_id = $4
+			RETURNING *
 		`, phase, orgID, claimID, conversationID)
-		return err
+		if err != nil {
+			return err
+		}
+		result = claim
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // newestEngagementFirstSQL orders one conversation's claims by how recently
@@ -669,39 +764,49 @@ func (s *conversationStore) PriorClaimExecutorSystem(ctx context.Context, orgID,
 // RecordClaimSandboxStatsSystem is keyed on the claim id alone (org bound as
 // defense in depth) with NO released_at predicate — the teardown that
 // measures these numbers runs after the claim is released.
-func (s *conversationStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) error {
-	_, err := s.admin.ExecContext(ctx, `
+func (s *conversationStore) RecordClaimSandboxStatsSystem(ctx context.Context, orgID, claimID string, peakMemMB *int, cpuUsec *int64) (*domain.ExecutorClaim, error) {
+	return updateClaimReturning(ctx, s.admin, `
 		UPDATE claims SET peak_mem_mb = $1, cpu_usec = $2
 		WHERE org_id = $3 AND id = $4
+		RETURNING *
 	`, nullIntPtr(peakMemMB), nullInt64Ptr(cpuUsec), orgID, claimID)
-	return err
 }
 
-func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationStore) SetWorktreePath(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error) {
 	return setConversationWorktreePath(ctx, s.q, orgID, conversationID, path)
 }
 
-func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) error {
+func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, conversationID, path string) (*domain.Conversation, error) {
 	return setConversationWorktreePath(ctx, s.admin, orgID, conversationID, path)
 }
 
 // SetWorktreePathForClaimSystem is SetWorktreePathSystem behind the fence — the
 // workspace stamp an engagement writes once its setup or rehydrate resolves a
 // path, refused once a successor holds the conversation.
-func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		return setConversationWorktreePath(ctx, q, orgID, conversationID, path)
+		r, err := setConversationWorktreePath(ctx, q, orgID, conversationID, path)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversationID, path string) error {
-	_, err := q.ExecContext(ctx, `
+func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversationID, path string) (*domain.Conversation, error) {
+	return updateConversationReturning(ctx, q, `
 		UPDATE conversations SET worktree_path = $1 WHERE org_id = $2 AND id = $3
+		RETURNING *
 	`, path, orgID, conversationID)
-	return err
 }
 
 // MarkFailedIfActive's release is adjacent, not atomic — see
@@ -871,6 +976,48 @@ const conversationLedgerLateral = `
 		WHERE m2.conversation_id = r.id AND m2.org_id = r.org_id
 	) msum ON true
 `
+
+// updateConversationReturning wraps a single-row UPDATE on conversations in a
+// data-modifying CTE, then re-joins its output row through the exact same
+// projection getConversation uses (pgConversationColumns, the
+// conversation_memory/agents LEFT JOINs, the claim/ledger laterals) — so a
+// conversations-row write shares the point read's column list and scanner
+// without hand-duplicating those joins as scalar subqueries the way the
+// SQLite dialect has to (Postgres's WITH...RETURNING has no such
+// restriction). This stays ONE statement — a data-modifying CTE plus the
+// SELECT that reads it — so it is still "the write statement itself", not a
+// follow-up read.
+//
+// Only sound when nothing else in updateSQL's own WHERE/SET depends on a
+// sibling data-modifying CTE in the same statement: Postgres evaluates
+// multiple data-modifying CTEs against one shared snapshot, so a second CTE
+// would NOT see this one's write. There is exactly one data-modifying CTE
+// here, so that caveat doesn't apply — but it is why any prep work this
+// write's derived columns depend on (a claim release, a cost settlement) must
+// run as its own EARLIER statement in the same transaction, never folded into
+// this WITH. See completeConversationReturning for the write that has such
+// prep work.
+//
+// updateSQL must itself end in `RETURNING *`.
+func updateConversationReturning(ctx context.Context, q queryer, updateSQL string, args ...any) (*domain.Conversation, error) {
+	row := q.QueryRowContext(ctx, `
+		WITH updated AS (`+updateSQL+`)
+		SELECT `+pgConversationColumns+`
+		FROM updated r
+		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
+		LEFT JOIN agents a ON a.id = r.actor_agent_id AND a.org_id = r.org_id
+		`+conversationClaimLateral+`
+		`+conversationLedgerLateral+`
+	`, args...)
+	var res domain.Conversation
+	if err := scanConversation(row, &res); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrNoSuchConversation
+		}
+		return nil, err
+	}
+	return &res, nil
+}
 
 func (s *conversationStore) Get(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
 	return getConversation(ctx, s.q, orgID, conversationID)
@@ -1340,89 +1487,116 @@ const pgMessageColumns = `id, conversation_id, COALESCE(user_id::text, ''), COAL
 func scanMessageRows(rows *sql.Rows) ([]domain.Message, error) {
 	var messages []domain.Message
 	for rows.Next() {
-		var m domain.Message
-		var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
-		var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
-		var costUSD sql.NullFloat64
-		var reasoningStr, contentBlocksStr sql.NullString
-		var delivered bool
-		var windowState string
-		var seq sql.NullFloat64
-		var durationMs sql.NullInt64
-
-		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
-			&toolCallID, &m.IsError, &metadataStr, &model,
-			&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
-			&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &m.StopReason,
-		); err != nil {
+		m, err := scanOneMessage(rows)
+		if err != nil {
 			return nil, err
 		}
-
-		m.Content = content.String
-		m.Subtype = subtype.String
-		m.ToolCallID = toolCallID.String
-		m.Model = model.String
-
-		if toolCallsStr.Valid && toolCallsStr.String != "" {
-			_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
-		}
-		if metadataStr.Valid && metadataStr.String != "" {
-			_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
-		}
-		// Unlike tool_calls/metadata above, reasoning/content_blocks are part
-		// of the canonical replay context a native loop reconstructs via
-		// ListForAssembly — a decode failure here must surface, not silently
-		// yield an empty Reasoning/ContentBlocks that looks like "no
-		// reasoning on this message" when the row actually has some.
-		if reasoningStr.Valid && reasoningStr.String != "" {
-			if err := json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning); err != nil {
-				return nil, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
-			}
-		}
-		if contentBlocksStr.Valid && contentBlocksStr.String != "" {
-			if err := json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks); err != nil {
-				return nil, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
-			}
-		}
-		if inputTok.Valid {
-			v := int(inputTok.Int64)
-			m.InputTokens = &v
-		}
-		if outputTok.Valid {
-			v := int(outputTok.Int64)
-			m.OutputTokens = &v
-		}
-		if cacheReadTok.Valid {
-			v := int(cacheReadTok.Int64)
-			m.CacheReadTokens = &v
-		}
-		if cacheCreateTok.Valid {
-			v := int(cacheCreateTok.Int64)
-			m.CacheCreationTokens = &v
-		}
-		if costUSD.Valid {
-			v := costUSD.Float64
-			m.CostUSD = &v
-		}
-		// Read back the concrete stored value (the column is NOT NULL) —
-		// unlike on insert, nil here would just mean "unknown", which is
-		// never the case for a persisted row.
-		deliveredVal := delivered
-		m.Delivered = &deliveredVal
-		m.WindowState = domain.MessageWindowState(windowState)
-		if seq.Valid {
-			v := seq.Float64
-			m.Seq = &v
-		}
-		if durationMs.Valid {
-			v := int(durationMs.Int64)
-			m.DurationMs = &v
-		}
-
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
+}
+
+// messageScanner is satisfied by both *sql.Row and *sql.Rows, so
+// scanOneMessage serves the multi-row read above and single-row RETURNING
+// reads (SettleCompactionRequestForClaimSystem) off one column layout.
+type messageScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOneMessage(row messageScanner) (domain.Message, error) {
+	var m domain.Message
+	var content, subtype, toolCallsStr, toolCallID, metadataStr, model sql.NullString
+	var inputTok, outputTok, cacheReadTok, cacheCreateTok sql.NullInt64
+	var costUSD sql.NullFloat64
+	var reasoningStr, contentBlocksStr sql.NullString
+	var delivered bool
+	var windowState string
+	var seq sql.NullFloat64
+	var durationMs sql.NullInt64
+
+	if err := row.Scan(
+		&m.ID, &m.ConversationID, &m.UserID, &m.ClaimID, &m.Role, &content, &subtype, &toolCallsStr,
+		&toolCallID, &m.IsError, &metadataStr, &model,
+		&inputTok, &outputTok, &cacheReadTok, &cacheCreateTok, &costUSD, &m.CreatedAt,
+		&reasoningStr, &contentBlocksStr, &delivered, &windowState, &seq, &durationMs, &m.StopReason,
+	); err != nil {
+		return domain.Message{}, err
+	}
+
+	m.Content = content.String
+	m.Subtype = subtype.String
+	m.ToolCallID = toolCallID.String
+	m.Model = model.String
+
+	if toolCallsStr.Valid && toolCallsStr.String != "" {
+		_ = json.Unmarshal([]byte(toolCallsStr.String), &m.ToolCalls)
+	}
+	if metadataStr.Valid && metadataStr.String != "" {
+		_ = json.Unmarshal([]byte(metadataStr.String), &m.Metadata)
+	}
+	// Unlike tool_calls/metadata above, reasoning/content_blocks are part
+	// of the canonical replay context a native loop reconstructs via
+	// ListForAssembly — a decode failure here must surface, not silently
+	// yield an empty Reasoning/ContentBlocks that looks like "no
+	// reasoning on this message" when the row actually has some.
+	if reasoningStr.Valid && reasoningStr.String != "" {
+		if err := json.Unmarshal([]byte(reasoningStr.String), &m.Reasoning); err != nil {
+			return domain.Message{}, fmt.Errorf("unmarshal reasoning (message %d): %w", m.ID, err)
+		}
+	}
+	if contentBlocksStr.Valid && contentBlocksStr.String != "" {
+		if err := json.Unmarshal([]byte(contentBlocksStr.String), &m.ContentBlocks); err != nil {
+			return domain.Message{}, fmt.Errorf("unmarshal content_blocks (message %d): %w", m.ID, err)
+		}
+	}
+	if inputTok.Valid {
+		v := int(inputTok.Int64)
+		m.InputTokens = &v
+	}
+	if outputTok.Valid {
+		v := int(outputTok.Int64)
+		m.OutputTokens = &v
+	}
+	if cacheReadTok.Valid {
+		v := int(cacheReadTok.Int64)
+		m.CacheReadTokens = &v
+	}
+	if cacheCreateTok.Valid {
+		v := int(cacheCreateTok.Int64)
+		m.CacheCreationTokens = &v
+	}
+	if costUSD.Valid {
+		v := costUSD.Float64
+		m.CostUSD = &v
+	}
+	// Read back the concrete stored value (the column is NOT NULL) —
+	// unlike on insert, nil here would just mean "unknown", which is
+	// never the case for a persisted row.
+	deliveredVal := delivered
+	m.Delivered = &deliveredVal
+	m.WindowState = domain.MessageWindowState(windowState)
+	if seq.Valid {
+		v := seq.Float64
+		m.Seq = &v
+	}
+	if durationMs.Valid {
+		v := int(durationMs.Int64)
+		m.DurationMs = &v
+	}
+	return m, nil
+}
+
+// scanMessageRow scans a single RETURNING pgMessageColumns row into a
+// domain.Message, or ErrNoSuchMessage on sql.ErrNoRows.
+func scanMessageRow(row *sql.Row) (*domain.Message, error) {
+	m, err := scanOneMessage(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, db.ErrNoSuchMessage
+		}
+		return nil, err
+	}
+	return &m, nil
 }
 
 // Messages is the whole-transcript display read — MessagesSince from the
@@ -1594,6 +1768,12 @@ func (s *conversationStore) MarkDeliveredForClaimSystem(ctx context.Context, org
 // fractions are computed against a queue no concurrent enqueue can reorder
 // under it: a row inserted after this transaction commits carries an id
 // greater than the result row's and sorts after every fraction on its own.
+//
+// Exempt from the returned-row rule (bare error stays the return type): this
+// writes up to two inserted rows, a batch flip, and a re-seq of every queued
+// row ahead of the result — no single row a return value could name.
+// replyRow/resultRow's assigned IDs are written back to the caller's own
+// pointers, which stands in for "the row it persisted" here.
 func (s *conversationStore) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
 	return inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
@@ -1667,23 +1847,33 @@ func scanIntIDs(rows *sql.Rows) ([]int, error) {
 
 // SettleCompactionRequestForClaimSystem records a discarded warm attempt on
 // the request row, behind the fence — see the interface doc.
-func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *conversationStore) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error) {
+	var result *domain.Message
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
-		_, err := q.ExecContext(ctx, `
+		row := q.QueryRowContext(ctx, `
 			UPDATE messages
 			SET input_tokens = $4, output_tokens = $5,
 			    cache_read_tokens = $6, cache_creation_tokens = $7,
 			    cost_usd = $8,
 			    metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('compaction_failure', $9::text)
 			WHERE org_id = $1 AND conversation_id = $2 AND id = $3
-		`, orgID, conversationID, requestID,
+			RETURNING `+pgMessageColumns, orgID, conversationID, requestID,
 			inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
 			nullFloatPtr(costUSD), reason)
-		return err
+		m, err := scanMessageRow(row)
+		if err != nil {
+			return err
+		}
+		result = m
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // SetWindowStateSystem is the elision/compaction primitive: a batched range

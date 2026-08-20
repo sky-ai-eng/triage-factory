@@ -175,7 +175,7 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 
 	bpr, wtPath := seedEvictableTree(t, s, database, conversationID)
 	addStepConversation(t, database, bpr, taskID, "step-live", 1, "running")
-	if err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "exec-live", 1); err != nil {
+	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "exec-live", 1); err != nil {
 		t.Fatalf("mint sibling claim: %v", err)
 	}
 
@@ -187,7 +187,7 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 
 	// Release the sibling and settle it, and the same sweep reclaims the tree —
 	// the live claim was the only thing holding it.
-	if err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "", 0); err != nil {
+	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "", 0); err != nil {
 		t.Fatalf("release sibling claim: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE conversations SET status='completed', completed_at=datetime('now','-2 hours') WHERE id='step-live'`); err != nil {

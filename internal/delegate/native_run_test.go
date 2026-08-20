@@ -217,7 +217,7 @@ func TestExecutorChangedSince(t *testing.T) {
 		if predecessor != "" {
 			s.SetExecutorID(predecessor, 1)
 			s.stampExecutor(org, conversationID, "")
-			if err := s.conversations.SetExecutorSystem(ctx, org, conversationID, "", 0); err != nil {
+			if _, err := s.conversations.SetExecutorSystem(ctx, org, conversationID, "", 0); err != nil {
 				t.Fatalf("release the predecessor's claim: %v", err)
 			}
 		}
@@ -281,7 +281,7 @@ func TestExecutorChangedSince_UnwiredIdentityStaysSilent(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-exec-unwired", "sess", "/tmp/wt-unwired")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.conversations.SetExecutorSystem(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "exec-other", 1); err != nil {
+	if _, err := s.conversations.SetExecutorSystem(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "exec-other", 1); err != nil {
 		t.Fatalf("mint the predecessor's claim: %v", err)
 	}
 	if s.executorChangedSince(context.Background(), runmode.LocalDefaultOrgID, "r-exec-unwired", "some-claim", domain.WorkspaceProvenanceRehydrated) {
