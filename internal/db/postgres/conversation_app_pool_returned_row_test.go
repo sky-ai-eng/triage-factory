@@ -11,7 +11,7 @@ import (
 )
 
 // TestConversationStore_Postgres_ReturnedRow_AppPool runs the returned-row
-// suite's RLS-focused arm (TFAC-861) against the Postgres impl under the
+// suite's RLS-focused arm against the Postgres impl under the
 // registrant's claims, on the app pool — the same wiring shape
 // TestJiraAppsStore_Postgres_ReturnedRowConformance uses and for the same
 // reason: wiring both pools to AdminDB (what the plain conformance run does)

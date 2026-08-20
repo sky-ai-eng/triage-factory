@@ -49,7 +49,7 @@ func TestTaskMemoryStore_Postgres(t *testing.T) {
 }
 
 // TestTaskMemoryStore_Postgres_ReturnedRowConformance runs the returned-row
-// suite (TFAC-867) against the Postgres impl, wired the same way
+// suite against the Postgres impl, wired the same way
 // TestTaskMemoryStore_Postgres is — both pools against AdminDB (BYPASSRLS),
 // which is what lets it cover the System variants: they always route
 // through the true admin pool in production, so there is no claims-carrying

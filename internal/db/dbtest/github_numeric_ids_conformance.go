@@ -98,7 +98,7 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 	t.Run("InstallationAccountIDRoundTrips", func(t *testing.T) {
 		stores, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		got := only(t, stores, org)
@@ -116,7 +116,7 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// login is unaffected by the column existing.
 		stores, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		if got := only(t, stores, org); got.AccountID != "" {
@@ -130,10 +130,10 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// webhook that follows.
 		stores, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (no id): %v", err)
 		}
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (with id): %v", err)
 		}
 		if got := only(t, stores, org); got.AccountID != "1234" {
@@ -146,10 +146,10 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// unlearn one the mirror already has.
 		stores, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (with id): %v", err)
 		}
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (no id): %v", err)
 		}
 		if got := only(t, stores, org); got.AccountID != "1234" {
@@ -163,10 +163,10 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 		// rename has to land on it.
 		stores, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
-		if err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme-corp")); err != nil {
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, install(org, "456", "1234", "acme-corp")); err != nil {
 			t.Fatalf("UpsertInstallation (renamed): %v", err)
 		}
 		got := only(t, stores, org)

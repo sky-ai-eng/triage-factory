@@ -78,7 +78,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 	t.Run("HostRoundTrips", func(t *testing.T) {
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		if got := only(t, store, org).GitHubHost; got != ghes {
@@ -92,7 +92,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		// would make the column useless for the comparisons it exists to enable.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := store.UpsertInstallation(ctx, install(org, "456", ghes+"/", "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes+"/", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		if got := only(t, store, org).GitHubHost; got != ghes {
@@ -107,7 +107,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		// can be compared against.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		if got := only(t, store, org).GitHubHost; got != db.DefaultGitHubHost {
@@ -123,10 +123,10 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		// installation but not which GitHub it came from.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if err := store.UpsertInstallation(ctx, install(org, "456", db.DefaultGitHubHost, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", db.DefaultGitHubHost, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
-		if err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (moved host): %v", err)
 		}
 		if got := only(t, store, org).GitHubHost; got != ghes {
@@ -144,10 +144,10 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		owner := seed.User(t)
 		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
 
-		if err := store.UpsertInstallation(ctx, install(orgA, "456", db.DefaultGitHubHost, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", db.DefaultGitHubHost, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (public host): %v", err)
 		}
-		if err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (GHES, same installation id): %v", err)
 		}
 
@@ -177,10 +177,10 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		owner := seed.User(t)
 		orgA, orgB := seed.Org(t, owner), seed.Org(t, owner)
 
-		if err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (org A): %v", err)
 		}
-		if err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (org B, same host + installation id): %v", err)
 		}
 		if got := only(t, store, orgA).GitHubHost; got != ghes {

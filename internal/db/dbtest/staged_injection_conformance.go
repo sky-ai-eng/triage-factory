@@ -187,7 +187,7 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 type StagedInjectionReturnedRowFactory func(t *testing.T) (store db.StagedInjectionStore, orgID, conversationID string)
 
 // RunStagedInjectionReturnedRowConformance covers the returned-row standard
-// (TFAC-869) on AppendSystem. StagedInjectionStore has no plain point read —
+// on AppendSystem. StagedInjectionStore has no plain point read —
 // FlushPendingSystem, its only other read, is destructive — so the "point
 // read" this arm compares against is a flush called immediately after one
 // Append on a conversation with nothing else staged: one row went in, one row

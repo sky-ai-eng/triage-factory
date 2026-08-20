@@ -247,9 +247,19 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	// Atomic flip: activate the App AND delete the org PAT in one transaction.
 	// Both are app-pool writes (SetActive is org-admin-gated UPDATE; the PAT
 	// delete is a Vault delete), so either both land or neither does.
+	var activated *domain.OrgGitHubApp
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.GitHubApps.SetActive(ctx, orgID, true); err != nil {
-			return fmt.Errorf("activate app: %w", err)
+		var serr error
+		activated, serr = tx.GitHubApps.SetActive(ctx, orgID, true)
+		if serr != nil {
+			return fmt.Errorf("activate app: %w", serr)
+		}
+		if activated == nil {
+			// The authoritative read above confirmed the row moments ago, under
+			// this same lock — a nil here means it vanished between that read and
+			// this UPDATE. Refuse rather than proceed: the PAT delete below must
+			// never run against a cutover that didn't actually activate anything.
+			return fmt.Errorf("activate app: registration for org %s vanished mid-cutover", orgID)
 		}
 		if _, err := tx.Secrets.Delete(ctx, orgID, integrations.KeyGitHubPAT); err != nil {
 			return fmt.Errorf("delete org pat: %w", err)
@@ -293,7 +303,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	}
 	release() // idempotent; the defer stays as the early-return safety net
 
-	githubAppLog.Info("cutover to app complete, pat deleted and app active", "org", orgID, "app_id", app.AppID)
+	githubAppLog.Info("cutover to app complete, pat deleted and app active", "org", orgID, "app_id", activated.AppID)
 
 	// The App is now live. Drop any cached installation tokens (none should
 	// exist for a previously-staged App, but be defensive) and re-resolve;
@@ -304,7 +314,16 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		go s.onGitHubChanged(orgID)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"status": "cutover", "active": true})
+	// The response is the resource SetActive just persisted, not a status stub
+	// asserting the value the request sent — the SPA's cutoverToApp() discards
+	// the body today (it re-fetches status separately), so this is a pure
+	// improvement, not a wire break.
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(
+		domain.GitHubCredentialClassBYOApp, activated, insts,
+		s.registrantDisplayName(ctx, orgID, userID, activated),
+		s.connectCallbackURLSafe(orgID),
+		s.webhookHealthDTO(ctx, orgID, activated),
+	))
 }
 
 // handleGitHubAccessSwitchToPAT switches an org from its GitHub App to a PAT —

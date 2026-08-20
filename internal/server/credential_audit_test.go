@@ -250,7 +250,7 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 		// Racing writer: an App registration commits mid-validation. Errors are
 		// captured rather than t.Fatal'd — this runs on the server's goroutine.
 		once.Do(func() {
-			err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+			_, err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
 				OrgID: runmode.LocalDefaultOrgID, AppID: "1", Slug: "tf-bot",
 				ClientID: "Iv1.x", Active: true,
 			})

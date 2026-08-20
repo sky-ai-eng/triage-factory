@@ -57,7 +57,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	// hangs off, and the thing the reads join through.
 	install := func(t *testing.T, b ReachableReposBackend, installationID, login, selection string) {
 		t.Helper()
-		if err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID:      installationID,
 			OrgID:               b.OrgID,
 			AccountType:         "Organization",
@@ -237,7 +237,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
 		}
 
-		if err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -417,7 +417,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		got, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID)
@@ -512,7 +512,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("scope drift = %v before removal; want [acme/legacy]", trackedSlugs(drift))
 		}
 
-		if err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		got, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID)
@@ -765,7 +765,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)

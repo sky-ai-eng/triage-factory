@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +15,8 @@ import (
 	"github.com/zalando/go-keyring"
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -59,7 +62,7 @@ func TestGitHubAppsStore_SQLite_CreateGetRoundTrip(t *testing.T) {
 		t.Fatalf("GetForOrg on empty table = %+v, want nil", got)
 	}
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID:            orgID,
 		AppID:            "4242",
 		Slug:             "tf-roundtrip",
@@ -101,7 +104,7 @@ func TestGitHubAppsStore_SQLite_BotUserID(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgWithID)
 	seedSQLiteOrgForApps(t, conn, orgWithout)
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgWithID, AppID: "7001", Slug: "acme-bot", ClientID: "Iv1.x",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 		BotUserID: 41898282,
@@ -117,7 +120,7 @@ func TestGitHubAppsStore_SQLite_BotUserID(t *testing.T) {
 	}
 
 	// Unset id → stored NULL → scans back as 0.
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgWithout, AppID: "7002", Slug: "no-bot", ClientID: "Iv1.y",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 		// BotUserID intentionally unset (0).
@@ -144,7 +147,7 @@ func TestGitHubAppsStore_SQLite_OwnerTypeDefaultsToUser(t *testing.T) {
 	orgID := runmode.LocalDefaultOrgID
 	seedSQLiteOrgForApps(t, conn, orgID)
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID:            orgID,
 		AppID:            "9001",
 		Slug:             "tf-default",
@@ -176,7 +179,7 @@ func TestGitHubAppsStore_SQLite_SetActive(t *testing.T) {
 	orgID := runmode.LocalDefaultOrgID
 	seedSQLiteOrgForApps(t, conn, orgID)
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgID, AppID: "1", Slug: "staged", ClientID: "Iv1.x",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 		Active: false, // staged
@@ -188,7 +191,7 @@ func TestGitHubAppsStore_SQLite_SetActive(t *testing.T) {
 		t.Fatalf("after staged create got %+v, want Active=false", got)
 	}
 
-	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+	if _, err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 	got, _ = stores.GitHubApps.GetForOrg(ctx, orgID)
@@ -197,7 +200,7 @@ func TestGitHubAppsStore_SQLite_SetActive(t *testing.T) {
 	}
 
 	// SetActive on an org with no row is a no-op, no error.
-	if err := stores.GitHubApps.SetActive(ctx, "00000000-0000-0000-0000-0000000000ff", true); err != nil {
+	if _, err := stores.GitHubApps.SetActive(ctx, "00000000-0000-0000-0000-0000000000ff", true); err != nil {
 		t.Errorf("SetActive on absent row = %v, want nil", err)
 	}
 }
@@ -213,7 +216,7 @@ func TestGitHubAppsStore_SQLite_DeleteForOrg(t *testing.T) {
 	seedSQLiteApp(t, conn, orgID, "1", "pem")
 
 	for _, login := range []string{"acme", "globex"} {
-		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
 		}); err != nil {
 			t.Fatalf("seed installation %s: %v", login, err)
@@ -251,7 +254,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 		AccountType:    "Organization",
 		AccountLogin:   "acme",
 	}
-	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
 		t.Fatalf("UpsertInstallation: %v", err)
 	}
 
@@ -266,7 +269,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted CURRENT_TIMESTAMP")
 	}
 
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -276,7 +279,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 
 	// Re-upsert the same installation_id revives the row (removed_at cleared).
 	inst.AccountLogin = "acme-renamed"
-	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
 		t.Fatalf("UpsertInstallation (revive): %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -302,7 +305,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 		{orgA, "only-in-a", "User"},
 		{orgB, "only-in-b", "Organization"},
 	} {
-		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID: "900", OrgID: tc.org, AccountType: tc.typ, AccountLogin: tc.login,
 		}); err != nil {
 			t.Fatalf("UpsertInstallation %s: %v", tc.org, err)
@@ -314,7 +317,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 		t.Errorf("orgA = %+v, want one only-in-a row (orgB's same-id upsert leaked)", gotA)
 	}
 
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
 		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
@@ -364,7 +367,7 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 
 	// Pre-seed a stale active installation (33) that the mock GitHub no
 	// longer reports — the reconcile must soft-remove it.
-	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed",
 	}); err != nil {
 		t.Fatalf("seed stale installation: %v", err)
@@ -408,6 +411,65 @@ func TestGitHubAppsStore_SQLite_BackfillNoApp(t *testing.T) {
 	if err := stores.GitHubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		t.Fatalf("BackfillInstallationsFromAPI with no App = %v; want nil", err)
 	}
+}
+
+// TestGitHubAppsStore_SQLite_ReturnedRowConformance covers the returned-row
+// standard end to end: the app row (CreateForOrg, SetActive) and the
+// installation row (UpsertInstallation, SetInstallationSuspension,
+// MarkInstallationRemoved) both hand back what they persisted.
+func TestGitHubAppsStore_SQLite_ReturnedRowConformance(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	orgID := runmode.LocalDefaultOrgID
+	seedSQLiteOrgForApps(t, conn, orgID)
+
+	dbtest.RunGitHubAppReturnedRowConformance(t, func(t *testing.T) (db.GitHubAppsStore, string, string) {
+		t.Helper()
+		return stores.GitHubApps, orgID, ""
+	})
+
+	dbtest.RunGitHubInstallationReturnedRowConformance(t, func(t *testing.T) (db.GitHubAppsStore, string, func(string) (*domain.OrgGitHubAppInstallation, error)) {
+		t.Helper()
+		return stores.GitHubApps, orgID, func(installationID string) (*domain.OrgGitHubAppInstallation, error) {
+			return readSQLiteInstallationRaw(ctx, conn, orgID, installationID)
+		}
+	})
+}
+
+// readSQLiteInstallationRaw reads one org_github_app_installations row
+// regardless of removed_at — the raw probe RunGitHubInstallationReturnedRowConformance
+// needs for MarkInstallationRemoved, whose row is invisible to every store
+// read once removed (see GitHubInstallationReturnedRowFactory's doc).
+func readSQLiteInstallationRaw(ctx context.Context, conn *sql.DB, orgID, installationID string) (*domain.OrgGitHubAppInstallation, error) {
+	var (
+		inst        domain.OrgGitHubAppInstallation
+		accountID   sql.NullString
+		suspendedAt sql.NullTime
+		suspendedBy sql.NullString
+		selection   sql.NullString
+	)
+	err := conn.QueryRowContext(ctx, `
+		SELECT installation_id, org_id, account_type, account_id, account_login,
+		       github_host, installed_at, suspended_at, suspended_by, repository_selection
+		  FROM org_github_app_installations
+		 WHERE org_id = ? AND installation_id = ?
+	`, orgID, installationID).Scan(
+		&inst.InstallationID, &inst.OrgID, &inst.AccountType,
+		&accountID, &inst.AccountLogin, &inst.GitHubHost, &inst.InstalledAt,
+		&suspendedAt, &suspendedBy, &selection,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	inst.AccountID = accountID.String
+	inst.SuspendedAt = suspendedAt.Time
+	inst.SuspendedBy = suspendedBy.String
+	inst.RepositorySelection = selection.String
+	return &inst, nil
 }
 
 // testRSAPEM returns a fresh PKCS#1 RSA private key in PEM form for

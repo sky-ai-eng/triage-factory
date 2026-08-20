@@ -24,7 +24,7 @@ type ConversationReturnedRowFactory func(t *testing.T) (
 )
 
 // RunConversationReturnedRowConformance covers the returned-row standard
-// (TFAC-861) for every ConversationStore write that isn't exempt:
+// for every ConversationStore write that isn't exempt:
 //
 //   - conversations-row writes (Complete, SetSession, SetWorktreePath and
 //     their System/ForClaimSystem twins) return the row Get would read.
