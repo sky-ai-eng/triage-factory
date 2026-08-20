@@ -288,11 +288,18 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// being exactly what the user should never wait on.
 	//
 	// The other half is the killed engagement's own teardown, arriving after:
-	// it records that a persist is owed, finds its flip refused by the claim
-	// fence this release just tripped, and writes the snapshot anyway (see
-	// parkConversationOpen). A follow-up sent between the two is accepted
-	// rather than refused as expired — the pending record names the persist and
-	// its writer, which is what makes parking before the blob exists safe.
+	// it records that a persist is owed and writes the snapshot (see
+	// parkConversationOpen). What its status flip then does depends on who
+	// fences. Where the claim fence is real, the release above has already
+	// tripped it, so the flip is refused and says so at INFO — the ordinary
+	// shape of every cross-pod stop. At N=1 nothing fences, and the flip is a
+	// deliberate re-park of the row this verb already parked: a content no-op
+	// the park write permits on purpose, costing one repeated `open` on the
+	// wire, which consumers of that event merge idempotently by contract.
+	//
+	// A follow-up sent before the blob lands is accepted rather than refused as
+	// expired — the pending record names the persist and its writer, which is
+	// what makes parking before the blob exists safe.
 	var (
 		flipped bool
 		err     error

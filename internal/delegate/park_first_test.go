@@ -102,8 +102,9 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the teardown never finished")
 	}
-	// The fenced teardown's contribution still lands: the blob, and the record
-	// that says so.
+	// The teardown's contribution lands either way: the blob, and the record
+	// that says so. (Its own status flip is a no-op here — N=1 does not fence,
+	// so it re-parks a row this stop already parked.)
 	assertSnapshotPresent(t, s, namespace, true)
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-killed")
 }
