@@ -381,7 +381,7 @@ func (s *Spawner) recordPermissionRequest(orgID, conversationID, claimID string,
 	}
 	now := time.Now().UTC()
 	expires := now.Add(full)
-	err := s.permissions.Create(context.Background(), orgID, &domain.ConversationPermission{
+	_, err := s.permissions.Create(context.Background(), orgID, domain.ConversationPermission{
 		ConversationID: conversationID,
 		ClaimID:        claimID,
 		ToolCallID:     req.ToolCallID,
@@ -398,19 +398,28 @@ func (s *Spawner) recordPermissionRequest(orgID, conversationID, claimID string,
 	}
 }
 
-// resolvePermissionRow stamps a prompt's terminal on its durable row. Same
-// best-effort posture as the insert: the broker has already decided and the
-// agent is already unblocked by the time this runs, so a failure loses an audit
-// row rather than changing what happened. decidedBy is set only for a human
-// answer.
-func (s *Spawner) resolvePermissionRow(orgID, conversationID, toolCallID, state, reason, decidedBy string) {
+// resolvePermissionRow stamps a prompt's terminal on its durable row and
+// returns what the store settled: the row when this call's decision landed,
+// nil when the store has nothing wired, the write failed (logged here — same
+// best-effort posture as the insert, since the broker has already decided and
+// the agent is already unblocked by the time this runs, so a failure loses an
+// audit row rather than changing what happened), or the guard declined
+// because the prompt wasn't pending. A caller that only needs the
+// best-effort record (the auto-deny paths below) can discard the return
+// value; resolvePermissionLocal's HTTP-driven path uses it to answer with
+// the row it actually settled rather than asserting one. decidedBy is set
+// only for a human answer.
+func (s *Spawner) resolvePermissionRow(orgID, conversationID, toolCallID, state, reason, decidedBy string) *domain.ConversationPermission {
 	if s.permissions == nil {
-		return
+		return nil
 	}
-	if err := s.permissions.Resolve(context.Background(), orgID, conversationID, toolCallID, state, reason, decidedBy); err != nil {
+	resolved, err := s.permissions.Resolve(context.Background(), orgID, conversationID, toolCallID, state, reason, decidedBy)
+	if err != nil {
 		delegateLog.Warn("record tool permission resolution failed",
 			"conversation", conversationID, "tool_call_id", toolCallID, "state", state, "reason", reason, "error", err)
+		return nil
 	}
+	return resolved
 }
 
 // ExpirePermissionsForClaim marks an engagement's still-open prompts expired
@@ -635,32 +644,38 @@ func (s *Spawner) AutoApprovePermissionHandler(conversationID string) agentproc.
 // never existed) is genuinely stale/not-found, never a routing question,
 // so it short-circuits before ever trying remote.
 // decidedBy is the answering user, stamped onto the audit row so an approval
-// names who granted it — the fact the old arrangement recorded nowhere at all.
-func (s *Spawner) ResolvePermission(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
-	err := s.resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy, d)
+// names who granted it — the fact the old arrangement recorded nowhere at
+// all. The returned permission is the durable row this call's decision
+// settled — nil when it isn't available locally (the cross-pod routed path:
+// the row was written on the remote owner, not this process) or the store
+// isn't wired; a nil error always means the broker delivered the decision to
+// the agent regardless, since that promise is independent of the audit
+// write.
+func (s *Spawner) ResolvePermission(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) (*domain.ConversationPermission, error) {
+	resolved, err := s.resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy, d)
 	if err == nil || !errors.Is(err, ErrNoPendingPermission) {
-		return err
+		return resolved, err
 	}
 	if s.getProc(conversationID) != nil {
-		return ErrNoPendingPermission
+		return nil, ErrNoPendingPermission
 	}
 	s.mu.Lock()
 	conversationSignals := s.conversationSignals
 	s.mu.Unlock()
 	if conversationSignals == nil {
-		return ErrNoPendingPermission
+		return nil, ErrNoPendingPermission
 	}
-	return s.routePermission(orgID, conversationID, toolCallID, decidedBy, d)
+	return nil, s.routePermission(orgID, conversationID, toolCallID, decidedBy, d)
 }
 
 // resolvePermissionLocal is ResolvePermission's original N=1 body: resolve
 // the in-memory broker entry and buffer the decision.
-func (s *Spawner) resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) error {
+func (s *Spawner) resolvePermissionLocal(orgID, conversationID, toolCallID, decidedBy string, d agentproc.PermissionDecision) (*domain.ConversationPermission, error) {
 	s.mu.Lock()
 	p, ok := s.permPending[permKey(conversationID, toolCallID)]
 	if !ok || p.orgID != orgID {
 		s.mu.Unlock()
-		return ErrNoPendingPermission
+		return nil, ErrNoPendingPermission
 	}
 	select {
 	case p.ch <- d:
@@ -674,16 +689,16 @@ func (s *Spawner) resolvePermissionLocal(orgID, conversationID, toolCallID, deci
 		if d.Behavior == "allow" {
 			state = domain.PermissionStateAllowed
 		}
-		s.resolvePermissionRow(orgID, conversationID, toolCallID, state, domain.PermissionReasonUser, decidedBy)
+		resolved := s.resolvePermissionRow(orgID, conversationID, toolCallID, state, domain.PermissionReasonUser, decidedBy)
 		// Tell other surfaces showing this prompt to drop it now — broadcast
 		// outside s.mu so the hub's own locking never nests under the broker
 		// mutex.
 		s.broadcastPermissionResolved(orgID, conversationID, toolCallID)
-		return nil
+		return resolved, nil
 	default:
 		// Slot already filled by a racing resolve — treat as no-longer-pending.
 		s.mu.Unlock()
-		return ErrNoPendingPermission
+		return nil, ErrNoPendingPermission
 	}
 }
 

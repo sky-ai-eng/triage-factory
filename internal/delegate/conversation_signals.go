@@ -681,7 +681,7 @@ func (s *Spawner) deliverPermissionSignal(sig domain.ConversationSignal) string 
 		delegateLog.Warn("apply permission signal: malformed payload", "signal_id", sig.ID, "error", err)
 		return domain.ConversationSignalAckStale
 	}
-	err := s.resolvePermissionLocal(sig.OrgID, sig.ConversationID, p.ToolCallID, p.DecidedBy, agentproc.PermissionDecision{
+	_, err := s.resolvePermissionLocal(sig.OrgID, sig.ConversationID, p.ToolCallID, p.DecidedBy, agentproc.PermissionDecision{
 		Behavior:     p.Behavior,
 		Message:      p.Message,
 		UpdatedInput: p.UpdatedInput,
