@@ -24,6 +24,14 @@ import (
 // hold JWT claims, and no request handler reads the table. SQLite collapses the
 // pools onto its one connection (N=1).
 //
+// claimID is a precondition, not a validated input: callers pass a real claim
+// id, and the guard for "this engagement has no claim" lives at the caller
+// (delegate's snapshot writer skips the record entirely rather than writing a
+// row nobody owns). The dialects do not agree on what an empty or malformed one
+// does — Postgres casts it to uuid and rejects, SQLite stores the string as
+// given — so a caller that hands these methods an empty id gets a different
+// answer per backend, and neither answer is one to build on.
+//
 // Neither write returns the row it persisted, and that is deliberate rather
 // than an oversight of the store-write standard. Handing a writer back the row
 // it just wrote would say the one thing that must never be assumed here: that

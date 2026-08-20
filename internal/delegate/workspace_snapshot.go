@@ -219,8 +219,10 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	defer func() {
 		// A durable 'failed' is what lets a waiting resume stop waiting and
 		// fall back, so every error exit below lands here rather than leaving
-		// the key pending forever. The success and superseded exits write
-		// their own outcome and return nil.
+		// the key pending forever. The two nil exits are covered elsewhere:
+		// the success path writes 'written' itself, and the superseded path
+		// writes nothing at all — the row is the successor's now, and its
+		// outcome is the successor's to record.
 		if err != nil && owned {
 			s.finishSnapshotState(stateCtx, orgID, keyID, claimID, false)
 		}
