@@ -88,14 +88,17 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.TargetUserID != nil {
-		if _, ok := s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, req.HesitationMs); !ok {
+		if !s.reassignClaim(w, r, orgID, userID, id, *req.TargetUserID, req.HesitationMs) {
 			return
 		}
-		s.writeTaskResource(w, r, orgID, userID, id)
+		// Admin-pool read, deliberately: a handoff can consolidate team_id
+		// to the target's team, which an overriding admin need not be in —
+		// the RLS-scoped read would answer 404 for a write that landed.
+		s.writeTaskResourceSystem(w, r, orgID, userID, id)
 		return
 	}
 
-	_, jiraUserClient, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
+	jiraUserClient, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
 	if !ok {
 		return
 	}
@@ -114,9 +117,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 // → 409). For a Jira-backed task it resolves the acting user's Jira client up
 // front so a user with no connected Jira is refused BEFORE the claim lands
 // (acting as the bot here would mis-assign the ticket to the service account).
-// Returns the new status, the resolved Jira client (nil for GitHub tasks), and
-// ok=false when it already wrote an error response.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (string, *jira.Client, bool) {
+// Returns the resolved Jira client (nil for GitHub tasks) and ok=false when it
+// already wrote an error response.
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, bool) {
 	var task *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -124,11 +127,11 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return "", nil, false
+		return nil, false
 	}
 	if task == nil {
 		notFound(w, "task")
-		return "", nil, false
+		return nil, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
 	// meaningless. RecordSwipe refuses them too, so this is the answer the
@@ -136,7 +139,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	// about the task rather than a silently unaudited claim.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
-		return "", nil, false
+		return nil, false
 	}
 
 	// A Jira-backed claim assigns the ticket to the claiming user and
@@ -151,11 +154,11 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 				Reason:  httpx.ReasonNotConfigured,
 				Message: "connect your Jira to act on tickets",
 			})
-			return "", nil, false
+			return nil, false
 		}
 		if jerr != nil {
 			internalError(w, "tasks", jerr)
-			return "", nil, false
+			return nil, false
 		}
 		jiraUserClient = c
 	}
@@ -169,7 +172,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			Reason:  httpx.ReasonConflict,
 			Message: "task is already claimed by another user",
 		})
-		return "", nil, false
+		return nil, false
 	case task.ClaimedByAgentID != "":
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -181,13 +184,13 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return "", nil, false
+			return nil, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return "", nil, false
+			return nil, false
 		}
 		claimChanged = true
 	default:
@@ -201,13 +204,13 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return "", nil, false
+			return nil, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return "", nil, false
+			return nil, false
 		}
 		claimChanged = true
 	}
@@ -218,17 +221,15 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	// doesn't land — an insert failure, or the task closing under us, which
 	// RecordSwipe's own status predicate refuses — the claim still landed, so
 	// log and continue rather than 500-ing on a committed state change.
-	var newStatus string
 	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionClaim, hesitationMs, nil)
+		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionClaim, hesitationMs, nil)
 		return e
 	})
 	if swipeErr != nil || !audited {
 		taskActionLog.Warn("audit write did not land for claim, claim mutation already did",
 			"task", id, "refused", swipeErr == nil, "error", swipeErr)
-		newStatus = taskStatusQueued
 	}
 	if claimChanged {
 		s.ws.Broadcast(websocket.Event{
@@ -241,7 +242,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			},
 		})
 	}
-	return newStatus, jiraUserClient, true
+	return jiraUserClient, true
 }
 
 // reassignClaim is the claim route's target_user_id arm: the user↔user
@@ -286,7 +287,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 // interacts with it — an accepted divergence in the same family as the
 // TF/GitHub drift docs/for-agents/multi-team-task-model.md already calls out,
 // not a bug this method needs to close.
-func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, hesitationMs int) (string, bool) {
+func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id, targetUserID string, hesitationMs int) bool {
 	var task *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -294,22 +295,22 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return "", false
+		return false
 	}
 	if task == nil {
 		notFound(w, "task")
-		return "", false
+		return false
 	}
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
-		return "", false
+		return false
 	}
 	if task.ClaimedByUserID == "" {
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
 			Message: "task isn't claimed by a user; claim it or take it over before handing it off",
 		})
-		return "", false
+		return false
 	}
 
 	// Permission: the current claimant may hand off their own claim; anyone
@@ -325,16 +326,16 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 		if runmode.Current() != runmode.ModeLocal {
 			if task.TeamID == nil || *task.TeamID == "" {
 				forbidden(w, "only the current claimant or a team admin can reassign this task")
-				return "", false
+				return false
 			}
 			isAdmin, err := s.az.UserIsTeamAdmin(r.Context(), userID, orgID, *task.TeamID)
 			if err != nil {
 				internalError(w, "tasks", err)
-				return "", false
+				return false
 			}
 			if !isAdmin {
 				forbidden(w, "only the current claimant or a team admin can reassign this task")
-				return "", false
+				return false
 			}
 		}
 	}
@@ -351,7 +352,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "reassign failed" + localDetail(err),
 			})
-			return "", false
+			return false
 		}
 		if !ok {
 			// Disambiguate the two guards the CAS collapses into one
@@ -379,35 +380,20 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 					Reason: httpx.ReasonConflict, Message: "reassign race lost; refetch task and retry",
 				})
 			}
-			return "", false
+			return false
 		}
 	}
 
 	// Audit post-mutation, best-effort — mirrors selfClaim.
-	var newStatus string
 	var audited bool
 	swipeErr := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newStatus, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionReassign, hesitationMs, nil)
+		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, swipeActionReassign, hesitationMs, nil)
 		return e
 	})
 	if swipeErr != nil || !audited {
 		taskActionLog.Warn("audit write did not land for reassign, claim mutation already did",
 			"task", id, "refused", swipeErr == nil, "error", swipeErr)
-		// Mirror ReassignClaimToUser(System)'s own status transformation
-		// (SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE
-		// status END) rather than assuming the pre-mutation snapshot still
-		// matches: task.Status can't actually be "snoozed" here today
-		// (SnoozeTask refuses to snooze an already-claimed row, so a
-		// handoff candidate — always user-claimed — is never snoozed),
-		// but that's an app-level invariant, not a DB constraint, and this
-		// fallback shouldn't silently depend on it holding. Every other
-		// status (queued/in_progress/in_review) passes through unchanged,
-		// same as the CAS.
-		newStatus = task.Status
-		if newStatus == "snoozed" {
-			newStatus = "queued"
-		}
 	}
 	if claimChanged {
 		s.ws.Broadcast(websocket.Event{
@@ -420,7 +406,7 @@ func (s *Server) reassignClaim(w http.ResponseWriter, r *http.Request, orgID, us
 			},
 		})
 	}
-	return newStatus, true
+	return true
 }
 
 // taskDelegateRequest is the body of POST /api/tasks/{id}/delegate.
