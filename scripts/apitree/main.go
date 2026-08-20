@@ -178,8 +178,13 @@ func collect(root string) ([]route, error) {
 // worktree carries .git as a file pointing into the parent's gitdir; a clone
 // carries it as a directory. Either way what is under dir belongs to that
 // checkout's commit, not to the one being walked.
+//
+// Lstat, not Stat: the question is whether the entry is there, not whether it
+// resolves. A .git symlink whose target is gone or is outside a mounted tree
+// still marks a checkout — its Go files are just as much some other commit's —
+// and Stat would report the dangling link as absent and walk it.
 func isCheckout(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
 	return err == nil
 }
 

@@ -115,6 +115,14 @@ func TestCollectSkipsNestedCheckouts(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		// A .git symlink whose target is gone or unmounted still marks a
+		// checkout, so presence of the entry is the test — not whether it
+		// resolves.
+		{"dangling .git symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(dir, "no-such-gitdir"), filepath.Join(dir, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
