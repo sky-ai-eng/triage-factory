@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -75,7 +76,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 
 	t.Run("list_for_user_returns_both_teams", func(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
+			teams, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
@@ -111,30 +112,30 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 
 			// No filter → the union of the viewer's teams (both tasks).
-			all, e := store.Queued(ctx, orgID, nil)
+			all, e := queuedForTeams(ctx, store, orgID, nil)
 			if e != nil {
-				return fmt.Errorf("Queued(union): %w", e)
+				return fmt.Errorf("queue projection(union): %w", e)
 			}
 			if !containsTask(all, taskA) || !containsTask(all, taskB) {
-				t.Errorf("union Queued missing a task: got %s, want both %s and %s", taskIDs(all), taskA, taskB)
+				t.Errorf("union queue projection missing a task: got %s, want both %s and %s", taskIDs(all), taskA, taskB)
 			}
 
 			// Filter to A → only A's task; B's row is hidden.
-			onlyA, e := store.Queued(ctx, orgID, []string{teamA})
+			onlyA, e := queuedForTeams(ctx, store, orgID, []string{teamA})
 			if e != nil {
-				return fmt.Errorf("Queued(A): %w", e)
+				return fmt.Errorf("queue projection(A): %w", e)
 			}
 			if !containsTask(onlyA, taskA) || containsTask(onlyA, taskB) {
-				t.Errorf("Queued(team A) = %s; want only %s", taskIDs(onlyA), taskA)
+				t.Errorf("queue projection(team A) = %s; want only %s", taskIDs(onlyA), taskA)
 			}
 
 			// Filter to B → only B's task.
-			onlyB, e := store.Queued(ctx, orgID, []string{teamB})
+			onlyB, e := queuedForTeams(ctx, store, orgID, []string{teamB})
 			if e != nil {
-				return fmt.Errorf("Queued(B): %w", e)
+				return fmt.Errorf("queue projection(B): %w", e)
 			}
 			if !containsTask(onlyB, taskB) || containsTask(onlyB, taskA) {
-				t.Errorf("Queued(team B) = %s; want only %s", taskIDs(onlyB), taskB)
+				t.Errorf("queue projection(team B) = %s; want only %s", taskIDs(onlyB), taskB)
 			}
 			return nil
 		})
@@ -187,8 +188,9 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		// unreferenced — Postgres 42P18 "could not determine data type of
 		// parameter $4". The single-team subtests above only ever bind one team
 		// placeholder, so nothing exercised the second; this pins that a
-		// multi-team factory view (or task list) doesn't 500. Covers a base-1
-		// caller (Queued → $2,$3) and a base-2 caller
+		// multi-team factory view (or task list) doesn't 500. Covers the
+		// task-list caller (List, whose team placeholders land behind its
+		// own filter binds) and a base-2 caller
 		// (ListActiveRefsForEntities → $3,$4).
 		var entA, entB string
 		if err := h.AdminDB.QueryRow(`SELECT entity_id::text FROM tasks WHERE id = $1`, taskA).Scan(&entA); err != nil {
@@ -199,12 +201,12 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
-			both, e := store.Queued(ctx, orgID, []string{teamA, teamB})
+			both, e := queuedForTeams(ctx, store, orgID, []string{teamA, teamB})
 			if e != nil {
-				return fmt.Errorf("Queued(A,B): %w", e)
+				return fmt.Errorf("queue projection(A,B): %w", e)
 			}
 			if !containsTask(both, taskA) || !containsTask(both, taskB) {
-				t.Errorf("Queued(A,B) = %s; want both %s and %s", taskIDs(both), taskA, taskB)
+				t.Errorf("queue projection(A,B) = %s; want both %s and %s", taskIDs(both), taskA, taskB)
 			}
 			refs, e := store.ListActiveRefsForEntities(ctx, orgID, []string{entA, entB}, []string{teamA, teamB})
 			if e != nil {
@@ -259,16 +261,25 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		// behavior). The resolver that *chooses* teamB is unit-tested in the
 		// server package; here we pin that the store honors it.
 		promptID := "p_pick_" + uuid.New().String()
+		var created domain.Prompt
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
+			var e error
+			created, e = pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
 				ID:     promptID,
 				Name:   "Scoped",
 				Body:   "do the thing",
 				Source: "user",
 			})
+			return e
 		})
 		if err != nil {
 			t.Fatalf("create prompt on team B: %v", err)
+		}
+		// The row the write handed back says which team it landed on, so the
+		// caller learns it without a second read. The raw check below is the
+		// independent witness that it is telling the truth.
+		if created.TeamID != teamB {
+			t.Errorf("Create returned team %q; want the picked team %q (B)", created.TeamID, teamB)
 		}
 		var landed string
 		if err := h.AdminDB.QueryRow(
@@ -291,9 +302,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkPrompt := func(team, name string) string {
 			id := "p_scope_" + uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, team, domain.Prompt{
+				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, team, domain.Prompt{
 					ID: id, Name: name, Body: "b", Source: "user",
 				})
+				return e
 			}); e != nil {
 				t.Fatalf("create prompt %s: %v", name, e)
 			}
@@ -311,21 +323,21 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts
-			a, e := store.List(ctx, orgID, teamA)
+			a, _, e := store.List(ctx, orgID, teamA, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if ga := promptIDs(a); !ga[pA] || ga[pB] {
 				t.Errorf("List(teamA): want {A} without B; got A=%v B=%v", ga[pA], ga[pB])
 			}
-			b, e := store.List(ctx, orgID, teamB)
+			b, _, e := store.List(ctx, orgID, teamB, db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
 			if gb := promptIDs(b); !gb[pB] || gb[pA] {
 				t.Errorf("List(teamB): want {B} without A; got B=%v A=%v", gb[pB], gb[pA])
 			}
-			all, e := store.List(ctx, orgID, "")
+			all, _, e := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
 			if e != nil {
 				return e
 			}
@@ -349,7 +361,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
+				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
 					ID:              id,
 					Kind:            domain.EventHandlerKindRule,
 					EventType:       domain.EventGitHubPRCICheckFailed,
@@ -359,6 +371,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 					Enabled:         true,
 					Source:          domain.EventHandlerSourceUser,
 				})
+				return e
 			}); e != nil {
 				t.Fatalf("create rule %s: %v", name, e)
 			}
@@ -376,14 +389,14 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		}
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers
-			a, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamA)
+			a, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamA}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
 			if ga := handlerIDs(a); !ga[rA] || ga[rB] {
 				t.Errorf("List(rule, teamA): want A without B; got A=%v B=%v", ga[rA], ga[rB])
 			}
-			b, e := store.List(ctx, orgID, domain.EventHandlerKindRule, teamB)
+			b, _, e := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule, TeamID: teamB}, db.ListOpts{Limit: 200})
 			if e != nil {
 				return e
 			}
@@ -410,20 +423,20 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Sanity: visible in the union (via A).
-			all, e := store.Queued(ctx, orgID, nil)
+			all, e := queuedForTeams(ctx, store, orgID, nil)
 			if e != nil {
 				return e
 			}
 			if !containsTask(all, shared) {
-				t.Errorf("union Queued missing the A/C task %s", shared)
+				t.Errorf("union queue projection missing the A/C task %s", shared)
 			}
 			// Forged narrow to C (founder isn't in C) must NOT surface it.
-			forged, e := store.Queued(ctx, orgID, []string{teamC})
+			forged, e := queuedForTeams(ctx, store, orgID, []string{teamC})
 			if e != nil {
 				return e
 			}
 			if containsTask(forged, shared) {
-				t.Errorf("Queued(team C) leaked task %s; the caller isn't a member of C", shared)
+				t.Errorf("queue projection(team C) leaked task %s; the caller isn't a member of C", shared)
 			}
 			return nil
 		})
@@ -447,20 +460,20 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 			store := pgstore.NewForTx(tx, pgtest.SecretKey).Tasks
 			// Owning team A still matches.
-			onA, e := store.ByStatus(ctx, orgID, "claimed", []string{teamA})
+			onA, e := claimedForTeams(ctx, store, orgID, []string{teamA})
 			if e != nil {
 				return e
 			}
 			if !containsTask(onA, claimed) {
-				t.Errorf("ByStatus(claimed, team A) missing the A-owned task %s", claimed)
+				t.Errorf("claimed projection(team A) missing the A-owned task %s", claimed)
 			}
 			// Stale visibility team B must NOT match a claimed task.
-			onB, e := store.ByStatus(ctx, orgID, "claimed", []string{teamB})
+			onB, e := claimedForTeams(ctx, store, orgID, []string{teamB})
 			if e != nil {
 				return e
 			}
 			if containsTask(onB, claimed) {
-				t.Errorf("ByStatus(claimed, team B) matched task %s via a stale task_teams row; claimed tasks consolidate to team_id", claimed)
+				t.Errorf("claimed projection(team B) matched task %s via a stale task_teams row; claimed tasks consolidate to team_id", claimed)
 			}
 			return nil
 		})
@@ -478,7 +491,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			}
 			newTeamID = created.ID
 			// The creator is now a member, so ListForUser sees three teams.
-			teams, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID)
+			teams, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 			if e != nil {
 				return fmt.Errorf("list after create: %w", e)
 			}
@@ -575,6 +588,31 @@ func TestMultiTeam_Postgres(t *testing.T) {
 			t.Fatalf("post-reassign read as userB: %v", err)
 		}
 	})
+}
+
+// queuedForTeams is the queue projection — the pickable-right-now board
+// column — narrowed to teamIDs. The RLS assertions in this file are about
+// which teams' rows a filter admits, so they read better as the projection
+// the board asks for than as a filter literal repeated a dozen times.
+func queuedForTeams(ctx context.Context, store db.TaskStore, orgID string, teamIDs []string) ([]domain.Task, error) {
+	tasks, _, err := store.List(ctx, orgID, db.TaskListFilter{
+		Statuses:      []string{"queued"},
+		TeamIDs:       teamIDs,
+		OnlyUnclaimed: true,
+	}, db.ListOpts{Limit: 200})
+	return tasks, err
+}
+
+// claimedForTeams is the board's Claimed column narrowed to teamIDs — the
+// claim axis, where the team filter's task_teams branch deliberately does not
+// apply (a claim consolidates the task to its owning team).
+func claimedForTeams(ctx context.Context, store db.TaskStore, orgID string, teamIDs []string) ([]domain.Task, error) {
+	tasks, _, err := store.List(ctx, orgID, db.TaskListFilter{
+		Statuses:       []string{db.TaskListStatusClaimed},
+		TeamIDs:        teamIDs,
+		IncludeSnoozed: true,
+	}, db.ListOpts{Limit: 200})
+	return tasks, err
 }
 
 func containsTask(tasks []domain.Task, id string) bool {

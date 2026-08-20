@@ -1,19 +1,22 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { Link } from 'react-router'
 import { Check, X } from 'lucide-react'
-import { readError } from '../lib/api'
+import { apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { toast } from './Toast/toastStore'
+import type { RepoOption } from '../types'
 
 interface Props {
+  /** Selected repository ids — what `pinned_repository_ids` carries. */
   value: string[]
   onChange: (next: string[]) => void
   // The team whose tracked repos the picker offers. Empty falls back to
-  // the org's default team (the "default" alias the repos endpoint
-  // resolves) — the solo case where no write-time picker renders. When
-  // the create modal's TeamPicker is shown (≥2 teams), it threads the
-  // chosen team here so the offered repos match the team the project is
-  // created under, and server-side validatePinnedRepos agrees.
+  // the "default" alias, which the repos endpoint resolves in local mode
+  // only — the sole-team case where no write-time picker renders. Multi
+  // callers must supply a uuid: the create modal holds the fetch via
+  // `disabled` until the acting team resolves, then threads it here so
+  // the offered repos match the team the project is created under, and
+  // server-side validatePinnedRepos agrees.
   teamId?: string
   // When true the picker waits — no fetch, no interaction — until the
   // acting team resolves. The create modal sets this so a multi-team user
@@ -24,21 +27,26 @@ interface Props {
 }
 
 // RepoMultiSelect is the project create modal's pinned-repos picker. It
-// reads the acting team's tracked repos and exposes those slugs as
-// toggleable chips. Mirroring the server-side validation contract: the
-// user can only pick from the team's tracked set, so the chip strip
-// already enforces exactly what validatePinnedRepos enforces server-side.
-// Sourcing from the org-wide union (GET /api/repos) instead would offer
-// sibling-team repos the team doesn't track, so submitting would 400.
+// holds repository ids and displays names: the ids are what the pinned set
+// is submitted as, and a name is only ever what a chip reads.
 //
-// Chosen slugs render up top; the popover below holds the remaining
+// The offered set is the acting team's tracked repos, which takes two reads
+// because the two facts live in different places. The team's tracked set is
+// name-shaped — tracking is the ingest edge that mints a registry row, so it
+// names things that may not have one yet — and the registry is what carries
+// the ids. Intersecting them offers exactly what validatePinnedRepos accepts:
+// offering the registry alone would include sibling teams' repos (an org admin
+// reads the whole union), and every one of them would 400 on submit.
+//
+// Chosen repos render up top; the popover below holds the remaining
 // tracked options + a search filter. Empty tracked list shows a hint
 // pointing at /repos rather than an awkward empty popover.
 export default function RepoMultiSelect({ value, onChange, teamId, disabled = false }: Props) {
-  // "default" is the alias resolveTeamID maps to the org's default team;
-  // a real team id is used verbatim once the picker supplies one.
-  const teamReposPath = `/api/settings/team/${teamId || 'default'}/repos`
-  const [available, setAvailable] = useState<string[]>([])
+  // "default" is the alias ResolveTeamID maps to the sole team in local
+  // mode (the only mode whose callers leave teamId empty); a real team id
+  // is used verbatim once the picker supplies one.
+  const teamReposPath = `/api/teams/${teamId || 'default'}/github-repos`
+  const [available, setAvailable] = useState<RepoOption[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
@@ -53,20 +61,22 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
     async (signal: AbortSignal) => {
       try {
         setError(null)
-        const res = await fetch(teamReposPath, { signal })
+        const [team, registry] = await Promise.all([
+          apiJSON<{ repos?: string[] }>(teamReposPath, { signal }),
+          apiListAll<RepoOption>('/api/repos/list', {}, { signal }),
+        ])
         if (signal.aborted) return
-        if (!res.ok) {
-          const msg = await readError(res, 'Failed to load repos')
-          setError(msg)
-          toast.error(msg)
-          return
-        }
-        const data: { repos?: string[] } = await res.json()
-        if (signal.aborted) return
-        setAvailable(data.repos ?? [])
+        // Fold both sides: GitHub names are case-insensitive and the two
+        // tables can hold different casings of one repository.
+        const tracked = new Set((team.repos ?? []).map((slug) => slug.toLowerCase()))
+        setAvailable(
+          registry
+            .filter((r) => tracked.has(r.slug.toLowerCase()))
+            .sort((a, b) => a.slug.localeCompare(b.slug)),
+        )
       } catch (err) {
         if (signal.aborted) return
-        const msg = `Failed to load repos: ${err instanceof Error ? err.message : String(err)}`
+        const msg = httpErrorMessage(err, 'Could not load the tracked repos.')
         setError(msg)
         toast.error(msg)
       } finally {
@@ -92,18 +102,36 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
     if (!q) return available
-    return available.filter((slug) => slug.toLowerCase().includes(q))
+    return available.filter((r) => r.slug.toLowerCase().includes(q))
   }, [available, search])
 
+  // Chips read their name out of the offered set. An id with no entry is a
+  // repo the team stopped tracking since it was pinned: it still shows, so
+  // the user can see and remove it, rendered as the id because that is the
+  // only thing about it this picker knows.
+  const nameByID = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of available) m.set(r.id, r.slug)
+    return m
+  }, [available])
+  // Sorted by what the user reads, not by the opaque id.
+  const chosen = useMemo(
+    () =>
+      value
+        .map((id) => ({ id, slug: nameByID.get(id) ?? id }))
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    [value, nameByID],
+  )
+
   const toggle = useCallback(
-    (slug: string) => {
+    (id: string) => {
       const next = new Set(value)
-      if (next.has(slug)) {
-        next.delete(slug)
+      if (next.has(id)) {
+        next.delete(id)
       } else {
-        next.add(slug)
+        next.add(id)
       }
-      onChange(Array.from(next).sort())
+      onChange(Array.from(next))
     },
     [value, onChange],
   )
@@ -157,11 +185,11 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
     <div>
       {value.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-2">
-          {value.map((slug) => (
+          {chosen.map((r) => (
             <button
-              key={slug}
+              key={r.id}
               type="button"
-              onClick={() => toggle(slug)}
+              onClick={() => toggle(r.id)}
               className="
                 inline-flex items-center gap-1 rounded-full
                 bg-warm-2 text-warm px-2.5 py-0.5 text-reported
@@ -169,7 +197,7 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
                 group
               "
             >
-              {slug}
+              {r.slug}
               <X size={10} className="opacity-60 group-hover:opacity-100" />
             </button>
           ))}
@@ -191,20 +219,20 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
         {filtered.length === 0 ? (
           <div className="text-ui text-ink-3 py-2 px-3">No matches.</div>
         ) : (
-          filtered.map((slug) => {
-            const isSelected = selected.has(slug)
+          filtered.map((r) => {
+            const isSelected = selected.has(r.id)
             return (
               <button
-                key={slug}
+                key={r.id}
                 type="button"
-                onClick={() => toggle(slug)}
+                onClick={() => toggle(r.id)}
                 className="
                   w-full flex items-center justify-between gap-2
                   px-3 py-1.5 text-ui text-left
                   hover:bg-tint-2 transition-colors
                 "
               >
-                <span className="text-ink-1 truncate">{slug}</span>
+                <span className="text-ink-1 truncate">{r.slug}</span>
                 {isSelected && <Check size={12} className="shrink-0 text-warm" />}
               </button>
             )

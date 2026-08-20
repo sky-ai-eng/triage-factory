@@ -7,10 +7,46 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// TestJiraAppsStore_Postgres_ReturnedRowConformance runs the shared
+// returned-row suite against the Postgres impl under the registrant's claims,
+// on the app pool.
+//
+// The claims are the point. Wiring both pools to AdminDB — what the other
+// store conformance suites do, so behavior stays independent of the auth path
+// — makes the connection BYPASSRLS, and a RETURNING clause on a BYPASSRLS
+// connection returns its row unconditionally. Under RLS it does not: the
+// upsert's conflict arm has to satisfy the SELECT policy for the row it hands
+// back, so a policy that admits the write but not the read-back yields zero
+// rows from a statement that updated one. That is the failure this wiring
+// exists to catch, and it is invisible on the admin pool.
+//
+// The whole suite runs inside ONE claims-carrying transaction, which is also
+// what the sequence needs: org_jira_apps is one row per org, so the conflict
+// arm is only reachable through the insert arm that preceded it. A subtest
+// added to the suite therefore inherits the table its siblings left behind.
+func TestJiraAppsStore_Postgres_ReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).JiraApps
+		dbtest.RunJiraAppsReturnedRowConformance(t, func(t *testing.T) (db.JiraAppsStore, string, string) {
+			t.Helper()
+			return store, orgID, userID
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+}
 
 // TestJiraAppsStore_Postgres_UpsertGetDelete exercises Upsert + Get + Delete
 // through the app pool with matching claims. RLS gates writes via
@@ -33,7 +69,7 @@ func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 			t.Error("GetForOrg on empty table returned non-nil")
 		}
 
-		if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+		if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           "atl-client-1",
 			ClientSecretRef:    "jira_oauth_client_secret",
@@ -55,7 +91,7 @@ func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 		firstRegistered := got.RegisteredAt
 
 		// Replace in place; registered_at preserved.
-		if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+		if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           "atl-client-2",
 			ClientSecretRef:    "jira_oauth_client_secret",

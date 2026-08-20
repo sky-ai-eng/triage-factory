@@ -28,12 +28,19 @@ type Scorer interface {
 // wiring passes a *delegate.Spawner.
 type Delegator interface {
 	Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error)
-	// StopAndCancelBlueprint is the teardown half: the router only stops a
-	// conversation when the layer above it has already ended — a task closed,
-	// a firing rolled back — so the owning blueprint dies with it rather than
-	// freezing 'running' over work nothing will resume. The cause names which
-	// of those it was, and reaches the stopped conversation's transcript.
-	StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error
+	// StopConversationAndCancelBlueprint is the teardown half: the router only
+	// stops a conversation when the layer above it has already ended — a task
+	// closed, a firing rolled back — so the owning blueprint dies with it
+	// rather than freezing 'running' over work nothing will resume. The cause
+	// names which of those it was, and reaches the stopped conversation's
+	// transcript.
+	StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error
+	// StopBlueprintRun is the same teardown addressed from the other end, for
+	// the caller that holds the id Delegate returned and has no conversation
+	// in hand: it stops whatever steps the run has and cancels the run itself.
+	// Which verb a caller wants follows from which id it is holding — neither
+	// id resolves against the other's table.
+	StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable
@@ -47,7 +54,7 @@ type Delegator interface {
 	// caller must NOT record task_events 'injected' itself); the other two
 	// outcomes are handled exactly like the pre-TFAC-585 delivered/staged
 	// cases.
-	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
+	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
 }
 
 // ReDeriveLedger is the one write the post-scoring re-derive owns on the
@@ -84,28 +91,28 @@ type EventPublisher interface {
 //     auto run or earlier queued firings.
 //  8. Runs inline close checks for the event type
 type Router struct {
-	prompts      dbpkg.PromptStore
-	blueprints   dbpkg.BlueprintStore // resolves a trigger's blueprint → first step prompt for the per-(entity, prompt) breaker
-	handlers     dbpkg.EventHandlerStore
-	agents       dbpkg.AgentStore
-	teamAgents   dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
-	users        dbpkg.UsersStore            // read local user's host-scoped Jira identity for inline close gates
-	tasks        dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
-	agentRuns    dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
-	entities     dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
-	firings      dbpkg.PendingFiringsStore   // per-task firing queue + active-run gate
-	events       dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
-	eventQueue   dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
-	orgs         dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
-	teams        dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
-	teamRepos    dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
-	jiraRules    dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
-	githubGroups dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested team visibility. nil-safe — review routing degrades to handler-team visibility when unset
-	scores       ReDeriveLedger              // discharges tasks.rederive_owed after a re-derive pass; set post-construction via SetReDeriveLedger (nil → the pass runs, nothing is cleared)
-	spawner      Delegator
-	scorer       Scorer
-	ws           *websocket.Hub
-	publisher    EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
+	prompts       dbpkg.PromptStore
+	blueprints    dbpkg.BlueprintStore // resolves a trigger's blueprint → first step prompt for the per-(entity, prompt) breaker
+	handlers      dbpkg.EventHandlerStore
+	agents        dbpkg.AgentStore
+	teamAgents    dbpkg.TeamAgentStore        // read team_agents.enabled before auto-firing triggers
+	users         dbpkg.UsersStore            // read local user's host-scoped Jira identity for inline close gates
+	tasks         dbpkg.TaskStore             // task lifecycle, dedup, claims, breaker
+	conversations dbpkg.ConversationStore     // lookup active runs for the task-close cancel cascade
+	entities      dbpkg.EntityStore           // closed-entity guard + entity-terminating close cascade
+	firings       dbpkg.PendingFiringsStore   // per-task firing queue + active-run gate
+	events        dbpkg.EventStore            // admin-pool RecordSystem + GetMetadataSystem for the background subscriber
+	eventQueue    dbpkg.EventQueueStore       // durable router queue the drain worker claims from; set post-construction via SetEventQueue (nil → worker is a no-op)
+	orgs          dbpkg.OrgsStore             // per-org iteration for the drain sweeper; required (RunDrainSweeper dereferences it directly)
+	teams         dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
+	teamRepos     dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
+	jiraRules     dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
+	githubGroups  dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested team visibility. nil-safe — review routing degrades to handler-team visibility when unset
+	scores        ReDeriveLedger              // discharges tasks.rederive_owed after a re-derive pass; set post-construction via SetReDeriveLedger (nil → the pass runs, nothing is cleared)
+	spawner       Delegator
+	scorer        Scorer
+	ws            *websocket.Hub
+	publisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
 
 	// executorID/bootEpoch are this process's persistent instance-registry
 	// identity (TFAC-577), set post-construction via SetExecutorID before
@@ -127,7 +134,7 @@ type Router struct {
 	bootEpoch  int64
 
 	// drainLocks serializes DrainTask calls per task. Without this, the
-	// window between a pop and MarkPendingFiringFired/Skipped lets a
+	// window between a pop and MarkFired/MarkSkipped lets a
 	// concurrent drain (typically spawned by a fast-terminating run that
 	// the first drain just fired) pop the same row and double-fire it. The
 	// mutex closes the window: a second drain blocks until the first marks
@@ -158,28 +165,28 @@ type Router struct {
 // visibility routing degrades to handler-team visibility (the
 // pre-ticket behavior) when missing or when an event carries no requested
 // identity.
-func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, agentRuns dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
-		prompts:      prompts,
-		blueprints:   blueprints,
-		handlers:     handlers,
-		agents:       agents,
-		teamAgents:   teamAgents,
-		users:        users,
-		tasks:        tasks,
-		agentRuns:    agentRuns,
-		entities:     entities,
-		firings:      firings,
-		events:       events,
-		orgs:         orgs,
-		teams:        teams,
-		teamRepos:    teamRepos,
-		jiraRules:    jiraRules,
-		githubGroups: githubGroups,
-		spawner:      spawner,
-		scorer:       scorer,
-		ws:           ws,
-		drainLocks:   make(map[string]*sync.Mutex),
+		prompts:       prompts,
+		blueprints:    blueprints,
+		handlers:      handlers,
+		agents:        agents,
+		teamAgents:    teamAgents,
+		users:         users,
+		tasks:         tasks,
+		conversations: conversations,
+		entities:      entities,
+		firings:       firings,
+		events:        events,
+		orgs:          orgs,
+		teams:         teams,
+		teamRepos:     teamRepos,
+		jiraRules:     jiraRules,
+		githubGroups:  githubGroups,
+		spawner:       spawner,
+		scorer:        scorer,
+		ws:            ws,
+		drainLocks:    make(map[string]*sync.Mutex),
 	}
 }
 
@@ -188,7 +195,7 @@ func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handl
 // runs per (entity, prompt), and runs are prompt-keyed, so it tracks the
 // blueprint's first step prompt — exactly the wrapped prompt for the 1-step
 // blueprints every shipped trigger uses. Returns "" when the blueprint or its
-// steps can't be resolved (CountConsecutiveFailedRunsSystem then matches no
+// steps can't be resolved (CountConsecutiveFailedConversationsSystem then matches no
 // runs → breaker never trips, the safe default that doesn't block
 // auto-delegation on a transient read error). nil-safe on the store.
 func (r *Router) breakerPromptID(ctx context.Context, orgID, blueprintID string) string {

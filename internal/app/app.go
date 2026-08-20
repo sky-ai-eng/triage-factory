@@ -31,6 +31,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
@@ -40,6 +41,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
@@ -125,6 +127,12 @@ type App struct {
 	profiler   *repoprofile.Manager
 	classifier *projectclassify.Manager
 	reconciler *reconcile.Manager
+	// reachCache refreshes the reachable-repo mirror the repository picker and
+	// the team-repos write gate read. grantReconciler is the App-installation
+	// grant reconcile it shares with the poller — one instance, two cadences
+	// (the poller's per-cycle pass, and this manager's TTL-gated/forceable one).
+	reachCache      *reachcache.Manager
+	grantReconciler *grantmirror.Reconciler
 	// marketplaceStats is nil in local mode (TFAC-540): the marketplace is
 	// multi-mode only, so there's nothing to aggregate — see buildAI and
 	// registerSubscribers, which both branch on this being nil rather than
@@ -152,7 +160,7 @@ type App struct {
 
 	// placementResolver computes the capacity-weighted rendezvous placement
 	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue
-	// and the two-tier claim config the dispatcher passes to ClaimNextRun.
+	// and the two-tier claim config the dispatcher passes to ClaimNextConversation.
 	// Also backs the GET /api/fleet/placement explainer. Built in
 	// buildPlacement; a disabled config (local mode, or TF_PLACEMENT=off)
 	// still constructs a resolver whose Enabled() is false — a uniform no-op
@@ -169,7 +177,7 @@ type App struct {
 	// startBrain/stopBrain start/stop RunReaper + RunRegistryGC against it,
 	// nil-checked the same way a.wsBackplane is. reaperStaleThreshold /
 	// reaperMaxAttempts are the resolved TF_REAPER_STALE_SEC /
-	// TF_RUN_MAX_ATTEMPTS knobs those loops run with.
+	// TF_MAX_CLAIM_ATTEMPTS knobs those loops run with.
 	reaperStore          reaper.Store
 	reaperStaleThreshold time.Duration
 	reaperMaxAttempts    int
@@ -177,7 +185,7 @@ type App struct {
 	// credProvisioner is the brain-side sealed-credential-bundle
 	// provisioner (TFAC-614, spec's "channel") — resolves a run's LLM/
 	// GitHub/Jira credentials, seals them to the claiming executor's
-	// published pubkey, and writes run_credentials. Non-nil only for
+	// published pubkey, and writes claim_credentials. Non-nil only for
 	// brain-capable roles in multi mode (buildCredProvisioner), started/
 	// stopped alongside the rest of the brain in startBrain/stopBrain,
 	// nil-checked the same way a.reaperStore is.
@@ -328,8 +336,8 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	}
 	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — same
 	// brain-capable-roles-in-multi-mode gate as buildReaper, and must run
-	// after it exists so the run-signal/instance/run-queue stores it reads
-	// (a.stores) are already the real bundle.
+	// after it exists so the conversation-signal/instance/conversation-queue
+	// stores it reads (a.stores) are already the real bundle.
 	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}

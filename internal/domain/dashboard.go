@@ -20,7 +20,7 @@ type DashboardPoint struct {
 }
 
 // PRSummaryRow is a PR as displayed on the dashboard list. Returned
-// by db.DashboardStore.PRs and rendered as JSON by /api/dashboard/prs.
+// by db.DashboardStore.PRs and rendered as JSON by the dashboard PR list.
 type PRSummaryRow struct {
 	Number    int      `json:"number"`
 	Title     string   `json:"title"`
@@ -32,4 +32,40 @@ type PRSummaryRow struct {
 	CreatedAt string   `json:"created_at"`
 	UpdatedAt string   `json:"updated_at"`
 	HTMLURL   string   `json:"html_url"`
+}
+
+// PRSummaryFromSnapshot projects a stored PR snapshot onto the dashboard row.
+// It lives here rather than in each dialect because the projection is between
+// two domain types and has nothing to do with either backend — the two copies
+// that used to sit in the store packages were a place for the row shapes to
+// drift apart by one field.
+func PRSummaryFromSnapshot(snap PRSnapshot) PRSummaryRow {
+	// The dashboard renders lowercase states, and "merged" is a state of its
+	// own there though GitHub reports a merged PR as CLOSED with merged=true.
+	// An unrecognized state passes through verbatim rather than being
+	// lowercased, so a value the UI can't render stays legible in a bug report.
+	state := snap.State
+	switch state {
+	case "OPEN":
+		state = "open"
+	case "CLOSED":
+		state = "closed"
+	case "MERGED":
+		state = "merged"
+	}
+	if snap.Merged {
+		state = "merged"
+	}
+	return PRSummaryRow{
+		Number:    snap.Number,
+		Title:     snap.Title,
+		Repo:      snap.Repo,
+		Author:    snap.Author,
+		State:     state,
+		Draft:     snap.IsDraft,
+		Labels:    snap.Labels,
+		CreatedAt: snap.CreatedAt,
+		UpdatedAt: snap.UpdatedAt,
+		HTMLURL:   snap.URL,
+	}
 }

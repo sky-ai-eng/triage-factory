@@ -17,8 +17,8 @@ import (
 
 // RelayServer is the orchestrator-side op server the sidecar's relay envelope
 // dispatches to (it implements agentproc.RelayDispatcher). It holds the run's
-// db.Stores + RunInfo + git gate — everything the capless sidecar cannot — and
-// binds identity from RunInfo on every op, so a relayed op is structurally
+// db.Stores + ConversationInfo + git gate — everything the capless sidecar cannot — and
+// binds identity from ConversationInfo on every op, so a relayed op is structurally
 // unable to address another org's data (the wire carries no org id). One
 // RelayServer per run, built by the delegate at sidecar bring-up.
 //
@@ -37,11 +37,11 @@ type RelayServer struct {
 	rt *directRuntime
 
 	stores db.Stores
-	info   RunInfo
+	info   ConversationInfo
 
 	// audit is the host-side client the relayed audit-only ops record through —
 	// the same seam the in-process git gate uses (executorGitGate's
-	// denialHost), so a sandbox's denial and a local run's land the identical
+	// auditHost), so a sandbox's denial and a local run's land the identical
 	// row through the identical method.
 	audit *LocalClient
 
@@ -52,7 +52,7 @@ type RelayServer struct {
 
 	// proxyCreds are the run's per-run proxy coordinates (REST + git proxy, with
 	// placeholder tokens), set once the sidecar bring-up returns them (SetProxyCreds).
-	// The workspace materialization served here clones + GetPRs through them, so the
+	// The workspace materialization served here clones + fetches PRs through them, so the
 	// orchestrator holds no real credential for either. nil until bring-up completes.
 	proxyCreds *ProxyCredentials
 
@@ -125,8 +125,8 @@ func (s *RelayServer) SetGitHubCredential(credential string) {
 }
 
 // NewRelayServer builds the run's relay op server. git may be nil (no git
-// surface); stores/info are the run's own, admin-pool + RunInfo-bound.
-func NewRelayServer(stores db.Stores, info RunInfo, git *agentproc.GitProxyConfig) *RelayServer {
+// surface); stores/info are the run's own, admin-pool + ConversationInfo-bound.
+func NewRelayServer(stores db.Stores, info ConversationInfo, git *agentproc.GitProxyConfig) *RelayServer {
 	return &RelayServer{
 		rt:     newDirectRuntime(stores, info),
 		stores: stores,
@@ -159,7 +159,7 @@ func (s *RelayServer) dispatch(ctx context.Context, namespace, op string, args j
 		return s.dispatchCoreCall(ctx, op, args)
 	}
 	// A provider policy op (e.g. slack/authorize_channel): served against the
-	// run's stores + RunInfo, identity bound orchestrator-side.
+	// run's stores + ConversationInfo, identity bound orchestrator-side.
 	return dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args)
 }
 
@@ -228,11 +228,11 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		return json.Marshal(agentproc.AuthorizeGHWriteReply{Allowed: s.authorizeGHWrite(ctx, a)})
 
 	case opGetConversation:
-		run, err := s.rt.GetConversation(ctx)
+		conv, err := s.rt.GetConversation(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(agentRunResult{Run: run})
+		return json.Marshal(getConversationResult{Conversation: conv})
 
 	case opGetTask:
 		var a getTaskArgs
@@ -274,51 +274,51 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(teamTracksRepoResult{Tracks: tracks})
 
-	case opGetRunWorktreeByRepoRef:
-		var a runWorktreeByRepoRefArgs
+	case opGetConversationWorktreeByRepoRef:
+		var a conversationWorktreeByRepoRefArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		w, err := s.rt.GetRunWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		w, err := s.rt.GetConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(runWorktreeResult{Worktree: w})
+		return json.Marshal(conversationWorktreeResult{Worktree: w})
 
-	case opListRunWorktrees:
-		w, err := s.rt.ListRunWorktrees(ctx)
+	case opListConversationWorktrees:
+		w, err := s.rt.ListConversationWorktrees(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(runWorktreesResult{Worktrees: w})
+		return json.Marshal(conversationWorktreesResult{Worktrees: w})
 
-	case opInsertRunWorktree:
-		var a insertRunWorktreeArgs
+	case opInsertConversationWorktree:
+		var a insertConversationWorktreeArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		inserted, winningPath, err := s.rt.InsertRunWorktree(ctx, a.Row)
+		inserted, winningPath, err := s.rt.InsertConversationWorktree(ctx, a.Row)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(insertRunWorktreeResult{Inserted: inserted, WinningPath: winningPath})
+		return json.Marshal(insertConversationWorktreeResult{Inserted: inserted, WinningPath: winningPath})
 
-	case opDeleteRunWorktree:
-		var a deleteRunWorktreeByRepoRefArgs
+	case opDeleteConversationWorktree:
+		var a deleteConversationWorktreeByRepoRefArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		if err := s.rt.DeleteRunWorktree(ctx, a.RepoID, a.Ref); err != nil {
+		if err := s.rt.DeleteConversationWorktree(ctx, a.RepoID, a.Ref); err != nil {
 			return nil, err
 		}
 		return nil, nil
 
-	case opListRunArtifacts:
-		arts, err := s.rt.ListRunArtifacts(ctx)
+	case opListConversationArtifacts:
+		arts, err := s.rt.ListConversationArtifacts(ctx)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(listRunArtifactsResult{Artifacts: arts})
+		return json.Marshal(listConversationArtifactsResult{Artifacts: arts})
 
 	case opOrgJiraBase:
 		url, err := s.rt.OrgJiraBaseURL(ctx)
@@ -383,7 +383,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		// the team settings live behind the stores it doesn't hold, and its own
 		// gh clients speak to per-run REST proxies that report a descriptive
 		// identity, not the real App-vs-PAT tier. Identity is the run's own
-		// RunInfo, so a sidecar cannot read another team's posture.
+		// ConversationInfo, so a sidecar cannot read another team's posture.
 		res, err := s.rt.ReviewPosture(ctx, a.Owner, a.Repo)
 		if err != nil {
 			return nil, err
@@ -411,7 +411,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		// The sidecar relays `memory load` here so the entity lookup, the team-
 		// scoped memory read, and the best-effort touch all land where the stores
-		// live. Identity is the run's own RunInfo (s.rt), so a sidecar cannot
+		// live. Identity is the run's own ConversationInfo (s.rt), so a sidecar cannot
 		// steer the read at another org/team's memory.
 		res, err := s.rt.MemoryLoad(ctx, a.Source, a.SourceID, a.Limit)
 		if err != nil {
@@ -436,14 +436,14 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		// Materialize on the orchestrator, which owns the bare cache + run-root
 		// and clones / fetches PRs through the run's proxies. Identity is the
-		// run's own RunInfo, so the repo-config + team-tracking gate re-binds to
+		// run's own ConversationInfo, so the repo-config + team-tracking gate re-binds to
 		// THIS run's team — a sidecar cannot steer it at another team's repo.
 		client := &LocalClient{
 			stores:     s.stores,
 			info:       s.info,
 			rt:         s.rt,
 			proxyCreds: s.proxyCreds,
-			gateWired:  s.stores.TeamGitHubRepos != nil && s.stores.RunWorktrees != nil,
+			gateWired:  s.stores.TeamGitHubRepos != nil && s.stores.ConversationWorktrees != nil,
 		}
 		path, err := client.materializeWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
 		if err != nil {
@@ -524,7 +524,7 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 		if err != nil {
 			if !warned {
 				warned = true
-				agenthostLog.Warn("read sealed credential bundle timestamp failed; retrying until the workspace wait expires", "run", s.info.RunID, "repo", repoID, "error", err)
+				agenthostLog.Warn("read sealed credential bundle timestamp failed; retrying until the workspace wait expires", "conversation", s.info.ConversationID, "repo", repoID, "error", err)
 			}
 		} else if ok && sealedAt.After(reservedAt) {
 			if s.credRefresh.Relay == nil {
@@ -563,11 +563,11 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 // re-seal that changes nothing.
 //
 // Repo ids are compared case-insensitively because the reservation records the
-// agent's spelling while the checkout op carries the repo profile's — the same
+// agent's spelling while the checkout op carries the repository row's — the same
 // rule the insert's doorbell gate uses, so the two halves agree on what counts
 // as the same repo.
 func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.Time, bool, error) {
-	rows, err := s.rt.ListRunWorktrees(ctx)
+	rows, err := s.rt.ListConversationWorktrees(ctx)
 	if err != nil {
 		return time.Time{}, false, err
 	}
@@ -586,10 +586,10 @@ func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.T
 }
 
 // ObservationArtifact turns a gh-injector observation into the domain artifact
-// the recording side upserts. The run identity (ConversationID/OrgID/TeamID) is
-// stamped downstream by RecordExternalWrite from the caller's RunInfo — never
-// from the wire — so a sidecar cannot attribute an artifact to another run. A
-// review anchors to runID for its dedup key (the same run-scoped key a TF-side
+// the recording side upserts. The conversation identity (ConversationID/OrgID/TeamID) is
+// stamped downstream by RecordExternalWrite from the caller's ConversationInfo — never
+// from the wire — so a sidecar cannot attribute an artifact to another conversation. A
+// review anchors to conversationID for its dedup key (the same conversation-scoped key a TF-side
 // draft would use, so a gh submit migrates a draft in place). ok is false for a
 // malformed observation (missing coordinates), which is dropped.
 //
@@ -597,7 +597,7 @@ func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.T
 // sidecar relays its observations here through the RelayServer, and a local-mode
 // run — whose injector runs in this very process — records them directly with no
 // relay hop at all.
-func ObservationArtifact(a agentproc.RecordObservationArgs, runID string) (domain.Artifact, bool) {
+func ObservationArtifact(a agentproc.RecordObservationArgs, conversationID string) (domain.Artifact, bool) {
 	if a.Owner == "" || a.Repo == "" {
 		return domain.Artifact{}, false
 	}
@@ -612,7 +612,7 @@ func ObservationArtifact(a agentproc.RecordObservationArgs, runID string) (domai
 		if a.Number == 0 || a.ReviewID == 0 {
 			return domain.Artifact{}, false
 		}
-		return domain.NewSubmittedReviewArtifact(repoPath, a.Number, a.ReviewID, a.ReviewState, a.URL, runID), true
+		return domain.NewSubmittedReviewArtifact(repoPath, a.Number, a.ReviewID, a.ReviewState, a.URL, conversationID), true
 	}
 	return domain.Artifact{}, false
 }
@@ -759,14 +759,14 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed gh observation: %w", err)
 		}
-		art, ok := ObservationArtifact(a, s.info.RunID)
+		art, ok := ObservationArtifact(a, s.info.ConversationID)
 		if !ok {
 			// A shape that maps to no artifact, not a lost one: the write's own
 			// audit row rides record_gh_write, which is a separate notify.
 			return nil
 		}
 		// The gh mutation already landed upstream; Record stamps the run identity
-		// from THIS server's RunInfo (never the wire) and upserts. Best-effort,
+		// from THIS server's ConversationInfo (never the wire) and upserts. Best-effort,
 		// capped like the other audit ops.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
@@ -794,7 +794,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		// fine. See agentproc.NotifyRelayAudit for the half this cannot see.
 		recordAuditDrop(ctx, dropStageRelaySend, relayDropOp(a.Namespace, a.Op))
 		agenthostLog.Warn("sidecar could not relay an audit record",
-			"namespace", a.Namespace, "op", a.Op, "run", s.info.RunID)
+			"namespace", a.Namespace, "op", a.Op, "conversation", s.info.ConversationID)
 
 	default:
 		return fmt.Errorf("agenthost: unsupported core relay notify op %q", op)

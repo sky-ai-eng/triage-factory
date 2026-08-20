@@ -1,8 +1,8 @@
 import { useSyncExternalStore, useCallback, useEffect, useRef, useState } from 'react'
-import type { TeamsResponse, TeamSummary } from '../types'
-import { readError } from '../lib/api'
+import type { TeamSummary } from '../types'
+import { apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
-// Shared store for GET /api/teams — the data source for the multi-team
+// Shared store for POST /api/teams/list — the data source for the multi-team
 // selectors (the per-page read filter and the write-time picker) plus the
 // org-admin "add team" control. A single module-level cache means every
 // selector across pages and modals shares one round-trip, and a mutation
@@ -57,14 +57,16 @@ function load(): Promise<void> {
   if (inFlight) return inFlight
   const gen = generation
   setState({ loading: true, error: null })
-  inFlight = fetch('/api/teams')
-    .then(async (r) => {
-      if (!r.ok) throw new Error(await readError(r, 'Failed to load teams'))
-      const data = (await r.json()) as TeamsResponse
+  // page_size at the route max: this is a picker cache, and every selector
+  // that reads it wants the whole set. An org past 200 teams would page, and
+  // the cache would hold the first page — worth revisiting only if that
+  // becomes real, since a team picker with 200 entries has a bigger problem.
+  inFlight = apiList<TeamSummary>('/api/teams/list', { page_size: 200 })
+    .then((page) => {
       if (gen !== generation) return // superseded — a newer invalidation won
       setState({
-        teams: data.teams ?? [],
-        lastActingTeamId: data.last_acting_team_id ?? '',
+        teams: page.items,
+        lastActingTeamId: page.items.find((t) => t.is_last_acting)?.id ?? '',
         loaded: true,
         loading: false,
         error: null,
@@ -72,7 +74,7 @@ function load(): Promise<void> {
     })
     .catch((err) => {
       if (gen !== generation) return
-      setState({ loading: false, error: err instanceof Error ? err.message : String(err) })
+      setState({ loading: false, error: httpErrorMessage(err, 'Could not load teams.') })
     })
     .finally(() => {
       // Only clear if it's still ours — supersedeInFlight may have already
@@ -149,14 +151,11 @@ export function useTeams(): UseTeams {
   }, [])
 
   const createTeam = useCallback(async (name: string): Promise<TeamSummary> => {
-    const res = await fetch('/api/teams', {
+    const created = await apiJSON<TeamSummary>('/api/teams', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ name }),
     })
-    if (!res.ok) throw new Error(await readError(res, 'Failed to create team'))
-    const created = (await res.json()) as TeamSummary
     // Supersede so the reload reflects the just-created team rather than a
     // pre-create fetch that may still be in flight.
     supersedeInFlight()

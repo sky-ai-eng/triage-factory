@@ -21,6 +21,46 @@ type blueprintWithStepsView struct {
 	Steps     composeSteps   `json:"steps"`
 }
 
+// listBlueprintSteps reads one blueprint's steps through the single step-list
+// route (the per-blueprint GET it replaced was the same query with a filter).
+func listBlueprintSteps(t *testing.T, s *Server, blueprintID string) composeSteps {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprint-steps/list", map[string]any{
+		"blueprint_ids": []string{blueprintID},
+	})
+	return decodeList[map[string]any](t, rec).Items
+}
+
+// listAllBlueprintSteps reads every in-scope blueprint's steps — the canvas's
+// bulk read — and groups them by blueprint id.
+func listAllBlueprintSteps(t *testing.T, s *Server) map[string]composeSteps {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/api/blueprint-steps/list", map[string]any{})
+	out := map[string]composeSteps{}
+	for _, st := range decodeList[map[string]any](t, rec).Items {
+		id, _ := st["blueprint_id"].(string)
+		out[id] = append(out[id], st)
+	}
+	return out
+}
+
+// blueprintExists reports whether the canonical single read resolves the
+// blueprint. It replaces the per-blueprint steps GET's 404, which was the only
+// way to ask "is this blueprint gone?" before that read existed.
+func blueprintExists(t *testing.T, s *Server, blueprintID string) bool {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprints/"+blueprintID, nil)
+	switch rec.Code {
+	case http.StatusOK:
+		return true
+	case http.StatusNotFound:
+		return false
+	default:
+		t.Fatalf("GET /api/blueprints/%s = %d; body=%s", blueprintID, rec.Code, rec.Body.String())
+		return false
+	}
+}
+
 // --- B: atomic merge -----------------------------------------------------
 
 func TestBlueprintMerge_AppendsAndRetiresSource(t *testing.T) {
@@ -61,8 +101,8 @@ func TestBlueprintMerge_AppendsAndRetiresSource(t *testing.T) {
 			t.Fatalf("source %s still listed after merge", source)
 		}
 	}
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+source+"/steps", nil); g.Code != http.StatusNotFound {
-		t.Fatalf("GET source steps after merge: expected 404, got %d", g.Code)
+	if blueprintExists(t, s, source) {
+		t.Fatal("GET source steps after merge: the blueprint is still readable")
 	}
 }
 
@@ -73,8 +113,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 
 	// Attach a trigger to the source — unreachable from the canvas, but a
 	// third-party caller can do it, so the endpoint must refuse to corrupt state.
-	tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             source,
 		"breaker_threshold":        3,
@@ -91,9 +130,7 @@ func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 		t.Fatalf("merge triggered source: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// The host is untouched (single transaction, nothing reparented).
-	steps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+host+"/steps", nil)
-	var hostSteps composeSteps
-	_ = json.Unmarshal(steps.Body.Bytes(), &hostSteps)
+	hostSteps := listBlueprintSteps(t, s, host)
 	if len(hostSteps) != 1 {
 		t.Fatalf("host steps after rejected merge = %d, want 1 (untouched)", len(hostSteps))
 	}
@@ -122,14 +159,12 @@ func TestBlueprintMerge_ExceedsStepCapRejected(t *testing.T) {
 		t.Fatalf("merge over cap: expected 422, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// Both blueprints untouched — host still at the cap, source not retired.
-	hostSteps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+host+"/steps", nil)
-	var hs composeSteps
-	_ = json.Unmarshal(hostSteps.Body.Bytes(), &hs)
+	hs := listBlueprintSteps(t, s, host)
 	if len(hs) != maxBlueprintSteps {
 		t.Fatalf("host steps after rejected merge = %d, want %d (untouched)", len(hs), maxBlueprintSteps)
 	}
-	if g := doJSON(t, s, http.MethodGet, "/api/blueprints/"+source+"/steps", nil); g.Code != http.StatusOK {
-		t.Fatalf("source steps after rejected merge: expected 200 (not retired), got %d", g.Code)
+	if !blueprintExists(t, s, source) {
+		t.Fatal("source blueprint was retired by a rejected merge")
 	}
 }
 
@@ -233,9 +268,7 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 		}
 	}
 	// The blueprint is untouched after the rejected splits.
-	steps := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bp+"/steps", nil)
-	var got composeSteps
-	_ = json.Unmarshal(steps.Body.Bytes(), &got)
+	got := listBlueprintSteps(t, s, bp)
 	if len(got) != 2 {
 		t.Fatalf("steps after rejected splits = %d, want 2 (untouched)", len(got))
 	}
@@ -246,8 +279,7 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 	s := newTestServer(t)
 	seedBlueprintForTrigger(t, s, "bp-one-trigger")
-	first := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	first := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             "bp-one-trigger",
 		"breaker_threshold":        3,
@@ -258,8 +290,7 @@ func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 	}
 	// A second trigger on the same blueprint (even on a different event) is a
 	// clean 409, not a raw 500 from the partial-unique index.
-	second := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	second := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:review_changes_requested",
 		"blueprint_id":             "bp-one-trigger",
 		"breaker_threshold":        3,
@@ -273,8 +304,7 @@ func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	s := newTestServer(t)
 	seedBlueprintForTrigger(t, s, "bp-promote-conflict")
-	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             "bp-promote-conflict",
 		"breaker_threshold":        3,
@@ -282,8 +312,7 @@ func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	}); tr.Code != http.StatusCreated {
 		t.Fatalf("seed trigger: %d: %s", tr.Code, tr.Body.String())
 	}
-	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:review_changes_requested",
 		"name":             "to-promote",
 		"default_priority": 0.5,
@@ -307,9 +336,9 @@ func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	}
 }
 
-// GET /api/blueprint-steps returns every blueprint's steps in one read, grouped
-// by blueprint_id and excluding retired (merged-away) blueprints — the canvas's
-// bulk fetch that replaced the per-blueprint N+1.
+// The step list with no blueprint_ids returns every blueprint's steps in one
+// read, grouped by blueprint_id and excluding retired (merged-away)
+// blueprints — the canvas's bulk fetch that replaced the per-blueprint N+1.
 func TestBlueprintStepsAll_BulkGroupedAndExcludesRetired(t *testing.T) {
 	s := newTestServer(t)
 	host, hp := createWrappedBlueprint(t, s, "Alpha")
@@ -322,18 +351,11 @@ func TestBlueprintStepsAll_BulkGroupedAndExcludesRetired(t *testing.T) {
 		t.Fatalf("merge: %d: %s", rec.Code, rec.Body.String())
 	}
 
-	got := doJSON(t, s, http.MethodGet, "/api/blueprint-steps", nil)
-	if got.Code != http.StatusOK {
-		t.Fatalf("bulk steps: %d: %s", got.Code, got.Body.String())
-	}
-	var steps []map[string]any
-	if err := json.Unmarshal(got.Body.Bytes(), &steps); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
 	byBp := map[string][]string{}
-	for _, st := range steps {
-		bp, _ := st["blueprint_id"].(string)
-		byBp[bp] = append(byBp[bp], st["step_prompt_id"].(string))
+	for bp, steps := range listAllBlueprintSteps(t, s) {
+		for _, st := range steps {
+			byBp[bp] = append(byBp[bp], st["step_prompt_id"].(string))
+		}
 	}
 	if len(byBp[host]) != 2 || byBp[host][0] != hp || byBp[host][1] != sp {
 		t.Errorf("Alpha steps = %v, want [%s %s]", byBp[host], hp, sp)

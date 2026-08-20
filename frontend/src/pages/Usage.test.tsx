@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import type {
-  AccessLogResponse,
+  AccessChangeRow,
   UsageCategoryBucket,
   UsageMeResponse,
   UsageOrgResponse,
-  UsageTeamCapsResponse,
+  UsageTeamCap,
   UsageTeamResponse,
 } from '../types'
 
@@ -44,6 +44,14 @@ vi.mock('../contexts/AuthContext', () => ({
   useOptionalAuth: () => (authMock.local ? null : ({} as unknown)),
 }))
 
+// The org-scoped reads name their org in the path, so the page resolves one
+// through useApiOrgId (the sentinel in local mode, the active org in multi).
+// Mocked to a fixed id here: what's under test is which reads happen, not how
+// the id is resolved, and the real hook needs an OrgProvider this render has no
+// reason to mount.
+const orgIdMock = vi.hoisted(() => ({ id: 'o1' as string | null }))
+vi.mock('../hooks/useApiOrgId', () => ({ useApiOrgId: () => orgIdMock.id }))
+
 // useEntitlements gates the EE governance surfaces on the Usage page — the
 // per-team cap editor (TFAC-482) and the access & credential change-log band
 // (TFAC-484/471). Mock it like the other hooks so each test toggles governance
@@ -60,6 +68,7 @@ vi.mock('../hooks/useEntitlements', () => ({
 }))
 
 import Usage from './Usage'
+import { jsonBody } from '../test/apiResponse'
 
 // --- fixtures -------------------------------------------------------------
 
@@ -136,31 +145,24 @@ const ORG: UsageOrgResponse = {
   by_rule: [{ trigger_id: 'tr1', rule_name: 'CI Fixer', cost: 50 }],
 }
 
-// The governance cap editor reads its team list from /api/usage/org/team-caps
-// (ALL active teams, TFAC-482), not the spend rollup's by_team — so Idle (no spend
-// in ORG.by_team) still appears and can be capped.
-const ORG_TEAM_CAPS: UsageTeamCapsResponse = {
-  teams: [
-    { team_id: 't1', team_name: 'Platform', cap: 50 },
-    { team_id: 't2', team_name: 'Growth', cap: null },
-    { team_id: 't3', team_name: 'Idle', cap: null },
-  ],
-}
+// The governance cap editor reads its team list from the team-caps list route
+// (ALL active teams), not the spend rollup's by_team — so Idle (no spend in
+// ORG.by_team) still appears and can be capped.
+const ORG_TEAM_CAPS: UsageTeamCap[] = [
+  { team_id: 't1', team_name: 'Platform', cap: 50 },
+  { team_id: 't2', team_name: 'Growth', cap: null },
+  { team_id: 't3', team_name: 'Idle', cap: null },
+]
 
-// stubUsageFetch routes GET /api/usage/* by path (query stripped) to a canned
-// payload; an unmapped path resolves to a 404-shaped response (readError-safe).
+// stubUsageFetch routes a usage read by path (query stripped) to a canned
+// payload; an unmapped path resolves to a 404 whose body apiClient can read.
 function stubUsageFetch(payloads: Record<string, unknown>) {
   const fetchMock = vi.fn((input: unknown, _init?: RequestInit) => {
     const path = String(input).split('?')[0]
     if (path in payloads) {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve(payloads[path]) })
+      return Promise.resolve({ ok: true, ...jsonBody(payloads[path]) })
     }
-    return Promise.resolve({
-      ok: false,
-      status: 404,
-      clone: () => ({ json: () => Promise.resolve({ error: 'not found' }) }),
-      text: () => Promise.resolve('not found'),
-    })
+    return Promise.resolve({ ok: false, status: 404, ...jsonBody({ error: 'not found' }) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -171,35 +173,36 @@ function fetchedPaths(fetchMock: ReturnType<typeof vi.fn>): string[] {
 }
 
 // Access-log fixtures: one membership row + one credential row, newest-first.
-const ACCESS_LOG: AccessLogResponse = {
-  items: [
-    {
-      id: 'a1',
-      action: 'org_role_changed',
-      action_label: 'changed Bob from member to admin',
-      actor_name: 'Alice',
-      target_name: 'Bob',
-      created_at: '2026-06-20T11:00:00Z',
-    },
-    {
-      id: 'a2',
-      action: 'credential_set',
-      action_label: 'set the GitHub PAT for github.example.com',
-      actor_name: 'Alice',
-      created_at: '2026-06-20T10:00:00Z',
-    },
-  ],
-  limit: 50,
-  offset: 0,
-  has_more: false,
+const ACCESS_LOG: AccessChangeRow[] = [
+  {
+    id: 'a1',
+    action: 'org_role_changed',
+    action_label: 'changed Bob from member to admin',
+    actor_name: 'Alice',
+    target_name: 'Bob',
+    created_at: '2026-06-20T11:00:00Z',
+  },
+  {
+    id: 'a2',
+    action: 'credential_set',
+    action_label: 'set the GitHub PAT for github.example.com',
+    actor_name: 'Alice',
+    created_at: '2026-06-20T10:00:00Z',
+  },
+]
+
+const ACCESS_LOG_EMPTY: AccessChangeRow[] = []
+
+// listOf wraps rows in the list envelope a POST /…/list route answers with, so
+// a fixture in this file stays a plain row array.
+function listOf<T>(rows: T[]) {
+  return { items: rows, next_page_token: '', total_count: rows.length }
 }
 
-const ACCESS_LOG_EMPTY: AccessLogResponse = { items: [], limit: 50, offset: 0, has_more: false }
-
-// fullUrls returns each fetched URL with its query intact (fetchedPaths strips
-// the query) — for asserting the access-log category param.
-function fullUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
-  return fetchMock.mock.calls.map((c) => String(c[0]))
+// calledBodies parses each recorded request's JSON body — a list read's filters
+// live there, not in a query string.
+function calledBodies(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
+  return fetchMock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit)?.body ?? '{}')))
 }
 
 beforeEach(() => {
@@ -218,10 +221,10 @@ describe('Usage page', () => {
       { id: 't2', name: 'Growth', slug: 'growth', role: 'admin' },
     ]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/teams/t2': TEAM_T2,
-      '/api/usage/org': ORG,
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/teams/t2/usage': TEAM_T2,
+      '/api/orgs/o1/usage': ORG,
     })
 
     render(<Usage />)
@@ -241,9 +244,9 @@ describe('Usage page', () => {
     // The three role-scoped endpoints were all hit (team defaults to the first
     // admin team).
     const paths = fetchedPaths(fetchMock)
-    expect(paths).toContain('/api/usage/me')
-    expect(paths).toContain('/api/usage/teams/t1')
-    expect(paths).toContain('/api/usage/org')
+    expect(paths).toContain('/api/me/usage')
+    expect(paths).toContain('/api/teams/t1/usage')
+    expect(paths).toContain('/api/orgs/o1/usage')
   })
 
   it('org section hides the per-team cap editor unless governance is licensed', async () => {
@@ -251,7 +254,7 @@ describe('Usage page', () => {
     roleMock.isAdmin = true
     entMock.governance = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
-    stubUsageFetch({ '/api/usage/me': ME, '/api/usage/teams/t1': TEAM, '/api/usage/org': ORG })
+    stubUsageFetch({ '/api/me/usage': ME, '/api/teams/t1/usage': TEAM, '/api/orgs/o1/usage': ORG })
 
     render(<Usage />)
 
@@ -266,28 +269,28 @@ describe('Usage page', () => {
     entMock.governance = true
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/org': ORG,
-      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/team-caps/list': listOf(ORG_TEAM_CAPS),
       // The PUT echoes the stored value back; stubUsageFetch keys on path only.
-      '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
+      '/api/teams/t1/usage/cap': { max_daily_cost_usd: 75 },
     })
 
     render(<Usage />)
 
-    // The editor renders, seeded from /api/usage/org/team-caps (Platform = 50).
+    // The editor renders, seeded from the team-caps list (Platform = 50).
     expect(await screen.findByText('Daily caps')).toBeInTheDocument()
     const input = (await screen.findByLabelText('Daily cap for Platform')) as HTMLInputElement
     expect(input.value).toBe('50')
 
-    // Edit + blur → PUT /api/usage/teams/t1/cap with the new numeric cap.
+    // Edit + blur → PUT /api/teams/t1/usage/cap with the new numeric cap.
     fireEvent.change(input, { target: { value: '75' } })
     fireEvent.blur(input)
 
     await waitFor(() => {
       const put = fetchMock.mock.calls.find(
-        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+        (c) => String(c[0]) === '/api/teams/t1/usage/cap' && c[1]?.method === 'PUT',
       )
       expect(put).toBeTruthy()
       expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 75 })
@@ -299,11 +302,11 @@ describe('Usage page', () => {
     entMock.governance = true
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/org': ORG,
-      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
-      '/api/usage/teams/t1/cap': { max_daily_cost_usd: null },
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/team-caps/list': listOf(ORG_TEAM_CAPS),
+      '/api/teams/t1/usage/cap': { max_daily_cost_usd: null },
     })
 
     render(<Usage />)
@@ -314,7 +317,7 @@ describe('Usage page', () => {
 
     await waitFor(() => {
       const put = fetchMock.mock.calls.find(
-        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+        (c) => String(c[0]) === '/api/teams/t1/usage/cap' && c[1]?.method === 'PUT',
       )
       expect(put).toBeTruthy()
       expect(JSON.parse(String(put![1]?.body))).toEqual({
@@ -331,15 +334,15 @@ describe('Usage page', () => {
     entMock.governance = true
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/org': ORG,
-      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
-      '/api/usage/teams/t1/cap': { max_daily_cost_usd: 75 },
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/team-caps/list': listOf(ORG_TEAM_CAPS),
+      '/api/teams/t1/usage/cap': { max_daily_cost_usd: 75 },
     })
     const capPuts = () =>
       fetchMock.mock.calls.filter(
-        (c) => String(c[0]) === '/api/usage/teams/t1/cap' && c[1]?.method === 'PUT',
+        (c) => String(c[0]) === '/api/teams/t1/usage/cap' && c[1]?.method === 'PUT',
       )
 
     render(<Usage />)
@@ -362,18 +365,18 @@ describe('Usage page', () => {
   })
 
   it('an idle team with no window spend still appears and is cappable', async () => {
-    // The editor reads /api/usage/org/team-caps (ALL active teams), not the spend
+    // The editor reads the team-caps list (ALL active teams), not the spend
     // rollup's by_team — so Idle (absent from ORG.by_team, no window spend) still
     // gets an editable cap input, the whole point of pre-capping a runaway.
     roleMock.isAdmin = true
     entMock.governance = true
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/org': ORG,
-      '/api/usage/org/team-caps': ORG_TEAM_CAPS,
-      '/api/usage/teams/t3/cap': { max_daily_cost_usd: 20 },
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/team-caps/list': listOf(ORG_TEAM_CAPS),
+      '/api/teams/t3/usage/cap': { max_daily_cost_usd: 20 },
     })
 
     render(<Usage />)
@@ -386,7 +389,7 @@ describe('Usage page', () => {
     fireEvent.blur(idle)
     await waitFor(() => {
       const put = fetchMock.mock.calls.find(
-        (c) => String(c[0]) === '/api/usage/teams/t3/cap' && c[1]?.method === 'PUT',
+        (c) => String(c[0]) === '/api/teams/t3/usage/cap' && c[1]?.method === 'PUT',
       )
       expect(put).toBeTruthy()
       expect(JSON.parse(String(put![1]?.body))).toEqual({ max_daily_cost_usd: 20 })
@@ -397,9 +400,9 @@ describe('Usage page', () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'member' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/org': ORG,
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/orgs/o1/usage': ORG,
     })
 
     render(<Usage />)
@@ -410,15 +413,15 @@ describe('Usage page', () => {
     expect(screen.queryByText('Org')).not.toBeInTheDocument()
 
     const paths = fetchedPaths(fetchMock)
-    expect(paths).toContain('/api/usage/me')
-    expect(paths.some((p) => p.startsWith('/api/usage/teams'))).toBe(false)
-    expect(paths).not.toContain('/api/usage/org')
+    expect(paths).toContain('/api/me/usage')
+    expect(paths.some((p) => p.startsWith('/api/teams/'))).toBe(false)
+    expect(paths).not.toContain('/api/orgs/o1/usage')
   })
 
   it('team admin (not org admin) sees personal + team, no org', async () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
-    const fetchMock = stubUsageFetch({ '/api/usage/me': ME, '/api/usage/teams/t1': TEAM })
+    const fetchMock = stubUsageFetch({ '/api/me/usage': ME, '/api/teams/t1/usage': TEAM })
 
     render(<Usage />)
 
@@ -426,14 +429,14 @@ describe('Usage page', () => {
     expect(await screen.findByText('CI Fixer')).toBeInTheDocument()
     expect(screen.queryByText('Org')).not.toBeInTheDocument()
 
-    expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t1')
-    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org')
+    expect(fetchedPaths(fetchMock)).toContain('/api/teams/t1/usage')
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/orgs/o1/usage')
   })
 
   it('renders a zero state for an empty window instead of crashing', async () => {
     roleMock.isAdmin = false
     teamsMock.teams = []
-    stubUsageFetch({ '/api/usage/me': ME_EMPTY })
+    stubUsageFetch({ '/api/me/usage': ME_EMPTY })
 
     render(<Usage />)
 
@@ -448,9 +451,9 @@ describe('Usage page', () => {
       { id: 't2', name: 'Growth', slug: 'growth', role: 'admin' },
     ]
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': TEAM,
-      '/api/usage/teams/t2': TEAM_T2,
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': TEAM,
+      '/api/teams/t2/usage': TEAM_T2,
     })
 
     render(<Usage />)
@@ -464,20 +467,20 @@ describe('Usage page', () => {
 
     // The t2 breakdown loads (its distinct rule name) and the endpoint was hit.
     expect(await screen.findByText('Stale Sweeper')).toBeInTheDocument()
-    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/teams/t2'))
+    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/teams/t2/usage'))
   })
 
   it('local mode (N=1) renders one flat console from a single /org fetch', async () => {
     // Local mode: no AuthProvider (useOptionalAuth null), useOrgRole reports
     // non-admin, the sole team reports admin. Instead of three duplicated
     // sections, LocalConsole renders a flat layout: over-time + by-team /
-    // category + by-rule, ALL from one /api/usage/org read — in local mode the
+    // category + by-rule, ALL from one /api/orgs/o1/usage read — in local mode the
     // rollup folds in by_rule, so there's no second team round-trip.
     authMock.local = true
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
     const fetchMock = stubUsageFetch({
-      '/api/usage/org': ORG,
+      '/api/orgs/o1/usage': ORG,
     })
 
     render(<Usage />)
@@ -496,8 +499,8 @@ describe('Usage page', () => {
     expect(await screen.findByText('$100.00')).toBeInTheDocument()
 
     // Exactly one endpoint — the org rollup. No team fetch at all.
-    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/usage/org'))
-    expect(fetchedPaths(fetchMock).some((p) => p.startsWith('/api/usage/teams'))).toBe(false)
+    await waitFor(() => expect(fetchedPaths(fetchMock)).toContain('/api/orgs/o1/usage'))
+    expect(fetchedPaths(fetchMock).some((p) => p.startsWith('/api/teams/'))).toBe(false)
   })
 
   it('over-time chart breaks spend out by model — top-N keyed, the tail folded into "other"', async () => {
@@ -508,8 +511,8 @@ describe('Usage page', () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     stubUsageFetch({
-      '/api/usage/me': ME_EMPTY,
-      '/api/usage/teams/t1': {
+      '/api/me/usage': ME_EMPTY,
+      '/api/teams/t1/usage': {
         ...TEAM,
         by_model: [
           { model: 'claude-opus-4-8', cost: 30 },
@@ -549,7 +552,7 @@ describe('Usage page', () => {
   it('has no manual refresh button (the page auto-refreshes)', async () => {
     roleMock.isAdmin = false
     teamsMock.teams = []
-    stubUsageFetch({ '/api/usage/me': ME })
+    stubUsageFetch({ '/api/me/usage': ME })
 
     render(<Usage />)
 
@@ -564,8 +567,8 @@ describe('Usage page', () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': { ...TEAM, team_name: 'STALE-NAME' },
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': { ...TEAM, team_name: 'STALE-NAME' },
     })
 
     render(<Usage />)
@@ -581,8 +584,8 @@ describe('Usage page', () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': { ...TEAM, by_category: [TOK_CATEGORY] },
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': { ...TEAM, by_category: [TOK_CATEGORY] },
     })
 
     render(<Usage />)
@@ -596,8 +599,8 @@ describe('Usage page', () => {
     roleMock.isAdmin = false
     teamsMock.teams = [{ id: 't1', name: 'Platform', slug: 'platform', role: 'admin' }]
     stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/teams/t1': {
+      '/api/me/usage': ME,
+      '/api/teams/t1/usage': {
         ...TEAM,
         by_user: [
           {
@@ -634,9 +637,9 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = true
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
@@ -646,7 +649,7 @@ describe('Usage access & credential change-log (EE governance)', () => {
     expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
     expect(await screen.findByText('set the GitHub PAT for github.example.com')).toBeInTheDocument()
     // The endpoint was hit.
-    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+    expect(fetchedPaths(fetchMock)).toContain('/api/orgs/o1/usage/access-log/list')
   })
 
   it('hides the audit band when the governance entitlement is absent', async () => {
@@ -654,9 +657,9 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = false // unlicensed
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
@@ -665,7 +668,7 @@ describe('Usage access & credential change-log (EE governance)', () => {
     // does not — and its endpoint is never fetched.
     expect(await screen.findByText('Org')).toBeInTheDocument()
     expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
-    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/orgs/o1/usage/access-log/list')
   })
 
   it('hides the audit band from a non-org-admin even when licensed', async () => {
@@ -673,15 +676,15 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = true
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
 
     expect(await screen.findByText('Personal')).toBeInTheDocument()
     expect(screen.queryByText('Access & credential changes')).not.toBeInTheDocument()
-    expect(fetchedPaths(fetchMock)).not.toContain('/api/usage/org/access-log')
+    expect(fetchedPaths(fetchMock)).not.toContain('/api/orgs/o1/usage/access-log/list')
   })
 
   it('shows the audit band in local mode (N=1 owner) when governance is licensed', async () => {
@@ -693,8 +696,8 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = [{ id: 't1', name: 'Default', slug: 'default', role: 'admin' }]
     entMock.governance = true
     const fetchMock = stubUsageFetch({
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
@@ -703,7 +706,7 @@ describe('Usage access & credential change-log (EE governance)', () => {
     expect(await screen.findByText('changed Bob from member to admin')).toBeInTheDocument()
     // Local layout: no multi-mode section headers.
     expect(screen.queryByText('Personal')).not.toBeInTheDocument()
-    expect(fetchedPaths(fetchMock)).toContain('/api/usage/org/access-log')
+    expect(fetchedPaths(fetchMock)).toContain('/api/orgs/o1/usage/access-log/list')
   })
 
   it('renders a zero state for an empty log', async () => {
@@ -711,9 +714,9 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = true
     stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG_EMPTY,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG_EMPTY),
     })
 
     render(<Usage />)
@@ -727,9 +730,9 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = true
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
@@ -739,7 +742,7 @@ describe('Usage access & credential change-log (EE governance)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Credential' }))
 
     await waitFor(() =>
-      expect(fullUrls(fetchMock).some((u) => u.includes('category=credential'))).toBe(true),
+      expect(calledBodies(fetchMock).some((b) => b.category === 'credential')).toBe(true),
     )
   })
 
@@ -748,9 +751,9 @@ describe('Usage access & credential change-log (EE governance)', () => {
     teamsMock.teams = []
     entMock.governance = true
     const fetchMock = stubUsageFetch({
-      '/api/usage/me': ME,
-      '/api/usage/org': ORG,
-      '/api/usage/org/access-log': ACCESS_LOG,
+      '/api/me/usage': ME,
+      '/api/orgs/o1/usage': ORG,
+      '/api/orgs/o1/usage/access-log/list': listOf(ACCESS_LOG),
     })
 
     render(<Usage />)
@@ -759,7 +762,7 @@ describe('Usage access & credential change-log (EE governance)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Policy' }))
 
     await waitFor(() =>
-      expect(fullUrls(fetchMock).some((u) => u.includes('category=policy'))).toBe(true),
+      expect(calledBodies(fetchMock).some((b) => b.category === 'policy')).toBe(true),
     )
   })
 })

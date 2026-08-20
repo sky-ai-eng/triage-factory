@@ -35,7 +35,7 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	// Provision the local tenant so the FK-bearing probe columns
-	// (runs.creator_user_id → users) resolve. The migration no longer
+	// (conversations.creator_user_id → users) resolve. The migration no longer
 	// seeds tenant rows; this test exercises the DEFAULT literals against
 	// a provisioned install, which is the state those defaults serve.
 	if err := SeedLocalTenantRows(context.Background(), d); err != nil {

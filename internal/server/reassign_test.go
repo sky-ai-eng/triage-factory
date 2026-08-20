@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,11 +12,87 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestHandleSwipe_ReassignHappyPath pins the TFAC-561 user↔user handoff arm's
+// TestTaskUndo_RefusesAGestureAnotherUserHasActedPast is the RLS half of the
+// undo guard, which the store conformance suite cannot reach: it runs both
+// pools for real, with two distinct users, so it proves the guard sees a row
+// the requesting user did not write. swipe_events_select scopes SELECT to
+// creator_user_id = tf.current_user_id(), so under the app pool "the newest
+// gesture I can see" is always mine — the question the guard asks would answer
+// itself, and a stale gesture would reopen a task somebody else closed.
+func TestTaskUndo_RefusesAGestureAnotherUserHasActedPast(t *testing.T) {
+	r := newViewerRig(t)
+
+	var entityID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO entities (org_id, source, source_id, kind, title)
+		VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+	`, r.orgID, "octo/undo#"+t.Name()).Scan(&entityID); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	var evtID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO events (org_id, entity_id, event_type) VALUES ($1, $2, 'github:pr:opened') RETURNING id
+	`, r.orgID, entityID).Scan(&evtID); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	var taskID string
+	if err := r.h.AdminDB.QueryRow(`
+		INSERT INTO tasks (org_id, creator_user_id, team_id, entity_id, event_type, primary_event_id)
+		VALUES ($1, $2, $3, $4, 'github:pr:opened', $5) RETURNING id
+	`, r.orgID, r.admin, r.teamID, entityID, evtID).Scan(&taskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	// The member's own gesture: a real claim through the route, so the audit
+	// row carries their id.
+	call := func(method, path, caller string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		req := r.req(method, path, caller, body)
+		req.SetPathValue("id", taskID)
+		rec := httptest.NewRecorder()
+		switch {
+		case strings.HasSuffix(path, "/claim"):
+			r.s.handleTaskClaim(rec, req)
+		case strings.HasSuffix(path, "/undo"):
+			r.s.handleUndo(rec, req)
+		default:
+			r.s.handleTaskPatch(rec, req)
+		}
+		return rec
+	}
+
+	if rec := call(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("member claim = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	// The founder then closes it — a later gesture by a different user, which
+	// is exactly the row the member's session cannot see.
+	if rec := call(http.MethodPatch, "/api/tasks/"+taskID, r.admin,
+		map[string]any{"status": "dismissed"}); rec.Code != http.StatusOK {
+		t.Fatalf("admin dismiss = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := call(http.MethodPost, "/api/tasks/"+taskID+"/undo", r.member, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("member undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var status string
+	var closedAt sql.NullTime
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT status, closed_at FROM tasks WHERE id = $1`, taskID,
+	).Scan(&status, &closedAt); err != nil {
+		t.Fatalf("scan task: %v", err)
+	}
+	if status != "dismissed" || !closedAt.Valid {
+		t.Fatalf("task = (%q, closed_at valid=%v) after a refused undo; want the founder's close intact",
+			status, closedAt.Valid)
+	}
+}
+
+// TestTaskClaim_ReassignHappyPath pins the user↔user handoff arm's
 // core CAS behavior against local-mode SQLite: a task claimed by another user
 // gets reassigned to a third user, the claim columns land as expected, and
 // the audit trail records the gesture.
-func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
+func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	const fromUser = "00000000-0000-0000-0000-0000000000f1"
@@ -49,14 +126,14 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id, team_id)
-		 VALUES ('t_re', 'e_re', ?, 'ev_re', 'in_progress', ?, ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000018', 'e_re', ?, 'ev_re', 'in_progress', ?, ?)`,
 		eventType, fromUser, runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_re/swipe",
-		map[string]any{"action": "reassign", "target_user_id": toUser})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000018/claim",
+		map[string]any{"target_user_id": toUser})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -64,7 +141,7 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 	var status string
 	var claimedUser, claimedAgent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_re'`,
+		`SELECT status, claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000018'`,
 	).Scan(&status, &claimedUser, &claimedAgent); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -82,7 +159,7 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_re' AND action = 'reassign'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000018' AND action = 'reassign'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -91,24 +168,15 @@ func TestHandleSwipe_ReassignHappyPath(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ReassignRefusalReasons covers the guard order documented on
-// swipeReassign: missing target (400), missing task (404), terminal task
-// (409), and a task that isn't currently held by a user — unclaimed or
-// bot-claimed (409, since those go through claim/takeover instead).
-func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
-	t.Run("missing_target_user_id_400", func(t *testing.T) {
-		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
-			map[string]any{"action": "reassign"})
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
-		}
-	})
-
+// TestTaskClaim_ReassignRefusalReasons covers the guard order documented on
+// reassignClaim: missing task (404), terminal task (409), and a task that
+// isn't currently held by a user — unclaimed or bot-claimed (409, since those
+// go through the self-claim arm instead).
+func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 	t.Run("missing_task_404", func(t *testing.T) {
 		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
-			map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/claim",
+			map[string]any{"target_user_id": runmode.LocalDefaultUserID})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
@@ -133,13 +201,13 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-			 VALUES ('t_ret', 'e_ret', 'github:pr:opened', 'ev_ret', 'done', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000016', 'e_ret', 'github:pr:opened', 'ev_ret', 'done', ?)`,
 			runmode.LocalDefaultUserID,
 		); err != nil {
 			t.Fatalf("seed terminal claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_ret/swipe",
-			map[string]any{"action": "reassign", "target_user_id": otherUserID})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000016/claim",
+			map[string]any{"target_user_id": otherUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -160,12 +228,12 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-			 VALUES ('t_reu', 'e_reu', 'github:pr:opened', 'ev_reu', 'queued')`,
+			 VALUES ('00000000-0000-4000-8000-000000000017', 'e_reu', 'github:pr:opened', 'ev_reu', 'queued')`,
 		); err != nil {
 			t.Fatalf("seed unclaimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_reu/swipe",
-			map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000017/claim",
+			map[string]any{"target_user_id": runmode.LocalDefaultUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -186,23 +254,45 @@ func TestHandleSwipe_ReassignRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-			 VALUES ('t_reb', 'e_reb', 'github:pr:opened', 'ev_reb', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000014', 'e_reb', 'github:pr:opened', 'ev_reb', 'queued', ?)`,
 			runmode.LocalDefaultAgentID,
 		); err != nil {
 			t.Fatalf("seed bot-claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_reb/swipe",
-			map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000014/claim",
+			map[string]any{"target_user_id": runmode.LocalDefaultUserID})
 		if rec.Code != http.StatusConflict {
 			t.Errorf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 }
 
-// TestHandleSwipe_ReassignIdempotentToCurrentClaimant pins the no-op path:
-// reassigning a task to the user who already holds it must succeed (200)
-// without disturbing the claim, mirroring swipeClaim's same-user idempotency.
-func TestHandleSwipe_ReassignIdempotentToCurrentClaimant(t *testing.T) {
+// TestTaskClaim_RejectsBlankTarget pins that an explicitly blank
+// target_user_id is a fault, not a second spelling of "omitted". The field's
+// PRESENCE is what selects the handoff arm; a client that sends a blank id has
+// lost track of its target, and reading it as a self-claim would hand the task
+// to the caller instead of saying so.
+func TestTaskClaim_RejectsBlankTarget(t *testing.T) {
+	s := newTestServer(t)
+	taskID := seedLifecycleTask(t, s.db, "blank-target", lifecycleTaskOpts{})
+
+	for _, blank := range []string{"", "   "} {
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
+			map[string]any{"target_user_id": blank})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("target_user_id=%q: status = %d, want 400; body=%s", blank, rec.Code, rec.Body.String())
+		}
+	}
+	// Omitting it entirely is the self-claim, and still works.
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{}); rec.Code != http.StatusOK {
+		t.Fatalf("self-claim = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTaskClaim_ReassignIdempotentToCurrentClaimant pins the no-op path:
+// handing a task to the user who already holds it must succeed (200)
+// without disturbing the claim, mirroring the self-claim arm's idempotency.
+func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	s := newTestServer(t)
 	if _, err := s.db.Exec(
 		`INSERT INTO entities (id, source, source_id, kind, state)
@@ -217,20 +307,20 @@ func TestHandleSwipe_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_rei', 'e_rei', 'github:pr:opened', 'ev_rei', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000015', 'e_rei', 'github:pr:opened', 'ev_rei', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_rei/swipe",
-		map[string]any{"action": "reassign", "target_user_id": runmode.LocalDefaultUserID})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000015/claim",
+		map[string]any{"target_user_id": runmode.LocalDefaultUserID})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_rei'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000015'`,
 	).Scan(&claimedUser); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -239,14 +329,14 @@ func TestHandleSwipe_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	}
 }
 
-// TestSwipeReassign_PermissionModel pins TFAC-561's "claimant + team admin"
+// TestTaskClaimReassign_PermissionModel pins the "claimant + team admin"
 // permission rule against real Postgres RLS (local mode has no admin concept
 // to test against — the check short-circuits true there by design). A plain
 // team member who is neither the current claimant nor an admin of the task's
-// owning team gets swipeReassign's own 403 (distinct from the broader
+// owning team gets reassignClaim's own 403 (distinct from the broader
 // view-only 403 RequireTaskWrite already covers for non-members); the
 // team-admin override and the current claimant's own handoff both succeed.
-func TestSwipeReassign_PermissionModel(t *testing.T) {
+func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 	r := newViewerRig(t)
 	bystander := pgtest.SeedUser(t, r.h, "bystander")
 	pgtest.AddOrgMember(t, r.h, bystander, r.orgID, r.teamID, "member", "member")
@@ -285,11 +375,11 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 
 	t.Run("non_claimant_non_admin_member_refused", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"action": "reassign", "target_user_id": bystander}
-		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", bystander, body)
+		body := map[string]any{"target_user_id": bystander}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", bystander, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
-		r.s.handleSwipe(rec, req)
+		r.s.handleTaskClaim(rec, req)
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -297,11 +387,11 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 
 	t.Run("team_admin_override_succeeds", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"action": "reassign", "target_user_id": bystander}
-		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.admin, body)
+		body := map[string]any{"target_user_id": bystander}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
-		r.s.handleSwipe(rec, req)
+		r.s.handleTaskClaim(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("admin reassign: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
@@ -318,11 +408,11 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 
 	t.Run("current_claimant_handoff_succeeds", func(t *testing.T) {
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"action": "reassign", "target_user_id": bystander}
-		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.member, body)
+		body := map[string]any{"target_user_id": bystander}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
-		r.s.handleSwipe(rec, req)
+		r.s.handleTaskClaim(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("claimant handoff: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
@@ -351,13 +441,29 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 		pgtest.MustExec(t, r.h.AdminDB,
 			`INSERT INTO task_teams (task_id, team_id) VALUES ($1, $2)`, taskID, teamB)
 
-		body := map[string]any{"action": "reassign", "target_user_id": crossTarget}
-		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.admin, body)
+		body := map[string]any{"target_user_id": crossTarget}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.admin, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
-		r.s.handleSwipe(rec, req)
+		r.s.handleTaskClaim(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("cross-team admin override: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		// The response is the post-write task resource, served through the
+		// admin pool: consolidation to teamB moved the row out of the acting
+		// admin's OWN RLS visibility, so an RLS-scoped response read would
+		// have answered 404 for a write that landed.
+		var got struct {
+			ID              string `json:"id"`
+			ClaimedByUserID string `json:"claimed_by_user_id"`
+			TeamID          string `json:"team_id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+		}
+		if got.ID != taskID || got.ClaimedByUserID != crossTarget || got.TeamID != teamB {
+			t.Errorf("response = {id:%q claimed_by_user_id:%q team_id:%q}, want {%q %q %q}",
+				got.ID, got.ClaimedByUserID, got.TeamID, taskID, crossTarget, teamB)
 		}
 		var claimed, gotTeam sql.NullString
 		if err := r.h.AdminDB.QueryRow(
@@ -374,21 +480,22 @@ func TestSwipeReassign_PermissionModel(t *testing.T) {
 	})
 
 	// Regression pin: a target with zero relationship to the task's team(s)
-	// is refused with the target-relevance message, not the generic
-	// race-lost message (retrying would never succeed).
+	// is a reference to an object in the wrong team — 422 CROSS_TEAM_REF,
+	// distinct from the 409 a genuinely lost CAS answers, because no retry
+	// will ever make this one succeed.
 	t.Run("target_with_no_relevant_team_refused", func(t *testing.T) {
 		unrelated := pgtest.SeedUser(t, r.h, "unrelated-target")
 		taskID := seedClaimedTask(t, r.member)
-		body := map[string]any{"action": "reassign", "target_user_id": unrelated}
-		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/swipe", r.member, body)
+		body := map[string]any{"target_user_id": unrelated}
+		req := r.req(http.MethodPost, "/api/tasks/"+taskID+"/claim", r.member, body)
 		req.SetPathValue("id", taskID)
 		rec := httptest.NewRecorder()
-		r.s.handleSwipe(rec, req)
-		if rec.Code != http.StatusConflict {
-			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+		r.s.handleTaskClaim(rec, req)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want 422; body=%s", rec.Code, rec.Body.String())
 		}
-		if !strings.Contains(rec.Body.String(), "isn't on a team") {
-			t.Errorf("body=%s; want the target-relevance message, not the generic race message", rec.Body.String())
+		if !strings.Contains(rec.Body.String(), "CROSS_TEAM_REF") {
+			t.Errorf("body=%s; want reason CROSS_TEAM_REF, not the generic race conflict", rec.Body.String())
 		}
 	})
 }

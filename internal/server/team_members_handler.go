@@ -11,20 +11,23 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // teamMembersHandler serves /api/teams/{team_id}/members — the team roster
-// (TFAC-444) and its add / change-role / remove(/leave) affordances. It mirrors
+// and its add / change-role / remove(/leave) affordances. It mirrors
 // orgMembersHandler's shape (transactional store runner + authz checker): read
 // is any org member, mutate is team-admin-or-org-admin (or self for a leave).
 // Every endpoint front-gates on VerifyTeamInOrg so a cross-org team_id 404s
 // rather than leaking its existence.
 //
-// Multi-mode only: the whole surface 404s in local mode (N=1 keeps the synthetic
-// single-member roster on GET /api/team/members). The last-admin invariant is
-// enforced by the tf.guard_team_admins DB trigger, never re-implemented here;
-// the store surfaces its SQLSTATE 23514 as db.ErrLastTeamAdminGuard, which the
-// mutators translate into a friendly 409.
+// The list read serves every roster consumer in both modes — the management
+// roster, the per-card assignee picker, the predicate editor's variant choice.
+// The MUTATORS are multi-mode only and 404 in local: N=1 has nobody to enrol,
+// promote or remove. The last-admin invariant is enforced by the
+// tf.guard_team_admins DB trigger, never re-implemented here; the store
+// surfaces its SQLSTATE 23514 as db.ErrLastTeamAdminGuard, which the mutators
+// translate into a friendly 409.
 type teamMembersHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
@@ -33,9 +36,9 @@ type teamMembersHandler struct {
 // teamRoles is the closed set of membership_role enum values the add/role
 // handlers accept. Validating here keeps an invalid value from reaching the
 // column (where it would surface as a driver error, not a clean 400) and pins
-// the vocabulary the frontend adapter mirrors. 'viewer' is assignable now;
-// read-only enforcement is a separate slice (TFAC-447) — until it lands a
-// viewer behaves like a member.
+// the vocabulary the frontend adapter mirrors. 'viewer' is a read-only role:
+// team-scoped writes reject it at the handler gate and again in RLS, so it is
+// not a weaker member.
 var teamRoles = map[string]bool{"admin": true, "member": true, "viewer": true}
 
 // teamRosterRow is one roster row. github_username / jira_account_id are null
@@ -53,9 +56,12 @@ type teamRosterRow struct {
 
 // teamRosterBotRow is the team's agent (team_agents) surfaced as an extra
 // roster row — the bot is a workload identity, not a member, so it rides
-// alongside Members rather than inside it. enabled/model/autonomy reflect the
+// beside the page rather than inside it. enabled/model/autonomy reflect the
 // per-team team_agents overrides (falling back to the org agent's defaults).
-// Null when the org has no bootstrapped agent.
+// A consumer that only offers a usable bot reads `enabled`; the row is
+// reported either way, because "disabled" and "absent" are different states
+// and the management roster renders both. Null when the org has no
+// bootstrapped agent.
 type teamRosterBotRow struct {
 	AgentID     string   `json:"agent_id"`
 	DisplayName string   `json:"display_name"`
@@ -64,29 +70,62 @@ type teamRosterBotRow struct {
 	Autonomy    *float64 `json:"autonomy"`
 }
 
-type teamRosterResponse struct {
-	Members []teamRosterRow   `json:"members"`
-	Bot     *teamRosterBotRow `json:"bot"`
+// teamRosterListRequest is the list body: paging only. The roster has no
+// filters — a team's members are the answer, and a client that wants a subset
+// of a few dozen rows filters them in hand.
+type teamRosterListRequest struct {
+	httpx.PageRequest
 }
 
-// handleTeamRosterList returns every member of the team with their role and
-// identity readiness, plus the team bot row. Any org member may read (the
-// memberships_select RLS gates on org access), so it gates on org membership +
-// team-in-org, not admin.
+// teamRosterListResponse is the list envelope plus the team's bot.
 //
-// GET /api/teams/{team_id}/members
+// The bot rides BESIDE items rather than in it because it is a workload
+// identity occupying the agent claim slot, not a member: a page whose last
+// element is not a member makes total_count a lie, and every consumer that
+// renders the bot renders it as its own row anyway. Both consumers are served
+// from this one payload — the management roster shows the bot's enabled/model/
+// autonomy, and a picker reads `enabled` to decide whether to offer it at all.
+type teamRosterListResponse struct {
+	Items         []teamRosterRow   `json:"items"`
+	NextPageToken string            `json:"next_page_token,omitempty"`
+	TotalCount    int               `json:"total_count"`
+	Bot           *teamRosterBotRow `json:"bot"`
+}
+
+// handleTeamRosterList returns one page of the team's members with their role
+// and identity readiness, plus the team bot beside the page. Any org member may
+// read (the memberships_select RLS gates on org access), so it gates on org
+// membership + team-in-org, not admin.
+//
+// It answers in both modes. {team_id} takes a uuid, or the literal "default" in
+// local mode, through the one {team_id} grammar (authz.ResolveTeamID). Naming
+// the team in the path is what lets a picker ask for the team the page around
+// it is acting as: a roster addressed by the session alone can only answer for
+// one team per caller, which is the wrong one as soon as they belong to two.
+//
+// POST /api/teams/{team_id}/members/list
 func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http.Request) {
-	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
-		return
-	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
 	if !ok {
 		return
 	}
 
+	var req teamRosterListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	// No filters, so the fingerprint is over the empty filter set — the token
+	// still can't cross to another route's list, and it gains meaning for free
+	// if this read ever takes one.
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	var (
 		members []domain.TeamMember
+		total   int
 		agent   *domain.Agent
 		ta      *domain.TeamAgent
 	)
@@ -97,7 +136,8 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		if e != nil {
 			return e
 		}
-		members, e = tx.Teams.ListMembers(r.Context(), teamID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL)
+		members, total, e = tx.Teams.ListMembers(r.Context(), teamID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
 		}
@@ -117,9 +157,9 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		return
 	}
 
-	out := make([]teamRosterRow, 0, len(members))
+	items := make([]teamRosterRow, 0, len(members))
 	for _, m := range members {
-		out = append(out, teamRosterRow{
+		items = append(items, teamRosterRow{
 			UserID:         m.UserID,
 			DisplayName:    m.DisplayName,
 			GitHubUsername: m.GitHubUsername,
@@ -129,7 +169,12 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 		})
 	}
 
-	writeJSON(w, http.StatusOK, teamRosterResponse{Members: out, Bot: teamBotFromAgent(agent, ta)})
+	writeJSON(w, http.StatusOK, teamRosterListResponse{
+		Items:         items,
+		NextPageToken: httpx.NextPageToken(page, len(items), total),
+		TotalCount:    total,
+		Bot:           teamBotFromAgent(agent, ta),
+	})
 }
 
 // handleTeamMemberAdd enrolls an existing org member on the team with a role.
@@ -141,7 +186,9 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 // POST /api/teams/{team_id}/members  body: { "user_id": "<uuid>", "role": "<membership_role>" }
 func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -159,17 +206,19 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 		UserID string `json:"user_id"`
 		Role   string `json:"role"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	target := strings.TrimSpace(body.UserID)
+	var v httpx.Validation
 	if _, err := uuid.Parse(target); err != nil {
-		badRequest(w, "user_id must be a valid user id")
-		return
+		v.Invalid("user_id", "user_id must be a valid user id")
 	}
 	role := strings.TrimSpace(body.Role)
 	if !teamRoles[role] {
-		badRequest(w, "role must be one of admin, member, viewer")
+		v.Invalid("role", "role must be one of admin, member, viewer")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
@@ -182,8 +231,8 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 		return
 	}
 	if !isMember {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "the user must be a member of this org",
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonCrossTeamRef, Message: "the user must be a member of this org", Field: "user_id",
 		})
 		return
 	}
@@ -205,9 +254,7 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 	case err == nil:
 		w.WriteHeader(http.StatusCreated)
 	case errors.Is(err, db.ErrTeamMemberExists):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "that user is already on this team",
-		})
+		conflict(w, "that user is already on this team")
 	default:
 		internalError(w, "team-members", err)
 	}
@@ -220,7 +267,9 @@ func (h *teamMembersHandler) handleTeamMemberAdd(w http.ResponseWriter, r *http.
 // PATCH /api/teams/{team_id}/members/{user_id}  body: { "role": "<membership_role>" }
 func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -241,12 +290,14 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 	var body struct {
 		Role string `json:"role"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	role := strings.TrimSpace(body.Role)
 	if !teamRoles[role] {
-		badRequest(w, "role must be one of admin, member, viewer")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "role must be one of admin, member, viewer", Field: "role",
+		})
 		return
 	}
 
@@ -278,7 +329,9 @@ func (h *teamMembersHandler) handleTeamMemberRoleChange(w http.ResponseWriter, r
 // DELETE /api/teams/{team_id}/members/{user_id}
 func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The whole roster surface is multi-mode only; a route that doesn't
+		// exist in this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, teamID, ok := h.resolve(w, r)
@@ -323,8 +376,9 @@ func (h *teamMembersHandler) handleTeamMemberRemove(w http.ResponseWriter, r *ht
 // resolve runs the shared front gate for every team-roster endpoint: the active
 // org + caller identity, a valid {team_id}, and the team-in-org check (404
 // cross-org). Returns (orgID, userID, teamID, true) on success; writes the error
-// and returns ok=false otherwise. Only reached in multi mode (each handler 404s
-// local first).
+// and returns ok=false otherwise. The mutators 404 local before reaching it;
+// the list read reaches it in both modes, where TeamIDFromPath resolves the
+// "default" alias and VerifyTeamInOrg short-circuits at N=1.
 func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	orgID, ok = requireOrg(w, r)
 	if !ok {
@@ -336,9 +390,8 @@ func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (or
 		return "", "", "", false
 	}
 	userID = claims.Subject
-	teamID = r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		http.NotFound(w, r)
+	teamID, ok = h.az.TeamIDFromPath(w, r, "team-members", orgID, userID)
+	if !ok {
 		return "", "", "", false
 	}
 	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -349,8 +402,13 @@ func (h *teamMembersHandler) resolve(w http.ResponseWriter, r *http.Request) (or
 
 // requireTeamManager confirms the caller may mutate the team's roster: a team
 // admin OR an org admin (the union memberships_insert/_update/_delete RLS gate
-// on). On not-allowed it writes 404 (non-disclosure, matching the org roster's
-// posture) and returns false; an error renders a 500.
+// on). On not-allowed it writes 403 and returns false; an error renders a 500.
+//
+// 403, not the 404 it used to write: every caller reaching this point has
+// already passed VerifyTeamInOrg, which means the team is in their org and
+// GET /api/teams lists it for them. Hiding a row the caller can see elsewhere
+// reads as a bug, and the disclosure rule reserves 404 for what is genuinely
+// invisible — which VerifyTeamInOrg has already answered.
 func (h *teamMembersHandler) requireTeamManager(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	isTeamAdmin, err := h.az.UserIsTeamAdmin(r.Context(), userID, orgID, teamID)
 	if err != nil {
@@ -366,7 +424,7 @@ func (h *teamMembersHandler) requireTeamManager(w http.ResponseWriter, r *http.R
 		return false
 	}
 	if !isOrgAdmin {
-		http.NotFound(w, r)
+		forbidden(w, "team admin or org admin role required")
 		return false
 	}
 	return true
@@ -403,12 +461,7 @@ func teamBotFromAgent(agent *domain.Agent, ta *domain.TeamAgent) *teamRosterBotR
 // malformed UUID is a 404 (same response as "no such member") so a bad path
 // can't surface as a 500 from the uuid cast in the store query.
 func teamMemberTargetID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	raw := r.PathValue("user_id")
-	if _, err := uuid.Parse(raw); err != nil {
-		http.NotFound(w, r)
-		return "", false
-	}
-	return raw, true
+	return uuidPathOr404(w, r, "user_id", "member")
 }
 
 // writeTeamMemberMutationResult renders the shared error mapping for the
@@ -421,9 +474,7 @@ func writeTeamMemberMutationResult(w http.ResponseWriter, err error) bool {
 	case err == nil:
 		return true
 	case errors.Is(err, db.ErrLastTeamAdminGuard):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "can't remove or demote the last admin — assign another admin first",
-		})
+		conflict(w, "can't remove or demote the last admin — assign another admin first")
 	case errors.Is(err, db.ErrTeamMemberNotFound):
 		notFound(w, "member")
 	default:

@@ -51,9 +51,11 @@ func TestSpendStore_Postgres(t *testing.T) {
 // view's security_invoker=true makes the base tables' RLS apply under the
 // querying user. It proves the spine doesn't leak spend across the RLS boundary:
 //
-//   - runs are TEAM-scoped: a teamA member sees teamA's run, not teamB's.
-//   - curator is CREATOR-scoped (curator_requests_select gates on
-//     creator_user_id): a user sees their own curator turns, not a peer's.
+//   - 'run' rows are TEAM-scoped: a teamA member sees teamA's conversation,
+//     not teamB's.
+//   - curator is CREATOR-scoped (conversations_select's visibility='private'
+//     arm gates on creator_user_id): a user sees their own curator turns, not
+//     a peer's.
 //     (The epic's "org scope" shorthand for curator is looser than the actual
 //     policy; the view faithfully inherits whatever the base RLS is.)
 //   - system is ORG-scoped: every org member sees the system_overhead row.
@@ -73,7 +75,8 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	pgtest.AddOrgMember(t, h, bob, orgA, teamB, "member", "member")
 	orgB, carol, _ := pgtest.SeedOrgWithUser(t, h, "carol")
 
-	// orgA fixtures: an agent + a team project the runs/curator rows FK into, plus
+	// orgA fixtures: an agent + a team project the delegation/curator
+	// conversations FK into, plus
 	// a null-team org project. The RLS curator fixtures below use the default
 	// (null-team) project — curator visibility is creator-scoped regardless of
 	// team_id, so the snapshot value (NULL here) doesn't affect these assertions.
@@ -89,8 +92,8 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 		projectAOrg, orgA, alice)
 
 	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectAOrg)
-	runA := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	runB := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
+	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
 	curatorAlice := seeder.Curator(t, dbtest.CuratorSpendFixture{CreatorUserID: alice, Cost: 0.3, Tokens: dbtest.SpendTokens{Input: 3, Output: 3, CacheRead: 3, CacheCreation: 3}, Status: "completed", CreatedAt: spendTestTime})
 	curatorBob := seeder.Curator(t, dbtest.CuratorSpendFixture{CreatorUserID: bob, Cost: 0.4, Tokens: dbtest.SpendTokens{Input: 4, Output: 4, CacheRead: 4, CacheCreation: 4}, Status: "completed", CreatedAt: spendTestTime})
 	systemA := seeder.System(t, dbtest.SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: dbtest.SpendTokens{Input: 5, Output: 5, CacheRead: 5, CacheCreation: 5}, StartedAt: spendTestTime})
@@ -99,16 +102,16 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	// NOT teamB's run, NOT bob's curator turn.
 	aliceVisible := spendVisibleIDs(t, h, alice, orgA)
 	assertSpendVisible(t, "alice", aliceVisible, map[string]bool{
-		runA: true, curatorAlice: true, systemA: true,
-		runB: false, curatorBob: false,
+		convA: true, curatorAlice: true, systemA: true,
+		convB: false, curatorBob: false,
 	})
 
 	// bob (teamB): mirror image — teamB's run, his curator turn, the org system
 	// row; NOT teamA's run, NOT alice's curator turn.
 	bobVisible := spendVisibleIDs(t, h, bob, orgA)
 	assertSpendVisible(t, "bob", bobVisible, map[string]bool{
-		runB: true, curatorBob: true, systemA: true,
-		runA: false, curatorAlice: false,
+		convB: true, curatorBob: true, systemA: true,
+		convA: false, curatorAlice: false,
 	})
 
 	// carol (orgB) querying her own (empty) org sees nothing...
@@ -119,7 +122,7 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	// current_org_id() to orgB, so orgA's rows never match.
 	crossOrg := spendVisibleIDs(t, h, carol, orgA)
 	assertSpendVisible(t, "carol-cross-org", crossOrg, map[string]bool{
-		runA: false, runB: false, curatorAlice: false, curatorBob: false, systemA: false,
+		convA: false, convB: false, curatorAlice: false, curatorBob: false, systemA: false,
 	})
 }
 
@@ -153,8 +156,8 @@ func TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS(t *testing.T) {
 	// project args (team-attributed / null-team, TFAC-476) are never exercised —
 	// pass projectA for both.
 	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectA)
-	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
+	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
 
 	// Admin-pool System read: org-wide, sees both teams → manual = $3.
 	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -206,8 +209,8 @@ func TestSpendStore_Postgres_ListSpendSystem_BypassesRLS(t *testing.T) {
 
 	// Runs only (team_id set directly), so the curator project args are unused.
 	seeder := newPgSpendSeeder(h.AdminDB, orgA, projectA, projectA)
-	runA := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	runB := seeder.Run(t, dbtest.RunSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
+	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
 
 	// Admin-pool System read: org-wide, sees BOTH teams' runs.
 	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -219,14 +222,14 @@ func TestSpendStore_Postgres_ListSpendSystem_BypassesRLS(t *testing.T) {
 	for _, r := range sysRows {
 		sysIDs[r.SourceID] = true
 	}
-	if !sysIDs[runA] || !sysIDs[runB] {
-		t.Errorf("ListSpendSystem saw %v, want both runA %s + runB %s (org-wide)", sysIDs, runA, runB)
+	if !sysIDs[convA] || !sysIDs[convB] {
+		t.Errorf("ListSpendSystem saw %v, want both runA %s + runB %s (org-wide)", sysIDs, convA, convB)
 	}
 
 	// App-pool ListSpend under alice (teamA member): RLS scopes to teamA → only runA.
 	aliceVisible := spendVisibleIDs(t, h, alice, orgA)
-	if !aliceVisible[runA] || aliceVisible[runB] {
-		t.Errorf("app-pool ListSpend under alice saw %v, want runA %s only (runB excluded by RLS)", aliceVisible, runA)
+	if !aliceVisible[convA] || aliceVisible[convB] {
+		t.Errorf("app-pool ListSpend under alice saw %v, want runA %s only (runB excluded by RLS)", aliceVisible, convA)
 	}
 }
 
@@ -287,9 +290,9 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 		`INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, NULL, 'spend-test-org', 'org')`,
 		nullTeamProjectID, orgID, userID)
 	// A blueprint + trigger event_handler so an autonomous run can carry a
-	// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
-	// same-team FK → blueprints). The view passes runs.trigger_id straight
-	// through (TFAC-478).
+	// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
+	// the trigger's same-team FK → blueprints). The view passes
+	// conversations.trigger_id straight through (TFAC-478).
 	blueprintID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB,
 		`INSERT INTO blueprints (id, org_id, team_id, creator_user_id, name) VALUES ($1, $2, $3, $4, 'spend-bp')`,
@@ -303,7 +306,7 @@ func seedPgSpendOrg(t *testing.T, h *pgtest.Harness) (orgID, userID, teamID, age
 }
 
 // newPgSpendSeeder owns the raw INSERT shape for each source table on the admin
-// pool. origin='manual' satisfies runs_origin_requires_parents without a
+// pool. origin='manual' satisfies conversations_origin_requires_parents without a
 // blueprint graph; empty CreatorUserID/ActorAgentID and a nil Cost map to SQL
 // NULL (uuid columns reject empty strings; the in-flight run carries NULL cost).
 func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
@@ -325,7 +328,7 @@ func newPgSpendSeeder(conn *sql.DB, orgID, teamProjectID, nullTeamProjectID stri
 		return strconv.FormatInt(id, 10)
 	}
 	return dbtest.SpendSeeder{
-		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
+		Conversation: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`

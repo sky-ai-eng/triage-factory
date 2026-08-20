@@ -15,29 +15,31 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// waitForPending blocks until the broker has registered (runID, toolCallID). The
+// waitForPending blocks until the broker has registered (conversationID, toolCallID). The
 // handler registers synchronously on entry and then parks, so a test can resolve
 // it without racing the handler goroutine. Only safe when permTimeout is far
 // longer than a poll interval — the entry must still be pending when the poll
 // runs. Tests that shrink permTimeout near the poll interval must use
 // waitForPendingOrDone instead.
-func waitForPending(t *testing.T, s *Spawner, runID, toolCallID string) {
+func waitForPending(t *testing.T, s *Spawner, conversationID, toolCallID string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, ok := s.permPending[permKey(runID, toolCallID)]
+		_, ok := s.permPending[permKey(conversationID, toolCallID)]
 		s.mu.Unlock()
 		if ok {
 			return
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) never registered", toolCallID, runID)
+	t.Fatalf("permission request %q (run %q) never registered", toolCallID, conversationID)
 }
 
 // waitForPendingOrDone polls until the prompt is observably pending (false) or
@@ -46,12 +48,12 @@ func waitForPending(t *testing.T, s *Spawner, runID, toolCallID string) {
 // between two polls on a starved runner — registration, timeout, deregistration
 // all inside one oversleep — so "handler already finished" must be a navigable
 // outcome, not a missed observation that fails the test.
-func waitForPendingOrDone(t *testing.T, s *Spawner, runID, toolCallID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
+func waitForPendingOrDone(t *testing.T, s *Spawner, conversationID, toolCallID string, got <-chan agentproc.PermissionDecision, d *agentproc.PermissionDecision) bool {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		s.mu.Lock()
-		_, pending := s.permPending[permKey(runID, toolCallID)]
+		_, pending := s.permPending[permKey(conversationID, toolCallID)]
 		s.mu.Unlock()
 		if pending {
 			return false
@@ -63,7 +65,7 @@ func waitForPendingOrDone(t *testing.T, s *Spawner, runID, toolCallID string, go
 		}
 		time.Sleep(time.Millisecond)
 	}
-	t.Fatalf("permission request %q (run %q) neither registered nor returned", toolCallID, runID)
+	t.Fatalf("permission request %q (run %q) neither registered nor returned", toolCallID, conversationID)
 	return false
 }
 
@@ -92,6 +94,34 @@ func TestAutoApprovePermissionHandler_AlwaysAllows(t *testing.T) {
 	}
 }
 
+func TestResolveSDKPermissionMode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        runmode.Mode
+		teamEnabled bool
+		want        string
+	}{
+		{name: "local enabled", mode: runmode.ModeLocal, teamEnabled: true, want: "auto"},
+		{name: "local disabled", mode: runmode.ModeLocal, teamEnabled: false, want: ""},
+		{name: "multi ignores stored false", mode: runmode.ModeMulti, teamEnabled: false, want: "auto"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, tc.mode)
+			database := newDelegateTestDB(t)
+			stores := sqlitestore.New(database)
+			settings := domain.DefaultTeamSettings()
+			settings.AutoModeEnabled = tc.teamEnabled
+			if _, err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
+				t.Fatalf("UpdateSettings: %v", err)
+			}
+			s := NewSpawner(database, stores, nil, nil, "")
+			if got := s.resolveSDKPermissionMode(t.Context(), runmode.LocalDefaultTeamID); got != tc.want {
+				t.Errorf("permission mode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
 // ResolvePermission returns the user's decision to the parked handler.
 func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
@@ -104,7 +134,7 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 	}()
 
 	waitForPending(t, s, "run-1", "req-1")
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
 	select {
@@ -181,14 +211,14 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 			if d.Behavior != "deny" {
 				t.Fatalf("iteration %d: unanswered prompt returned %q, want timeout deny", i, d.Behavior)
 			}
-			if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-race", reqID, "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
+			if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-race", reqID, "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
 				t.Fatalf("iteration %d: resolve after handler returned: err = %v, want ErrNoPendingPermission", i, err)
 			}
 			continue
 		}
 		time.Sleep(time.Duration(i%5) * time.Millisecond)
 
-		err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-race", reqID, "", agentproc.PermissionDecision{Behavior: "allow"})
+		_, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-race", reqID, "", agentproc.PermissionDecision{Behavior: "allow"})
 		if err != nil && !errors.Is(err, ErrNoPendingPermission) {
 			t.Fatalf("iteration %d: ResolvePermission: %v", i, err)
 		}
@@ -208,7 +238,7 @@ func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 // endpoint can 404.
 func TestResolvePermission_NoPending(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "ghost", "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "ghost", "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission", err)
 	}
 }
@@ -224,12 +254,12 @@ func TestResolvePermission_WrongRun(t *testing.T) {
 	go func() { done <- h(agentproc.PermissionRequest{ToolCallID: "req-x"}) }()
 	waitForPending(t, s, "run-A", "req-x")
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "req-x", "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "req-x", "", agentproc.PermissionDecision{Behavior: "allow"}); !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission for a wrong-run resolve", err)
 	}
 
 	// The correct run resolves it, freeing the handler goroutine.
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "req-x", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "req-x", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
 		t.Fatalf("correct resolve: %v", err)
 	}
 	<-done
@@ -251,10 +281,10 @@ func TestBrowserPermissionHandler_ConcurrentRunsSameToolCallID(t *testing.T) {
 	waitForPending(t, s, "run-A", "toolu_dup")
 	waitForPending(t, s, "run-B", "toolu_dup")
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "toolu_dup", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "toolu_dup", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("resolve run-A: %v", err)
 	}
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "toolu_dup", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-B", "toolu_dup", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
 		t.Fatalf("resolve run-B: %v", err)
 	}
 	if d := <-gotA; d.Behavior != "allow" {
@@ -311,10 +341,10 @@ func dialHubClientOrg(t *testing.T, h *websocket.Hub, orgID string) (*ws.Conn, f
 }
 
 // sendPresence writes a presence control frame the way the frontend does, then
-// blocks until the hub observes the expected presence for (orgID, runID) — so a
+// blocks until the hub observes the expected presence for (orgID, conversationID) — so a
 // test that depends on a client being present (or absent) doesn't race the
 // async readPump apply.
-func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, runID, viewing string, visible bool, want bool) {
+func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, conversationID, viewing string, visible bool, want bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -324,12 +354,12 @@ func sendPresence(t *testing.T, conn *ws.Conn, h *websocket.Hub, orgID, runID, v
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.PresentFor(orgID, runID) == want {
+		if h.PresentFor(orgID, conversationID) == want {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("hub presence for (%s,%s) never became %v", orgID, runID, want)
+	t.Fatalf("hub presence for (%s,%s) never became %v", orgID, conversationID, want)
 }
 
 const presenceTestOrg = "00000000-0000-0000-0000-0000000000aa"
@@ -392,7 +422,7 @@ func TestBrowserPermissionHandler_PresentWaitsFullTimeout(t *testing.T) {
 	}
 
 	// It stays answerable: resolving returns the user's decision.
-	if err := s.ResolvePermission(presenceTestOrg, "run-1", "req-present", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if _, err := s.ResolvePermission(presenceTestOrg, "run-1", "req-present", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
 	select {
@@ -438,7 +468,7 @@ func TestBrowserPermissionHandler_PresenceDuringGraceExtends(t *testing.T) {
 	}
 
 	// Clean up the parked goroutine.
-	if err := s.ResolvePermission(presenceTestOrg, "run-1", "req-extend", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
+	if _, err := s.ResolvePermission(presenceTestOrg, "run-1", "req-extend", "", agentproc.PermissionDecision{Behavior: "deny"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
 	<-got
@@ -618,9 +648,9 @@ func TestHumanWait(t *testing.T) {
 
 // readPermissionResolved reads frames until a permission_resolved event arrives
 // (skipping the permission_request the handler emits on registration), and
-// returns its run_id + tool_call_id. A bounded read deadline turns a missing
+// returns its conversation_id + tool_call_id. A bounded read deadline turns a missing
 // broadcast into a clean failure instead of a hang.
-func readPermissionResolved(t *testing.T, conn *ws.Conn) (runID, toolCallID string) {
+func readPermissionResolved(t *testing.T, conn *ws.Conn) (conversationID, toolCallID string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -662,14 +692,14 @@ func TestBrowserPermissionHandler_ResolveBroadcastsResolved(t *testing.T) {
 	}()
 
 	waitForPending(t, s, "run-1", "req-1")
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
 	<-got // handler unblocked
 
-	runID, toolCallID := readPermissionResolved(t, conn)
-	if runID != "run-1" || toolCallID != "req-1" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", runID, toolCallID)
+	conversationID, toolCallID := readPermissionResolved(t, conn)
+	if conversationID != "run-1" || toolCallID != "req-1" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-1)", conversationID, toolCallID)
 	}
 }
 
@@ -690,8 +720,8 @@ func TestBrowserPermissionHandler_TimeoutBroadcastsResolved(t *testing.T) {
 		t.Fatalf("behavior = %q, want deny on timeout", d.Behavior)
 	}
 
-	runID, toolCallID := readPermissionResolved(t, conn)
-	if runID != "run-1" || toolCallID != "req-timeout" {
-		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", runID, toolCallID)
+	conversationID, toolCallID := readPermissionResolved(t, conn)
+	if conversationID != "run-1" || toolCallID != "req-timeout" {
+		t.Errorf("permission_resolved = (run %q, req %q), want (run-1, req-timeout)", conversationID, toolCallID)
 	}
 }

@@ -6,43 +6,46 @@ import DiffFile from './DiffFile'
 import type { FileComment } from './DiffFile'
 import ReviewSummary from './ReviewSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
-// ReviewArtifact mirrors internal/server/reviews_artifact_handler.go's
-// reviewArtifactJSON. review_body / review_event are the STAGED values (applied
-// to GitHub only on approval); the comments are staged TF-side (TFAC-494), each
-// with its severity parsed back out of the body (chip) and the clean body shown.
-// commits_since_finalize + per-comment freshness are computed against the live PR
-// head at GET time (TFAC-500) so the human sees how far the PR has drifted since
-// the agent wrote the review.
+// ReviewArtifact mirrors GET /api/artifacts/{id} for a review artifact: the
+// shared artifact envelope, with the review-shaped payload under `details`.
+// review_body / review_event there are the STAGED values (applied to GitHub
+// only on approval); the comments are staged TF-side, each with its
+// severity parsed back out of the body (chip) and the clean body shown.
+// commits_since_finalize + per-comment freshness are computed against the live
+// PR head at GET time, so the human sees how far the PR has drifted
+// since the agent wrote the review.
 interface ReviewArtifact {
   id: string
-  conversation_id?: string
-  owner: string
-  repo: string
-  pr_number: number
-  review_id: string
-  review_body: string
-  review_event: string
+  kind: string
   state: string
   // The posted review's GitHub deep link, stamped at approval; empty while the
   // draft is pending (nothing exists on GitHub yet).
   url: string
-  // null when it couldn't be computed (live head unreachable); 0 means the PR
-  // hasn't advanced since finalize.
-  commits_since_finalize: number | null
-  comments: {
-    id: string
-    path: string
-    line: number
-    start_line?: number
-    body: string
-    severity?: string
-    // 'current' | 'moved' | 'outdated' | 'unknown' (TFAC-500).
-    freshness?: string
-    // New-side position on the live head when freshness is 'moved'.
-    mapped_line?: number
-    mapped_path?: string
-  }[]
+  details: {
+    owner: string
+    repo: string
+    pr_number: number
+    review_body: string
+    review_event: string
+    // null when it couldn't be computed (live head unreachable); 0 means the PR
+    // hasn't advanced since finalize.
+    commits_since_finalize: number | null
+    comments: {
+      id: string
+      path: string
+      line: number
+      start_line?: number
+      body: string
+      severity?: string
+      // 'current' | 'moved' | 'outdated' | 'unknown'.
+      freshness?: string
+      // New-side position on the live head when freshness is 'moved'.
+      mapped_line?: number
+      mapped_path?: string
+    }[]
+  }
 }
 
 interface Props {
@@ -109,15 +112,10 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     ;(async () => {
       let data: ReviewArtifact
       try {
-        const res = await fetch(`/api/artifacts/${artifactId}`)
-        if (!res.ok) {
-          const e = await res.json().catch(() => ({}))
-          throw new Error(e.error || `Failed to load review (${res.status})`)
-        }
-        data = await res.json()
+        data = await apiJSON<ReviewArtifact>(`/api/artifacts/${artifactId}`)
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the review.'))
           setLoading(false)
         }
         return
@@ -126,17 +124,15 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       setReview(data)
 
       try {
-        const diffRes = await fetch(`/api/artifacts/${artifactId}/diff`)
-        if (!diffRes.ok) {
-          const e = await diffRes.json().catch(() => ({}))
-          throw new Error(e.error || `Failed to load diff (${diffRes.status})`)
-        }
+        // The diff endpoint answers with the patch text, not JSON, and the
+        // truncation flag rides on a header — so this reads the Response.
+        const diffRes = await apiFetch(`/api/artifacts/${artifactId}/diff`)
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))
         setTruncationNote(diffRes.headers.get('X-Diff-Truncated'))
       } catch (err) {
-        if (!cancelled) setDiffError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setDiffError(httpErrorMessage(err, 'Could not load the diff.'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -152,20 +148,27 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // mode, and update local state only on success.
   const handleUpdateComment = useCallback(
     async (commentId: string, body: string) => {
-      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ body }),
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Save failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ body }),
+        })
+      } catch (err) {
+        // Rethrown as a clean message: ReviewComment renders it and stays in
+        // edit mode, so an HttpError's raw body must not reach it.
+        throw new Error(httpErrorMessage(err, 'Could not save the comment.'))
       }
       setReview((prev) =>
         prev
           ? {
               ...prev,
-              comments: prev.comments.map((c) => (c.id === commentId ? { ...c, body } : c)),
+              details: {
+                ...prev.details,
+                comments: prev.details.comments.map((c) =>
+                  c.id === commentId ? { ...c, body } : c,
+                ),
+              },
             }
           : prev,
       )
@@ -175,15 +178,21 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
 
   const handleDeleteComment = useCallback(
     async (commentId: string) => {
-      const res = await fetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Delete failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, { method: 'DELETE' })
+      } catch (err) {
+        throw new Error(httpErrorMessage(err, 'Could not delete the comment.'))
       }
       setReview((prev) =>
-        prev ? { ...prev, comments: prev.comments.filter((c) => c.id !== commentId) } : prev,
+        prev
+          ? {
+              ...prev,
+              details: {
+                ...prev.details,
+                comments: prev.details.comments.filter((c) => c.id !== commentId),
+              },
+            }
+          : prev,
       )
     },
     [artifactId],
@@ -193,14 +202,14 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // at approval). lastSavePromise lets the submit handler await the last edit.
   const patchReview = useCallback(
     async (patch: object) => {
-      const res = await fetch(`/api/artifacts/${artifactId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Save failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/review`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+      } catch (err) {
+        throw new Error(httpErrorMessage(err, 'Could not save the review.'))
       }
     },
     [artifactId],
@@ -213,22 +222,26 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
 
   const handleUpdateBody = useCallback(
     async (body: string) => {
-      const p = patchReview({ review_body: body })
+      const p = patchReview({ body })
       inFlightSaves.current.add(p)
       void p.finally(() => inFlightSaves.current.delete(p))
       await p
-      setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
+      setReview((prev) =>
+        prev ? { ...prev, details: { ...prev.details, review_body: body } } : prev,
+      )
     },
     [patchReview],
   )
 
   const handleUpdateEvent = useCallback(
     async (event: string) => {
-      const p = patchReview({ review_event: event })
+      const p = patchReview({ event })
       inFlightSaves.current.add(p)
       void p.finally(() => inFlightSaves.current.delete(p))
       await p
-      setReview((prev) => (prev ? { ...prev, review_event: event } : prev))
+      setReview((prev) =>
+        prev ? { ...prev, details: { ...prev.details, review_event: event } } : prev,
+      )
     },
     [patchReview],
   )
@@ -244,17 +257,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
       if (inFlightSaves.current.size > 0) {
         await Promise.allSettled([...inFlightSaves.current])
       }
-      const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
+      await apiFetch(`/api/artifacts/${artifactId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || 'Submit failed')
-      }
       onClose()
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : String(err))
+      setSubmitError(httpErrorMessage(err, 'Could not submit the review.'))
     } finally {
       setSubmitting(false)
     }
@@ -268,17 +277,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     setRefreshing(true)
     setRefreshError(null)
     try {
-      const res = await fetch(`/api/artifacts/${artifactId}/review/refresh`, {
+      await apiFetch(`/api/artifacts/${artifactId}/review/refresh`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (!res.ok) {
-        const e = await res.json().catch(() => ({}))
-        throw new Error(e.error || `Refresh failed (${res.status})`)
-      }
       setReloadKey((k) => k + 1)
     } catch (err) {
-      setRefreshError(err instanceof Error ? err.message : String(err))
+      setRefreshError(httpErrorMessage(err, 'Could not refresh the review.'))
       // Re-throw so ReviewSummary keeps the confirm panel open — that panel is the
       // only place refreshError renders, so closing it would hide the message.
       throw err
@@ -290,16 +295,18 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // Per-verdict counts for the Refresh confirmation (computed from the freshness
   // the GET already returned — no extra round-trip): how many comments would be
   // remapped vs. dropped as outdated.
-  const movedCount = (review?.comments ?? []).filter((c) => c.freshness === 'moved').length
-  const outdatedCount = (review?.comments ?? []).filter((c) => c.freshness === 'outdated').length
+  const movedCount = (review?.details.comments ?? []).filter((c) => c.freshness === 'moved').length
+  const outdatedCount = (review?.details.comments ?? []).filter(
+    (c) => c.freshness === 'outdated',
+  ).length
 
   // A resolved review is view-only; every mutating affordance below keys off this.
   const readOnly = review != null && review.state !== 'pending'
 
   // Group comments by file path for the diff renderer. The overlay renders the
   // finalize-time frame, so a comment anchors by the path + line it was written
-  // against (TFAC-500); freshness + mappedLine ride along for the badge only.
-  const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
+  // against; freshness + mappedLine ride along for the badge only.
+  const commentsByFile = (review?.details.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
       ;(acc[c.path] ??= []).push({
         id: c.id,
@@ -366,7 +373,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                 </h1>
                 {review && (
                   <span className="text-ui text-ink-3">
-                    {review.owner}/{review.repo} #{review.pr_number}
+                    {review.details.owner}/{review.details.repo} #{review.details.pr_number}
                   </span>
                 )}
               </div>
@@ -404,13 +411,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                 <div className="p-6 space-y-4 max-w-5xl mx-auto">
                   {/* Review summary + actions */}
                   <ReviewSummary
-                    owner={review.owner}
-                    repo={review.repo}
-                    prNumber={review.pr_number}
-                    reviewEvent={review.review_event}
-                    reviewBody={review.review_body}
-                    commentCount={review.comments.length}
-                    commitsSinceFinalize={review.commits_since_finalize}
+                    owner={review.details.owner}
+                    repo={review.details.repo}
+                    prNumber={review.details.pr_number}
+                    reviewEvent={review.details.review_event}
+                    reviewBody={review.details.review_body}
+                    commentCount={review.details.comments.length}
+                    commitsSinceFinalize={review.details.commits_since_finalize}
                     movedCount={movedCount}
                     outdatedCount={outdatedCount}
                     onRefresh={handleRefresh}

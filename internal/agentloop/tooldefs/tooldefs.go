@@ -56,7 +56,7 @@ type Outcome struct {
 	// Terminal, when non-empty, ends the run with this outcome. Empty means
 	// the call was answered and the conversation carries on, which is what
 	// an ordinary loop-side tool does.
-	Terminal domain.RunOutcome
+	Terminal domain.ConversationOutcome
 	// Reason accompanies Terminal and is persisted as the run's
 	// outcome_reason: why the run stopped where it did.
 	Reason string

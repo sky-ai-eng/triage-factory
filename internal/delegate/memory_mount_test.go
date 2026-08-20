@@ -63,15 +63,15 @@ func TestEntityMemoryTarget_LocalRendersInTheTree(t *testing.T) {
 // fail here, which is exactly what the old pre-launch pass did.
 func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) {
 	sandboxingMode(t)
-	s, database, runID, taskID := setupAdvanceFixture(t, "warm-handoff")
-	makeRunBlueprintStep(t, database, runID, taskID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "warm-handoff")
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
-	blueprintRunID := "bpr-" + runID
+	blueprintRunID := "bpr-" + conversationID
 	cwd := t.TempDir()
 
 	// Step 1 writes the fixed path and terminates.
 	writeAgentMemory(t, cwd, "step 1 chose approach X because Y")
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, nil, "", "event", "")
 
 	// The launch handed the tree to the sandbox uid; nothing TF-side can write
@@ -116,23 +116,23 @@ func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) 
 func TestStagedEntityMemorySource_ResumeReusesWhatTheClaimStaged(t *testing.T) {
 	sandboxingMode(t)
 
-	const runID = "resumed-run"
-	if got := stagedEntityMemorySource(runID); got != "" {
+	const conversationID = "resumed-run"
+	if got := stagedEntityMemorySource(conversationID); got != "" {
 		t.Errorf("stagedEntityMemorySource with nothing on disk = %q, want empty", got)
 	}
 
-	dir := sandbox.TrustedMemorySourcePath(runID)
+	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	if err := os.MkdirAll(filepath.Join(dir, "this-run"), 0o755); err != nil {
 		t.Fatalf("stage: %v", err)
 	}
 	t.Cleanup(func() { removeStagedMemory(dir) })
 
-	if got := stagedEntityMemorySource(runID); got != dir {
+	if got := stagedEntityMemorySource(conversationID); got != dir {
 		t.Errorf("stagedEntityMemorySource = %q, want %q", got, dir)
 	}
 
 	removeStagedMemory(dir)
-	if got := stagedEntityMemorySource(runID); got != "" {
+	if got := stagedEntityMemorySource(conversationID); got != "" {
 		t.Errorf("after reclaim = %q, want empty (a swept dir means no mount, not a failed launch)", got)
 	}
 	// Reclaiming twice is how every terminal path behaves — the step's own defer
@@ -148,11 +148,11 @@ func TestStagedEntityMemorySource_ResumeReusesWhatTheClaimStaged(t *testing.T) {
 // and "this run wrote it" are different facts, and the factory's memory_missing
 // derivation reads the second.
 func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "stale-memory")
-	makeRunBlueprintStep(t, database, runID, taskID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "stale-memory")
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
-	blueprintRunID := "bpr-" + runID
+	blueprintRunID := "bpr-" + conversationID
 
 	// The previous step's file, still at the fixed write path because nothing in
 	// a handed-off tree could remove it.
@@ -162,10 +162,10 @@ func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 		t.Fatal("fingerprint of an existing memory file = nil")
 	}
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, inherited, "", "event", "")
 
-	if got := memoryContentFor(t, s, task.EntityID, runID); got != "" {
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != "" {
 		t.Errorf("agent_content = %q, want empty — this step wrote nothing, so its predecessor's narrative must not be adopted", got)
 	}
 }
@@ -181,11 +181,11 @@ func TestProcessCompletion_RefusesThePredecessorsMemory(t *testing.T) {
 // is reachable in production on any filesystem whose mtime is coarse enough that
 // a step's write lands in the same quantum as the pre-launch read.
 func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "fresh-memory")
-	makeRunBlueprintStep(t, database, runID, taskID)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "fresh-memory")
+	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	task := loadTask(t, s, taskID)
 	cwd := t.TempDir()
-	blueprintRunID := "bpr-" + runID
+	blueprintRunID := "bpr-" + conversationID
 
 	const previous = "the PREVIOUS step's narrative"
 	const mine = "the CURRENT step's narrative!"
@@ -204,10 +204,10 @@ func TestProcessCompletion_IngestsWhatThisStepWrote(t *testing.T) {
 		t.Fatalf("chtimes: %v", err)
 	}
 
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, runID, blueprintRunID, "", task,
+	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, blueprintRunID, "", task,
 		res(`{"outcome":"continue","summary":"did step work"}`), cwd, inherited, "", "event", "")
 
-	if got := memoryContentFor(t, s, task.EntityID, runID); got != mine {
+	if got := memoryContentFor(t, s, task.EntityID, conversationID); got != mine {
 		t.Errorf("agent_content = %q, want this step's own narrative", got)
 	}
 }
@@ -234,14 +234,14 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newStorageSpawner(t)
 
-	const runID = "wt-memlink"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-memlink"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	// Scratch content that DOES ride the snapshot, so the rehydrate takes the
 	// rename branch — the one that collides with an already-planted link.
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "build.log"), "ci log line")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
+	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -256,13 +256,13 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	gitT(t, bareDir, "worktree", "prune")
 
 	runmode.SetForTest(t, runmode.ModeMulti)
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, gitSeed{owner: owner, repo: repo})
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 
-	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "build.log"), "ci log line")
+	assertFileContains(t, filepath.Join(got, "_tfac", "notes", "build.log"), "scratch note")
 	link := filepath.Join(got, "_tfac", "entity-memory")
 	fi, err := os.Lstat(link)
 	if err != nil {
@@ -320,15 +320,15 @@ func TestMemoryFingerprint_IdentifiesByContent(t *testing.T) {
 	if fp.covers(rewritten) {
 		t.Fatal("a same-length, same-mtime rewrite read as inherited; this step's memory would be dropped")
 	}
-	content, state := readRunMemory(cwd, fp)
+	content, state := readConversationMemory(cwd, fp)
 	if state != memoryFilePresent || content != rewritten {
-		t.Errorf("readRunMemory = (%q, %v), want this step's own rewrite", content, state)
+		t.Errorf("readConversationMemory = (%q, %v), want this step's own rewrite", content, state)
 	}
 
 	// And the file it did inherit, untouched, is still refused.
 	writeFileT(t, path, inherited)
-	if content, state := readRunMemory(cwd, fp); state != memoryFileStale || content != "" {
-		t.Errorf("readRunMemory on the inherited file = (%q, %v), want ('', memoryFileStale)", content, state)
+	if content, state := readConversationMemory(cwd, fp); state != memoryFileStale || content != "" {
+		t.Errorf("readConversationMemory on the inherited file = (%q, %v), want ('', memoryFileStale)", content, state)
 	}
 
 	// Nothing to inherit is not the same as inheriting nothing readable.
@@ -348,14 +348,14 @@ func TestMemoryFingerprint_IdentifiesByContent(t *testing.T) {
 
 // memoryContentFor returns the ingested agent_content for one run's memory row,
 // or "" when the row carries none (the NULL case).
-func memoryContentFor(t *testing.T, s *Spawner, entityID, runID string) string {
+func memoryContentFor(t *testing.T, s *Spawner, entityID, conversationID string) string {
 	t.Helper()
 	mems, err := s.taskMemory.GetMemoriesForEntitySystem(context.Background(), runmode.LocalDefaultOrgID, entityID, runmode.LocalDefaultTeamID)
 	if err != nil {
 		t.Fatalf("GetMemoriesForEntitySystem: %v", err)
 	}
 	for _, m := range mems {
-		if m.RunID == runID {
+		if m.ConversationID == conversationID {
 			return m.Content
 		}
 	}

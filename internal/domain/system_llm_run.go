@@ -9,7 +9,7 @@ import "time"
 // it produces many rows per cycle; that is expected.
 //
 // Org-level, no team_id by design — scorer batches mix teams, and
-// repo_profiles/entities carry no team. The token breakdown (input /
+// repositories/entities carry no team. The token breakdown (input /
 // output / cache_read / cache_creation) is captured for cache-rate
 // analysis. CostUSD / DurationMs / NumTurns / IsError come from the
 // terminal result event the subprocess emits; the token counts are

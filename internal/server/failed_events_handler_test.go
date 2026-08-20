@@ -30,19 +30,37 @@ type stubFailedEventsQueue struct {
 	db.EventQueueStore
 
 	rows    []domain.FailedEvent
+	total   int
 	listErr error
 
 	gotOrgID string
-	gotLimit int
+	gotOpts  db.ListOpts
 	gotIDs   []int64
 
 	requeued   int
 	requeueErr error
 }
 
-func (s *stubFailedEventsQueue) ListFailedEvents(_ context.Context, orgID string, limit int) ([]domain.FailedEvent, error) {
-	s.gotOrgID, s.gotLimit = orgID, limit
-	return s.rows, s.listErr
+func (s *stubFailedEventsQueue) ListFailedEvents(_ context.Context, orgID string, opts db.ListOpts) ([]domain.FailedEvent, int, error) {
+	s.gotOrgID, s.gotOpts = orgID, opts
+	total := s.total
+	if total == 0 {
+		total = len(s.rows)
+	}
+	return s.rows, total, s.listErr
+}
+
+func (s *stubFailedEventsQueue) GetFailedEvent(_ context.Context, orgID string, id int64) (*domain.FailedEvent, error) {
+	s.gotOrgID = orgID
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	for i := range s.rows {
+		if s.rows[i].ID == id {
+			return &s.rows[i], nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *stubFailedEventsQueue) RequeueFailedEvents(_ context.Context, orgID string, ids []int64) (int, error) {
@@ -91,23 +109,14 @@ func TestFailedEventsList_LocalMode(t *testing.T) {
 	h := localFailedEventsRig(t, q)
 
 	rec := httptest.NewRecorder()
-	h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed",
-		runmode.LocalDefaultOrgID, "local-user", ""))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
+	h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+		runmode.LocalDefaultOrgID, "local-user", `{}`))
 
-	var resp struct {
-		Events []failedEventJSON `json:"events"`
-		Count  int               `json:"count"`
+	page := decodeList[failedEventJSON](t, rec)
+	if page.Total() != 1 || len(page.Items) != 1 {
+		t.Fatalf("total=%d items=%d, want 1 and 1", page.Total(), len(page.Items))
 	}
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Count != 1 || len(resp.Events) != 1 {
-		t.Fatalf("count=%d events=%d, want 1 and 1", resp.Count, len(resp.Events))
-	}
-	got := resp.Events[0]
+	got := page.Items[0]
 	if got.ID != 42 || got.Attempts != 5 {
 		t.Errorf("id/attempts = %d/%d, want 42/5", got.ID, got.Attempts)
 	}
@@ -122,55 +131,55 @@ func TestFailedEventsList_LocalMode(t *testing.T) {
 	if got.EnqueuedAt != "2026-08-07T09:30:00Z" {
 		t.Errorf("enqueued_at = %q, want RFC3339 UTC", got.EnqueuedAt)
 	}
-	// The store, not the handler, resolves an unspecified limit — the handler
-	// must forward the "unspecified" spelling rather than pick a number.
-	if q.gotLimit != 0 {
-		t.Errorf("limit forwarded = %d, want 0 (unspecified) when ?limit= is absent", q.gotLimit)
+	// An absent page_size resolves to the shared default before the store is
+	// called: a store must never be asked for an unbounded read from a route.
+	if q.gotOpts.Limit != httpx.DefaultPageSize || q.gotOpts.Offset != 0 {
+		t.Errorf("window forwarded = %+v, want the default page at offset 0", q.gotOpts)
 	}
 	if q.gotOrgID != runmode.LocalDefaultOrgID {
 		t.Errorf("org forwarded = %q, want the request's org", q.gotOrgID)
 	}
 }
 
-func TestFailedEventsList_LimitAndErrors(t *testing.T) {
-	t.Run("limit_forwarded", func(t *testing.T) {
+func TestFailedEventsList_PagingAndErrors(t *testing.T) {
+	t.Run("page_size_forwarded", func(t *testing.T) {
 		q := &stubFailedEventsQueue{}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
-		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed?limit=25",
-			runmode.LocalDefaultOrgID, "local-user", ""))
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{"page_size":25}`))
 		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
-		if q.gotLimit != 25 {
-			t.Errorf("limit forwarded = %d, want 25", q.gotLimit)
+		if q.gotOpts.Limit != 25 {
+			t.Errorf("limit forwarded = %d, want 25", q.gotOpts.Limit)
 		}
 	})
 
-	t.Run("non_numeric_limit_400", func(t *testing.T) {
+	// An over-cap page_size is rejected outright — a clamp would report a
+	// truncated page as if it were the requested one.
+	t.Run("oversized_page_size_400", func(t *testing.T) {
 		q := &stubFailedEventsQueue{}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
-		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed?limit=lots",
-			runmode.LocalDefaultOrgID, "local-user", ""))
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{"page_size":100000}`))
 		if rec.Code != http.StatusBadRequest {
-			t.Errorf("status = %d, want 400", rec.Code)
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if q.gotOpts.Limit != 0 {
+			t.Errorf("store was called with limit %d; an over-cap page_size must not reach it", q.gotOpts.Limit)
 		}
 	})
 
-	// An oversized limit is clamped by the store, not rejected — a diagnostics
-	// read shouldn't fail over a display preference.
-	t.Run("oversized_limit_forwarded_for_clamping", func(t *testing.T) {
+	t.Run("unknown_field_400", func(t *testing.T) {
 		q := &stubFailedEventsQueue{}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
-		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed?limit=100000",
-			runmode.LocalDefaultOrgID, "local-user", ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200", rec.Code)
-		}
-		if q.gotLimit != 100000 {
-			t.Errorf("limit forwarded = %d, want the raw value (the store clamps)", q.gotLimit)
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{"limit":25}`))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (the ?limit= param retired with the GET)", rec.Code)
 		}
 	})
 
@@ -178,8 +187,8 @@ func TestFailedEventsList_LimitAndErrors(t *testing.T) {
 		q := &stubFailedEventsQueue{listErr: errors.New("db down")}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
-		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed",
-			runmode.LocalDefaultOrgID, "local-user", ""))
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{}`))
 		if rec.Code != http.StatusInternalServerError {
 			t.Errorf("status = %d, want 500", rec.Code)
 		}
@@ -191,12 +200,61 @@ func TestFailedEventsList_LimitAndErrors(t *testing.T) {
 		q := &stubFailedEventsQueue{rows: []domain.FailedEvent{}}
 		h := localFailedEventsRig(t, q)
 		rec := httptest.NewRecorder()
-		h.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed",
-			runmode.LocalDefaultOrgID, "local-user", ""))
-		if !strings.Contains(rec.Body.String(), `"events":[]`) {
-			t.Errorf("body = %s, want an empty events array", rec.Body.String())
+		h.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{}`))
+		if !strings.Contains(rec.Body.String(), `"items":[]`) {
+			t.Errorf("body = %s, want an empty items array", rec.Body.String())
 		}
 	})
+}
+
+// The single read answers with the list's row shape, and a malformed or
+// unknown id is not-found rather than a driver error.
+func TestFailedEventGet_LocalMode(t *testing.T) {
+	rows := []domain.FailedEvent{{
+		ID: 42, EventType: domain.EventGitHubPRCICheckFailed, EntityTitle: "Fix the flaky test",
+		Attempts: 5, LastError: "route: db down", EnqueuedAt: time.Date(2026, 8, 7, 9, 30, 0, 0, time.UTC),
+	}}
+
+	t.Run("returns_the_list_row_shape", func(t *testing.T) {
+		h := localFailedEventsRig(t, &stubFailedEventsQueue{rows: rows})
+		rec := httptest.NewRecorder()
+		r := failedEventsReq(http.MethodGet, "/api/events/failed/42", runmode.LocalDefaultOrgID, "local-user", "")
+		r.SetPathValue("id", "42")
+		h.handleFailedEventGet(rec, r)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var got failedEventJSON
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		// Shape parity with the list row: same struct, same fields, no
+		// bespoke single-read projection.
+		listRec := httptest.NewRecorder()
+		h.handleFailedEventsList(listRec, failedEventsReq(http.MethodPost, "/api/events/failed/list",
+			runmode.LocalDefaultOrgID, "local-user", `{}`))
+		page := decodeList[failedEventJSON](t, listRec)
+		if got != page.Items[0] {
+			t.Errorf("single read = %+v, want the list row %+v", got, page.Items[0])
+		}
+	})
+
+	for _, tc := range []struct{ name, id string }{
+		{"unknown_id_404", "999"},
+		{"malformed_id_404", "not-a-number"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := localFailedEventsRig(t, &stubFailedEventsQueue{rows: rows})
+			rec := httptest.NewRecorder()
+			r := failedEventsReq(http.MethodGet, "/api/events/failed/"+tc.id, runmode.LocalDefaultOrgID, "local-user", "")
+			r.SetPathValue("id", tc.id)
+			h.handleFailedEventGet(rec, r)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
 }
 
 func TestFailedEventsRequeue_LocalMode(t *testing.T) {
@@ -241,7 +299,7 @@ func TestFailedEventsRequeue_LocalMode(t *testing.T) {
 	})
 
 	t.Run("oversized_selection_400", func(t *testing.T) {
-		ids := make([]string, db.MaxFailedEventsLimit+1)
+		ids := make([]string, db.MaxFailedEventsRequeueIDs+1)
 		for i := range ids {
 			ids[i] = fmt.Sprint(i + 1)
 		}
@@ -321,7 +379,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 
 	t.Run("member_list_403", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		fe.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed", orgID, member, ""))
+		fe.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list", orgID, member, `{}`))
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("list as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -333,7 +391,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("requeue as plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
-		rows, err := stores.EventQueue.ListFailedEvents(ctx, orgID, 0)
+		rows, _, err := stores.EventQueue.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("ListFailedEvents: %v", err)
 		}
@@ -344,25 +402,34 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 
 	t.Run("admin_list_200", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		fe.handleFailedEventsList(rec, failedEventsReq(http.MethodGet, "/api/events/failed", orgID, owner, ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("list as org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		fe.handleFailedEventsList(rec, failedEventsReq(http.MethodPost, "/api/events/failed/list", orgID, owner, `{}`))
+		page := decodeList[failedEventJSON](t, rec)
+		if page.Total() != 1 || len(page.Items) != 1 || page.Items[0].ID != claimed.ID {
+			t.Fatalf("admin list = %+v (total %d), want the one parked row", page.Items, page.Total())
 		}
-		var resp struct {
-			Events []failedEventJSON `json:"events"`
-			Count  int               `json:"count"`
+		if page.Items[0].EntityTitle != "Parked PR" {
+			t.Errorf("entity_title = %q, want the joined entity's title", page.Items[0].EntityTitle)
 		}
-		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-			t.Fatalf("decode: %v", err)
+		if page.Items[0].LastError != "route: db down (after 5 attempts)" {
+			t.Errorf("last_error = %q, want the park reason", page.Items[0].LastError)
 		}
-		if resp.Count != 1 || len(resp.Events) != 1 || resp.Events[0].ID != claimed.ID {
-			t.Fatalf("admin list = %+v, want the one parked row", resp)
+	})
+
+	// The single read is gated identically — a plain member cannot open a
+	// parked row they cannot list.
+	t.Run("single_read_admin_gate", func(t *testing.T) {
+		get := func(caller string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			r := failedEventsReq(http.MethodGet, fmt.Sprintf("/api/events/failed/%d", claimed.ID), orgID, caller, "")
+			r.SetPathValue("id", fmt.Sprint(claimed.ID))
+			fe.handleFailedEventGet(rec, r)
+			return rec
 		}
-		if resp.Events[0].EntityTitle != "Parked PR" {
-			t.Errorf("entity_title = %q, want the joined entity's title", resp.Events[0].EntityTitle)
+		if rec := get(member); rec.Code != http.StatusForbidden {
+			t.Errorf("single read as plain member = %d, want 403", rec.Code)
 		}
-		if resp.Events[0].LastError != "route: db down (after 5 attempts)" {
-			t.Errorf("last_error = %q, want the park reason", resp.Events[0].LastError)
+		if rec := get(owner); rec.Code != http.StatusOK {
+			t.Errorf("single read as org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -381,7 +448,7 @@ func TestFailedEventsHandler_AdminGate_Postgres(t *testing.T) {
 		if resp.Requeued != 1 {
 			t.Errorf("requeued = %d, want 1", resp.Requeued)
 		}
-		rows, _ := stores.EventQueue.ListFailedEvents(ctx, orgID, 0)
+		rows, _, _ := stores.EventQueue.ListFailedEvents(ctx, orgID, db.ListOpts{Limit: 50})
 		if len(rows) != 0 {
 			t.Errorf("parked rows after the requeue = %+v, want none", rows)
 		}

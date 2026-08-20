@@ -269,7 +269,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		state, err := s.ops.SetupNetwork(ctx, a.RunID, a.SubnetIdx)
+		state, err := s.ops.SetupNetwork(ctx, a.ConversationID, a.SubnetIdx)
 		if err != nil {
 			return nil, err
 		}

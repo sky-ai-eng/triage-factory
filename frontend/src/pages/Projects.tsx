@@ -2,8 +2,9 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { useOrgHref } from '../hooks/useOrgHref'
-import type { Project, ProjectImportError, ProjectImportResult } from '../types'
-import { readError } from '../lib/api'
+import type { Project, ProjectImportResult } from '../types'
+import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { usePagedList } from '../hooks/usePagedList'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import ProjectCreateModal from '../components/ProjectCreateModal'
@@ -21,7 +22,10 @@ import ProjectBackfillModal from '../components/ProjectBackfillModal'
 export default function Projects() {
   const navigate = useNavigate()
   const orgHref = useOrgHref()
-  const [projects, setProjects] = useState<Project[]>([])
+  // The grid pages: a project list grows with the org, and the cards below
+  // append rather than replace so "load more" reads as more of the same grid.
+  const projectList = usePagedList<Project>('/api/projects/list', 'Could not load your projects.')
+  const { items: projects, setItems: setProjects } = projectList
   const [loading, setLoading] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
@@ -41,29 +45,23 @@ export default function Projects() {
   // empty state — that would silently lie about the user's data.
   const [loadError, setLoadError] = useState<string | null>(null)
 
+  const loadProjects = projectList.load
   const refresh = useCallback(async () => {
-    try {
-      setLoadError(null)
-      const res = await fetch('/api/projects')
-      if (!res.ok) {
-        const msg = await readError(res, 'Failed to load projects')
-        setLoadError(msg)
-        toast.error(msg)
-        return
-      }
-      const data: Project[] = await res.json()
-      setProjects(data)
-    } catch (err) {
-      const msg = `Failed to load projects: ${err instanceof Error ? err.message : String(err)}`
+    setLoadError(null)
+    const page = await loadProjects({})
+    if (page === null) {
+      const msg = 'Could not load your projects.'
       setLoadError(msg)
       toast.error(msg)
-    } finally {
-      setLoading(false)
     }
-  }, [])
+    setLoading(false)
+  }, [loadProjects])
 
   useEffect(() => {
-    refresh()
+    // refresh owns its own setState calls; the effect just kicks it. Same safe
+    // pattern AuthContext uses.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refresh()
   }, [refresh])
 
   const handleCreated = useCallback(
@@ -78,19 +76,22 @@ export default function Projects() {
       setBackfillTarget(created)
       setBackfillThenNavigate(false)
     },
-    [refresh],
+    [refresh, setProjects],
   )
 
-  const handleImported = useCallback((created: Project) => {
-    setImportOpen(false)
-    setImportSeedFile(null)
-    setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
-    // Defer the /projects/:id navigation until the backfill popup
-    // closes — the user expects to land on the imported project,
-    // but the popup is the chance to claim existing entities first.
-    setBackfillTarget(created)
-    setBackfillThenNavigate(true)
-  }, [])
+  const handleImported = useCallback(
+    (created: Project) => {
+      setImportOpen(false)
+      setImportSeedFile(null)
+      setProjects((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)))
+      // Defer the /projects/:id navigation until the backfill popup
+      // closes — the user expects to land on the imported project,
+      // but the popup is the chance to claim existing entities first.
+      setBackfillTarget(created)
+      setBackfillThenNavigate(true)
+    },
+    [setProjects],
+  )
 
   const handleBackfillClose = useCallback(() => {
     const target = backfillTarget
@@ -151,27 +152,26 @@ export default function Projects() {
   // state on success rather than re-fetching the list — `refresh`'s
   // round-trip would also be fine, but the optimistic path keeps the
   // grid from briefly showing a stale entry.
-  const handleDelete = useCallback(async (project: Project) => {
-    if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
-    try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(project.id)}`, {
-        method: 'DELETE',
-      })
-      if (!res.ok && res.status !== 204) {
-        toast.error(await readError(res, 'Failed to delete project'))
-        return
+  const handleDelete = useCallback(
+    async (project: Project) => {
+      if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
+      try {
+        const res = await apiFetch(`/api/projects/${encodeURIComponent(project.id)}`, {
+          method: 'DELETE',
+        })
+        const cleanupWarning = res.headers.get('X-Cleanup-Warning')
+        if (cleanupWarning) {
+          toast.warning(cleanupWarning)
+        } else {
+          toast.success(`Deleted project "${project.name}"`)
+        }
+        setProjects((prev) => prev.filter((p) => p.id !== project.id))
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not delete the project.'))
       }
-      const cleanupWarning = res.headers.get('X-Cleanup-Warning')
-      if (cleanupWarning) {
-        toast.warning(cleanupWarning)
-      } else {
-        toast.success(`Deleted project "${project.name}"`)
-      }
-      setProjects((prev) => prev.filter((p) => p.id !== project.id))
-    } catch (err) {
-      toast.error(`Failed to delete project: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }, [])
+    },
+    [setProjects],
+  )
 
   const content = loading ? (
     <div className="text-ink-3 text-body">Loading projects…</div>
@@ -180,11 +180,27 @@ export default function Projects() {
   ) : projects.length === 0 ? (
     <EmptyState onCreate={() => setCreateOpen(true)} />
   ) : (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-      {projects.map((p) => (
-        <ProjectCard key={p.id} project={p} onDelete={() => handleDelete(p)} />
-      ))}
-    </div>
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+        {projects.map((p) => (
+          <ProjectCard key={p.id} project={p} onDelete={() => handleDelete(p)} />
+        ))}
+      </div>
+      {projectList.hasMore && (
+        <div className="mt-6 flex justify-center">
+          <button
+            type="button"
+            onClick={projectList.loadMore}
+            disabled={projectList.loading}
+            className="text-[13px] font-medium text-accent transition-opacity hover:opacity-80 disabled:opacity-50"
+          >
+            {projectList.loading
+              ? 'Loading…'
+              : `Load more (${projects.length} of ${projectList.total ?? projects.length})`}
+          </button>
+        </div>
+      )}
+    </>
   )
 
   return (
@@ -324,7 +340,7 @@ function ProjectImportModal({
 }) {
   const [file, setFile] = useState<File | null>(initialFile ?? null)
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState<ProjectImportError | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const dragDepth = useRef(0)
@@ -351,10 +367,7 @@ function ProjectImportModal({
     }
     if (!isTfprojectFile(next)) {
       clearSelectedFile()
-      setError({
-        error: 'invalid_file',
-        message: 'Only .tfproject files can be imported.',
-      })
+      setError('Only .tfproject files can be imported.')
       return
     }
     setFile(next)
@@ -369,7 +382,7 @@ function ProjectImportModal({
   const submit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!file) {
-      setError({ error: 'no_file', message: 'Choose a .tfproject file to import.' })
+      setError('Choose a .tfproject file to import.')
       return
     }
     setSubmitting(true)
@@ -377,22 +390,10 @@ function ProjectImportModal({
     try {
       const form = new FormData()
       form.append('bundle', file)
-      const res = await fetch('/api/projects/import', { method: 'POST', body: form })
-      if (!res.ok) {
-        let parsed: ProjectImportError | null = null
-        try {
-          parsed = (await res.clone().json()) as ProjectImportError
-        } catch {
-          parsed = null
-        }
-        if (parsed) {
-          setError(parsed)
-        } else {
-          setError({ error: 'import_failed', message: await readError(res, 'Import failed') })
-        }
-        return
-      }
-      const result = (await res.json()) as ProjectImportResult
+      const result = await apiJSON<ProjectImportResult>('/api/projects/import', {
+        method: 'POST',
+        body: form,
+      })
       for (const warning of result.warnings || []) {
         toast.warning(
           warning.repo
@@ -403,10 +404,17 @@ function ProjectImportModal({
       toast.success(`Imported project "${result.project.name}"`)
       onImported(result.project)
     } catch (err) {
-      setError({
-        error: 'import_failed',
-        message: `Import failed: ${err instanceof Error ? err.message : String(err)}`,
-      })
+      // Every import rejection is the standard error envelope now — a
+      // duplicate name, a bad bundle, an unreachable pinned repo (one item per
+      // repo). Render every message the server sent rather than only the
+      // first: the unreachable-repos case is a list, and showing one name
+      // would send the user round the loop once per repo.
+      const items = apiErrors(err)
+      setError(
+        items.length > 0
+          ? items.map((i) => i.message).join('\n')
+          : httpErrorMessage(err, 'Import failed.'),
+      )
     } finally {
       setSubmitting(false)
     }
@@ -486,10 +494,7 @@ function ProjectImportModal({
               const picked = pickTfprojectFile(e.dataTransfer.files)
               if (!picked) {
                 clearSelectedFile()
-                setError({
-                  error: 'invalid_file',
-                  message: 'Only .tfproject files can be imported.',
-                })
+                setError('Only .tfproject files can be imported.')
                 return
               }
               selectBundle(picked)
@@ -532,8 +537,8 @@ function ProjectImportModal({
           </div>
 
           {error && (
-            <div className="rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm">
-              {renderImportError(error)}
+            <div className="whitespace-pre-line rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm">
+              {error}
             </div>
           )}
 
@@ -566,17 +571,6 @@ function ProjectImportModal({
       </div>
     </div>
   )
-}
-
-function renderImportError(err: ProjectImportError): string {
-  if (err.error === 'duplicate_name') {
-    return err.message || 'A project with that name already exists. Rename or delete it first.'
-  }
-  if (err.error === 'missing_repos' && err.missing_repos && err.missing_repos.length > 0) {
-    const list = err.missing_repos.map((m) => `${m.repo} (${m.error})`).join(', ')
-    return `Missing pinned repos: ${list}`
-  }
-  return err.message || err.error || 'Import failed.'
 }
 
 function hasDroppedFiles(dataTransfer: DataTransfer | null): boolean {

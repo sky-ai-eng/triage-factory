@@ -210,6 +210,23 @@ var graphQLMutations = map[string]graphQLShape{
 	// that is refused unconditionally.
 }
 
+// KnownMutations lists the GraphQL mutation names this table classifies, in no
+// particular order.
+//
+// It exists for the conformance gate, the third consumer named in this
+// package's doc: that gate drives the pinned `gh` and asserts every act the
+// table names is reachable by some spelling and classifies when it arrives. It
+// can only assert that against the real key set — a list it kept of its own
+// would be a second copy of the table, and a second copy is exactly what this
+// package exists to prevent. Nothing in production reads it.
+func KnownMutations() []string {
+	names := make([]string, 0, len(graphQLMutations))
+	for name := range graphQLMutations {
+		names = append(names, name)
+	}
+	return names
+}
+
 // graphQLShape is one table entry: the act, and the flags the REST shapes carry
 // for the same reasons.
 type graphQLShape struct {

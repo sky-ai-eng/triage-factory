@@ -41,7 +41,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	}
 
 	bpID := "rbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	promptIDs := make([]string, nSteps)
@@ -50,7 +50,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 		ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
 		promptIDs[i] = pid
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, promptIDs, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	// Freeze the plan onto the run exactly as the mint path does — the reactor
@@ -62,7 +62,7 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 			PromptBody: "b", Source: "user",
 		}
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "rbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-" + suffix, StepPlan: plan,
@@ -70,20 +70,21 @@ func reactorFixture(t *testing.T, suffix string, nSteps int, step0Status, step0O
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
 	step0 := 0
-	run0 := "rrun0-" + suffix
+	step0ConversationID := "rrun0-" + suffix
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: run0, TaskID: task.ID, PromptID: promptIDs[0], Status: step0Status,
+		ID: step0ConversationID, TaskID: task.ID, PromptID: promptIDs[0], Status: step0Status,
 		Outcome: step0Outcome,
 		Model:   "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	return s, database, brID, task.ID, run0
+	return s, database, brID, task.ID, step0ConversationID
 }
 
-func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
+func queuedStepConversations(t *testing.T, database *sql.DB, brID string) []int {
 	t.Helper()
 	rows, err := database.Query(`SELECT blueprint_step_index FROM conversations WHERE blueprint_run_id = ? AND status IS NULL ORDER BY blueprint_step_index`, brID)
 	if err != nil {
@@ -102,25 +103,25 @@ func queuedStepRuns(t *testing.T, database *sql.DB, brID string) []int {
 }
 
 // TestDrainRunQueue_DrainingSkipsClaim pins the drain verb's dispatcher-side
-// consequence (TFAC-586): drainRunQueue must not claim a queued row while
+// consequence (TFAC-586): drainConversationQueue must not claim a queued row while
 // Draining() is true, and must resume claiming the moment it flips back —
 // proving the gate, not fixture setup, is what blocked the first attempt.
 func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
-	seedRun(t, database, "run-drain-skip", "sess-1", "/tmp/wt-run-drain-skip")
+	seedConversation(t, database, "run-drain-skip", "sess-1", "/tmp/wt-run-drain-skip")
 	forceClaimable(t, database, "run-drain-skip")
 
 	s.SetDraining(true)
-	s.drainRunQueue(context.Background())
+	s.drainConversationQueue(context.Background())
 
 	if claims := claimCountFor(t, database, "run-drain-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a draining instance must not claim", claims)
 	}
 
 	s.SetDraining(false)
-	s.drainRunQueue(context.Background())
-	// The claim is minted synchronously; drainRunQueue then dispatches the
+	s.drainConversationQueue(context.Background())
+	// The claim is minted synchronously; drainConversationQueue then dispatches the
 	// claimed run on a goroutine. This fixture's blueprint has an empty step
 	// plan, so that goroutine deterministically cancels the run — and may
 	// already have released the claim by the time we read (a race -race
@@ -133,9 +134,9 @@ func TestDrainRunQueue_DrainingSkipsClaim(t *testing.T) {
 
 // forceClaimable puts a seeded run into the mid-flight state the claim
 // predicate matches: no stored outcome, no active claim.
-func forceClaimable(t *testing.T, database *sql.DB, runID string) {
+func forceClaimable(t *testing.T, database *sql.DB, conversationID string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, runID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, conversationID); err != nil {
 		t.Fatalf("force claimable: %v", err)
 	}
 }
@@ -143,10 +144,10 @@ func forceClaimable(t *testing.T, database *sql.DB, runID string) {
 // claimCountFor counts every claim ever minted on a conversation — the
 // derived answer to "was this claimed", stable against a dispatch goroutine
 // that may already have released it.
-func claimCountFor(t *testing.T, database *sql.DB, runID string) int {
+func claimCountFor(t *testing.T, database *sql.DB, conversationID string) int {
 	t.Helper()
 	var n int
-	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id = ?`, runID).Scan(&n); err != nil {
+	if err := database.QueryRow(`SELECT COUNT(*) FROM claims WHERE conversation_id = ?`, conversationID).Scan(&n); err != nil {
 		t.Fatalf("count claims: %v", err)
 	}
 	return n
@@ -158,11 +159,11 @@ func claimCountFor(t *testing.T, database *sql.DB, runID string) int {
 func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
-	seedRun(t, database, "run-pfence-skip", "sess-1", "/tmp/wt-run-pfence-skip")
+	seedConversation(t, database, "run-pfence-skip", "sess-1", "/tmp/wt-run-pfence-skip")
 	forceClaimable(t, database, "run-pfence-skip")
 
 	s.partitionFenced.Store(true)
-	s.drainRunQueue(context.Background())
+	s.drainConversationQueue(context.Background())
 
 	if claims := claimCountFor(t, database, "run-pfence-skip"); claims != 0 {
 		t.Errorf("claims = %d, want 0 — a partition-fenced instance must not claim", claims)
@@ -180,21 +181,21 @@ func TestDrainRunQueue_PartitionFencedSkipsClaim(t *testing.T) {
 // the row is resumable: its blueprint is terminal, so the claim gate refuses
 // it — which the second half of this test pins.
 func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "recon-orphan", 1, "running", "")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "recon-orphan", 1, "running", "")
 
 	// Force the desync directly, mimicking a DB broken before the atomic park
 	// in MarkRunStatus landed: terminal parent, child still mid-flight.
-	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, run0); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("force child mid-flight: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 0 WHERE id = ?`, brID); err != nil {
 		t.Fatalf("force blueprint cancelled: %v", err)
 	}
 
-	s.reconcileRunQueue(context.Background())
+	s.reconcileConversationQueue(context.Background())
 
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, run0).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status); err != nil {
 		t.Fatalf("read child status: %v", err)
 	}
 	if status != "open" {
@@ -206,10 +207,10 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 	if _, err := database.Exec(`
 		INSERT INTO messages (conversation_id, org_id, role, subtype, content, delivered, window_state)
 		VALUES (?, ?, 'user', '', 'pick this back up', 0, 'active')`,
-		run0, runmode.LocalDefaultOrgID); err != nil {
+		step0ConversationID, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("queue input on the parked orphan: %v", err)
 	}
-	claimed, err := s.runQueue.ClaimNextRun(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
+	claimed, err := s.conversationQueue.ClaimNextConversation(context.Background(), "exec-orphan", 1, db.ClaimPlacement{})
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -222,15 +223,15 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 // 'continue' enqueues the next step and bumps current_step_index, leaving the
 // blueprint running.
 func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "adv", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "adv", 2, "completed", "continue")
 	org := runmode.LocalDefaultOrgID
 
-	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 		t.Fatalf("queued step runs = %v, want [1]", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -250,7 +251,7 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 // been executing the blueprint — proving the actor is stable across steps and
 // immune to a mid-blueprint claim change.
 func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
-	s, database, brID, taskID, run0 := reactorFixture(t, "actor-inherit", 2, "completed", "continue")
+	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "actor-inherit", 2, "completed", "continue")
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 
@@ -271,10 +272,10 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 		t.Fatalf("precondition: task must be unclaimed to prove inheritance, got claim %q", claim)
 	}
 
-	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(ctx, org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
 	var actor string
 	if err := database.QueryRow(`SELECT COALESCE(actor_agent_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&actor); err != nil {
@@ -286,13 +287,14 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 }
 
 // TestReactor_AdvanceInheritsTriggerID pins the by-rule spend attribution
-// (TFAC-478): the next step the reactor enqueues inherits the blueprint_run's
-// frozen trigger_id onto runs.trigger_id, so an event-fired step lands in the
-// JOIN-free llm_spend view attributable to its firing rule. Without the
-// inheritance, every autonomous step run carried NULL there — autonomous cost
-// in the usage by-category split with an empty by-rule breakdown.
+// (TFAC-478): the next step the reactor enqueues inherits the
+// blueprint_run's frozen trigger_id onto conversations.trigger_id, so an
+// event-fired step lands in the JOIN-free llm_spend view attributable to
+// its firing rule. Without the inheritance, every autonomous step run
+// carried NULL there — autonomous cost in the usage by-category split with
+// an empty by-rule breakdown.
 func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "trig-inherit", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "trig-inherit", 2, "completed", "continue")
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 
@@ -301,7 +303,7 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	// the event shape (creator NULL) so its trigger-type CHECK holds.
 	breaker, minSuit := 3, 0.5
 	trigID := "trig-inherit-handler"
-	if err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
+	if _, err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
 		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
 		BlueprintID: "rbp-trig-inherit", BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit,
 		Enabled: true,
@@ -312,10 +314,10 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 		t.Fatalf("freeze trigger on blueprint_run: %v", err)
 	}
 
-	stepRun, _ := s.agentRuns.GetSystem(ctx, org, run0)
-	stepRun.TriggerType = "event"
-	stepRun.CreatorUserID = ""
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(ctx, org, step0ConversationID)
+	stepConversation.TriggerType = "event"
+	stepConversation.CreatorUserID = ""
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
 	var gotTrig string
 	if err := database.QueryRow(`SELECT COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ? AND blueprint_step_index = 1`, brID).Scan(&gotTrig); err != nil {
@@ -329,15 +331,15 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 // TestReactor_FinalStepFinishCompletes: the final step completing with 'finish'
 // terminates the blueprint completed and closes the task.
 func TestReactor_FinalStepFinishCompletes(t *testing.T) {
-	s, database, brID, taskID, run0 := reactorFixture(t, "fin", 1, "completed", "finish")
+	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "fin", 1, "completed", "finish")
 	org := runmode.LocalDefaultOrgID
 
-	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -352,18 +354,18 @@ func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 // TestReactor_CancelRequestedTerminates: a continue outcome on a cancel-requested
 // blueprint does NOT advance — it finalizes the blueprint cancelled.
 func TestReactor_CancelRequestedTerminates(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "can", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "can", 2, "completed", "continue")
 	org := runmode.LocalDefaultOrgID
 	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
 		t.Fatalf("RequestRunCancelSystem: %v", err)
 	}
 
-	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
 	}
 	br := mustGetRun(t, s, org, brID)
@@ -375,15 +377,15 @@ func TestReactor_CancelRequestedTerminates(t *testing.T) {
 // TestReactor_ParkedStepLeavesRunning: a step parked `open` leaves the
 // blueprint running and enqueues nothing (resume drives it later).
 func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "park", 2, "open", "")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "park", 2, "open", "")
 	org := runmode.LocalDefaultOrgID
 
-	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (parked step waits for resume)", q)
 	}
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning {
@@ -397,20 +399,20 @@ func TestReactor_ParkedStepLeavesRunning(t *testing.T) {
 // BEFORE the parked arm — read the park first and every cancelled run would
 // strand its blueprint 'running' forever with nobody to finalize it.
 func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
-	s, database, brID, _, run0 := reactorFixture(t, "cancel-park", 2, "open", "")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "cancel-park", 2, "open", "")
 	org := runmode.LocalDefaultOrgID
 	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
 		t.Fatalf("RequestRunCancelSystem: %v", err)
 	}
 
-	stepRun, _ := s.agentRuns.GetSystem(context.Background(), org, run0)
-	stepRun.TriggerType = "manual"
-	stepRun.CreatorUserID = runmode.LocalDefaultUserID
+	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
 	// The pre-agent blueprint the dispatcher captured has no cancel on it; the
 	// reactor's own refresh is what must find the signal.
-	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+	s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-	if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 		t.Fatalf("queued step runs = %v, want none (cancel must not advance)", q)
 	}
 	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusCancelled {
@@ -418,7 +420,7 @@ func TestReactor_CancelledStepParksAndTerminatesBlueprint(t *testing.T) {
 	}
 	// The step keeps its park; the blueprint carries the cancellation.
 	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, run0).Scan(&status); err != nil {
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, step0ConversationID).Scan(&status); err != nil {
 		t.Fatalf("read step status: %v", err)
 	}
 	if status != "open" {
@@ -443,13 +445,13 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 	// with the given outcome.
 	stage := func(t *testing.T, suffix, step0Outcome string) (*Spawner, *sql.DB, string, string, domain.Conversation) {
 		t.Helper()
-		s, database, brID, taskID, run0 := reactorFixture(t, suffix, 3, "completed", step0Outcome)
+		s, database, brID, taskID, step0ConversationID := reactorFixture(t, suffix, 3, "completed", step0Outcome)
 		ctx := context.Background()
 
 		// The advance the reactor itself performed on step 0's first
 		// conclusion: pointer first, then the row it names. Step 1 is
 		// mid-flight (NULL status) and holds the shared worktree.
-		if err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
+		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, org, brID, 1); err != nil {
 			t.Fatalf("SetRunCurrentStepSystem: %v", err)
 		}
 		step1 := 1
@@ -458,13 +460,13 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step1,
 		})
 
-		stepRun, err := s.agentRuns.GetSystem(ctx, org, run0)
-		if err != nil || stepRun == nil {
-			t.Fatalf("read stale step run: (%v, %v)", stepRun, err)
+		stepConversation, err := s.conversations.GetSystem(ctx, org, step0ConversationID)
+		if err != nil || stepConversation == nil {
+			t.Fatalf("read stale step run: (%v, %v)", stepConversation, err)
 		}
-		stepRun.TriggerType = "manual"
-		stepRun.CreatorUserID = runmode.LocalDefaultUserID
-		return s, database, brID, taskID, *stepRun
+		stepConversation.TriggerType = "manual"
+		stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+		return s, database, brID, taskID, *stepConversation
 	}
 
 	t.Run("continue does not advance or double-enqueue", func(t *testing.T) {
@@ -474,7 +476,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 
 		s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), stale, runConfig{orgID: org}, time.Now())
 
-		if q := queuedStepRuns(t, database, brID); len(q) != 1 || q[0] != 1 {
+		if q := queuedStepConversations(t, database, brID); len(q) != 1 || q[0] != 1 {
 			t.Fatalf("queued step runs = %v, want [1] — the live step must not be enqueued a second time", q)
 		}
 		br := mustGetRun(t, s, org, brID)
@@ -553,15 +555,15 @@ func TestReactor_LeavesASuccessorsConversationAlone(t *testing.T) {
 
 	for _, status := range []string{domain.StatusQueued, domain.StatusRunning, domain.ClaimPhaseCloning} {
 		t.Run(status, func(t *testing.T) {
-			s, database, brID, taskID, run0 := reactorFixture(t, "successor-"+status, 2, "completed", "continue")
+			s, database, brID, taskID, step0ConversationID := reactorFixture(t, "successor-"+status, 2, "completed", "continue")
 
-			stepRun := loadRun(t, s, run0)
-			stepRun.Status = status
-			stepRun.TriggerType = "manual"
-			stepRun.CreatorUserID = runmode.LocalDefaultUserID
-			s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepRun, runConfig{orgID: org}, time.Now())
+			stepConversation := loadConversation(t, s, step0ConversationID)
+			stepConversation.Status = status
+			stepConversation.TriggerType = "manual"
+			stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+			s.reactToStepTerminal(context.Background(), org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
 
-			if q := queuedStepRuns(t, database, brID); len(q) != 0 {
+			if q := queuedStepConversations(t, database, brID); len(q) != 0 {
 				t.Errorf("queued step runs = %v, want none — nothing about a successor's state says to advance", q)
 			}
 			br := mustGetRun(t, s, org, brID)

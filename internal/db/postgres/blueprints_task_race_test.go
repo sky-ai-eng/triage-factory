@@ -100,7 +100,7 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 }
 
 // TestBlueprintStore_Postgres_OneActiveAutoRunPerTask: the task gate
-// (HasActiveAutoRunForTaskSystem) is check-then-act, so two different
+// (HasActiveAutoConversationForTaskSystem) is check-then-act, so two different
 // (event, trigger) pairs racing to auto-fire on the SAME task could both
 // pass the check and each mint an active blueprint_run —
 // blueprint_runs_one_active_auto_run_per_task is the DB-enforced backstop.
@@ -221,8 +221,11 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 
 	var count int
 	if err := h.AdminDB.QueryRow(`
-		SELECT COUNT(*) FROM blueprint_runs
-		WHERE org_id = $1 AND entity_id = $2 AND trigger_type = 'event' AND status = 'running'
+		SELECT COUNT(*)
+		FROM blueprint_runs br
+		JOIN tasks t ON t.org_id = br.org_id AND t.id = br.task_id
+		WHERE br.org_id = $1 AND t.entity_id = $2
+		  AND br.trigger_type = 'event' AND br.status = 'running'
 	`, fx.orgID, fx.entityID).Scan(&count); err != nil {
 		t.Fatalf("count active runs: %v", err)
 	}
@@ -234,7 +237,7 @@ func TestBlueprintStore_Postgres_SiblingTasksOnOneEntityBothFire(t *testing.T) {
 // TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim is the Postgres
 // twin of the SQLite test of the same shape: the fenced insert is a
 // delegation's commitment point, so the task's agent claim commits in the same
-// transaction as the run row. Without that, a failed stamp leaves the board
+// transaction as the blueprint run row. Without that, a failed stamp leaves the board
 // showing a free task under a live run and no replay can repair it — the
 // (triggering_event_id, trigger_id) fence closes first.
 func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
@@ -273,7 +276,7 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 		taskID := fx.newTask(t)
 		// The user claims the task in the window before the insert: they win
 		// the claim, and the run must still commit.
-		if err := stores.Tasks.SetClaimedByUser(ctx, fx.orgID, taskID, fx.userID); err != nil {
+		if _, err := stores.Tasks.SetClaimedByUser(ctx, fx.orgID, taskID, fx.userID); err != nil {
 			t.Fatalf("SetClaimedByUser: %v", err)
 		}
 		br := fx.firing(t, taskID)

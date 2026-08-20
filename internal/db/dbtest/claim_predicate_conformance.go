@@ -88,9 +88,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 
 	claim := func(t *testing.T, h ClaimPredicateHarness) *domain.Conversation {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "predicate-exec", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "predicate-exec", 1, db.ClaimPlacement{})
 		if err != nil {
-			t.Fatalf("ClaimNextRun: %v", err)
+			t.Fatalf("ClaimNextConversation: %v", err)
 		}
 		return got
 	}
@@ -98,14 +98,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		t.Helper()
 		got := claim(t, h)
 		if got == nil || got.ID != convID {
-			t.Fatalf("ClaimNextRun = %+v, want conversation %s", got, convID)
+			t.Fatalf("ClaimNextConversation = %+v, want conversation %s", got, convID)
 		}
 		return got
 	}
 	mustNotClaim := func(t *testing.T, h ClaimPredicateHarness) {
 		t.Helper()
 		if got := claim(t, h); got != nil {
-			t.Fatalf("ClaimNextRun = %s, want nothing claimable", got.ID)
+			t.Fatalf("ClaimNextConversation = %s, want nothing claimable", got.ID)
 		}
 	}
 	release := func(t *testing.T, h ClaimPredicateHarness, orgID, convID, outcome string) {
@@ -298,8 +298,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			// than against nothing.
 			t.Run("FinishedBlueprint", func(t *testing.T) {
 				// stage conducts both conversations to a completed terminal and
-				// settles the blueprint at currentStep, then re-queues the one
-				// named by resumeStep. It returns the two conversation ids in
+				// settles the blueprint at currentStep; resume re-queues whichever
+				// one it is handed. stage returns the two conversation ids in
 				// step order.
 				stage := func(t *testing.T, h ClaimPredicateHarness, blueprintStatus string, currentStep int) (string, string) {
 					t.Helper()
@@ -380,7 +380,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				//
 				// Only the CLAIM path's Attempts. The display reads return a
 				// lifetime engagement count under the same field name —
-				// deliberately, and pinned in RunAgentRunConformance. See
+				// deliberately, and pinned in RunConversationStoreConformance. See
 				// domain.Conversation.Attempts for which is which.
 				h := mk(t)
 				convID := h.EnqueueDelegation(t, runtime)
@@ -517,14 +517,14 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				// copy of it: a phase added in Go and never taught to a store
 				// fails here, on both dialects.
 				for _, phase := range domain.AllClaimPhases() {
-					if err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, phase); err != nil {
+					if _, err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, phase); err != nil {
 						t.Fatalf("set phase %s: %v", phase, err)
 					}
 					if st := h.DisplayStatus(t, convID); st != phase {
 						t.Errorf("phase %s displays %q, want the phase itself", phase, st)
 					}
 				}
-				if err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, ""); err != nil {
+				if _, err := h.Stores.Conversations.SetActiveClaimPhaseSystem(ctx, h.OrgID, convID, ""); err != nil {
 					t.Fatalf("clear phase: %v", err)
 				}
 				if st := h.DisplayStatus(t, convID); st != "running" {
@@ -545,7 +545,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				}
 
 				// Terminals render verbatim.
-				for _, term := range domain.AllTerminalRunStatuses() {
+				for _, term := range domain.AllTerminalConversationStatuses() {
 					h.SetStoredStatus(t, convID, term)
 					if st := h.DisplayStatus(t, convID); st != term {
 						t.Errorf("terminal %s displays %q", term, st)
@@ -563,10 +563,49 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 		err := h.EnqueueUnindexed(t)
 		if !errors.Is(err, db.ErrBlueprintStepUnindexed) {
-			t.Fatalf("EnqueueRun with no step index = %v, want ErrBlueprintStepUnindexed", err)
+			t.Fatalf("EnqueueConversation with no step index = %v, want ErrBlueprintStepUnindexed", err)
 		}
 		// The refusal is the whole point: nothing landed, so nothing is
 		// sitting in the work list that no claim could ever reach.
 		mustNotClaim(t, h)
+	})
+
+	// The claim gate's `open` arm is an UN-PARK, and it has to clear the
+	// park's own columns — park_reason included.
+	//
+	// This is the second door out of a park, and the quieter one. The loud
+	// one is MarkQueuedForResume; this is a parked conversation woken by
+	// undelivered input and claimed straight off the queue, which is what an
+	// ordinary follow-up does. park_reason answers "why is this parked", so
+	// once the row is mid-flight again the old value is not history, it is a
+	// wrong answer to the only question the column asks — and it is
+	// single-valued, so nothing overwrites it until the NEXT park. A stale
+	// one therefore rides this engagement all the way to whatever terminal
+	// follows, and the run station prints it beside a failed run as "stopped
+	// by user" on a run nobody stopped.
+	t.Run("ClaimingAParkedConversationClearsItsParkReason", func(t *testing.T) {
+		h := mk(t)
+		convID := h.EnqueueDelegation(t, "sdk")
+		if _, err := h.Stores.Conversations.ParkOpen(ctx, h.OrgID, convID,
+			db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil {
+			t.Fatalf("park: %v", err)
+		}
+		if got, _ := h.Stores.Conversations.Get(ctx, h.OrgID, convID); got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Fatalf("precondition: park_reason = %q, want user_cancelled", got.ParkReason)
+		}
+
+		// A follow-up wakes it, and the dispatcher claims it directly — no
+		// resume flip in between. That is the whole path.
+		h.InsertRow(t, convID, userRow("keep going", false))
+		mustClaim(t, h, convID)
+
+		got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.ParkReason != "" {
+			t.Errorf("park_reason = %q after the claim un-parked it, want cleared — "+
+				"the row is mid-flight, so it is not parked for any reason", got.ParkReason)
+		}
 	})
 }

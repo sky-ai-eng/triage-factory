@@ -47,14 +47,14 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 	// memberB is teamB's *team* admin (needed so replaceTeamRepos below, run
 	// as memberB, satisfies team_github_repos_insert's tf.user_is_team_admin
 	// check) but an org-level plain "member" — the role isOrgAdmin/
-	// repoAccessAllowed actually gate on. Team role and org role are
+	// repoVisible actually gate on. Team role and org role are
 	// orthogonal; this is a common real shape (team admins who aren't org
 	// admins).
 	pgtest.AddOrgMember(t, h, memberB, orgID, teamB, "member", "admin")
 	// plainB is on teamB with no admin role at either grain — the shape the
 	// read gate and the write gate answer differently: they can *see*
 	// teamB's repos (membership), but must not be able to mutate an
-	// org-wide repo profile every tracking team's runs read.
+	// org-wide repository row every tracking team's runs read.
 	plainB := pgtest.SeedUser(t, h, "plain-b")
 	pgtest.AddOrgMember(t, h, plainB, orgID, teamB, "member", "member")
 	teamless := pgtest.SeedUser(t, h, "teamless")
@@ -83,6 +83,21 @@ func (r *repoScopeRig) replaceTeamRepos(t *testing.T, actingUser, teamID string,
 	}
 }
 
+// repoID resolves a seeded repository's registry row id — how every repo
+// route addresses one. Read off the admin pool so the lookup itself is not
+// subject to the gate under test.
+func (r *repoScopeRig) repoID(t *testing.T, owner, repo string) string {
+	t.Helper()
+	var id string
+	if err := r.h.AdminDB.QueryRow(
+		`SELECT id::text FROM repositories WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
+		r.orgID, owner, repo,
+	).Scan(&id); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	return id
+}
+
 // req builds a request to path as callerID with claims + active org
 // injected, mirroring viewerRig.req.
 func (r *repoScopeRig) req(method, path, callerID string, body any) *http.Request {
@@ -100,71 +115,61 @@ func (r *repoScopeRig) req(method, path, callerID string, body any) *http.Reques
 	return req.WithContext(ctx)
 }
 
-func repoSlugsFromJSON(t *testing.T, body []byte) []string {
+// listRepos calls the registry list as callerID and returns the page.
+func (r *repoScopeRig) listRepos(t *testing.T, callerID string) listEnvelope[repoJSON] {
 	t.Helper()
-	var rows []struct {
-		Owner string `json:"owner"`
-		Repo  string `json:"repo"`
-	}
-	if err := json.Unmarshal(body, &rows); err != nil {
-		t.Fatalf("decode repo list: %v; body=%s", err, body)
-	}
-	out := make([]string, len(rows))
-	for i, row := range rows {
-		out[i] = row.Owner + "/" + row.Repo
+	rec := httptest.NewRecorder()
+	r.s.handleRepositories(rec, r.req(http.MethodPost, "/api/repos/list", callerID, map[string]any{}))
+	return decodeList[repoJSON](t, rec)
+}
+
+func listedRepoSlugs(page listEnvelope[repoJSON]) []string {
+	out := make([]string, len(page.Items))
+	for i, row := range page.Items {
+		out[i] = row.Slug
 	}
 	return out
 }
 
-// TestHandleRepoProfiles_TeamScoped pins the TFAC-559 fix: GET /api/repos
+// TestHandleRepositories_TeamScoped pins the TFAC-559 fix: the registry list
 // returns the org-wide union for an org admin, only the caller's own team's
 // tracked repos for a plain member, and nothing for a teamless member —
 // where before the fix every caller saw the full org-wide list regardless
 // of role or team membership.
-func TestHandleRepoProfiles_TeamScoped(t *testing.T) {
+func TestHandleRepositories_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
-	// Org owner (admin) sees the org-wide union: both teams' repos.
-	rec := httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.orgOwner, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("owner GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
-		t.Errorf("owner (org admin) repos = %v, want org-wide [acme/api acme/web]", got)
+	// Org owner (admin) sees the org-wide union: both teams' repos. The
+	// total_count is scoped the same way the rows are — it counts what the
+	// caller may see, not what the table holds.
+	owner := rig.listRepos(t, rig.orgOwner)
+	if got := listedRepoSlugs(owner); !equalSlugs(got, []string{"acme/api", "acme/web"}) || owner.Total() != 2 {
+		t.Errorf("owner (org admin) repos = %v (total %d), want org-wide [acme/api acme/web]", got, owner.Total())
 	}
 
 	// teamB member sees only teamB's tracked repo (acme/web), not teamA's
 	// (acme/api) — the cross-team leak this ticket fixes.
-	rec = httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.memberB, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("memberB GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); !equalSlugs(got, []string{"acme/web"}) {
-		t.Errorf("memberB repos = %v, want only [acme/web]", got)
+	member := rig.listRepos(t, rig.memberB)
+	if got := listedRepoSlugs(member); !equalSlugs(got, []string{"acme/web"}) || member.Total() != 1 {
+		t.Errorf("memberB repos = %v (total %d), want only [acme/web] with total 1", got, member.Total())
 	}
 
 	// A teamless member sees zero repos — before the fix this returned the
 	// full org-wide list to any org member regardless of team membership.
-	rec = httptest.NewRecorder()
-	rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", rig.teamless, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("teamless GET /api/repos: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-	if got := repoSlugsFromJSON(t, rec.Body.Bytes()); len(got) != 0 {
-		t.Errorf("teamless member repos = %v, want empty", got)
+	teamless := rig.listRepos(t, rig.teamless)
+	if got := listedRepoSlugs(teamless); len(got) != 0 || teamless.Total() != 0 {
+		t.Errorf("teamless member repos = %v (total %d), want empty", got, teamless.Total())
 	}
 }
 
-// baseBranch reads a repo profile's stored base_branch straight off the
+// baseBranch reads a repository row's stored base_branch straight off the
 // admin pool, so a "the write was rejected" assertion checks the row rather
 // than trusting the status code.
 func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
 	t.Helper()
 	var got *string
 	if err := r.h.AdminDB.QueryRow(
-		`SELECT base_branch FROM repo_profiles WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
+		`SELECT base_branch FROM repositories WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
 		r.orgID, owner, repo,
 	).Scan(&got); err != nil {
 		t.Fatalf("read base_branch for %s/%s: %v", owner, repo, err)
@@ -177,10 +182,10 @@ func (r *repoScopeRig) baseBranch(t *testing.T, owner, repo string) string {
 
 func (r *repoScopeRig) patchBaseBranch(t *testing.T, callerID, owner, repo, branch string) *httptest.ResponseRecorder {
 	t.Helper()
+	id := r.repoID(t, owner, repo)
 	rec := httptest.NewRecorder()
-	req := r.req(http.MethodPatch, "/api/repos/"+owner+"/"+repo, callerID, map[string]string{"base_branch": branch})
-	req.SetPathValue("owner", owner)
-	req.SetPathValue("repo", repo)
+	req := r.req(http.MethodPatch, "/api/repos/"+id, callerID, map[string]string{"base_branch": branch})
+	req.SetPathValue("id", id)
 	r.s.handleRepoUpdate(rec, req)
 	return rec
 }
@@ -216,7 +221,7 @@ func TestHandleRepoUpdate_TeamScoped(t *testing.T) {
 }
 
 // TestHandleRepoUpdate_RequiresAdmin pins the mutation gate: changing an
-// org-wide repo profile takes an admin, not just membership of a team that
+// org-wide repository row takes an admin, not just membership of a team that
 // tracks it.
 // The two rejection codes are load-bearing and different — 403 for a repo
 // the caller can see in their own GET /api/repos list (404 there would read
@@ -256,32 +261,20 @@ func TestHandleRepoUpdate_RequiresAdmin(t *testing.T) {
 	}
 }
 
-// TestHandleRepoProfiles_CanEdit pins the projection the Repos page gates
+// TestHandleRepositories_CanEdit pins the projection the Repos page gates
 // its base-branch control on: it mirrors the PATCH gate per row, so the
 // client never has to re-derive authz from role (org admin and team admin
 // are orthogonal, and only the server knows which tracking teams the caller
 // administers).
-func TestHandleRepoProfiles_CanEdit(t *testing.T) {
+func TestHandleRepositories_CanEdit(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
 	canEdit := func(callerID string) map[string]bool {
 		t.Helper()
-		rec := httptest.NewRecorder()
-		rig.s.handleRepoProfiles(rec, rig.req(http.MethodGet, "/api/repos", callerID, nil))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("%s GET /api/repos: status = %d; body=%s", callerID, rec.Code, rec.Body.String())
-		}
-		var rows []struct {
-			Owner   string `json:"owner"`
-			Repo    string `json:"repo"`
-			CanEdit bool   `json:"can_edit"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
-			t.Fatalf("decode repo list: %v; body=%s", err, rec.Body.String())
-		}
-		out := make(map[string]bool, len(rows))
-		for _, row := range rows {
-			out[row.Owner+"/"+row.Repo] = row.CanEdit
+		page := rig.listRepos(t, callerID)
+		out := make(map[string]bool, len(page.Items))
+		for _, row := range page.Items {
+			out[row.Slug] = row.CanEdit
 		}
 		return out
 	}
@@ -322,10 +315,10 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	rig := newRepoScopeRig(t)
 
 	branches := func(callerID, owner, repo string) *httptest.ResponseRecorder {
+		id := rig.repoID(t, owner, repo)
 		rec := httptest.NewRecorder()
-		req := rig.req(http.MethodGet, "/api/repos/"+owner+"/"+repo+"/branches", callerID, nil)
-		req.SetPathValue("owner", owner)
-		req.SetPathValue("repo", repo)
+		req := rig.req(http.MethodPost, "/api/repos/"+id+"/branches/list", callerID, map[string]any{})
+		req.SetPathValue("id", id)
 		rig.s.handleRepoBranches(rec, req)
 		return rec
 	}
@@ -333,14 +326,14 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	// memberB's team doesn't track acme/api — blocked at the gate, 404,
 	// before any GitHub credential resolution is attempted.
 	if rec := branches(rig.memberB, "acme", "api"); rec.Code != http.StatusNotFound {
-		t.Fatalf("memberB GET acme/api/branches: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("memberB branches list for acme/api: status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// memberB's team does track acme/web — passes the gate and reaches the
-	// (unconfigured, in this test) GitHub resolver, which 400s distinctly
-	// from the gate's 404.
-	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("memberB GET acme/web/branches: status = %d, want 400 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
+	// (unconfigured, in this test) GitHub resolver, which answers 409
+	// NOT_CONFIGURED, distinctly from the gate's 404.
+	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusConflict {
+		t.Fatalf("memberB branches list for acme/web: status = %d, want 409 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
 	}
 }
 

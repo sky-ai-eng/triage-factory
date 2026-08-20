@@ -16,7 +16,7 @@ func TestUpstreamForMethod(t *testing.T) {
 		methodGithubSubmitReview:      upstreamGitHub,
 		methodGithubDownloadArtifact:  upstreamGitHub,
 		methodGithubAPIGet:            upstreamGitHub,
-		methodLookupRun:               upstreamNone,
+		methodLookupConversation:      upstreamNone,
 		methodGetTask:                 upstreamNone,
 		methodCreateWorkspaceCheckout: upstreamNone,
 		methodUpsertArtifact:          upstreamNone,

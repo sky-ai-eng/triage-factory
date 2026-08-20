@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -85,21 +86,36 @@ func (s *curatorStore) GetLiveConversation(ctx context.Context, orgID, projectID
 	return getLiveCuratorConversation(ctx, s.q, orgID, projectID, creatorUserID)
 }
 
+// curatorConversationColumns is CuratorStore's own projection of a
+// conversations row — not ConversationStore's fuller one (claim/ledger
+// laterals, memory-missing join): a curator conversation carries no
+// task/blueprint state to join in, so this stays the narrower shape the
+// curator surface has always read. GetLiveConversation SELECTs it,
+// SetSDKSession and ImportConversationStateSystem RETURN it, so a write's
+// shape can never drift from what the read already promised.
+const pgCuratorConversationColumns = `
+	id, type, visibility, COALESCE(project_id::text, ''), COALESCE(creator_user_id::text, ''),
+	COALESCE(team_id::text, ''), COALESCE(sdk_session_id, ''), started_at
+`
+
+func scanCuratorConversation(scan func(...any) error) (domain.Conversation, error) {
+	var c domain.Conversation
+	err := scan(&c.ID, &c.Type, &c.Visibility, &c.ProjectID, &c.CreatorUserID,
+		&c.TeamID, &c.SessionID, &c.StartedAt)
+	return c, err
+}
+
 // getLiveCuratorConversation picks the OLDEST live conversation
 // deterministically so two racing minters converge on the same row.
 func getLiveCuratorConversation(ctx context.Context, q queryer, orgID, projectID, creatorUserID string) (*domain.Conversation, error) {
-	row := q.QueryRowContext(ctx, `
-		SELECT id, type, visibility, COALESCE(project_id::text, ''), COALESCE(creator_user_id::text, ''),
-		       COALESCE(team_id::text, ''), COALESCE(sdk_session_id, ''), started_at
+	c, err := scanCuratorConversation(q.QueryRowContext(ctx, `
+		SELECT `+pgCuratorConversationColumns+`
 		FROM conversations
 		WHERE org_id = $1 AND project_id = $2 AND creator_user_id = $3
 		  AND type = 'curator' AND archived_at IS NULL
 		ORDER BY started_at ASC, id ASC
 		LIMIT 1
-	`, orgID, projectID, creatorUserID)
-	var c domain.Conversation
-	err := row.Scan(&c.ID, &c.Type, &c.Visibility, &c.ProjectID, &c.CreatorUserID,
-		&c.TeamID, &c.SessionID, &c.StartedAt)
+	`, orgID, projectID, creatorUserID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -121,22 +137,38 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 
 // --- History ---
 
-func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
+func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string, limit int) ([]domain.Message, error) {
 	// Withdrawn-pending rows (undelivered + inactive) never happened and are
 	// hidden; delivered + inactive stays visible — that is retired history
 	// (compaction, a dead-lettered turn's input) the transcript still shows.
+	//
+	// A bounded read selects DESC and reverses, so the bound keeps the NEWEST
+	// rows: an ASC read with a LIMIT would hand back the oldest N and call it
+	// the transcript.
+	order, reverse := "ASC", false
+	tail := ""
+	args := []any{orgID, conversationID}
+	if limit > 0 {
+		order, reverse = "DESC", true
+		tail = " LIMIT $3"
+		args = append(args, limit)
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+pgMessageColumns+`
 		FROM messages
 		WHERE org_id = $1 AND conversation_id = $2
 		  AND NOT (delivered = false AND window_state = 'inactive')
-		ORDER BY COALESCE(seq, id) ASC
-	`, orgID, conversationID)
+		ORDER BY COALESCE(seq, id) `+order+tail, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanMessageRows(rows)
+	out, err := scanMessageRows(rows)
+	if err != nil || !reverse {
+		return out, err
+	}
+	slices.Reverse(out)
+	return out, nil
 }
 
 func (s *curatorStore) ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error) {
@@ -296,7 +328,7 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		}
 
 		p, err := scanPgCuratorProject(q.QueryRowContext(ctx, `
-			SELECT id, name, description, pinned_repos::text,
+			SELECT id, name, description,
 			       jira_project_key, linear_project_key,
 			       COALESCE(spec_authorship_blueprint_id::text, ''),
 			       COALESCE(team_id::text, ''), created_at, updated_at
@@ -304,6 +336,11 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		`, orgID, projectID))
 		if err != nil {
 			return fmt.Errorf("read project: %w", err)
+		}
+		if p != nil {
+			if err := attachPinnedRepos(ctx, q, []*domain.Project{p}); err != nil {
+				return fmt.Errorf("read project pinned repos: %w", err)
+			}
 		}
 		start.Project = p
 		return nil
@@ -314,11 +351,19 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 	return start, nil
 }
 
-func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
-	`, sessionID, orgID, conversationID)
-	return err
+func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
+	c, err := scanCuratorConversation(s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET sdk_session_id = $1
+		WHERE org_id = $2 AND id = $3
+		RETURNING `+pgCuratorConversationColumns,
+		sessionID, orgID, conversationID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrNoSuchCuratorConversation
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (int, string, error) {
@@ -327,8 +372,8 @@ func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conv
 	// failures, and a withdrawn turn (message deleted → message_id NULLed)
 	// matches nothing. The zero-message NOT EXISTS stays load-bearing: a
 	// claim that delivered the turn also carries its message_id, and
-	// counting a post-delivery run crash would cap the turn for a failure
-	// that is not the input's fault.
+	// counting a post-delivery engagement crash would cap the turn for a
+	// failure that is not the input's fault.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT COALESCE(cl.error, '')
 		FROM claims cl
@@ -630,7 +675,7 @@ func (s *curatorStore) PublishTurnCredPubKeySystem(ctx context.Context, orgID, c
 		// Best-effort doorbell so the brain provisions this turn without
 		// waiting for the backstop sweep; the payload carries the
 		// conversation id — the claim-credentials channel's key.
-		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, RunID: conversationID})
+		_ = ctlbus.Publish(ctx, s.admin, ctlbus.Message{Kind: "curator_cred_request", OrgID: orgID, ConversationID: conversationID})
 	}
 	return n > 0, nil
 }
@@ -656,24 +701,30 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 
 // --- Project bundle import ---
 
-func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error {
-	return inTx(ctx, s.admin, func(q queryer) error {
+func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) (*domain.Conversation, error) {
+	var imported domain.Conversation
+	err := inTx(ctx, s.admin, func(q queryer) error {
 		startedAt := conv.StartedAt
 		if startedAt.IsZero() {
 			startedAt = time.Now().UTC()
 		}
 		// team_id snapshots from the destination project row — the source
-		// install's snapshot is meaningless here.
-		if _, err := q.ExecContext(ctx, `
+		// install's snapshot is meaningless here. RETURNING projects the row
+		// through the same shape GetLiveConversation reads, so the caller
+		// learns exactly what landed rather than echoing conv back.
+		c, err := scanCuratorConversation(q.QueryRowContext(ctx, `
 			INSERT INTO conversations (
 				id, org_id, type, creator_user_id, team_id, visibility,
 				trigger_type, origin, runtime, status, project_id, sdk_session_id, started_at)
 			VALUES ($1, $2, 'curator', $3, (SELECT team_id FROM projects WHERE id = $4::uuid),
 			        'private', 'manual', 'curator', 'sdk', NULL, $4, $5, $6)
-		`, conv.ID, orgID, conv.CreatorUserID, conv.ProjectID,
-			nullIfEmpty(conv.SessionID), startedAt); err != nil {
+			RETURNING `+pgCuratorConversationColumns,
+			conv.ID, orgID, conv.CreatorUserID, conv.ProjectID,
+			nullIfEmpty(conv.SessionID), startedAt).Scan)
+		if err != nil {
 			return fmt.Errorf("import curator conversation %s: %w", conv.ID, err)
 		}
+		imported = c
 		for _, cl := range claims {
 			var released any
 			if cl.ReleasedAt != nil {
@@ -691,12 +742,16 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 			}
 		}
 		for i := range msgs {
-			if _, err := insertRunMessage(ctx, q, orgID, &msgs[i]); err != nil {
+			if _, err := insertConversationMessage(ctx, q, orgID, &msgs[i]); err != nil {
 				return fmt.Errorf("import curator message: %w", err)
 			}
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &imported, nil
 }
 
 // --- Shared scan helpers ---
@@ -784,10 +839,9 @@ func scanPgCuratorProject(row interface {
 		linearKey       sql.NullString
 		specBlueprintID string
 		teamID          string
-		pinnedJSON      sql.NullString
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description,
 		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -801,13 +855,6 @@ func scanPgCuratorProject(row interface {
 	p.JiraProjectKey = jiraKey.String
 	p.LinearProjectKey = linearKey.String
 	p.SpecAuthorshipBlueprintID = specBlueprintID
-	if pinnedJSON.Valid && pinnedJSON.String != "" {
-		if err := json.Unmarshal([]byte(pinnedJSON.String), &p.PinnedRepos); err != nil {
-			return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-		}
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
+	p.PinnedRepos = []string{}
 	return &p, nil
 }

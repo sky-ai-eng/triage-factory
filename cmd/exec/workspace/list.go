@@ -12,13 +12,13 @@ import (
 // listOutput is the JSON shape printed by `workspace list`. Two sections:
 //
 //   - available: every repo configured in Triage Factory the agent COULD
-//     `workspace add`. Sourced from the repo_profiles table. Empty list
+//     `workspace add`. Sourced from the repositories table. Empty list
 //     means no repos are configured (delegated agents shouldn't ever see
 //     this since the spawner gates on profile readiness, but the shape
 //     stays consistent).
 //   - materialized: repos the agent has already `workspace add`'d for
 //     this run, with the absolute worktree path and the ref the worktree
-//     was materialized for ("@default", "pr-<N>", or a slugified branch).
+//     was materialized for ("default", "pr-<N>", or "ref-<branch>").
 //
 // Two-section structure (rather than a flat list with a `materialized`
 // boolean) keeps the field shape per entry uniform — available entries
@@ -36,7 +36,7 @@ type listAvailable struct {
 	// profile (GitHub repo metadata, captured during profiling). Helps
 	// the agent disambiguate between configured repos when the ticket
 	// text doesn't make the target obvious. Empty for repos whose
-	// profiling hasn't run yet (skeleton rows in repo_profiles).
+	// profiling hasn't run yet (skeleton rows in repositories).
 	//
 	// We deliberately omit profile_text — it's multi-KB of LLM-
 	// generated prose, would burn meaningful context on every list
@@ -49,7 +49,7 @@ type listMaterialized struct {
 	Repo string `json:"repo"`
 	Path string `json:"path"`
 	// Ref is the materialization selector the worktree was created for:
-	// "@default", "pr-<N>", or a slugified branch name. It is the checkout
+	// "default", "pr-<N>", or "ref-<branch>". It is the checkout
 	// intent, not the agent's live working branch (the agent creates its own
 	// branch off the checkout; the push gate authorizes that live branch).
 	Ref string `json:"ref"`
@@ -59,35 +59,35 @@ type listMaterialized struct {
 // extracted from runList so it returns errors instead of os.Exit-ing.
 // Mirrors the runAdd / materializeWorkspace split for testability.
 //
-// Run-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any run
-// — Jira, GitHub, or taskless — since `workspace add` now does too. It only
-// needs the run identity (for scoping the materialized list) plus the
+// Conversation-agnostic (TFAC-498), mirroring materializeWorkspace: it serves any
+// conversation — Jira, GitHub, or taskless — since `workspace add` does too. It only
+// needs the conversation identity (for scoping the materialized list) plus the
 // org-configured repos, not the task.
 //
 // All reads route through the agenthost client — in local mode the
 // LocalClient hits the SQLite store directly, in sandbox mode the
 // IPCClient round-trips to the host daemon. The TRIAGE_FACTORY_CONVERSATION_ID
-// validation happens inside host.LookupRun.
+// validation happens inside host.LookupConversation.
 func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	ctx := context.Background()
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
 		return listOutput{}, translateLookupErr("workspace list", "", err)
 	}
 
-	run, err := host.GetConversation(ctx)
+	conv, err := host.GetConversation(ctx)
 	if err != nil {
-		return listOutput{}, fmt.Errorf("workspace list: load run: %w", err)
+		return listOutput{}, fmt.Errorf("workspace list: load conversation: %w", err)
 	}
-	if run == nil {
-		return listOutput{}, fmt.Errorf("%w: %s", errRunNotFound, info.RunID)
+	if conv == nil {
+		return listOutput{}, fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
 	configured, err := host.ListRepos(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load configured repos: %w", err)
 	}
-	rows, err := host.ListRunWorktrees(ctx)
+	rows, err := host.ListConversationWorktrees(ctx)
 	if err != nil {
 		return listOutput{}, fmt.Errorf("workspace list: load materialized worktrees: %w", err)
 	}
@@ -113,7 +113,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 	}
 
 	// Available = configured-and-profilable minus already-materialized.
-	// Skeleton rows in repo_profiles (added to the configured list
+	// Skeleton rows in repositories (added to the configured list
 	// but not yet profiled — clone_url is empty) are filtered out:
 	// `workspace add` would reject them later with "no clone URL on
 	// its profile" anyway, so surfacing them here as discoverable
@@ -125,11 +125,11 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		if p.CloneURL == "" {
 			continue
 		}
-		if _, alreadyAdded := materializedSet[p.ID]; alreadyAdded {
+		if _, alreadyAdded := materializedSet[p.Slug()]; alreadyAdded {
 			continue
 		}
 		available = append(available, listAvailable{
-			Repo:        p.ID,
+			Repo:        p.Slug(),
 			Description: p.Description,
 		})
 	}

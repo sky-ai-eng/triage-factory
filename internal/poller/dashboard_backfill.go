@@ -60,7 +60,7 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 		return nil
 	}
 
-	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		return err
 	}
@@ -101,7 +101,10 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 
 	// PAT path (org PAT in multi mode, or any non-App org): one client over the
 	// full configured set. orgHasRegisteredApp mirrors runGitHubCycleForOrg's
-	// either/or gate — a staged (inactive) App keeps the PAT live.
+	// either/or gate — a staged (inactive) App keeps the PAT live. The target is
+	// empty because this credential has no account: the PAT searches across
+	// every configured owner at once, unlike the per-installation loop below,
+	// where each account names itself.
 	if !m.orgHasRegisteredApp(ctx, orgID) {
 		client, err := m.resolver.ClientFor(ctx, orgID, "")
 		if err != nil {

@@ -56,7 +56,10 @@ func recordEvent(ctx context.Context, q queryer, evt domain.Event) (string, erro
 	// chronological queries COALESCE(occurred_at, created_at).
 	var occurredAt any
 	if !evt.OccurredAt.IsZero() {
-		occurredAt = evt.OccurredAt
+		// UTC at the bind, not just at the callers: occurred_at unions with
+		// created_at in the ORDER BY of the events feed and the factory belt,
+		// so one local-zone instant misplaces a row against every other.
+		occurredAt = evt.OccurredAt.UTC()
 	}
 	var entityID any
 	if evt.EntityID != nil && *evt.EntityID != "" {
@@ -69,7 +72,7 @@ func recordEvent(ctx context.Context, q queryer, evt domain.Event) (string, erro
 	// for any burst-rate inserts (poller diff fanout, carry-over
 	// loops), falling through to a rowid-DESC tiebreak that doesn't
 	// always agree with insertion order under WAL.
-	createdAt := time.Now()
+	createdAt := time.Now().UTC()
 	if _, err := q.ExecContext(ctx, `
 		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, occurred_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)

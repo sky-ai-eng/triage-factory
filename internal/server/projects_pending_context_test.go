@@ -21,10 +21,11 @@ import (
 func seedProjectWithConversation(t *testing.T, s *Server) (projectID, convID string) {
 	t.Helper()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	projectID, err := s.projects.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	created, err := s.projects.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID = created.ID
 	if err := s.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
 		conv, err := ts.Curator.GetOrCreateConversation(t.Context(), org, projectID, user)
 		if err != nil {
@@ -78,11 +79,11 @@ func listPendingInjections(t *testing.T, s *Server, projectID string) []domain.C
 
 func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	repoID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	id, _ := seedProjectWithConversation(t, s)
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+		"pinned_repository_ids": []string{repoID},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -106,14 +107,15 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 // fresh values directly.
 func TestProjectPatch_NoQueueWithoutConversation(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	repoID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	id := created.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+		"pinned_repository_ids": []string{repoID},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -130,12 +132,12 @@ func TestProjectPatch_NoQueueWithoutConversation(t *testing.T) {
 // invisible.
 func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	repoID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	id, _ := seedProjectWithConversation(t, s)
 
 	// Seed an initial pinned repo via direct DB write, then PATCH the
 	// same value back. The diff should fold to "no change."
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
+	if _, err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:          id,
 		Name:        "P",
 		PinnedRepos: []string{"sky-ai-eng/triage-factory"},
@@ -144,7 +146,7 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+		"pinned_repository_ids": []string{repoID},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -160,13 +162,13 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 // second PATCH's pre-state.
 func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	seedConfiguredRepo(t, s, "sky-ai-eng", "another")
+	tfID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	anotherID := seedConfiguredRepo(t, s, "sky-ai-eng", "another")
 	id, _ := seedProjectWithConversation(t, s)
 
 	// First PATCH: [] → [triage-factory]. Baseline [].
 	if rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+		"pinned_repository_ids": []string{tfID},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("first patch: %d %s", rec.Code, rec.Body.String())
 	}
@@ -174,7 +176,7 @@ func TestProjectPatch_CoalescesRepeatedPATCHes(t *testing.T) {
 	// Second PATCH: [triage-factory] → [triage-factory, another]. The
 	// replacement's baseline is the second PATCH's pre-state.
 	if rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
+		"pinned_repository_ids": []string{tfID, anotherID},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("second patch: %d %s", rec.Code, rec.Body.String())
 	}
@@ -219,20 +221,20 @@ func TestPinnedReposSetEqual_DedupesBothSides(t *testing.T) {
 	}
 }
 
-// TestProjectPatch_NoQueueOnPureReorder verifies that pinned_repos is
+// TestProjectPatch_NoQueueOnPureReorder verifies that the pinned set is
 // treated as a set on both sides of the diff: a PATCH that only
 // reorders the existing list should not queue a row, since the
 // curator-side renderer would compute an empty add/remove diff and the
 // row would round-trip through consume/render having produced nothing.
 func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	seedConfiguredRepo(t, s, "sky-ai-eng", "another")
+	tfID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	anotherID := seedConfiguredRepo(t, s, "sky-ai-eng", "another")
 	id, _ := seedProjectWithConversation(t, s)
 
 	// Seed a known order via direct DB write so the comparison below
 	// is unambiguously a reorder.
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
+	if _, err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:          id,
 		Name:        "P",
 		PinnedRepos: []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},
@@ -242,7 +244,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 
 	// PATCH with the same set in reverse order.
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{"sky-ai-eng/another", "sky-ai-eng/triage-factory"},
+		"pinned_repository_ids": []string{anotherID, tfID},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())

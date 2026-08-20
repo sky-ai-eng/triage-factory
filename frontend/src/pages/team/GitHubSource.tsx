@@ -6,7 +6,9 @@ import SourceChart from '../../ui/sourcechart/SourceChart'
 import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
 import { figureAt, labelAt } from './schedule'
 import type { SourceBodyProps } from './SourceFrame'
-import { apiFetch, apiJSON } from '../../lib/apiClient'
+import { apiListAll } from '../../lib/apiClient'
+import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
+import type { GitHubRepo } from '../../lib/githubRepos'
 
 // GitHub, as this team's event source.
 //
@@ -19,10 +21,6 @@ import { apiFetch, apiJSON } from '../../lib/apiClient'
 // all need aggregations that do not exist yet (backend-needs 17, 18). A zero
 // would be a claim about a team's week. The tracked count and the visible
 // count are real, and so is watching and unwatching.
-
-type GitHubRepoRow = {
-  full_name: string
-}
 
 const PROSE =
   'Tracked repositories spawn events this team can automate, like PRs in need of review or CI failing. ' +
@@ -70,24 +68,26 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   useEffect(() => {
     if (!teamId) return
     let live = true
-    void apiJSON<{ repos: string[] }>(`/api/settings/team/${encodeURIComponent(teamId)}/repos`)
-      .then((d) => {
-        if (!live) return
-        const repos = d.repos ?? []
-        trackedRef.current = repos
-        setTracked(repos)
-      })
-      .catch(() => {
-        // A failed read must never read as "tracks nothing" — writing an empty
-        // set back over that would wipe the team's repositories.
-        if (live) setError('Could not read this team’s tracked repositories.')
-      })
+    void fetchTeamRepos(teamId).then((repos) => {
+      if (!live) return
+      // A failed read must never read as "tracks nothing" — writing an empty
+      // set back over that would wipe the team's repositories. The helper
+      // answers null for exactly that case, distinct from a real empty set.
+      if (repos === null) {
+        setError('Could not read this team’s tracked repositories.')
+        return
+      }
+      trackedRef.current = repos
+      setTracked(repos)
+    })
     // The org's whole visible estate, so an untracked repository is offerable
-    // rather than invisible. Best-effort: without it the page still shows and
-    // can still unwatch what is tracked.
-    void apiJSON<GitHubRepoRow[]>('/api/github/repos')
-      .then((d) => {
-        if (live) setVisible(d.map((r) => r.full_name))
+    // rather than invisible. Walked to completion because the table filters
+    // client-side, so a partial set would be a filter that silently misses.
+    // Best-effort: without it the page still shows and can still unwatch what
+    // is tracked.
+    void apiListAll<GitHubRepo>('/api/github/repos/list')
+      .then((repos) => {
+        if (live) setVisible(repos.map((r) => r.full_name))
       })
       .catch(() => {
         if (live) setVisible(null)
@@ -174,11 +174,9 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
           : trackedRef.current.filter((n) => !picked.has(n))
       trackedRef.current = next
       setTracked(next)
-      void apiFetch(`/api/settings/team/${encodeURIComponent(teamId)}/repos`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repos: next }),
-      }).catch(() => setError('Could not save the tracked repositories.'))
+      void saveTeamRepos(teamId, next).then((res) => {
+        if (!res.ok) setError(res.error)
+      })
     },
     [teamId],
   )

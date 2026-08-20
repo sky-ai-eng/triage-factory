@@ -11,7 +11,8 @@
 // JiraProjectRulesGroup, ModelTierSelector) — no carded field groups.
 //
 // Two couplings to honour:
-//   • Jira-projects + Team-defaults both ride POST /api/settings/team/{id}, so
+//   • Team-defaults ride PATCH /api/teams/{id}/settings and Jira-projects their
+//     own PUT /api/teams/{id}/jira-projects, so
 //     each saves {...baseline, ...ownSlice} (the org-group pattern).
 //   • The GitHub-teams candidate list is built live from the team's tracked
 //     repo owners with no server cache, so saving the Repos section bumps a
@@ -38,6 +39,7 @@ import {
   fetchTeamSettings,
   saveTeamGitHubGroups,
   saveTeamRepos,
+  saveTeamJiraProjects,
   saveTeamSettings,
   teamConfigFromSettings,
   teamProjectsBlocked,
@@ -45,6 +47,7 @@ import {
   type JiraProjectConfig,
   type TeamConfigForm,
 } from '../teamConfig'
+import { apiJSON } from '../../../lib/apiClient'
 import SettingsSection from './SettingsSection'
 
 const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
@@ -180,6 +183,7 @@ export default function TeamSettings({
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
   const [defaultModel, setDefaultModel] = useState('sonnet')
   const [autoDelegate, setAutoDelegate] = useState(true)
+  const [autoMode, setAutoMode] = useState(true)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
   const [branchTemplate, setBranchTemplate] = useState('tfac/<ticket-id>')
   // How finished agent reviews reach GitHub.
@@ -212,9 +216,7 @@ export default function TeamSettings({
       fetchTeamSettings(endpointTeamId),
       fetchTeamRepos(endpointTeamId),
       fetchTeamGitHubGroups(endpointTeamId),
-      fetch('/api/integrations/status')
-        .then((r) => (r.ok ? r.json() : null))
-        .catch(() => null),
+      apiJSON<{ jira?: boolean; jira_url?: string }>('/api/integrations/status').catch(() => null),
     ])
       .then(([settings, teamRepos, teamGroups, integ]) => {
         if (cancelled) return
@@ -245,6 +247,7 @@ export default function TeamSettings({
         setProjects(form.jira_projects)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
+        setAutoMode(form.auto_mode_enabled)
         setBranchTemplate(form.branch_template)
         setReviewPosture(form.review_posture)
         setBasePushPolicy(form.base_branch_push_policy)
@@ -313,14 +316,14 @@ export default function TeamSettings({
     }
   }
 
-  // ── Jira projects (rides team-settings POST) ──
+  // ── Jira projects (their own replace-set PUT) ──
   const projectsDirty =
     JSON.stringify(normProjects(projects)) !== JSON.stringify(baseline.jira_projects ?? [])
   const projectsBlocked = teamProjectsBlocked(projects, jiraConnected)
   const saveProjects = async (): Promise<boolean> => {
     setSavingProjects(true)
     try {
-      const res = await saveTeamSettings(endpointTeamId, { ...baseline, jira_projects: projects })
+      const res = await saveTeamJiraProjects(endpointTeamId, projects)
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -328,7 +331,6 @@ export default function TeamSettings({
       const normalized = normProjects(projects)
       setBaseline((b) => ({ ...b, jira_projects: normalized }))
       setProjects(normalized)
-      if (res.warning) toast.info(res.warning)
       toast.success('Jira projects saved')
       return true
     } finally {
@@ -336,24 +338,30 @@ export default function TeamSettings({
     }
   }
 
-  // ── Team defaults (rides team-settings POST) ──
+  // ── Team defaults (ride the team-settings PATCH) ──
   const defaultsDirty =
     defaultModel !== baseline.default_model ||
     autoDelegate !== baseline.auto_delegate_enabled ||
+    (isLocal && autoMode !== baseline.auto_mode_enabled) ||
     branchTemplate !== baseline.branch_template ||
     reviewPosture !== baseline.review_posture ||
     basePushPolicy !== baseline.base_branch_push_policy
   const saveDefaults = async (): Promise<boolean> => {
     setSavingDefaults(true)
     try {
-      const res = await saveTeamSettings(endpointTeamId, {
-        ...baseline,
-        default_model: defaultModel,
-        auto_delegate_enabled: autoDelegate,
-        branch_template: branchTemplate,
-        review_posture: reviewPosture,
-        base_branch_push_policy: basePushPolicy,
-      })
+      const res = await saveTeamSettings(
+        endpointTeamId,
+        {
+          ...baseline,
+          default_model: defaultModel,
+          auto_delegate_enabled: autoDelegate,
+          auto_mode_enabled: autoMode,
+          branch_template: branchTemplate,
+          review_posture: reviewPosture,
+          base_branch_push_policy: basePushPolicy,
+        },
+        isLocal,
+      )
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -362,6 +370,7 @@ export default function TeamSettings({
         ...b,
         default_model: defaultModel,
         auto_delegate_enabled: autoDelegate,
+        auto_mode_enabled: autoMode,
         branch_template: branchTemplate,
         review_posture: reviewPosture,
         base_branch_push_policy: basePushPolicy,
@@ -374,7 +383,7 @@ export default function TeamSettings({
     }
   }
 
-  // ── Unattended prompts: absent auto-deny (rides team-settings POST) ──
+  // ── Unattended prompts: absent auto-deny (rides the team-settings PATCH) ──
   const promptsDirty =
     absentAutodeny !== baseline.permission_absent_autodeny_enabled ||
     absentGraceSeconds !== baseline.permission_absent_grace_seconds
@@ -396,11 +405,15 @@ export default function TeamSettings({
       const grace = Number.isFinite(absentGraceSeconds)
         ? clampToRange(absentGraceSeconds, graceMin, graceMax)
         : baseline.permission_absent_grace_seconds
-      const res = await saveTeamSettings(endpointTeamId, {
-        ...baseline,
-        permission_absent_autodeny_enabled: absentAutodeny,
-        permission_absent_grace_seconds: grace,
-      })
+      const res = await saveTeamSettings(
+        endpointTeamId,
+        {
+          ...baseline,
+          permission_absent_autodeny_enabled: absentAutodeny,
+          permission_absent_grace_seconds: grace,
+        },
+        isLocal,
+      )
       if (!res.ok) {
         toast.error(res.error)
         return false
@@ -524,7 +537,7 @@ export default function TeamSettings({
         title="Team defaults"
         summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
           baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
-        } · Reviews: ${
+        }${isLocal ? ` · auto mode ${baseline.auto_mode_enabled ? 'on' : 'off'}` : ''} · Reviews: ${
           REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture
         } · Base-branch pushes: ${
           BASE_BRANCH_PUSH_LABELS[baseline.base_branch_push_policy] ??
@@ -536,6 +549,7 @@ export default function TeamSettings({
         onCancel={() => {
           setDefaultModel(baseline.default_model)
           setAutoDelegate(baseline.auto_delegate_enabled)
+          setAutoMode(baseline.auto_mode_enabled)
           setBranchTemplate(baseline.branch_template)
           setReviewPosture(baseline.review_posture)
           setBasePushPolicy(baseline.base_branch_push_policy)
@@ -578,6 +592,32 @@ export default function TeamSettings({
             />
           </button>
         </div>
+        {isLocal && (
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[13px] text-text-primary">Auto mode</p>
+              <p className="mt-0.5 text-[11px] text-text-tertiary">
+                Let Claude automatically approve tool calls it determines are safe
+              </p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-label="Auto mode"
+              aria-checked={autoMode}
+              onClick={() => setAutoMode((v) => !v)}
+              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                autoMode ? 'bg-accent' : 'bg-black/[0.08]'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                  autoMode ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
+            </button>
+          </div>
+        )}
         <div>
           <p className="text-body text-ink-1">Branch name template</p>
           <p className="mt-0.5 text-reported text-ink-3">
@@ -617,7 +657,7 @@ export default function TeamSettings({
           <p className="text-body text-ink-1">Pushes to the base branch</p>
           <p className="mt-0.5 text-reported text-ink-3">
             Whether a delegated agent may push straight to a repo&rsquo;s base or default branch
-            (main, master, or whatever the repo profile records). A safety guard against an agent
+            (main, master, or whatever the repository records). A safety guard against an agent
             pushing there by mistake &mdash; not a substitute for branch protection on the host.
           </p>
           <select

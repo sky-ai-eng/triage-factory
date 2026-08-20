@@ -16,17 +16,17 @@ import (
 // TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip is the real-infra E2E for
 // the relocation: it stands up the exec-verb socket server EXACTLY the way the
 // capless credential sidecar does — NewServerWithRuntime over a relay runtime,
-// hosted via StartWithServer on the fixed /run/tf/<runID>.sock with the sandbox
+// hosted via StartWithServer on the fixed /run/tf/<conversationID>.sock with the sandbox
 // grant — backed by a RelayServer on the other end of a live supervision
 // channel. A real IPCClient (the same client the jailed agent's `exec` verbs
 // use) then dials that socket and drives:
 //
-//  1. LookupRun — proves the relocated Server reports the run identity the
+//  1. LookupConversation — proves the relocated Server reports the run identity the
 //     orchestrator handed it (AgentHostInfo), served entirely in the sidecar
 //     half with no db.Stores.
 //  2. TeamTracksRepo — proves a DB-backed verb RELAYS across the supervision
 //     channel to the orchestrator's RelayServer, which serves it against the
-//     real stores under its OWN RunInfo, and the answer round-trips back
+//     real stores under its OWN ConversationInfo, and the answer round-trips back
 //     through the socket.
 //
 // This exercises the full relocated data path — IPCClient → sidecar-hosted
@@ -78,7 +78,7 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 	// Host the exec-verb socket server the way the sidecar does: a relay-backed
 	// Server on the real /run/tf socket with the sandbox grant.
 	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, info, nil), nil)
-	hd, mount, err := StartWithServer(agentSrv, info.RunID)
+	hd, mount, err := StartWithServer(agentSrv, info.ConversationID)
 	if err != nil {
 		t.Fatalf("StartWithServer (relocated host): %v", err)
 	}
@@ -93,13 +93,13 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	// (1) LookupRun — the relocated Server reports the run's own identity.
-	got, err := client.LookupRun(ctx)
+	// (1) LookupConversation — the relocated Server reports the run's own identity.
+	got, err := client.LookupConversation(ctx)
 	if err != nil {
-		t.Fatalf("LookupRun over the relocated socket: %v", err)
+		t.Fatalf("LookupConversation over the relocated socket: %v", err)
 	}
-	if got.RunID != info.RunID || got.OrgID != info.OrgID {
-		t.Fatalf("LookupRun = %+v, want run %s / org %s", got, info.RunID, info.OrgID)
+	if got.ConversationID != info.ConversationID || got.OrgID != info.OrgID {
+		t.Fatalf("LookupConversation = %+v, want run %s / org %s", got, info.ConversationID, info.OrgID)
 	}
 
 	// (2) TeamTracksRepo — a DB verb relays to the orchestrator's RelayServer and

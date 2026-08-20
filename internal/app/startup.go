@@ -9,14 +9,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
-	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // runStartupTasks performs the one-time boot side effects, in order:
@@ -37,7 +38,7 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		// Headless env-driven provisioning (TFAC-411): when TF_HEADLESS is set,
 		// provision the local tenant and seed repos / Jira / identity from env so
 		// a keychain-less, browser-less install reaches setup_complete. Runs
-		// before startPolling → bootstrapBareClones so the seeded repos clone on
+		// before startBrain → bootstrapBareClones so the seeded repos clone on
 		// the first cycle. Local-mode only; if the seed vars are set without the
 		// trigger, warn rather than silently ignore them.
 		if server.HeadlessEnabled() {
@@ -83,27 +84,35 @@ func (a *App) startWorkers(ctx context.Context) {
 		a.startKnowledgeWatcher()
 	}
 
-	// Dispatcher workers (executor/all): the run-queue dispatcher (claims +
-	// executes queued runs, reconciling crash-stranded runs on boot) and the
-	// workspace-snapshot retention reaper (bounds durable parked/aborted-run
-	// snapshot blobs by TTL; a no-op when no blob store is wired). A control
-	// pod builds the spawner but never claims delegated runs, so neither
-	// runs there.
+	// Dispatcher workers (executor/all): the conversation-queue dispatcher
+	// (claims + executes queued conversations, reconciling crash-stranded
+	// conversations on boot), the workspace-snapshot retention reaper (bounds
+	// durable parked/aborted-conversation snapshot blobs by TTL; a no-op when
+	// no blob store is wired), and the workspace evictor (bounds the WARM
+	// copy — the parked trees on this pod's own disk — which otherwise
+	// accumulates until the process restarts). A control pod builds the
+	// spawner but never claims delegated conversations, so none of them run
+	// there.
 	if a.plan.dispatcher {
-		go a.spawner.RunDispatcher(ctx, delegate.DefaultRunScanInterval)
+		go a.spawner.RunDispatcher(ctx, delegate.DefaultDispatchScanInterval)
 		go a.spawner.RunSnapshotReaper(ctx, delegate.DefaultSnapshotReapInterval)
+		evictAfter, eerr := delegate.ParseWorkspaceEvictAfter(os.Getenv("TF_WORKSPACE_EVICT_AFTER_SEC"), a.local())
+		if eerr != nil {
+			appLog.Warn("workspace eviction window", "error", eerr)
+		}
+		go a.spawner.RunWorkspaceEvictor(ctx, delegate.DefaultWorkspaceEvictInterval, evictAfter)
 	}
 
 	// The shared tf_ctl control-plane listener + the cross-pod run-control
 	// workers (TFAC-585). Multi mode only: local mode never wires
-	// SetRunSignals (so the apply loop / purge reaper below are no-ops
+	// SetConversationSignals (so the apply loop / purge reaper below are no-ops
 	// there anyway), never builds a backplane, and role=all always
 	// self-holds the brain — nothing ever relays into a local process, so
 	// there is no reason to open a Postgres LISTEN connection at all.
 	// startCtlListener (ctl.go) is the ONE tf_ctl LISTEN per pod, every
-	// role: it routes run-signal doorbells to the spawner, session kicks to
-	// the WS backplane, and trigger/PollSoon relays to handleCtlMessage
-	// (which holder-gates them).
+	// role: it routes conversation-signal doorbells to the spawner, session
+	// kicks to the WS backplane, and trigger/PollSoon relays to
+	// handleCtlMessage (which holder-gates them).
 	if runmode.Current() == runmode.ModeMulti {
 		a.startCtlListener(ctx)
 		// The signal apply loop only makes sense on dispatcher-capable
@@ -111,18 +120,18 @@ func (a *App) startWorkers(ctx context.Context) {
 		// LISTEN (TFAC-586) is the same gate: only a dispatcher-capable
 		// role has a claim loop worth nudging.
 		if a.plan.dispatcher {
-			go a.spawner.RunSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
+			go a.spawner.ConversationSignalApplyLoop(ctx, delegate.DefaultSignalApplyScanInterval)
 			go a.startWakeListener(ctx)
 		}
 		// The purge reaper is system housekeeping, not tied to executor
 		// identity — runs on brain roles like the other reapers/sweepers
 		// (never on a plain executor, avoiding N-executor duplicate sweeps).
 		if a.plan.brain {
-			purgeAge, perr := delegate.ParseRunSignalPurgeAge(os.Getenv("TF_RUN_SIGNAL_PURGE_AFTER"))
+			purgeAge, perr := delegate.ParseConversationSignalPurgeAge(os.Getenv("TF_CONVERSATION_SIGNAL_PURGE_AFTER"))
 			if perr != nil {
-				appLog.Warn("run signal purge age", "error", perr)
+				appLog.Warn("conversation signal purge age", "error", perr)
 			}
-			go a.spawner.RunSignalPurgeReaper(ctx, delegate.DefaultRunSignalPurgeInterval, purgeAge)
+			go a.spawner.ConversationSignalPurgeReaper(ctx, delegate.DefaultConversationSignalPurgeInterval, purgeAge)
 		}
 	}
 
@@ -132,8 +141,9 @@ func (a *App) startWorkers(ctx context.Context) {
 	go a.spawner.RunInstanceHeartbeat(ctx, delegate.DefaultInstanceHeartbeatInterval)
 
 	// Fleet telemetry sampler (TFAC-589): every role writes one instance_stats
-	// row a minute (cpu/load/mem/oom deployment-wide; run-scoped fields only on
-	// executor-capable roles) and reaps the ~30d tail. The dashboard reads it.
+	// row a minute (cpu/load/mem/oom deployment-wide; claim-scoped fields only
+	// on executor-capable roles) and reaps the ~30d tail. The dashboard reads
+	// it.
 	go a.spawner.RunInstanceStatSampler(ctx, delegate.DefaultInstanceStatSampleInterval, delegate.DefaultInstanceStatRetention)
 
 	// WS backplane workers (TFAC-584) — nil in local mode / before
@@ -183,11 +193,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
 }
 
-// cleanupWorktrees removes orphaned worktrees from crashed runs. Parked
-// `open` runs are preserved whole — their worktree dir
+// cleanupWorktrees removes orphaned worktrees from crashed conversations.
+// Parked `open` conversations are preserved whole — their worktree dir
 // and ~/.claude/projects session JSONL are the warm resume cache. A load
-// failure just forgoes that optimization; those runs still resume by
-// rehydrating from snapshot.
+// failure just forgoes that optimization; those conversations still resume
+// by rehydrating from snapshot.
 //
 // Non-local modes get the worktree-dir + bare-repo sweep but skip
 // ~/.claude/projects entirely: the preserve set is keyed by the synthetic
@@ -232,25 +242,47 @@ func (a *App) importLocalSkills(ctx context.Context) {
 }
 
 // wireCloneStatusCallback registers the worktree clone-result callback,
-// which stamps repo_profiles with the clone outcome and broadcasts a
+// which stamps repositories with the clone outcome and broadcasts a
 // websocket event so the Repos page updates live. A clone failure gets an
 // SSH preflight to classify whether SSH is the cause (driving the per-row
 // CTA). Local-only: the body hardcodes the sentinel org for the row-stamp +
 // broadcast.
 func (a *App) wireCloneStatusCallback() {
+	// Org-scoped notifier (no RecipientsFunc): this hook is local-only,
+	// and at N=1 the org-wide broadcast IS the REST-parity scope.
+	notify := repoevent.NewNotifier(a.wsHub, nil)
+	// The event is keyed on the registry row id, and the clone hook is handed
+	// a name — but the stamp itself resolves the row, so this publishes the row
+	// that write returned rather than looking the same repository up a second
+	// time. A nil row is the write's documented no-op: nothing answers to the
+	// name, so there is nothing to update and nothing for a client to merge
+	// into.
+	//
+	// All three clone columns go on the wire because the write sets all three,
+	// and off the row rather than restated from the arguments — so a success
+	// after a failure clears the stored error instead of leaving a client
+	// rendering it under a green status.
+	publish := func(row *domain.Repository) {
+		if row == nil {
+			return
+		}
+		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
+			ID:             row.ID,
+			Slug:           row.Slug(),
+			CloneStatus:    repoevent.Ptr(row.CloneStatus),
+			CloneError:     repoevent.Ptr(row.CloneError),
+			CloneErrorKind: repoevent.Ptr(row.CloneErrorKind),
+		})
+	}
 	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
+		ref := domain.RepoRef{Owner: owner, Repo: repo}
 		if cloneErr == nil {
-			if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "ok", "", ""); err != nil {
+			row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "ok", "", "")
+			if err != nil {
 				cloneStatusLog.Error("update ok status failed", "owner", owner, "repo", repo, "error", err)
+				return
 			}
-			a.wsHub.Broadcast(websocket.Event{
-				Type:  "repo_profile_updated",
-				OrgID: runmode.LocalDefaultOrgID,
-				Data: map[string]any{
-					"id":           owner + "/" + repo,
-					"clone_status": "ok",
-				},
-			})
+			publish(row)
 			return
 		}
 
@@ -275,19 +307,12 @@ func (a *App) wireCloneStatusCallback() {
 			cancel()
 		}
 
-		if err := a.stores.Repos.UpdateCloneStatusSystem(context.Background(), runmode.LocalDefaultOrgID, owner, repo, "failed", cloneErr.Error(), kind); err != nil {
+		row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind)
+		if err != nil {
 			cloneStatusLog.Error("update failed status failed", "owner", owner, "repo", repo, "error", err)
+			return
 		}
-		a.wsHub.Broadcast(websocket.Event{
-			Type:  "repo_profile_updated",
-			OrgID: runmode.LocalDefaultOrgID,
-			Data: map[string]any{
-				"id":               owner + "/" + repo,
-				"clone_status":     "failed",
-				"clone_error":      cloneErr.Error(),
-				"clone_error_kind": kind,
-			},
-		})
+		publish(row)
 	})
 }
 
@@ -343,13 +368,13 @@ func (a *App) startKnowledgeWatcher() {
 // bootstrapBareClones reads the configured repos and asks the worktree
 // package to ensure each is materialized on disk as a bare clone with the
 // right origin URL. Called after profiling completes (profiling populates
-// repo_profiles.clone_url; targets without a CloneURL are skipped). DB read
+// repositories.clone_url; targets without a CloneURL are skipped). DB read
 // errors are logged and skipped — the lazy clone inside CreateForPR /
 // CreateForBranch recovers affected delegations on the next run.
-func bootstrapBareClones(repos db.RepoStore, secrets db.SecretStore) {
+func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
 	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
 	if err != nil {
-		worktreeLog.Warn("bootstrap: load profiles failed", "error", err)
+		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return
 	}
 	// Load the org bot PAT once so HTTPS clones of private repos authenticate.

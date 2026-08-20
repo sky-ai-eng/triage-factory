@@ -30,7 +30,7 @@ func TestEventHandlerStore_SQLite(t *testing.T) {
 				// exist; a plain user blueprint satisfies it (the seeded system-slug
 				// shape is exercised in the shipped-defaults sync suite).
 				id := uuid.New().String()
-				if err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
+				if _, err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
 					ID: id, Name: slug, Source: "user",
 				}); err != nil {
 					t.Fatalf("seed blueprint %s: %v", slug, err)

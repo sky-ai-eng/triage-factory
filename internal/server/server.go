@@ -20,11 +20,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -33,26 +35,28 @@ import (
 
 // Server is the main HTTP server for Triage Factory.
 type Server struct {
-	db           *sql.DB
-	prompts      db.PromptStore
-	swipes       db.SwipeStore
-	agents       db.AgentStore           // resolves the org's agent for claim stamps
-	teamAgents   db.TeamAgentStore       // re-checks team_agents.enabled on swipe-delegate / factory-delegate
-	users        db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
-	blueprints   db.BlueprintStore       // used by event-handler + project test fixtures
-	tasks        db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
-	agentRuns    db.ConversationStore    // agent run lifecycle + transcript
-	repos        db.RepoStore            // repo_profiles CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects     db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
-	events       db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory   db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
-	secrets      db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
-	teams        db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
-	orgs         db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
-	jiraRules    db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
-	githubApps   db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
-	authEvents   db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
+	db               *sql.DB
+	prompts          db.PromptStore
+	swipes           db.SwipeStore
+	agents           db.AgentStore           // resolves the org's agent for claim stamps
+	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on task-delegate / factory-delegate
+	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
+	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
+	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
+	conversations    db.ConversationStore    // conversation lifecycle + transcript
+	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers and curator pinned-repo materialization
+	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
+	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
+	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
+	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
+	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
+	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
+	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
+	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules (replaces the deleted config.Jira.Projects view)
+	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
+	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
+	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
+	authEvents       db.AuthEventStore       // TFAC-76: SOC2 authentication audit log of record — written best-effort via recordAuthEvent at the auth write-sites
 	// tx runs handler-cleanup write batches under the request user's
 	// claims even when the cleanup needs to outlive the request
 	// context. Each cleanup wraps in `s.tx.WithTx(cleanupCtx, orgID,
@@ -87,7 +91,7 @@ type Server struct {
 	// handlers gate on runmode.ModeMulti, so a nil here in local mode is never
 	// dereferenced.
 	kb *kbstore.Store
-	// reconciler backs the Tier-2 run-scoped artifact refresh endpoint
+	// reconciler backs the Tier-2 conversation-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
 	// endpoint 503s rather than panicking if a request races startup.
@@ -103,8 +107,8 @@ type Server struct {
 	// via SetPlacementResolver after construction; nil until then so the
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
-	// fleetQueue backs the GET /api/fleet/queue view: per-org run-queue shares
-	// (active/queued + cap). Satisfied by the RunQueue store; a narrow
+	// fleetQueue backs the GET /api/fleet/queue view: per-org conversation-queue shares
+	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
 	// interface so the handler test can inject canned shares.
 	fleetQueue fleetQueueReader
 	// ghResolver picks the right GitHub credential (org App installation
@@ -117,6 +121,12 @@ type Server struct {
 	// repo picker's PAT fallback and GitHub-teams discovery.) Built in New from
 	// the stores, so it's never nil — handlers don't need a guard.
 	ghResolver ghclient.Resolver
+	// ghTokenCache is the per-installation App-token cache backing ghResolver.
+	// Retained on the Server (not just handed to the resolver) so the paths
+	// that learn a token has died — installation.deleted, installation.suspend,
+	// an App cutover or teardown — can Invalidate it, the same reason
+	// jiraTokenCache is held here. Built in New, never nil.
+	ghTokenCache ghclient.TokenCache
 	// jiraResolver routes Jira writes by provenance: ForSystem for
 	// the org/bot service cred, ForUser for the acting user's own stored
 	// credential. User-initiated board claim / undo / requeue resolve via
@@ -144,7 +154,7 @@ type Server struct {
 	// jiraResolver's OAuth branch. Retained on the Server (not just handed to
 	// the resolver) so the connect callback + a paste-over-OAuth re-bind can
 	// Invalidate the stale cached token — mirrors how ghTokenCache is reachable
-	// via onInstallationRemoved. Built in New, never nil.
+	// via onInstallationTokensInvalid. Built in New, never nil.
 	jiraTokenCache *jiraoauth.TokenCache
 	// Change callbacks accept the orgID of the tenant whose integration
 	// creds just rotated, so the closure can re-resolve via SecretStore.
@@ -164,6 +174,10 @@ type Server struct {
 	// repo-set change both want an immediate re-profile rather than waiting
 	// out a poll interval. Nil until SetProfilerTrigger runs.
 	profilerTrigger func(orgID string, force bool)
+	// reachTrigger kicks the per-org reachable-repo refresh manager.
+	// force=true bypasses its TTL — the picker's refresh control and every
+	// credential change. Nil until SetReachTrigger runs.
+	reachTrigger func(orgID string, force bool)
 	// dashboardBackfill seeds a bound user's trailing-window PR history into the
 	// entity store so the personal dashboard isn't blank for history that
 	// predates tracking (TFAC-396). Multi-mode only — wired to the poller's
@@ -183,11 +197,15 @@ type Server struct {
 	// never through the raw bus, or events lose the durable outbox.
 	ingestor *ingest.Ingestor
 
-	// onInstallationRemoved, when set, fires on a verified
-	// installation.deleted webhook so the credential resolver's
-	// per-installation token cache can drop the now-dead entry. Nil
-	// until the resolver wires it; the receiver skips the call when nil.
-	onInstallationRemoved func(orgID, installationID string)
+	// onInstallationTokensInvalid fires when an installation's already-minted
+	// tokens stop being usable — a verified installation.deleted or
+	// installation.suspend webhook, and the App-credential change paths — so
+	// the credential resolver's per-installation token cache can drop the
+	// now-dead entry. New wires it to ghTokenCache.Invalidate, so it is set on
+	// every Server; SetInstallationTokensInvalidHook replaces it (tests observe
+	// the firings that way), and callers still nil-guard because that setter
+	// accepts a nil.
+	onInstallationTokensInvalid func(orgID, installationID string)
 
 	// deployCfg holds deployment-identity config (publicURL, HMAC key,
 	// secureCookies) populated in both local and multi mode.
@@ -249,16 +267,36 @@ type Server struct {
 	// with a real cross-pod advisory lock instead.
 	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
 
-	// reachableRepoMu guards reachableRepoCache — the in-process
-	// enumeration cache the team-repos write gate consults before
-	// re-enumerating the org. The picker
-	// (handleGitHubRepos) warms it on the way out; the immediate-next
-	// PUT /api/settings/team/{id}/repos validates against this set in
-	// ~µs instead of paying the full ListUserRepos cost a second time.
-	// Entries are TTL-bounded (reachableCacheTTL) and evicted per-org
-	// when GitHub creds/installations rotate (SetOnGitHubChanged).
-	reachableRepoMu    sync.RWMutex
-	reachableRepoCache map[string]reachableRepoEntry // key: orgID\x00userID
+	// webhookSecretMu guards the three fields below — the short-TTL per-org
+	// cache of the secret the pre-auth GitHub webhook receiver verifies
+	// deliveries against. Resolving it costs a settings read, a registration
+	// read, and a vault read, all of them spent before the signature is
+	// checked, so an unauthenticated flood would otherwise pay them per
+	// request. Entries (positives and negatives alike) expire after
+	// webhookSecretTTL and are dropped explicitly when the App lifecycle
+	// rotates or tears down the secret. See github_webhook_secret.go.
+	webhookSecretMu    sync.Mutex
+	webhookSecretCache map[string]webhookSecretEntry // key: orgID
+	webhookSecretSweep time.Time                     // last expiry sweep, for the once-per-TTL gate
+	// webhookSecretGen counts invalidations. Resolutions run outside the
+	// lock, so it is what stops one that started before a rotation from
+	// writing the pre-rotation secret back afterwards.
+	webhookSecretGen uint64
+
+	// webhookHealthMu guards the per-org cache of the App-webhook probe — is
+	// GitHub actually delivering this org's webhooks here, and is the receiver
+	// accepting them. Unlike the secret cache above, this one is not a
+	// throughput measure: it is what keeps two GitHub round trips off the
+	// Settings status read, and what preserves the last known answer when a
+	// probe fails. Keys are org ids from membership-checked reads, so the key
+	// set is the deployment's own orgs rather than anything a caller chooses.
+	// See github_webhook_health.go.
+	webhookHealthMu sync.Mutex
+	webhookHealth   map[string]*webhookHealthEntry // key: orgID
+	// hookProbe substitutes the GitHub half of that probe. Nil in production
+	// (the real App-JWT reads run); set by tests, which have no GitHub to ask
+	// and need to drive the failure path deterministically.
+	hookProbe func(ctx context.Context, orgID string, app *domain.OrgGitHubApp, expectedURL string) (githubapp.WebhookHealth, error)
 
 	// preAuthLimiter is the per-IP token-bucket cap on the pre-auth
 	// allowlist routes (TFAC-433). Those mounts run before any session
@@ -326,116 +364,9 @@ type Server struct {
 	leaseStatus LeaseStatusFunc
 }
 
-// reachableRepoEntry is one cached picker enumeration: the lowercased
-// "owner/repo" slug set the user's GitHub credential can reach, plus the
-// wall-clock instant the entry stops being trusted.
-type reachableRepoEntry struct {
-	set       map[string]struct{}
-	expiresAt time.Time
-}
-
-// reachableCacheTTL bounds how long a picker enumeration is trusted to satisfy
-// a write. Long enough to cover the realistic "open picker → think → click
-// Continue" window; short enough that a stale enumeration can't mask a
-// credential revocation for more than a few minutes (eviction on
-// SetOnGitHubChanged handles the explicit-rotation case immediately).
-const reachableCacheTTL = 3 * time.Minute
-
-// reachableCacheKey namespaces the cache per (orgID, userID). A NUL separator
-// keeps two orgs/users whose IDs would otherwise concatenate ambiguously from
-// colliding.
-func reachableCacheKey(orgID, userID string) string {
-	return orgID + "\x00" + userID
-}
-
-// reachableRepoCacheGet returns the cached reachable slug set for (orgID,
-// userID) when present and unexpired. A miss (absent or stale) returns
-// (nil, false); a stale entry is reclaimed by the next put's sweep or an
-// org evict (the read path holds only an RLock and so can't delete).
-func (s *Server) reachableRepoCacheGet(orgID, userID string) (map[string]struct{}, bool) {
-	s.reachableRepoMu.RLock()
-	defer s.reachableRepoMu.RUnlock()
-	e, ok := s.reachableRepoCache[reachableCacheKey(orgID, userID)]
-	if !ok || time.Now().After(e.expiresAt) {
-		return nil, false
-	}
-	return e.set, true
-}
-
-// reachableRepoCachePut stores the picker enumeration for (orgID, userID) with
-// a fresh TTL. The set is stored by reference — callers must not mutate it
-// after handing it over.
-//
-// It also opportunistically sweeps already-expired entries while it holds the
-// write lock. Reads return a miss on expiry but can't delete (RLock only), so
-// without this the map would retain every distinct (orgID, userID) ever seen.
-// A put happens once per picker fetch, so the very workload that would grow
-// the map unboundedly — many distinct pairs churning through — is also what
-// drives the sweep, keeping it to roughly the live set.
-func (s *Server) reachableRepoCachePut(orgID, userID string, set map[string]struct{}) {
-	now := time.Now()
-	s.reachableRepoMu.Lock()
-	defer s.reachableRepoMu.Unlock()
-	if s.reachableRepoCache == nil {
-		s.reachableRepoCache = make(map[string]reachableRepoEntry)
-	}
-	for k, e := range s.reachableRepoCache {
-		if now.After(e.expiresAt) {
-			delete(s.reachableRepoCache, k)
-		}
-	}
-	s.reachableRepoCache[reachableCacheKey(orgID, userID)] = reachableRepoEntry{
-		set:       set,
-		expiresAt: now.Add(reachableCacheTTL),
-	}
-}
-
-// evictReachableRepoCache drops every cached enumeration for the org. Called
-// when the org's GitHub credentials or App installations rotate
-// (SetOnGitHubChanged): a stale enumeration built under the old credential
-// must not satisfy a write under the new one. Entries are keyed
-// orgID\x00userID, so we evict by orgID prefix to clear all of the org's
-// users at once.
-func (s *Server) evictReachableRepoCache(orgID string) {
-	prefix := orgID + "\x00"
-	s.reachableRepoMu.Lock()
-	defer s.reachableRepoMu.Unlock()
-	for k := range s.reachableRepoCache {
-		if strings.HasPrefix(k, prefix) {
-			delete(s.reachableRepoCache, k)
-		}
-	}
-}
-
-// agentEnabledForOrg returns the resolved agent and whether the bot is
-// enabled for the org's *default* team. Use only where there is no
-// specific acting team in play — the team-members roster hint
-// (config_handler) that just wants "is a bot generally available to
-// show in the picker." Delegation paths must use agentEnabledForTeam
-// with the actual acting team, or a non-default team's bot setting is
-// read off the default team (a multi-team bug).
-func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (*domain.Agent, bool, error) {
-	var (
-		a      *domain.Agent
-		teamID string
-	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(ctx, orgID)
-		return e
-	}); err != nil {
-		return nil, false, fmt.Errorf("default team lookup: %w", err)
-	}
-	// Empty teamID (teamless org) flows through agentEnabledForTeam,
-	// which treats it as "team missing → disabled" — same posture as
-	// before.
-	a, enabled, err := s.agentEnabledForTeam(ctx, orgID, userID, teamID)
-	return a, enabled, err
-}
-
 // agentEnabledForTeam returns the resolved agent and whether the
 // team_agents.enabled flag is true for it *on the given team*. This is
-// the acceptance rule "swipe-to-delegate re-checks
+// the acceptance rule "delegating re-checks
 // team_agents.enabled at delegate time," now correctly scoped to the
 // acting team rather than always the org default — so a
 // multi-team user delegating for team B is gated on B's bot setting.
@@ -520,33 +451,35 @@ func (s *Server) agentEnabledForTeam(ctx context.Context, orgID, userID, teamID 
 // ported to a store yet.
 func New(database *sql.DB, stores db.Stores) *Server {
 	s := &Server{
-		db:           database,
-		prompts:      stores.Prompts,
-		swipes:       stores.Swipes,
-		agents:       stores.Agents,
-		teamAgents:   stores.TeamAgents,
-		users:        stores.Users,
-		blueprints:   stores.Blueprints,
-		tasks:        stores.Tasks,
-		agentRuns:    stores.Conversations,
-		repos:        stores.Repos,
-		projects:     stores.Projects,
-		events:       stores.Events,
-		taskMemory:   stores.TaskMemory,
-		secrets:      stores.Secrets,
-		curatorStore: stores.Curator,
-		teams:        stores.Teams,
-		orgs:         stores.Orgs,
-		jiraRules:    stores.JiraStatusRules,
-		githubApps:   stores.GitHubApps,
-		jiraApps:     stores.JiraApps,
-		authEvents:   stores.AuthEvents,
-		tx:           stores.Tx,
-		az:           authz.New(database, stores.Tx),
-		fleetQueue:   stores.RunQueue,
-		allStores:    stores,
-		mux:          http.NewServeMux(),
-		ws:           websocket.NewHub(),
+		db:               database,
+		prompts:          stores.Prompts,
+		swipes:           stores.Swipes,
+		agents:           stores.Agents,
+		teamAgents:       stores.TeamAgents,
+		users:            stores.Users,
+		blueprints:       stores.Blueprints,
+		tasks:            stores.Tasks,
+		conversations:    stores.Conversations,
+		repos:            stores.Repos,
+		projects:         stores.Projects,
+		events:           stores.Events,
+		taskMemory:       stores.TaskMemory,
+		secrets:          stores.Secrets,
+		curatorStore:     stores.Curator,
+		teams:            stores.Teams,
+		orgs:             stores.Orgs,
+		jiraRules:        stores.JiraStatusRules,
+		githubApps:       stores.GitHubApps,
+		reachableRepos:   stores.ReachableRepos,
+		githubDeliveries: stores.GitHubDeliveries,
+		jiraApps:         stores.JiraApps,
+		authEvents:       stores.AuthEvents,
+		tx:               stores.Tx,
+		az:               authz.New(database, stores.Tx),
+		fleetQueue:       stores.ConversationQueue,
+		allStores:        stores,
+		mux:              http.NewServeMux(),
+		ws:               websocket.NewHub(),
 	}
 	// Per-IP rate limiters for the pre-auth allowlist and the signed-webhook
 	// tier. Built here (not injected) so a Server is always usable without
@@ -556,10 +489,11 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// GitHub credential resolver + its installation-token cache, built from
 	// the same stores. Constructed here (not injected) so a Server is always
 	// usable without external wiring — tests that call New directly get a
-	// working resolver too. A verified installation.deleted webhook drops
-	// the dead token from the cache via onInstallationRemoved.
-	ghTokenCache := ghclient.NewMemoryTokenCache()
-	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, ghTokenCache)
+	// working resolver too. A verified installation.deleted or
+	// installation.suspend webhook drops the dead token from the cache via
+	// onInstallationTokensInvalid.
+	s.ghTokenCache = ghclient.NewMemoryTokenCache()
+	s.ghResolver = ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, s.ghTokenCache)
 	// Atlassian OAuth app resolver (TFAC-337): per-org override → deployment
 	// first-party (hosted) / local-supplied (local). The first-party app is
 	// read from the deployment env, and only in hosted mode — local has no
@@ -578,8 +512,8 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// Constructed here like ghResolver so a Server is always usable without
 	// external wiring.
 	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
-	s.onInstallationRemoved = func(orgID, installationID string) {
-		ghTokenCache.Invalidate(orgID, installationID)
+	s.onInstallationTokensInvalid = func(orgID, installationID string) {
+		s.ghTokenCache.Invalidate(orgID, installationID)
 	}
 	s.routes()
 	return s
@@ -687,7 +621,7 @@ func (s *Server) routes() {
 	//        consult the DB (see handleHealth).
 	//   GET  /readyz                    — readiness probe (TFAC-573): DB +
 	//        migrations + poller liveness (hard checks, 503 on failure)
-	//        plus poll-staleness + active-run count (soft signals). Bare
+	//        plus poll-staleness + active-claim count (soft signals). Bare
 	//        path (not /api/readyz) by convention — the universal k8s/ALB
 	//        probe target — so it's outside /api/* and the preAuthAllowlist
 	//        below / routes_coverage_test entirely; noted here only for
@@ -720,9 +654,15 @@ func (s *Server) routes() {
 	// single-use IdP code, so an IP cap adds ~no protection — and a 429
 	// mid-OAuth on a shared NAT would break a top-level navigation for no
 	// gain), /api/health (platform liveness probes hit it often),
-	// /api/config (the AuthGate boot read), the GitHub webhook receiver
-	// (HMAC-verified, GitHub-paced), the /auth/v1/ GoTrue proxy (rate-
-	// limited upstream), and the SPA fallback (every static asset).
+	// /api/config (the AuthGate boot read), the /auth/v1/ GoTrue proxy
+	// (rate-limited upstream), and the SPA fallback (every static asset).
+	//
+	// The GitHub webhook receiver takes the separate signed-webhook tier
+	// rather than this one, alongside the Slack receiver: it authenticates
+	// each delivery by HMAC, so the human-login budget would throttle a
+	// legitimate sender, but "GitHub-paced" describes only the legitimate
+	// traffic — an anonymous caller can hit it as fast as it likes, and each
+	// attempt costs reads before the signature is checked.
 	//
 	// Wrap ORDER matters where a cheap rejection gate also applies: the
 	// limiter goes INSIDE such a gate so a request the gate rejects costs
@@ -769,7 +709,6 @@ func (s *Server) routes() {
 	// a cleanup so /api/auth/* unambiguously means
 	// "session authentication." Wrapped via s.api/apiMutating since you
 	// need to be logged in to manage your integration credentials.
-	s.apiMutating("POST /api/integrations/setup", s.handleIntegrationsSetup)
 	s.api("GET /api/integrations/status", s.handleIntegrationsStatus)
 	// Placement explainer (TFAC-587): the computed rendezvous candidate order
 	// for a key. Org-admin gated inside the handler on ?org= (the fleet
@@ -780,17 +719,6 @@ func (s *Server) routes() {
 	// operator view is a later ticket, same interim as the placement explainer
 	// above). Read-only.
 	s.api("GET /api/fleet/queue", s.handleFleetQueue)
-	// Local-mode "Start your factory" provision action — creates
-	// the synthetic tenant + materializes shipped defaults via the shared
-	// bootstrap chain. Idempotent; no-op once a tenant exists.
-	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
-	// DELETE on the collection = nuke every integration credential at once (the
-	// Settings danger zone). Unbinding ONE credential goes through that
-	// credential's own resource — DELETE /api/orgs/{org_id}/github/access/pat or
-	// .../jira/access/credential — which is why there's no per-integration
-	// subpath here any more.
-	s.apiMutating("DELETE /api/integrations", s.handleIntegrationsClear)
-
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
 	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)
@@ -805,10 +733,18 @@ func (s *Server) routes() {
 	s.api("GET /api/me/identities", s.handleMeIdentities)
 	// Switch the session's active org.
 	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
-	// Create a net-new org with default settings — the multi-mode
-	// "Start your Factory" onboarding CTA. Multi-mode only (404 in
-	// local); 403 when org creation is disabled on the instance.
+	// The caller's own settings row. Viewer-relative, so the subject comes
+	// from the session and there is no id to address.
+	s.api("GET /api/me/settings", s.handleMeSettingsGet)
+	s.apiMutating("PATCH /api/me/settings", s.handleMeSettingsPatch)
+	// Create the workspace — the "Start your Factory" onboarding CTA in
+	// both modes. Multi mints a net-new org (403 when org creation is
+	// disabled on the instance); local provisions its single synthetic
+	// tenant, idempotently.
 	s.apiMutating("POST /api/orgs", s.handleOrgCreate)
+	// The canonical single read for an org: the same {id, name, role} row
+	// /api/me carries per membership. Member-visible; a non-member 404s.
+	s.api("GET /api/orgs/{org_id}", s.handleOrgGet)
 	// multi-team selectors. GET /api/teams is the data source
 	// for the per-page read filter + write-time picker (count-gated to
 	// ≥2 teams in the frontend); it carries the last-acting-team the write
@@ -823,8 +759,12 @@ func (s *Server) routes() {
 		spawner:   func() *delegate.Spawner { return s.spawner },
 		curator:   func() *curator.Curator { return s.curator },
 	}
-	s.api("GET /api/teams", th.handleTeamsList)
+	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
+	// The canonical single read, and the only reader of a team's description.
+	// Any org member may read any team in their org; a cross-org id 404s under
+	// RLS. {team_id} takes the literal "default" in local mode (authz.ResolveTeamID).
+	s.api("GET /api/teams/{team_id}", th.handleTeamGet)
 	// PATCH /api/teams/{team_id} renames a team / edits its description
 	// (hosted-only; 404 in local). Gated team-admin-or-org-admin; a plain
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
@@ -832,21 +772,40 @@ func (s *Server) routes() {
 	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
 	// Archive soft-deletes + force-stops the team's in-flight delegations and
 	// curator sessions and blocks further writes; restore flips it back (dead
-	// runs stay dead). The preview + archived-list back the confirm modal and the
+	// conversations stay dead). The preview + archived-list back the confirm modal and the
 	// org-admin restore surface.
-	s.api("GET /api/teams/archived", th.handleTeamArchivedList)
+	// The team's settings row and its Jira project rules, under the team
+	// resource so the path segment the caller asserts is the one the
+	// authorization check is about. The rules are their own replace-set write
+	// rather than a key inside the settings body — a child collection, like the
+	// tracked repos and the github-group mappings, not a field.
+	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
+	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
+	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
+	// The other two child collections, siblings of jira-projects: the team's
+	// tracked GitHub repos and its GitHub-team mappings, both replace-set PUTs.
+	// github-repos, not repos — it reads as the sibling it is and does not
+	// collide with the top-level /api/repos registry resource.
+	s.api("GET /api/teams/{team_id}/github-repos", s.handleTeamReposGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
+	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
+	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
 	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
 	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
 
-	// Team roster (TFAC-444): list members + add + change role + remove/leave.
-	// Multi-mode only (each handler 404s in local; local keeps the synthetic
-	// single-member /api/team/members roster). GET is any org member;
-	// POST/PATCH/DELETE gate team-admin-or-org-admin (DELETE also allows a
-	// self-leave). VerifyTeamInOrg 404s a cross-org team_id; the last-admin
-	// guard is a DB trigger surfaced as a 409.
+	// Team roster: list members + add + change role + remove/leave. The list
+	// read is the one roster on the surface — the management roster, the
+	// assignee picker and the predicate editor all read it — and answers in
+	// both modes, where {team_id} takes the "default" alias at N=1. The
+	// MUTATORS are multi-mode only (each 404s in local, which has nobody to
+	// enrol). List is any org member; POST/PATCH/DELETE gate
+	// team-admin-or-org-admin (DELETE also allows a self-leave).
+	// VerifyTeamInOrg 404s a cross-org team_id; the last-admin guard is a DB
+	// trigger surfaced as a 409.
 	tmh := &teamMembersHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/teams/{team_id}/members", tmh.handleTeamRosterList)
+	s.apiMutating("POST /api/teams/{team_id}/members/list", tmh.handleTeamRosterList)
 	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
 	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
 	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
@@ -880,7 +839,7 @@ func (s *Server) routes() {
 			}
 		},
 	}
-	s.api("GET /api/orgs/{org_id}/members", omh.handleOrgMembersList)
+	s.apiMutating("POST /api/orgs/{org_id}/members/list", omh.handleOrgMembersList)
 	s.apiMutating("PATCH /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRoleChange)
 	s.apiMutating("DELETE /api/orgs/{org_id}/members/{user_id}", omh.handleOrgMemberRemove)
 	// Ownership transfer: owner-only (gated on tf.user_owns_org + the
@@ -888,36 +847,44 @@ func (s *Server) routes() {
 	// owner sentinel, demotes the former owner — all in one tx as the owner.
 	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 
-	// Usage (spend layer) — the core Usage page's read API (TFAC-478). All
-	// session-org-scoped (org from claims, not the path), like /api/dashboard/*.
+	// Usage (spend layer) — the core Usage page's read API, each route under
+	// the scope it reports on: usage is a fact about a caller, a team, or an
+	// org, the same way a roster is. /api/me/usage is viewer-relative and takes
+	// its org from the session; the team and org routes name their scope in the
+	// path, and the org routes authorize against THAT org rather than whichever
+	// one the session points at.
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
-	// org-admin, /org is org-admin. The team/org reads use the admin-pool
+	// org-admin, /orgs/{id} is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
-	uh := &usageHandler{tx: s.tx, az: s.az, runQueue: s.allStores.RunQueue}
-	s.api("GET /api/usage/me", uh.handleUsageMe)
-	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
-	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
+	s.api("GET /api/me/usage", uh.handleUsageMe)
+	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
+	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
 	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
 	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet console.
-	s.api("GET /api/usage/org/ops", uh.handleUsageOrgOps)
+	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions (external-action
-	// audit log) + Objects (artifact history) lenses, selected by ?view= — same
-	// scope gates as the spend reads above, plus the entitlement (unlicensed →
-	// 404). TFAC-483.
-	s.api("GET /api/usage/teams/{team_id}/activity", uh.handleUsageTeamActivity)
-	s.api("GET /api/usage/org/activity", uh.handleUsageOrgActivity)
+	// audit log) + Objects (artifact history) lenses — same scope gates as the
+	// spend reads above, plus the entitlement (unlicensed → 404).
+	// Two resources, two routes each. The single ?view=-multiplexed /activity
+	// route they replaced answered with two different row shapes and two
+	// different filter vocabularies from one address.
+	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
+	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
 	// Per-team daily spend cap (TFAC-482) — org-admin-set, EE/governance-gated
 	// (the handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one cap and
 	// is mutating, so it runs through the CSRF + session wrap. Both write/read the
 	// admin pool: an org admin may cap a team they don't belong to.
-	s.api("GET /api/usage/org/team-caps", uh.handleUsageTeamCaps)
-	s.apiMutating("PUT /api/usage/teams/{team_id}/cap", uh.handleUsageTeamCap)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/team-caps/list", uh.handleUsageTeamCaps)
+	s.apiMutating("PUT /api/teams/{team_id}/usage/cap", uh.handleUsageTeamCap)
 	// EE governance audit surface (TFAC-484): the access & credential change-log
 	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
 	// the handler — the data is core, only the cross-team lens is Enterprise.
-	s.api("GET /api/usage/org/access-log", uh.handleUsageAccessLog)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
 
 	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar first-party
 	// so it renders under the app's tight `img-src 'self'` CSP instead of being
@@ -955,8 +922,12 @@ func (s *Server) routes() {
 			return s.authDeps.sessions.UpdateActiveOrgSystem(ctx, sessID, orgID)
 		},
 	}
-	s.api("GET /api/invites", ih.handleInviteList)
+	s.apiMutating("POST /api/invites/list", ih.handleInviteList)
 	s.apiMutating("POST /api/invites", ih.handleInviteCreate)
+	// The single read carries no token and no accept URL — those live only in
+	// the create response. Registered after /preview, which is a literal and
+	// so wins the {id} segment on GET.
+	s.api("GET /api/invites/{id}", ih.handleInviteGet)
 	s.apiMutating("POST /api/invites/{id}/revoke", ih.handleInviteRevoke)
 	s.apiMutating("POST /api/invites/accept", ih.handleInviteAccept)
 	// Pre-auth: the invitee previews the token before signing in. The handler
@@ -979,26 +950,45 @@ func (s *Server) routes() {
 	// and registers the LoginExtension that drives SAML start + the callback's
 	// enforcement/JIT/test forks. Core holds no SSO symbols.
 
-	s.api("GET /api/queue", s.handleQueue)
-	s.api("GET /api/tasks", s.handleTasks)
+	// The tasks list read. It replaces the former GET /api/queue and
+	// GET /api/tasks outright rather than aliasing them: the two spellings
+	// answered the same nominal filter with different hidden ones
+	// (?status=queued returned claimed and future-snoozed rows the queue
+	// view hides), and one address per read is what keeps that from
+	// happening again. apiMutating is deliberate for a body-carrying read —
+	// see handleTaskList.
+	// Find-or-create the task at a station. The Factory's drop gesture is this
+	// plus POST /api/tasks/{id}/delegate: the task is the row, delegating is
+	// what you then do to it, so the in-between state — task resolved, run not
+	// started — is addressable rather than a partial success buried in one
+	// call's response.
+	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
+	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
-	s.apiMutating("POST /api/tasks/{id}/swipe", s.handleSwipe)
-	s.apiMutating("POST /api/tasks/{id}/snooze", s.handleSnooze)
+	// The task's field-write path. It replaces the former /swipe
+	// multiplexer, /snooze and /advance: the lifecycle axis and the wake
+	// time are columns, and a route per column value is how one gesture
+	// grew six arms with different required fields, different authz and
+	// different response shapes. The verbs below survive because each
+	// carries an effect a field write can't express — an external Jira
+	// write, a spawned run, artifact teardown, an audit reversal.
+	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
+	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
+	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
 	s.apiMutating("POST /api/tasks/{id}/undo", s.handleUndo)
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
-	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
 	s.api("GET /api/agent/conversations/{conversationID}/messages", ag.handleMessages)
-	// Run-scoped artifact read (A·6, TFAC-465): the run's artifacts across
-	// every kind, team-scoped via the run. Backs the run-detail surface (TFAC-470).
+	// Conversation-scoped artifact read (A·6, TFAC-465): the conversation's artifacts across
+	// every kind, team-scoped via the conversation. Backs the conversation detail surface (TFAC-470).
 	s.api("GET /api/agent/conversations/{conversationID}/artifacts", ag.handleAgentArtifacts)
-	// Run-scoped external-action read — the audit log filtered to this run.
-	// Its sibling above answers "what objects does this run own"; this answers
+	// Conversation-scoped external-action read — the audit log filtered to this conversation.
+	// Its sibling above answers "what objects does this conversation own"; this answers
 	// "what did it do", including the writes that produce no object at all (a
 	// review-thread reply, a refused merge, a denied push).
-	s.api("GET /api/agent/conversations/{conversationID}/actions", ag.handleAgentActions)
+	s.apiMutating("POST /api/agent/conversations/{conversationID}/actions/list", ag.handleAgentActions)
 	// The one conversation-level stop. It replaces the former /cancel and
 	// /interrupt outright rather than aliasing them: two addresses is how they
 	// drifted into two meanings of `open` in the first place.
@@ -1009,33 +999,33 @@ func (s *Server) routes() {
 	// here, so a refresh / second tab / cold load reconstructs it.
 	s.api("GET /api/agent/conversations/{conversationID}/permissions", ag.handleAgentPermissions)
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}", ag.handleAgentPermission)
-	// Tier-2 run-scoped artifact reconcile (TFAC-464): the run view polls this
-	// while open to refresh that run's non-terminal artifacts against GitHub.
+	// Tier-2 conversation-scoped artifact reconcile (TFAC-464): the conversation view polls this
+	// while open to refresh that conversation's non-terminal artifacts against GitHub.
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
-	s.api("GET /api/agent/conversations", ag.handleConversations)
+	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
 	// Projects. Pure CRUD over the projects table; the
-	// Curator runtime that populates curator_session_id and per-project
-	// entity classification land separately.
+	// Curator runtime that populates conversations.sdk_session_id and
+	// per-project entity classification land separately.
 	s.apiMutating("POST /api/projects", s.handleProjectCreate)
-	s.api("GET /api/projects", s.handleProjectList)
+	s.apiMutating("POST /api/projects/list", s.handleProjectList)
 	s.api("GET /api/projects/{id}", s.handleProjectGet)
 	s.apiMutating("PATCH /api/projects/{id}", s.handleProjectUpdate)
 	s.apiMutating("DELETE /api/projects/{id}", s.handleProjectDelete)
 	s.api("GET /api/projects/{id}/export/preview", s.handleProjectExportPreview)
 	s.api("GET /api/projects/{id}/export", s.handleProjectExport)
 	s.apiMutating("POST /api/projects/import", s.handleProjectImport)
-	s.api("GET /api/projects/{id}/knowledge", s.handleProjectKnowledge)
+	s.apiMutating("POST /api/projects/{id}/knowledge/list", s.handleProjectKnowledge)
 	s.apiMutating("POST /api/projects/{id}/knowledge", s.handleProjectKnowledgeUpload)
 	s.api("GET /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeFile)
 	s.apiMutating("DELETE /api/projects/{id}/knowledge/{path}", s.handleProjectKnowledgeDelete)
 	// Project-creation backfill popup.
 	bf := &backfillHandler{tx: s.tx, ws: s.ws}
-	s.api("GET /api/projects/{id}/backfill-candidates", bf.handleBackfillCandidates)
+	s.apiMutating("POST /api/projects/{id}/backfill-candidates/list", bf.handleBackfillCandidates)
 	s.apiMutating("POST /api/projects/{id}/backfill", bf.handleBackfill)
 	// Project entities panel.
 	pe := &projectEntitiesHandler{tx: s.tx}
-	s.api("GET /api/projects/{id}/entities", pe.handleProjectEntities)
+	s.apiMutating("POST /api/projects/{id}/entities/list", pe.handleProjectEntities)
 
 	// Curator chat per project. The Curator package owns the
 	// long-lived CC session lifecycle; these endpoints are the API
@@ -1056,47 +1046,39 @@ func (s *Server) routes() {
 
 	dh := &dashboardHandler{tx: s.tx, ghResolver: s.ghResolver, backfill: s.kickDashboardBackfill}
 	s.api("GET /api/dashboard/stats", dh.handleDashboardStats)
-	s.api("GET /api/dashboard/prs", dh.handleDashboardPRs)
-	s.api("GET /api/dashboard/prs/{number}/status", dh.handleDashboardPRStatus)
-	s.apiMutating("POST /api/dashboard/prs/{number}/draft", dh.handleDashboardPRDraft)
+	s.apiMutating("POST /api/dashboard/prs/list", dh.handleDashboardPRs)
+	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
+	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
 
-	s.api("GET /api/settings/user", s.handleUserSettingsGet)
-	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
-	s.api("GET /api/settings/team/{team_id}", s.handleTeamSettingsGet)
-	s.apiMutating("POST /api/settings/team/{team_id}", s.handleTeamSettingsPost)
-	s.api("GET /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
-	s.apiMutating("PUT /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
-	s.api("GET /api/settings/team/{team_id}/repos", s.handleTeamReposGet)
-	s.apiMutating("PUT /api/settings/team/{team_id}/repos", s.handleTeamReposPut)
-	s.api("GET /api/settings/org", s.handleOrgSettingsGet)
-	s.apiMutating("POST /api/settings/org", s.handleOrgSettingsPost)
-
-	// Team roster for the predicate editor. Fetched fresh on
-	// every consumer mount (the FE dedups concurrent in-flight calls
-	// within a render but doesn't hold a persistent cache — the roster
-	// is mutable mid-session). One SELECT per call. /api/config — the
-	// AuthGate boot endpoint — is mounted pre-auth above; per-user
-	// identity that used to live on /api/config moved to /api/me.
-	s.api("GET /api/team/members", s.handleTeamMembers)
-	sk := &skillsHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
-	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
-	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
-	s.api("GET /api/github/repos", s.handleGitHubRepos)
-	se := &settingsHandler{tx: s.tx, az: s.az, bedrockRole: func() bedrockRoleResolver { return s.bedrockRole }}
+	// Prompt imports. Two routes rather than one with a source field: they
+	// take different bodies (a paste vs. nothing) and only one of them can
+	// exist in multi mode, where the process has no per-tenant disk to scan.
+	pi := &promptImportHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/prompts/from-disk", pi.handlePromptImportFromDisk)
+	s.apiMutating("POST /api/prompts/upload", pi.handlePromptUpload)
+	// Proxy list: the rows come from GitHub, which reports no total for this
+	// read, so total_count is null and page_token wraps the upstream cursor.
+	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
+	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
+	se := &settingsHandler{
+		tx: s.tx, az: s.az,
+		bedrockRole: func() bedrockRoleResolver { return s.bedrockRole },
+		kickJira:    s.kickJiraChanged,
+	}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
 	// distinct from the creds stage (auth.ValidateGitHub / /api/jira/connect).
 	s.apiMutating("POST /api/github/reachability", handleGitHubReachability)
-	s.api("GET /api/repos", s.handleRepoProfiles)
-	s.apiMutating("PATCH /api/repos/{owner}/{repo}", s.handleRepoUpdate)
-	s.api("GET /api/repos/{owner}/{repo}/branches", s.handleRepoBranches)
+	s.apiMutating("POST /api/repos/list", s.handleRepositories)
+	// Addressed by the registry row id, which is what every repo payload
+	// carries. by-name is the slug-accepting read the API rules give a
+	// resource with a unique name, and the only one: the writes take the id
+	// they were served, so a rename cannot repoint a save.
+	s.api("GET /api/repos/by-name/{owner}/{repo}", s.handleRepoGetByName)
+	s.api("GET /api/repos/{id}", s.handleRepoGet)
+	s.apiMutating("PATCH /api/repos/{id}", s.handleRepoUpdate)
+	s.apiMutating("POST /api/repos/{id}/branches/list", s.handleRepoBranches)
 	s.apiMutating("POST /api/jira/reachability", handleJiraReachability)
-	// Validated org Anthropic-key capture — the single write path for the
-	// anthropic_api_key vault secret (an empty key clears it for "system creds").
-	s.apiMutating("POST /api/anthropic/connect", se.handleAnthropicConnect)
-	// Validated org Bedrock-credential capture — the single write path for
-	// the aws_* / bedrock_* vault secrets (auth_method "none" clears them).
-	s.apiMutating("POST /api/bedrock/connect", se.handleBedrockConnect)
 	// Bedrock role-mode setup (TFAC-616): returns the control service's caller
 	// ARN + the TF-generated External ID so the UI can render a filled
 	// trust-policy snippet. POST (not GET) because first entry generates +
@@ -1105,8 +1087,21 @@ func (s *Server) routes() {
 	// apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
+	// **Declared exception** to the list-envelope rule. The stock deck is a
+	// composite the discovery UI deals from — a readiness status plus two
+	// partitions of the same set — not a row list a client walks. It reads the
+	// team's whole active Jira set, bounded by the team's tracked projects
+	// rather than by a window; the deck is meant to be dealt whole. What it
+	// does hold to is one shape in every state: the status field never changes
+	// which keys are present.
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
-	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
+	// One route per carry-over action. The arms share only an eligibility
+	// gate: queue mints a task off a synthesized event with no Jira write,
+	// claim makes two external Jira writes before it touches a row, and done
+	// transitions the ticket and closes the entity without minting anything.
+	s.apiMutating("POST /api/jira/stock/queue", s.handleJiraStockQueue)
+	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
+	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
 
 	// Artifact-id-addressed endpoints back both the GitHub-native PR preview and
 	// the review preview (kind-dispatched inside the handlers). The review path
@@ -1115,35 +1110,50 @@ func (s *Server) routes() {
 	// edit/delete inline comments on the live pending review, approve submits it,
 	// and dismiss resolves a single artifact (per-item). The task-level
 	// resolve-all (drag-to-Done / Return-to-queue) flows through teardownTaskArtifacts.
-	ah := &artifactsHandler{tx: s.tx, ws: s.ws, agentRuns: s.agentRuns, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	ah := &artifactsHandler{tx: s.tx, ws: s.ws, conversations: s.conversations, ghResolver: s.ghResolver, spawner: func() *delegate.Spawner { return s.spawner }}
+	// One read for every kind; the writes are kind-scoped sub-resources, so a
+	// review-shaped body can never reach the PR write path.
 	s.api("GET /api/artifacts/{id}", ah.handleArtifactGet)
-	s.apiMutating("PATCH /api/artifacts/{id}", ah.handleArtifactUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/pr", ah.handleArtifactPRUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/review", ah.handleArtifactReviewUpdate)
 	s.api("GET /api/artifacts/{id}/diff", ah.handleArtifactDiff)
 	s.apiMutating("POST /api/artifacts/{id}/approve", ah.handleArtifactApprove)
+	// Pull requests only: closing one is a real GitHub write. A review is
+	// abandoned through PATCH …/review {state:"dismissed"}.
 	s.apiMutating("POST /api/artifacts/{id}/dismiss", ah.handleArtifactDismiss)
 	s.apiMutating("POST /api/artifacts/{id}/review/refresh", ah.handleReviewRefresh)
-	s.apiMutating("PUT /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
+	s.apiMutating("PATCH /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentUpdate)
 	s.apiMutating("DELETE /api/artifacts/{id}/comments/{commentId}", ah.handleArtifactCommentDelete)
 
 	fh := &factoryHandler{tx: s.tx}
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
-	s.apiMutating("POST /api/factory/delegate", s.handleFactoryDelegate)
 
 	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
+	// **Declared exceptions to the paginated-list rule.** These two are not
+	// lists of rows a tenant owns; they are the build's own vocabulary —
+	// domain.AllEventTypes() and the schemas derived from it, fixed at compile
+	// time and identical for every caller. There is nothing to filter by,
+	// nothing that grows with usage, and a page token would address a set that
+	// only changes when the binary does. A client reads them once and caches.
+	// Their shape stays a bare list on purpose: paginating a constant is
+	// ceremony that makes the surface look mutable.
 	s.api("GET /api/event-types", ph.handleEventTypes)
 	s.api("GET /api/event-schemas", handleEventSchemasList)
 	s.api("GET /api/event-schemas/{event_type}", handleEventSchemaGet)
-	// Unified event_handlers endpoints. Replace the former
-	// /api/task-rules + /api/triggers split — kind is passed as ?kind=
-	// on list, in the body on create, derived on update.
+	// The unified event_handlers surface — one ordered list for both kinds,
+	// with `kind` as the row discriminator on every read. The writes are split
+	// per kind, because a rule and a trigger require different fields and
+	// default `enabled` in opposite directions.
 	eh := &eventHandlersHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/event-handlers", eh.handleEventHandlersList)
-	s.apiMutating("POST /api/event-handlers", eh.handleEventHandlerCreate)
+	s.apiMutating("POST /api/event-handlers/list", eh.handleEventHandlersList)
+	// The canonical single read: five mutation routes preloaded this row
+	// internally and none would hand it back.
+	s.api("GET /api/event-handlers/{id}", eh.handleEventHandlerGet)
+	s.apiMutating("POST /api/event-handlers/rules", eh.handleEventHandlerCreateRule)
+	s.apiMutating("POST /api/event-handlers/triggers", eh.handleEventHandlerCreateTrigger)
 	s.apiMutating("PUT /api/event-handlers/reorder", eh.handleEventHandlerReorder)
 	s.apiMutating("PATCH /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
-	s.apiMutating("PUT /api/event-handlers/{id}", eh.handleEventHandlerUpdate)
 	s.apiMutating("DELETE /api/event-handlers/{id}", eh.handleEventHandlerDelete)
-	s.apiMutating("POST /api/event-handlers/{id}/toggle", eh.handleEventHandlerToggle)
 	s.apiMutating("POST /api/event-handlers/{id}/promote", eh.handleEventHandlerPromote)
 	s.apiMutating("POST /api/event-handlers/{id}/retarget", eh.handleEventHandlerRetarget)
 	// Parked event_queue rows — the operator surface over routing work the
@@ -1151,26 +1161,30 @@ func (s *Server) routes() {
 	// inside the handler; the store is the admin-pool EventQueueStore with
 	// org_id bound by argument, the same shape as the usage-ops read.
 	fe := &failedEventsHandler{az: s.az, queue: s.allStores.EventQueue}
-	s.api("GET /api/events/failed", fe.handleFailedEventsList)
+	s.apiMutating("POST /api/events/failed/list", fe.handleFailedEventsList)
+	s.api("GET /api/events/failed/{id}", fe.handleFailedEventGet)
 	s.apiMutating("POST /api/events/failed/requeue", fe.handleFailedEventsRequeue)
-	s.api("GET /api/prompts", ph.handlePromptsList)
+	s.apiMutating("POST /api/prompts/list", ph.handlePromptsList)
 	s.apiMutating("POST /api/prompts", ph.handlePromptCreate)
 	s.api("GET /api/prompts/{id}", ph.handlePromptGet)
 	s.apiMutating("PUT /api/prompts/{id}", ph.handlePromptPut)
 	s.apiMutating("DELETE /api/prompts/{id}", ph.handlePromptDelete)
 	s.api("GET /api/prompts/{id}/stats", ph.handlePromptStats)
 	bh := &blueprintsHandler{tx: s.tx, az: s.az, spawner: func() *delegate.Spawner { return s.spawner }}
-	s.api("GET /api/blueprints", bh.handleBlueprintsList)
+	s.apiMutating("POST /api/blueprints/list", bh.handleBlueprintsList)
+	s.api("GET /api/blueprints/{id}", bh.handleBlueprintGet)
 	s.apiMutating("POST /api/blueprints", bh.handleBlueprintCreate)
 	s.apiMutating("PUT /api/blueprints/{id}", bh.handleBlueprintUpdate)
 	s.apiMutating("DELETE /api/blueprints/{id}", bh.handleBlueprintDelete)
-	s.api("GET /api/blueprint-steps", bh.handleBlueprintStepsAll)
-	s.api("GET /api/blueprints/{id}/steps", bh.handleBlueprintStepsGet)
+	// One route for the canvas's bulk read and the per-blueprint read: they
+	// differed only in a filter, and a filter is what a list body is for.
+	s.apiMutating("POST /api/blueprint-steps/list", bh.handleBlueprintStepsAll)
 	s.apiMutating("PUT /api/blueprints/{id}/steps", bh.handleBlueprintStepsPut)
 	s.apiMutating("POST /api/blueprints/{id}/merge", bh.handleBlueprintMerge)
 	s.apiMutating("POST /api/blueprints/{id}/split", bh.handleBlueprintSplit)
 	s.apiMutating("POST /api/blueprints/{id}/reconnect", bh.handleBlueprintReconnect)
 	s.apiMutating("POST /api/blueprints/duplicate", bh.handleBlueprintDuplicate)
+	s.apiMutating("POST /api/blueprint-runs/list", bh.handleBlueprintRunsList)
 	s.api("GET /api/blueprint-runs/{id}", bh.handleBlueprintRunGet)
 	s.apiMutating("POST /api/blueprint-runs/{id}/cancel", bh.handleBlueprintRunCancel)
 
@@ -1178,7 +1192,7 @@ func (s *Server) routes() {
 	// handler opens with gateMarketplace, which 404s in local mode (see
 	// marketplace_handler.go).
 	mh := &marketplaceHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/marketplace/listings", mh.handleMarketplaceList)
+	s.apiMutating("POST /api/marketplace/listings/list", mh.handleMarketplaceList)
 	s.apiMutating("POST /api/marketplace/listings", mh.handleMarketplacePublish)
 	s.api("GET /api/marketplace/listings/{id}", mh.handleMarketplaceGet)
 	s.apiMutating("POST /api/marketplace/listings/{id}/versions", mh.handleMarketplaceListingVersionCreate)
@@ -1218,7 +1232,7 @@ func (s *Server) routes() {
 	// so it rides apiMutating (CSRF). Org-admin (gated inside the handler).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/import", s.handleGitHubAppImport)
 	// Read-only status + install deep-link for the Workspace Settings panel.
-	// Any org member (read), so requireOrgMember rather than requireOrgAdmin.
+	// Any org member (read), so RequireOrgMember rather than RequireOrgAdmin.
 	s.api("GET /api/orgs/{org_id}/github/app", s.handleGitHubAppStatus)
 	s.api("GET /api/orgs/{org_id}/github/app/install-url", s.handleGitHubAppInstallURL)
 	// On-demand installation reconcile — the "UI panel refresh" half of D11
@@ -1227,22 +1241,30 @@ func (s *Server) routes() {
 	// mode-agnostic. Mutating: it reconciles the installation mirror via the
 	// same API backfill the poller runs, so it rides apiMutating (CSRF).
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/installations/refresh", s.handleGitHubAppInstallationsRefresh)
+	// Replay the App's failed installation webhook deliveries — the repair for
+	// an org whose receiver was rejecting them (no webhook secret, or the wrong
+	// one) while its installation mirror went stale. Admin-only, and mutating
+	// in the sense that matters: it asks GitHub to deliver again, so it rides
+	// apiMutating (CSRF).
+	s.apiMutating("POST /api/orgs/{org_id}/github/app/webhook/replay", s.handleGitHubAppWebhookReplay)
 
 	// GitHub access either/or transitions. GitHub access is
 	// strictly App XOR PAT per org; these commit the switches and surface the
 	// inform-only reachability diffs. All org-admin (gated inside the handler).
-	//   - cutover: commit a staged PAT→App switch (activate App + delete PAT).
-	//   - switch-to-pat: full App teardown, validate + store the new PAT.
+	//   - app/cutover: commit a staged PAT→App switch (activate App + delete PAT).
+	//   - pat/switch-to: full App teardown, validate + store the new PAT.
 	//   - DELETE github/app: discard a staged (not-yet-live) App registration.
-	//   - cutover-preflight / pat-preflight: inform-only reachability diffs.
+	//   - app/cutover-preflight, pat/preflight: inform-only reachability diffs,
+	//     each under the flavor it is a preflight for.
 	// The two commits + the discard mutate state (apiMutating, CSRF); the
-	// cutover-preflight is a read (api); pat-preflight POSTs a token to probe
-	// reach but stores nothing — still apiMutating for the same-origin guard.
+	// cutover preflight is a read (api); the PAT preflight POSTs a token to
+	// probe reach but stores nothing — still apiMutating for the same-origin
+	// guard.
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/cutover", s.handleGitHubAppCutover)
-	s.apiMutating("POST /api/orgs/{org_id}/github/access/switch-to-pat", s.handleGitHubAccessSwitchToPAT)
+	s.apiMutating("POST /api/orgs/{org_id}/github/pat/switch-to", s.handleGitHubAccessSwitchToPAT)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/app", s.handleGitHubAppDiscard)
 	s.api("GET /api/orgs/{org_id}/github/app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
-	s.apiMutating("POST /api/orgs/{org_id}/github/access/pat-preflight", s.handleGitHubAccessPATPreflight)
+	s.apiMutating("POST /api/orgs/{org_id}/github/pat/preflight", s.handleGitHubAccessPATPreflight)
 
 	// The org integration credentials, each an addressable resource with an
 	// explicit bind + unbind rather than a field on the bulk settings save.
@@ -1254,8 +1276,32 @@ func (s *Server) routes() {
 	// no outbound call, and it can no longer revoke access as a side effect.
 	// The Jira half of the pair is registered with the rest of the Jira
 	// surface below; the rationale above covers both.
-	s.apiMutating("PUT /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATPut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATDelete)
+	// The PAT is a credential flavor, and the flavor is the resource: its bind
+	// and unbind here, its preflight and the switch onto it beside them, all
+	// under github/pat as the App's routes sit under github/app.
+	s.apiMutating("PUT /api/orgs/{org_id}/github/pat", s.handleGitHubPATPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github/pat", s.handleGitHubPATDelete)
+
+	// The org's pure CONFIG — hosts, poller cadence, clone transport, spend
+	// governance. Path-scoped like the credential resources beside it because
+	// the write is admin-gated, and PATCH rather than POST because it is a
+	// partial update: absent keeps, null clears, and the caller's `version`
+	// makes a concurrent save a 409 instead of a silent overwrite.
+	s.api("GET /api/orgs/{org_id}/settings", s.handleOrgSettingsGet)
+	s.apiMutating("PATCH /api/orgs/{org_id}/settings", s.handleOrgSettingsPatch)
+
+	// The org's LLM provider credential — one resource per credential SHAPE, so
+	// a route's required fields are fixed and a blank secret never selects a
+	// second behaviour. Rotation is the PUT with a new value; removal is the
+	// DELETE. Binding one provider clears the other's stored material (the
+	// resolver can only use one) and says so in the response. See
+	// llm_credentials.go.
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/access-keys", se.handleBedrockAccessKeysPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/bearer", se.handleBedrockBearerPut)
+	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/role", se.handleBedrockRolePut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/llm/bedrock", se.handleBedrockDelete)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
@@ -1331,7 +1377,17 @@ func (s *Server) routes() {
 	// session) and identified by org_id from the path; the handler
 	// verifies the HMAC signature against that org's stored webhook
 	// secret before any side effect, so it's on the preAuthAllowlist.
-	s.mux.Handle("POST /api/webhooks/github/{org_id}", http.HandlerFunc(s.handleGitHubWebhook))
+	//
+	// Wrapped in the signed-webhook tier — the same one the Slack receiver
+	// takes, and the tier that was built for this description: a route that
+	// authenticates every request itself, where the cap defends the cost of
+	// getting to the rejection rather than the rejection itself. Getting
+	// there is not free here: resolving the secret to verify against reads
+	// the org's settings, its registration row, and the vault, all before
+	// the signature is checked (github_webhook_secret.go caches the result
+	// per org; this bounds how fast an anonymous caller can miss that
+	// cache). No-op in local mode.
+	s.mux.Handle("POST /api/webhooks/github/{org_id}", s.signedWebhookRateLimit(http.HandlerFunc(s.handleGitHubWebhook)))
 
 	// Registered server extensions (Enterprise Edition, ee/) mount their
 	// routes here, each gated on its license feature. No-op in a community
@@ -1405,7 +1461,7 @@ func (s *Server) SetStatic(f fs.FS) {
 	s.inlineScriptHashes = hashes
 }
 
-// SetSpawner sets the delegation spawner for agent runs.
+// SetSpawner sets the delegation spawner for agent conversations.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
 }
@@ -1442,20 +1498,23 @@ func (s *Server) SetKBChangedDoorbell(fn func(op, orgID, projectID string)) {
 // driven by the system:poll "profiler" subscriber off that poll's completion.
 // The orgID is the tenant whose creds changed — closure re-resolves via SecretStore.
 //
-// The registered callback is wrapped so the reachable-repo enumeration cache
-// is evicted for the org *before* the re-due runs: a creds
-// rotation, App install, or repo-set change can move which repos the org can
-// reach, and a stale cached enumeration must never satisfy the next write.
+// The registered callback is wrapped so a FORCED reachable-repo refresh is
+// kicked for the org alongside the re-due. A creds rotation, an App install, or
+// a host repoint moves which repositories the org can reach without moving the
+// timestamp the mirror's TTL reads, so the mirror is wrong in fact while looking
+// fresh — the one staleness a TTL cannot detect, which is why the explicit force
+// exists at all.
 //
-// Handlers fire this callback in a goroutine, so the
-// eviction is asynchronous: a second write landing in the same instant as a
-// first could still read the pre-eviction cache. That race is benign — the
-// cache was just validated as correct, and the near-simultaneous second write
-// is still checked against it. Eviction exists to retire a *stale* enumeration
-// over the TTL window, not to serialize against a concurrent write.
+// The refresh is out of band by construction (it is a Manager trigger, not a
+// call), so this stays as cheap as the eviction it replaces. A repo-TRACKING
+// save also lands here — tracking is not reachability, so that refresh is
+// redundant — and it is left in rather than special-cased: it is one
+// enumeration per human Save gesture, and splitting the hook into
+// "creds changed" and "repos changed" variants would put the burden of picking
+// the right one on six call sites.
 func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 	s.onGitHubChanged = func(orgID string) {
-		s.evictReachableRepoCache(orgID)
+		s.kickReachRefresh(orgID, true)
 		if fn != nil {
 			fn(orgID)
 		}
@@ -1484,8 +1543,45 @@ func (s *Server) SetProfilerTrigger(fn func(orgID string, force bool)) {
 	s.profilerTrigger = fn
 }
 
+// reachableCredentialClass resolves which credential class this org's
+// reachable-repo entries are keyed under — the stored class narrowed by the
+// App-XOR-PAT gate, which is the same narrowing the refresh applies when it
+// writes them. The picker and the team-repos write gate both key on it, and
+// keying a read differently from the write is how a mirror reads as empty for an
+// org that has one.
+//
+// Built per call rather than held: it is two store pointers and no state, so
+// constructing it here costs nothing and it always reads whichever stores this
+// Server currently holds.
+func (s *Server) reachableCredentialClass(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
+	return reachcache.NewClassResolver(s.orgs, s.githubApps).For(ctx, orgID)
+}
+
+// SetReachTrigger registers the per-org reachable-repo refresh trigger (the
+// reachcache Manager's Trigger). force=true bypasses its TTL. Used by the
+// picker read (non-forced, when the mirror is empty or stale), the explicit
+// refresh control, and every GitHub credential change.
+//
+// Nil until wired — bare test constructions and any role that builds no
+// background managers. kickReachRefresh nil-checks it, so a picker read on such
+// a Server serves whatever the mirror holds and asks for nothing.
+func (s *Server) SetReachTrigger(fn func(orgID string, force bool)) {
+	s.reachTrigger = fn
+}
+
+// kickReachRefresh asks for a reachable-mirror refresh, out of band. It never
+// blocks the caller and never reports failure: a refresh that does not happen
+// costs a staler mirror on the next read, which is the same cost as the TTL not
+// having elapsed yet, and a request has nothing useful to do with the error.
+func (s *Server) kickReachRefresh(orgID string, force bool) {
+	if s.reachTrigger == nil || orgID == "" {
+		return
+	}
+	s.reachTrigger(orgID, force)
+}
+
 // SetReconciler registers the shared artifact Reconciler that backs the Tier-2
-// run-scoped refresh endpoint (TFAC-464). The same instance the background
+// conversation-scoped refresh endpoint (TFAC-464). The same instance the background
 // Tier-1 Manager runs, so a foreground refresh and a background cycle apply the
 // identical reconcile path. Nil until wired — the endpoint 503s until then.
 func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
@@ -1602,11 +1698,15 @@ func (s *Server) SetIngestor(i *ingest.Ingestor) {
 	s.ingestor = i
 }
 
-// SetInstallationRemovedHook registers a callback fired on a verified
-// installation.deleted webhook (the resolver's token-cache invalidate).
-// Optional — left nil until the credential resolver wires it.
-func (s *Server) SetInstallationRemovedHook(fn func(orgID, installationID string)) {
-	s.onInstallationRemoved = fn
+// SetInstallationTokensInvalidHook REPLACES the callback fired when an
+// installation's minted tokens stop being usable — a verified
+// installation.deleted or installation.suspend webhook, and the App-credential
+// change paths. New already wires that callback to the resolver's own token
+// cache, so this is an override rather than the wiring: whatever it installs
+// takes over, and passing nil disables the invalidate entirely. Its caller
+// today is a test observing which installation a delivery fired for.
+func (s *Server) SetInstallationTokensInvalidHook(fn func(orgID, installationID string)) {
+	s.onInstallationTokensInvalid = fn
 }
 
 // MarkJiraRestarted records the moment orgID's Jira poller was restarted.

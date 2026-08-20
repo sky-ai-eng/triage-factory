@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // githubAppStatusResponse is the read-only shape the Workspace Settings
@@ -26,6 +28,13 @@ type githubAppStatusResponse struct {
 	// when no deployment identity is configured (deployCfg nil — e.g. a unit-test
 	// server); the field is only actioned by an admin enabling OAuth.
 	ConnectCallbackURL string `json:"connect_callback_url"`
+	// WebhookHealth is whether GitHub is actually delivering this App's
+	// webhooks to this deployment — null when there is no App, no deployment
+	// identity to compare a hook URL against, or no probe answer yet. Its
+	// absence is "not known", never "fine": a registered App that receives
+	// nothing is the case this exists to make visible. See
+	// github_webhook_health.go.
+	WebhookHealth *githubAppWebhookHealth `json:"webhook_health"`
 }
 
 type githubAppInfo struct {
@@ -48,23 +57,57 @@ type githubAppInstallation struct {
 	AccountType    string `json:"account_type"`
 	AccountLogin   string `json:"account_login"`
 	InstalledAt    string `json:"installed_at"`
+	// SuspendedAt is RFC3339 when the account owner has suspended this
+	// installation, "" when it is live — the installation still holds its
+	// grant, but GitHub refuses every token minted from it. SuspendedBy is the
+	// login that suspended it, "" when unsuspended or when the source named no
+	// one. Carried so the panel can render the state; nothing in the UI reads
+	// them yet, and no other behaviour turns on them.
+	SuspendedAt string `json:"suspended_at"`
+	SuspendedBy string `json:"suspended_by"`
 }
 
-// newGitHubAppStatusResponse assembles the read-only status payload from a
-// loaded App registration, its installations, and the registrant's display
-// name. Shared by the member-readable status GET (handleGitHubAppStatus) and
-// the admin-only refresh POST (handleGitHubAppInstallationsRefresh) so the two
-// can never drift in shape. A nil app yields app:null (the org has no
-// registration); registeredByName may be empty when the registrant is unknown
-// or the lookup was skipped.
-// connectCallbackURL is the org's Connect OAuth redirect_uri (or "" when no
-// deployment identity is configured), carried so the import/connect form can
-// show the exact URL the App owner must register.
-func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string) githubAppStatusResponse {
+// newGitHubAppStatusResponse assembles the read-only status payload from the
+// org's credential class, a loaded App registration, its installations, and the
+// registrant's display name. Shared by the member-readable status GET
+// (handleGitHubAppStatus) and the admin-only refresh POST
+// (handleGitHubAppInstallationsRefresh) so the two can never drift in shape.
+// registeredByName may be empty when the registrant is unknown or the lookup
+// was skipped. connectCallbackURL is the org's Connect OAuth redirect_uri (or
+// "" when no deployment identity is configured), carried so the import/connect
+// form can show the exact URL the App owner must register. health is the last
+// known App-webhook probe answer, or nil when none is known — a nil is rendered
+// as an absent block rather than as a healthy one.
+//
+// class decides using_hosted_default, which is the one field on this payload
+// that a nil app cannot answer for. A nil app means "no registration of your
+// own", which is true of a PAT org and would equally be true of an org riding
+// the deployment's own App — and those two want opposite answers here. Both
+// classes this build knows are the org's OWN credential, so both report false;
+// the reserved shared-App class is the arm that would report true, and it gets
+// to be a visible new case rather than a silent inherited default.
+func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.OrgGitHubApp, insts []domain.OrgGitHubAppInstallation, registeredByName, connectCallbackURL string, health *githubAppWebhookHealth) githubAppStatusResponse {
 	resp := githubAppStatusResponse{
 		Installations:      make([]githubAppInstallation, 0, len(insts)),
-		UsingHostedDefault: false,
 		ConnectCallbackURL: connectCallbackURL,
+		WebhookHealth:      health,
+	}
+	switch class {
+	case domain.GitHubCredentialClassPAT, domain.GitHubCredentialClassBYOApp:
+		// The org owns whatever credential it has — no deployment-level App
+		// stands behind it.
+		resp.UsingHostedDefault = false
+	default:
+		// Handlers refuse an unknown class before reaching here; this arm is the
+		// backstop. Render no App and claim nothing about a hosted default: a
+		// panel that says "no App configured" for an org whose credential system
+		// this build can't name would invite an admin to register a second one.
+		githubAppLog.Error("unknown github credential class in status payload; rendering app:null", "class", class)
+		// Nothing is claimed about an App this build can't name, webhook health
+		// included — a health block beside app:null would describe a
+		// registration the payload just declined to render.
+		resp.WebhookHealth = nil
+		return resp
 	}
 	if app != nil {
 		resp.App = &githubAppInfo{
@@ -77,12 +120,20 @@ func newGitHubAppStatusResponse(app *domain.OrgGitHubApp, insts []domain.OrgGitH
 		}
 	}
 	for _, inst := range insts {
-		resp.Installations = append(resp.Installations, githubAppInstallation{
+		dto := githubAppInstallation{
 			InstallationID: inst.InstallationID,
 			AccountType:    inst.AccountType,
 			AccountLogin:   inst.AccountLogin,
 			InstalledAt:    inst.InstalledAt.UTC().Format(time.RFC3339),
-		})
+		}
+		// "" rather than the zero instant formatted, so an unsuspended
+		// installation reads as unsuspended instead of as one suspended in
+		// year one.
+		if inst.Suspended() {
+			dto.SuspendedAt = inst.SuspendedAt.UTC().Format(time.RFC3339)
+			dto.SuspendedBy = inst.SuspendedBy
+		}
+		resp.Installations = append(resp.Installations, dto)
 	}
 	return resp
 }
@@ -119,10 +170,18 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
+	// The class rides along in the same transaction as the registration it
+	// describes, so the payload can never pair one org's class with another
+	// read's view of its App.
+	var class domain.GitHubCredentialClass
 	var app *domain.OrgGitHubApp
 	var insts []domain.OrgGitHubAppInstallation
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var lerr error
+		set, lerr := tx.Orgs.GetSettings(ctx, orgID)
+		if lerr != nil {
+			return lerr
+		}
+		class = set.GitHubCredentialClass
 		app, lerr = tx.GitHubApps.GetForOrg(ctx, orgID)
 		if lerr != nil {
 			return lerr
@@ -133,8 +192,13 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "github-app", err)
 		return
 	}
+	if !class.Known() {
+		githubAppLog.Error("unknown github credential class on app status read", "org", orgID, "class", class)
+		internalError(w, "github-app", ErrUnknownGitHubCredentialClass)
+		return
+	}
 
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // connectCallbackURLSafe returns the org's Connect OAuth callback URL, or ""
@@ -173,11 +237,27 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	}
 	ctx := r.Context()
 
-	// A reconcile only makes sense for an org that has registered an App; with
-	// none there are no live installations to list. 404 with the same shape
-	// handleGitHubAppInstallURL uses. The App mirror is read through the System
-	// (claims-free) door here — the admin gate already authorized orgID, and
-	// the backfill below is itself a System operation.
+	// A reconcile only makes sense for an org that brought its own App; there is
+	// nothing of the org's to reconcile in any other credential system. Gate on
+	// the class first — a PAT org's missing registration is a 404 by decision,
+	// not by the accident of a nil row — then require the row the class
+	// promises. 404 with the same shape handleGitHubAppInstallURL uses. The App
+	// mirror is read through the System (claims-free) door here — the admin gate
+	// already authorized orgID, and the backfill below is itself a System
+	// operation.
+	class, err := s.githubCredentialClass(ctx, orgID)
+	if err != nil {
+		if errors.Is(err, ErrUnknownGitHubCredentialClass) {
+			githubAppLog.Error("unknown github credential class on installations refresh", "org", orgID)
+		}
+		internalError(w, "github-app", err)
+		return
+	}
+	if class != domain.GitHubCredentialClassBYOApp {
+		notFound(w, "github app")
+		return
+	}
+
 	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -195,7 +275,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// what made the original picker dead-end untraceable).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
 		githubAppLog.Error("refresh installations failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to refresh GitHub App installations" + localDetail(err)})
+		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to refresh GitHub App installations" + localDetail(err)})
 		return
 	}
 
@@ -207,7 +287,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 		internalError(w, "github-app", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID)))
+	writeJSON(w, http.StatusOK, newGitHubAppStatusResponse(class, app, insts, s.registrantDisplayName(ctx, orgID, userID, app), s.connectCallbackURLSafe(orgID), s.webhookHealthDTO(ctx, orgID, app)))
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

@@ -35,7 +35,7 @@ func newAgentStore(q, _ queryer) db.AgentStore { return &agentStore{q: q} }
 var _ db.AgentStore = (*agentStore)(nil)
 
 const sqliteAgentColumns = `id, display_name, default_model, default_autonomy_suitability,
-       github_pat_user_id, github_org_login, jira_service_account_id,
+       github_pat_user_id, github_org_login, github_org_email, jira_service_account_id,
        created_at, updated_at`
 
 func (s *agentStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.Agent, error) {
@@ -102,8 +102,18 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 	return existing, nil
 }
 
-func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) error {
-	_, err := s.q.ExecContext(ctx, `
+// scanUpdatedAgent decodes an id-keyed UPDATE … RETURNING. No row scanned
+// means the (org, id) pair named nothing, which is db.ErrNoSuchAgent.
+func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
+	a, err := scanAgentRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Agent{}, db.ErrNoSuchAgent
+	}
+	return a, err
+}
+
+func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error) {
+	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
 		UPDATE agents
 		SET display_name = ?,
 		    default_model = ?,
@@ -111,12 +121,12 @@ func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) e
 		    jira_service_account_id = ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ?
-	`, a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.JiraServiceAccountID), time.Now().UTC(), orgID, a.ID)
-	return err
+		RETURNING `+sqliteAgentColumns,
+		a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
+		nullString(a.JiraServiceAccountID), time.Now().UTC(), orgID, a.ID))
 }
 
-func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error {
+func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error) {
 	// Match the Postgres impl's input contract: empty = intentional
 	// clear, valid UUID = intentional set, anything else is a caller
 	// bug. SQLite's github_pat_user_id has an FK to users(id) post-269
@@ -124,28 +134,33 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 	// rejecting up front keeps the error shape friendly + matches
 	// Postgres exactly.
 	if userID != "" && !isValidUUIDLike(userID) {
-		return fmt.Errorf("sqlite agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
+		return domain.Agent{}, fmt.Errorf("sqlite agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_pat_user_id = ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ?
-	`, nullString(userID), time.Now().UTC(), orgID, agentID)
-	return err
+		RETURNING `+sqliteAgentColumns,
+		nullString(userID), time.Now().UTC(), orgID, agentID))
 }
 
-func (s *agentStore) SetGitHubOrgLogin(ctx context.Context, orgID, agentID, login string) error {
+func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
-	// not a UUID — no shape validation. Empty clears it (NULL), so an org that
-	// drops its PAT path stops stamping a stale identity.
-	_, err := s.q.ExecContext(ctx, `
+	// not a UUID — no shape validation. The pair is all-or-nothing: either
+	// empty input clears both columns so no caller can persist a partial commit
+	// identity.
+	if login == "" || email == "" {
+		login, email = "", ""
+	}
+	return scanUpdatedAgent(s.q.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_org_login = ?,
+		    github_org_email = ?,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ?
-	`, nullString(login), time.Now().UTC(), orgID, agentID)
-	return err
+		RETURNING `+sqliteAgentColumns,
+		nullString(login), nullString(email), time.Now().UTC(), orgID, agentID))
 }
 
 // isValidUUIDLike is a thin local mirror of postgres/uuid.go:isValidUUID.
@@ -168,10 +183,10 @@ func nullString(s string) any {
 
 func scanAgentRow(row *sql.Row) (domain.Agent, error) {
 	var a domain.Agent
-	var defaultModel, ghPATUser, ghOrgLogin, jiraSvc sql.NullString
+	var defaultModel, ghPATUser, ghOrgLogin, ghOrgEmail, jiraSvc sql.NullString
 	var defAutonomy sql.NullFloat64
 	if err := row.Scan(&a.ID, &a.DisplayName, &defaultModel, &defAutonomy,
-		&ghPATUser, &ghOrgLogin, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&ghPATUser, &ghOrgLogin, &ghOrgEmail, &jiraSvc, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return a, err
 	}
 	a.DefaultModel = defaultModel.String
@@ -181,6 +196,7 @@ func scanAgentRow(row *sql.Row) (domain.Agent, error) {
 	}
 	a.GitHubPATUserID = ghPATUser.String
 	a.GitHubOrgLogin = ghOrgLogin.String
+	a.GitHubOrgEmail = ghOrgEmail.String
 	a.JiraServiceAccountID = jiraSvc.String
 	return a, nil
 }

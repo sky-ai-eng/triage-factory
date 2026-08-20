@@ -88,7 +88,7 @@ func TestRuntime_StartProxiesRoutesGitAtTheSharedOrigin(t *testing.T) {
 		GitUpstream:       "https://github.com",
 		GHChannelEnabled:  true,
 		GHChannelUpstream: "https://api.github.com",
-		AgentHost:         &sidecarproto.AgentHostInfo{OrgID: "org", RunID: "run-shared-origin"},
+		AgentHost:         &sidecarproto.AgentHostInfo{OrgID: "org", ConversationID: "run-shared-origin"},
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestRuntime_StartProxiesWithoutSharedOriginKeepsProxyRouting(t *testing.T) 
 // routing read. They must agree: routing the sandbox's git at a shared origin no
 // injector serves would break every git operation in the jail.
 func TestGHChannelWanted(t *testing.T) {
-	withID := &sidecarproto.AgentHostInfo{RunID: "run-1"}
+	withID := &sidecarproto.AgentHostInfo{ConversationID: "run-1"}
 	for _, c := range []struct {
 		name string
 		req  sidecarproto.StartProxiesBody
@@ -203,8 +203,8 @@ func stubPrivilegedSideEffects(t *testing.T) {
 	t.Helper()
 	origWrite, origStart := writeInjectorCert, startAgentHostSocket
 	dir := t.TempDir()
-	writeInjectorCert = func(runID string, pem []byte) error {
-		return os.WriteFile(filepath.Join(dir, runID+".crt"), pem, 0o600)
+	writeInjectorCert = func(conversationID string, pem []byte) error {
+		return os.WriteFile(filepath.Join(dir, conversationID+".crt"), pem, 0o600)
 	}
 	startAgentHostSocket = func(*agenthost.Server, string) (*agenthost.HostDaemon, sandbox.Mount, error) {
 		return nil, sandbox.Mount{}, nil

@@ -67,7 +67,7 @@ func TestPendingFiringsStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 
 func newSQLiteForPendingFiringsTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -103,7 +103,7 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 			t.Fatalf("seed entity: %v", err)
 		}
 
-		// prompt: triggers + runs both FK to prompts(id).
+		// prompt: triggers + conversations both FK to prompts(id).
 		// source='user' requires creator_user_id non-null per the
 		// prompts_system_has_no_creator CHECK.
 		if _, err := conn.Exec(`
@@ -116,12 +116,12 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB) dbtest.PendingFiringsSeeder {
 		// blueprint (+ step): the trigger's blueprint_id FKs to
 		// blueprints(id, org_id) AND the same-team blueprints(id, team_id),
 		// so it needs a real team-owned blueprint wrapping the prompt above.
-		if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+		if _, err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: "Test BP", Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("seed blueprint: %v", err)
 		}
-		if err := sqlitestore.New(conn).Blueprints.ReplaceSteps(context.Background(), runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+		if _, err := sqlitestore.New(conn).Blueprints.ReplaceSteps(context.Background(), runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("seed blueprint step: %v", err)
 		}
 

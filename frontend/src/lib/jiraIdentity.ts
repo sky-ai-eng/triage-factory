@@ -17,7 +17,7 @@
 // couldn't reach) on failure. Goes through apiClient so a stale-session 401 is
 // funneled to AuthContext (re-auth) rather than surfacing as a raw status.
 
-import { apiJSON, HttpError } from './apiClient'
+import { apiJSON, httpErrorMessage } from './apiClient'
 
 export interface JiraIdentityCaptured {
   account: string
@@ -31,26 +31,18 @@ async function postJiraIdentity(
   body: Record<string, string>,
 ): Promise<JiraIdentityCaptured> {
   try {
-    return await apiJSON<JiraIdentityCaptured>('/jira/identity/pat', {
-      org: orgId,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
+    return await apiJSON<JiraIdentityCaptured>(
+      `/api/orgs/${encodeURIComponent(orgId)}/jira/identity/pat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
   } catch (err) {
-    // Surface the endpoint's user-facing `error` field instead of a bare HTTP
+    // Surface the endpoint's user-facing `error` field rather than a bare HTTP
     // status. (A 401 has already been routed to AuthContext by apiClient.)
-    if (err instanceof HttpError) {
-      let msg = `Couldn't verify that credential (HTTP ${err.status}).`
-      try {
-        const parsed = JSON.parse(err.body) as { error?: string }
-        if (parsed?.error) msg = parsed.error
-      } catch {
-        // Non-JSON error body — keep the generic message.
-      }
-      throw new Error(msg)
-    }
-    throw err
+    throw new Error(httpErrorMessage(err, "Couldn't verify that credential."))
   }
 }
 

@@ -15,7 +15,7 @@ import "time"
 // fall back to PAT-borrow. Local mode populates
 // GitHubPATUserID with the sentinel user (the lone human in the
 // synthetic single-tenant world) at bootstrap; the PAT itself still
-// lives in the OS keychain and is looked up at run dispatch via the
+// lives in the OS keychain and is looked up at dispatch via the
 // user identity here.
 type Agent struct {
 	ID                         string
@@ -24,6 +24,7 @@ type Agent struct {
 	DefaultAutonomySuitability *float64 // nil = no default; consumer uses the trigger-level threshold instead
 	GitHubPATUserID            string   // "" if not borrowing a PAT; local mode populates with the sentinel user at bootstrap
 	GitHubOrgLogin             string   // the org credential's OWN GitHub login (PAT path) — "" until a PAT bind persists it; distinct from GitHubPATUserID (the user who pasted the PAT). The credential resolver's OrgIdentityFor reads this to stamp the org commit identity (TFAC-452).
+	GitHubOrgEmail             string   // verified primary email captured with GitHubOrgLogin; required for PAT-backed commit attribution
 	JiraServiceAccountID       string   // "" if no Jira service account (v2 surface)
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time

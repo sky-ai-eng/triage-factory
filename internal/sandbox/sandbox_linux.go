@@ -108,9 +108,9 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// doesn't drag Linux-only types into other builds.
 	td := &teardownState{subnetIdx: idx, ownsNetwork: ownsNetwork}
 	sb := &Sandbox{
-		RunID:     cfg.RunID,
-		SubnetIdx: idx,
-		teardown:  td,
+		ConversationID: cfg.ConversationID,
+		SubnetIdx:      idx,
+		teardown:       td,
 	}
 	releaseOnError := true
 	defer func() {
@@ -126,7 +126,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// to clean up whatever prefix of setup succeeded. Skipped when the
 	// caller supplied the network (already built + owned by them).
 	if ownsNetwork {
-		ns, err := defaultOps.SetupNetwork(ctx, cfg.RunID, idx)
+		ns, err := defaultOps.SetupNetwork(ctx, cfg.ConversationID, idx)
 		td.netSt = ns
 		if err != nil {
 			return nil, nil, fmt.Errorf("sandbox: %w", err)
@@ -184,18 +184,18 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// the caller drives Start → stream → Wait → Close.
 	//
 	// Container ID must be unique per Wrap or runsc rejects the second
-	// concurrent start. RunID isn't unique on its own (some callers pass
+	// concurrent start. ConversationID isn't unique on its own (some callers pass
 	// fixed TraceIDs like "scorer-batch"), but the subnet idx is — the
 	// allocator gives a fresh idx for every live Wrap. Pair them so the ID
 	// stays grep-friendly while being uniquely distinguishable.
-	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.RunID, containerIDRunFragmentMax), idx)
+	containerID := fmt.Sprintf("tf-%s-%d", truncate(cfg.ConversationID, containerIDRunFragmentMax), idx)
 	// Published on the Sandbox before the launch so an observer (the resource
 	// sampler) reads the id this launch actually used rather than re-deriving
 	// it. Set even if the launch below fails: the group may already exist and
 	// the caller's teardown is what reclaims it.
 	sb.ContainerID = containerID
 	run, err := runLauncher.LaunchRun(ctx, LaunchParams{
-		RunID:           cfg.RunID,
+		ConversationID:  cfg.ConversationID,
 		MemoryNamespace: cfg.MemoryNamespace,
 		ContainerID:     containerID,
 		Rootfs:          rootfsSel,
@@ -228,7 +228,7 @@ func logCgroupFailOpenOnce(err error) {
 	})
 }
 
-// containerIDRunFragmentMax is how much of a RunID a container id carries.
+// containerIDRunFragmentMax is how much of a ConversationID a container id carries.
 // Named rather than repeated as a literal because the boot sweep's matcher
 // (tfContainerIDRE) is built from it: the sweep delete-forces what it
 // matches, so a matcher looser than what this package can actually mint is
@@ -285,7 +285,7 @@ func (s *Sandbox) Close() error {
 // brokered privileged op wrap uses. On a SetupNetwork error the returned
 // (possibly partial) state is torn down and the idx released so the caller
 // never has to Close a failed bring-up.
-func setupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
+func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, error) {
 	if defaultOps == nil {
 		return nil, fmt.Errorf("sandbox: no privileged ops installed (cap-broker not started)")
 	}
@@ -293,7 +293,7 @@ func setupRunNetwork(ctx context.Context, runID string) (*RunNetwork, error) {
 	if err != nil {
 		return nil, err // ErrSubnetsExhausted
 	}
-	netSt, serr := defaultOps.SetupNetwork(ctx, runID, idx)
+	netSt, serr := defaultOps.SetupNetwork(ctx, conversationID, idx)
 	if serr != nil {
 		// netSt carries whatever prefix of setup succeeded — reverse it, then
 		// hand the idx back so a partial bring-up leaks neither veth nor slot.

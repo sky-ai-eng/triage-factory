@@ -34,7 +34,7 @@ export interface Task {
   // Number of messages addressed to the bot on a Slack thread's entity.
   // A Slack thread carries one long-lived task whose title names only the
   // channel, so the card shows this count as a badge — it rises as
-  // follow-ups land while a run is in flight. Absent/0 for non-Slack tasks.
+  // follow-ups land while a conversation is in flight. Absent/0 for non-Slack tasks.
   slack_message_count?: number
   // Claim cols, exposed so the assignee picker on the board
   // can render current state without a second fetch. Exactly one is
@@ -49,9 +49,22 @@ export interface Task {
   team_id?: string
 }
 
-// TeamSummary is one entry of GET /api/teams — the identity row the
-// multi-team selectors enumerate. The team count drives
-// whether a team control renders at all (the ≥2 gate).
+// TranscriptPage is GET /api/agent/conversations/{id}/messages.
+//
+// The transcript stays a GET because it is followed, not browsed: `?since_id=`
+// walks FORWARD from a watermark the client holds (the tail-follow that
+// repairs a transcript assembled from websocket frames), while
+// `next_page_token` walks BACKWARD through history from the oldest row the
+// response carried. There is no total — counting a stream still being
+// appended to would be wrong by the time it rendered.
+export interface TranscriptPage {
+  items: Message[]
+  next_page_token?: string
+}
+
+// TeamSummary is one row of POST /api/teams/list, GET /api/teams/{id}, and
+// POST /api/teams/archived/list — one team shape across all three. The team
+// count drives whether a team control renders at all (the ≥2 gate).
 export interface TeamSummary {
   id: string
   name: string
@@ -59,27 +72,38 @@ export interface TeamSummary {
   /** The viewer's membership role in this team ("admin" | "member" |
    *  "viewer"). The settings surface renders the Team section only when the
    *  viewer admins ≥1 team and filters its selector to those teams. Local /
-   *  N=1 reports "admin" for the sole team. */
-  role: string
+   *  N=1 reports "admin" for the sole team. Absent on rows with no membership
+   *  to report — an archived team an org admin never joined. */
+  role?: string
+  description?: string
+  /** Soft-delete timestamp, present only on an archived team. */
+  archived_at?: string
+  /** True on the viewer's sticky default team, and on at most one row. A
+   *  default that has been archived or left marks no row at all, so a
+   *  selector never seeds to a team it isn't offering. */
+  is_last_acting?: boolean
 }
 
-// TeamsResponse is GET /api/teams: the viewer's teams in the active org
-// plus their sticky default (last_acting_team_id), present only when it is
-// still one of those teams.
-export interface TeamsResponse {
-  teams: TeamSummary[]
-  last_acting_team_id?: string
-}
-
-// TeamBot mirrors the bot half of /api/team/members. Null
-// when no agent is bootstrapped OR team_agents.enabled is false for
-// the caller's team — same gate the swipe-delegate handler enforces.
-// Frontend hides the Bot row in the picker when this is null. The
-// per-user TeamMember + TeamMembersResponse shapes live further down
-// (where they were originally declared for the predicate editor).
+// TeamBot is the team's agent (its team_agents row) as the roster reports it —
+// beside the members, never among them, because the bot occupies the agent
+// claim slot rather than a user one. Null when the org has no bootstrapped
+// agent at all.
+//
+// `enabled` is the per-team switch, and the two consumers read it differently
+// on purpose: a picker offers the bot only when it is enabled (the same gate
+// the delegate handlers enforce, so it can't offer an option they'd refuse),
+// while the management roster renders a disabled bot as a disabled row —
+// "off" and "absent" are different states and the roster's job is to show
+// which one this team is in. The member row shape (TeamMember) is further
+// down, where it was first declared for the predicate editor.
 export interface TeamBot {
   agent_id: string
   display_name: string
+  enabled: boolean
+  model: string
+  /** Per-team autonomy-suitability override, or null to inherit the org
+   *  agent's default. */
+  autonomy: number | null
 }
 
 // The conversation status vocabulary — the frontend's ONE copy of it. Every
@@ -87,7 +111,7 @@ export interface TeamBot {
 // spells a status name as a bare literal in a list.
 //
 // How this stays in sync with Go: by hand, plus a test. The names are owned by
-// internal/domain/run_status.go, and TestFrontendMirrorsRunStatusVocabulary
+// internal/domain/conversation_status.go, and TestFrontendMirrorsConversationStatusVocabulary
 // (feature_parity_test.go) parses the arrays below and fails when the two sets
 // diverge in EITHER direction — a phase added in Go and not here, or a name
 // here that Go never emits. Codegen was considered and rejected: it buys a
@@ -102,7 +126,7 @@ export interface TeamBot {
 // That test pins these arrays and nothing else, which bought about a week:
 // component code doesn't read the arrays, it compares a status against a bare
 // literal, and no amount of array-pinning can see a literal in a switch arm.
-// So the arrays have a second enforcer — the run-status/no-ghost-run-status
+// So the arrays have a second enforcer — the conversation-status/no-ghost-conversation-status
 // ESLint rule (frontend/eslint-rules/), which reads the vocabulary out of this
 // file and fails the lint on any comparison or `case` that tests a
 // conversation status against a name the arrays don't hold.
@@ -118,28 +142,28 @@ export const CLAIM_PHASES = [
 ] as const
 export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 
-// TERMINAL_RUN_STATUSES are the states a conversation never leaves: the agent
-// concluded, or the infrastructure died. Stopping a run without concluding it
+// TERMINAL_CONVERSATION_STATUSES are the states a conversation never leaves: the agent
+// concluded, or the infrastructure died. Stopping a conversation without concluding it
 // parks it `open` instead — cancellation is spelled at the task and blueprint
 // layers, never as a conversation status.
-export const TERMINAL_RUN_STATUSES = ['completed', 'failed'] as const
-export type TerminalRunStatus = (typeof TERMINAL_RUN_STATUSES)[number]
+export const TERMINAL_CONVERSATION_STATUSES = ['completed', 'failed'] as const
+export type TerminalConversationStatus = (typeof TERMINAL_CONVERSATION_STATUSES)[number]
 
-// RUN_STATUSES is the full display union: the two derived states (queued and
+// CONVERSATION_STATUSES is the full display union: the two derived states (queued and
 // running are never stored — they're computed from the claim/queue state),
 // the parked state, every claim phase, every terminal.
-export const RUN_STATUSES = [
+export const CONVERSATION_STATUSES = [
   'queued',
   'running',
   'open',
   ...CLAIM_PHASES,
-  ...TERMINAL_RUN_STATUSES,
+  ...TERMINAL_CONVERSATION_STATUSES,
 ] as const
-export type RunStatus = (typeof RUN_STATUSES)[number]
+export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number]
 
-// RunStatusValue is a conversation status as it arrives over the wire: a plain
-// string, deliberately NOT the RunStatus union, so a server emitting a name
-// this build predates flows through the lib/runStatus predicates (which
+// ConversationStatusValue is a conversation status as it arrives over the wire: a plain
+// string, deliberately NOT the ConversationStatus union, so a server emitting a name
+// this build predates flows through the lib/conversationStatus predicates (which
 // classify it as unknown) instead of being a compile error at the boundary.
 //
 // It exists to be a NAME rather than a type constraint. The lint rule reads a
@@ -147,24 +171,24 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 // projection; every other DTO in this file spells its own status lowercase, so
 // the case alone separates the curator-turn and blueprint-run vocabularies from
 // this one) and any value annotated with this alias. So a helper that takes a
-// status second-hand — `runStatusColor(status)`, a tone switch — says so in its
+// status second-hand — `conversationStatusColor(status)`, a tone switch — says so in its
 // signature and gets checked like the property access it came from.
-export type RunStatusValue = string
+export type ConversationStatusValue = string
 
 // Conversation is the durable agent-context row's display projection —
 // served through a handler-side map, so its fields are PascalCase (mirroring
-// internal/domain/agent.go's Conversation). One conversation is one delegated
-// run today; curator conversations are surfaced through the curator turn DTOs.
+// internal/domain/agent.go's Conversation). One conversation is one delegation
+// today; curator conversations are surfaced through the curator turn DTOs.
 export interface Conversation {
   ID: string
   TaskID: string
-  // Status is the coalesced display status. RunStatusValue (a string), not the
-  // RunStatus union, on purpose — see the alias for why the wire field stays
+  // Status is the coalesced display status. ConversationStatusValue (a string), not the
+  // ConversationStatus union, on purpose — see the alias for why the wire field stays
   // open-world and how the lint rule closes the branching over it.
-  Status: RunStatusValue
+  Status: ConversationStatusValue
   Model: string
   StartedAt: string
-  // QueuedAt is when the run last entered the queue; ClaimedAt is when the
+  // QueuedAt is when the conversation last entered the queue; ClaimedAt is when the
   // dispatcher last claimed it (work actually began). Together they carry the
   // latest queue episode's dwell — the queue timer — while StartedAt stays the
   // mint stamp and DurationMs stays pure working time. Both absent on legacy
@@ -175,60 +199,67 @@ export interface Conversation {
   TotalCostUSD?: number
   DurationMs?: number
   NumTurns?: number
-  StopReason?: string
+  // ParkReason is WHY the conversation was parked `open` — one of the
+  // domain.ParkReason vocabulary, glossed for display by parkReasonLabel
+  // (lib/conversationStatus.ts). Absent when it was never parked, or was resumed
+  // since. The MODEL's stop reason is per-turn and rides MessageDTO.
+  ParkReason?: string
   ResultSummary: string
   // Outcome is the parsed terminal-envelope outcome
-  // (continue|finish|abort), persisted to runs.outcome. Empty/absent for an
-  // infra-error run or a step that ended without a recognized conclusion.
+  // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
+  // an infra-error conversation or a step that ended without a recognized conclusion.
   // The blueprint run timeline reads this in place of the old verdict object.
   Outcome?: string
   // OutcomeReason is the "why I stopped" populated only on an abort outcome.
   OutcomeReason?: string
   // FailureKind is the machine-readable failure discriminator for a
-  // status='failed' run ('memory_limit' | 'crash' | 'no_result' |
+  // status='failed' conversation ('memory_limit' | 'crash' | 'no_result' |
   // 'agent_error'), classified backend-side via errors.Is — never derived
-  // from message text. Empty/absent for non-failed runs, legacy failed rows,
+  // from message text. Empty/absent for non-failed conversations, legacy failed rows,
   // and failures nothing classified; only 'memory_limit' currently gets
   // distinct rendering (the "Killed: memory limit" badge + the
-  // TF_RUN_MEMORY_LIMIT_MB pointer).
+  // TF_CLAIM_MEMORY_LIMIT_MB pointer).
   FailureKind?: string
   SessionID?: string
   WorktreePath?: string
-  // Derived approval signal. Runs never park for
+  // Derived approval signal. Conversations never park for
   // approval; the "needs approval" state is a *view*
-  // over the run's unresolved-artifact set. A card surfaces in the approval
-  // column whenever has_unresolved_artifacts is true — whether the run is live
+  // over the conversation's unresolved-artifact set. A card surfaces in the approval
+  // column whenever has_unresolved_artifacts is true — whether the conversation is live
   // or terminal — and re-derives back to in-progress (live) / done (terminal)
   // once the last artifact is resolved. These four fields replace the legacy
   // single-kind `pending_kind` / `pending_artifact_id` overlay discriminators.
   //
-  // The server emits them only when the answer is *definitive* (the run has no
+  // The server emits them only when the answer is *definitive* (the conversation has no
   // artifacts, or its artifact set was read successfully); on a transient
   // read failure they're OMITTED rather than reported as a misleading false, so
   // consumers treat absence as "unknown" and re-derive on the next refresh.
   has_unresolved_artifacts?: boolean
   // pending_artifact_ids is the set of unresolved approvable artifact ids — every
   // draft PR first (in slice order), then every ready review — the per-item
-  // resolve UI lists one card per id. Each is editable (PATCH /api/artifacts/{id})
-  // and approvable (POST /api/artifacts/{id}/approve) / dismissable
-  // (POST /api/artifacts/{id}/dismiss). [] (not undefined) when nothing is
-  // unresolved but the set was read; undefined under the transient-failure guard.
+  // resolve UI lists one card per id. Each is editable through its kind's
+  // sub-resource (PATCH /api/artifacts/{id}/pr | /review) and approvable
+  // (POST /api/artifacts/{id}/approve); a draft PR is abandoned with
+  // POST /api/artifacts/{id}/dismiss, a review with PATCH …/review
+  // {state:"dismissed"}. [] (not undefined) when nothing is unresolved but the
+  // set was read; undefined under the transient-failure guard.
   pending_artifact_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
   // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count
   // draft PRs + unresolved_review_count ready reviews === pending_artifact_ids.length.
   unresolved_pr_count?: number
   unresolved_review_count?: number
-  // artifact_count is the number of artifacts this run produced (TFAC-465's
-  // runResponse projection — branch / PR / review / issue / comment, the
+  // artifact_count is the number of artifacts this conversation produced (the
+  // conversationResponse projection — branch / PR / review / issue / comment, the
   // primary gating one included). The Board card shows it as a footer
   // affordance without a per-card fetch; 0 / undefined hides the affordance.
   artifact_count?: number
-  // actor_agent_id / actor_agent_name identify the bot that executed this run
-  // (runs.actor_agent_id), denormalized from agents.display_name
-  // via a JOIN on the run read projections. The card renders "Ran as: {name}" when
-  // a name is present; both are absent/empty for a run with no actor (spawned before
-  // agent bootstrap, or after the agent row was deleted).
+  // actor_agent_id / actor_agent_name identify the bot that executed this
+  // conversation (conversations.actor_agent_id), denormalized from
+  // agents.display_name via a JOIN on the conversation read projections. The card
+  // renders "Ran as: {name}" when a name is present; both are absent/empty for a
+  // conversation with no actor (spawned before agent bootstrap, or after the
+  // agent row was deleted).
   actor_agent_id?: string
   actor_agent_name?: string
   blueprint_run_id?: string
@@ -237,17 +268,17 @@ export interface Conversation {
   // step plan — what turns blueprint_step_index into a position ("step 2 of
   // 4") and says whether a completed step is the chain's last. 0 when the
   // server could not resolve the plan (a manual blueprint run is creator-scoped
-  // under RLS, so a teammate reads 0); lib/runStatus treats that as unknown and
-  // falls back to the unqualified reading. Every delegated run belongs to a
-  // blueprint, so 1 — not 0 — is the plain single-prompt run.
+  // under RLS, so a teammate reads 0); lib/conversationStatus treats that as unknown and
+  // falls back to the unqualified reading. Every delegated conversation belongs to
+  // a blueprint, so 1 — not 0 — is the plain single-prompt case.
   blueprint_step_count?: number
   // Token rollups: the SUM over this conversation's messages, derived by the
-  // same run read that carries TotalCostUSD / DurationMs / NumTurns. The
+  // same conversation read that carries TotalCostUSD / DurationMs / NumTurns. The
   // authoritative numbers — the same ones the usage dashboard reports — so a
-  // surface reads them here rather than walking the transcript. 0 for a run
-  // that never streamed a usage-bearing message; useRunDetail folds live
-  // per-message deltas on top between refetches of the run row, exactly as it
-  // does for cost.
+  // surface reads them here rather than walking the transcript. 0 for a
+  // conversation that never streamed a usage-bearing message;
+  // useConversationDetail folds live per-message deltas on top between
+  // refetches of the conversation row, exactly as it does for cost.
   input_tokens?: number
   output_tokens?: number
   cache_read_tokens?: number
@@ -255,17 +286,17 @@ export interface Conversation {
   // resumable is the server's answer to "will a follow-up be accepted?" — the
   // three-part backend predicate (status, workspace survival, blueprint
   // drivability) of which the client can see exactly one part. The composer
-  // gates on it: a stopped run whose workspace never made it, was reaped by
+  // gates on it: a stopped conversation whose workspace never made it, was reaped by
   // retention, or predates the snapshot work looks identically resumable from
   // Status alone and answers every message with a 409/410.
   //
-  // Detail read only (GET /api/agent/conversations/{id}) and only for a run
-  // that is neither active nor failed — the board shows no composer, an active
-  // run is steered through its live process, and a failed one has no workspace.
-  // ABSENT therefore means "the server didn't answer", not false: consumers
-  // fall back to the status-only reading, which is correct for the runs that
-  // skip it. It is a read, not a promise — the send's own 409/410 stays the
-  // enforcement.
+  // Detail read only (GET /api/agent/conversations/{id}) and only for a
+  // conversation that is neither active nor failed — the board shows no composer,
+  // an active conversation is steered through its live process, and a failed one
+  // has no workspace. ABSENT therefore means "the server didn't answer", not
+  // false: consumers fall back to the status-only reading, which is correct for
+  // the conversations that skip it. It is a read, not a promise — the send's
+  // own 409/410 stays the enforcement.
   resumable?: boolean
   // resume_blocked_reason names the rung that refused, present only when
   // resumable is false: 'workspace_expired' | 'blueprint_concluded' |
@@ -285,7 +316,7 @@ export type ArtifactKind = 'branch' | 'pull_request' | 'review' | 'issue' | 'com
 
 // Artifact mirrors the GET /api/agent/conversations/{id}/artifacts wire shape
 // (internal/server/agent.go artifactJSON, TFAC-465). One row per real external
-// object a run produced. `state` is meaningful only read with `kind` (see
+// object a conversation produced. `state` is meaningful only read with `kind` (see
 // internal/domain/artifact.go — 'pending' aliases across kinds). `details` is
 // the parsed kind-specific payload (or null when absent/unparseable).
 export interface Artifact {
@@ -302,7 +333,7 @@ export interface Artifact {
 
 // ActivityArtifact is the activity feed's Objects-lens row shape (TFAC-483): an
 // Artifact plus the owning team's id + name. The team fields are populated ONLY
-// by the org-wide feed (GET /api/usage/org/activity?view=objects) so a cross-team
+// by the org-wide feed (POST /api/orgs/{id}/usage/artifacts/list) so a cross-team
 // row shows which team's bot acted; the team-scoped feed omits them (it's already
 // one team). Mirrors internal/server activityArtifactJSON.
 export interface ActivityArtifact extends Artifact {
@@ -338,7 +369,7 @@ export interface ActivityAction {
 }
 
 // Message is the single snake_case transcript-row DTO shared by every
-// surface (delegated runs and curator chat), mirroring domain.MessageDTO
+// surface (delegated conversations and curator chat), mirroring domain.MessageDTO
 // (internal/domain/agent.go). conversation_id links the row to its owning
 // conversation; curator groups these into turns client-side.
 export interface Message {
@@ -358,8 +389,8 @@ export interface Message {
   cache_creation_tokens?: number
   // cost_usd is the dollars settled at this row — absent when the row is not a
   // settlement row, 0 when it is and cost nothing. A runtime that stamps as it
-  // streams turns these into a live spend signal: useRunDetail folds each
-  // stamped row into the displayed run total between refetches of the
+  // streams turns these into a live spend signal: useConversationDetail folds each
+  // stamped row into the displayed conversation total between refetches of the
   // conversation's authoritative SUM.
   cost_usd?: number
   created_at: string
@@ -791,15 +822,6 @@ export interface AcceptInviteResponse {
   org_id: string
 }
 
-/** The body the accept endpoint returns on the 409 wrong-identity case: the
- *  recipient is signed in as someone other than the invited address. Carries
- *  the actionable message plus the address the invite was sent to so the page
- *  can offer "log out and sign in as {invited_email}". */
-export interface AcceptInviteMismatch {
-  error: string
-  invited_email: string
-}
-
 /* ── SSO (multi-org SAML via GoTrue, epic TFAC-422) ──────────────────────────
  *  Wire shapes for the per-org "Configure SSO" admin surface (TFAC-429), which
  *  consumes the connection (TFAC-424) and domain (TFAC-428) endpoints. Multi-
@@ -872,10 +894,11 @@ export interface BreakGlassPrincipal {
   created_at: string
 }
 
-/** GET /api/team/members row. Backs Variant B's searchable multi-select.
- *  Local mode returns a single-entry array containing the synthetic
- *  LocalDefaultUserID; multi mode returns the active
- *  user's team roster. */
+/** One row of `POST /api/teams/{team_id}/members/list` — the one team roster on
+ *  the surface. It backs the management roster, the board's assignee picker and
+ *  Variant B's searchable multi-select alike; a consumer that doesn't care about
+ *  `role` simply ignores it. Local mode answers with a single row: the synthetic
+ *  LocalDefaultUserID, whose role is always admin. */
 export interface TeamMember {
   user_id: string
   display_name: string
@@ -883,14 +906,9 @@ export interface TeamMember {
   /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null
+  /** Team role: 'admin' | 'member' | 'viewer'. */
+  role: string
   is_current_user: boolean
-}
-
-export interface TeamMembersResponse {
-  members: TeamMember[]
-  // Bot entry, populated when the caller's team has an
-  // enabled agent (otherwise null). Same gate as swipe-delegate.
-  bot: TeamBot | null
 }
 
 /** One team's tracking claim on a Slack channel (TFAC-543) — the tracked_by
@@ -944,6 +962,15 @@ export interface SlackChannelsResponse {
  *  this. */
 export type ProjectVisibility = 'private' | 'team' | 'org'
 
+/** RepoOption is one repository as a picker offers it: the registry row id
+ *  it submits and the "owner/repo" name it shows. The split is the whole
+ *  addressing contract in one type — a repository is keyed by id and read by
+ *  name — and it is shared so the two pin pickers cannot drift on it. */
+export interface RepoOption {
+  id: string
+  slug: string
+}
+
 export interface Project {
   id: string
   name: string
@@ -967,7 +994,12 @@ export interface Project {
    *  compares this against the viewer's own id to gray that option out
    *  for anyone else. */
   creator_user_id: string
-  pinned_repos: string[]
+  /** The pinned repositories as registry row ids — the ids `/api/repos`
+   *  serves and the ids a PATCH sends back. A repository's "owner/repo"
+   *  name is a display property read off the repo, never a key that
+   *  round-trips through here: a rename mid-session would strand every
+   *  pin that did. */
+  pinned_repository_ids: string[]
   jira_project_key: string
   linear_project_key: string
   /** Per-project Curator spec-authorship skill. Empty string =
@@ -1003,15 +1035,6 @@ export interface ProjectImportWarning {
 export interface ProjectImportResult {
   project: Project
   warnings: ProjectImportWarning[]
-}
-
-export interface ProjectImportError {
-  error: string
-  message?: string
-  missing_repos?: Array<{
-    repo: string
-    error: string
-  }>
 }
 
 export interface KnowledgeFile {
@@ -1088,11 +1111,12 @@ export interface FactoryEntity {
   /** Active tasks for this entity, grouped by event_type. Drives the
    *  station drawer's drag-to-delegate flow: dropping on the runs tray
    *  reads the matching event_type's first dedup_key and forwards it
-   *  (along with entity_id + event_type) to POST /api/factory/delegate,
-   *  which then find-or-creates via the unique index on
-   *  (entity_id, event_type, dedup_key). task_id is informational —
-   *  not currently sent on the request — and is kept available for
-   *  future UI hints (e.g., "this queued chip already has a task"). */
+   *  (along with entity_id + event_type) to POST /api/tasks, which
+   *  find-or-creates via the unique index on
+   *  (entity_id, event_type, dedup_key) and answers the task the second
+   *  call delegates. task_id is informational — not sent on the request —
+   *  and is kept available for future UI hints (e.g., "this queued chip
+   *  already has a task"). */
   pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
   /** True if any run on this entity is `open` (a turn ended without a
    *  conclusion). Drives the idle badge on the runs-tray chip so a user
@@ -1122,19 +1146,18 @@ export interface FactorySnapshot {
 }
 
 export type WSEvent =
-  // One transcript row for a conversation — delegated run or curator turn
+  // One transcript row for a conversation — delegated conversation or curator turn
   // alike (the two former agent_message / curator_message events converged).
-  // conversation_id is set for delegated runs; project_id is set for curator
+  // conversation_id is set for delegated conversations; project_id is set for curator
   // turns (the curator surface filters by project and appends to its active
   // turn). data is the shared snake_case Message DTO.
   | { type: 'message'; conversation_id?: string; project_id?: string; data: Message }
-  // Conversation lifecycle/status change (the former agent_run_update +
-  // curator_request_update). A delegated run carries conversation_id and a
+  // Conversation lifecycle/status change. A delegated conversation carries conversation_id and a
   // coalesced display status (fetching/cloning/agent_starting/
   // awaiting_credentials/running/terminal) plus failure_kind on a failure; a
   // curator turn carries project_id and { request_id, status }. failure_kind
   // rides along only when status === 'failed' AND the backend classified the
-  // cause (domain.RunFailureKind); absent === generic failure.
+  // cause (domain.ConversationFailureKind); absent === generic failure.
   | {
       type: 'conversation_update'
       conversation_id?: string
@@ -1143,9 +1166,10 @@ export type WSEvent =
         status?: string
         failure_kind?: string
         request_id?: string
-        // resumable rides the parked status when a run's workspace snapshot
-        // lands after the park was already announced (a cross-pod stop parks
-        // from control seconds before the executor writes the blob) — the
+        // resumable rides the parked status when a conversation parked by one pod
+        // becomes resumable on another: a cross-pod stop parks from control
+        // before the executor holding the workspace has recorded that it owes
+        // a persist for it, and this is the executor saying it has — the
         // moment a follow-up becomes possible, which no status change marks.
         // The status repeats what the row already has, so consumers must merge
         // it idempotently: a second `open` is not a transition.
@@ -1184,7 +1208,7 @@ export type WSEvent =
   | {
       // A pending permission prompt reached a terminal resolution (answered by
       // someone, or timed out) — broadcast so every surface showing it (board +
-      // run-detail, or two board tabs) drops it promptly instead of waiting for
+      // RunDetail, or two board tabs) drops it promptly instead of waiting for
       // its own client TTL. The client TTL stays as a backstop.
       type: 'permission_resolved'
       conversation_id: string
@@ -1218,6 +1242,11 @@ export type WSEvent =
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  // The workspace's reachable-repo mirror was refreshed. Payload-free: the
+  // repository picker refetches through the REST read, which carries the
+  // scoping — the cheap tier, and what turns a first-ever open's "discovering
+  // repositories…" into a list without the client polling for it.
+  | { type: 'github_repos_updated'; data: Record<string, never> }
   | {
       // Claim-axis change. Exactly one of the two ID fields
       // is populated when claim landed; both empty when claim was
@@ -1240,18 +1269,36 @@ export type WSEvent =
   | { type: 'scoring_started'; data: { task_ids: string[] } }
   | { type: 'scoring_completed'; data: { task_ids: string[] } }
   | {
-      type: 'repo_docs_updated'
-      data: { id: string; has_readme: boolean; has_claude_md: boolean; has_agents_md: boolean }
+      // One sparse-diff event for the repositories table (mirrors Go's
+      // repoevent.Update allowlist): only the fields the backend just
+      // wrote are present, and consumers merge them into the row keyed
+      // by id — never overwrite, so a clone-status diff can't blank the
+      // AI profile text and vice versa.
+      type: 'repository_updated'
+      data: {
+        /** The registry row id — the merge key, and the same id
+         *  `/api/repos` serves. A repository renamed between two frames
+         *  keeps it, so the merge goes on matching. */
+        id: string
+        /** "owner/repo", for display only. Never key on it. */
+        slug: string
+        has_readme?: boolean
+        has_claude_md?: boolean
+        has_agents_md?: boolean
+        profile_text?: string
+        clone_status?: 'ok' | 'failed' | 'pending'
+        clone_error?: string
+        clone_error_kind?: 'ssh' | 'other'
+      }
     }
-  | { type: 'repo_profile_updated'; data: { id: string; profile_text: string } }
   | { type: 'toast'; data: ToastPayload }
 
 // ──────────────────────────────────────────────────────────────────────
 // Usage dashboard — spend layer (TFAC-479, consuming the TFAC-478 backend).
-// Three role-gated, session-org-scoped reads over the llm_spend view. The FE
-// calls the literal /api/usage/* paths WITHOUT an org prefix — the backend
-// resolves the org from the session, same as /api/dashboard/*. snake_case
-// fields mirror the Go response structs in internal/server/usage_handler.go.
+// Three role-gated reads over the llm_spend view, each addressed by the scope
+// it reports on: /api/me/usage, /api/teams/{id}/usage, /api/orgs/{id}/usage.
+// snake_case fields mirror the Go response structs in
+// internal/server/usage_handler.go.
 // `cost` is real USD (SDK token counts × list price; see the TFAC-449 epic),
 // not an estimate.
 // ──────────────────────────────────────────────────────────────────────
@@ -1312,7 +1359,7 @@ export interface UsageRuleBucket {
 
 /** One team's summed cost across team-attributed rows (org rollup only). Per-team
  *  caps are NOT here — the governance cap editor reads the full team list from
- *  /api/usage/org/team-caps (UsageTeamCap), so an idle team absent from this spend
+ *  /api/orgs/{id}/usage/team-caps/list (UsageTeamCap), so an idle team absent from this spend
  *  rollup can still be capped (TFAC-482). */
 export interface UsageTeamBucket {
   team_id: string
@@ -1327,7 +1374,7 @@ export interface UsageOrgLevelBucket {
   cost: number
 }
 
-/** GET /api/usage/me — the caller's own spend (any org member). */
+/** GET /api/me/usage — the caller's own spend (any org member). */
 export interface UsageMeResponse {
   total_cost_usd: number
   by_category: UsageCategoryBucket[]
@@ -1336,7 +1383,7 @@ export interface UsageMeResponse {
   by_day_model?: UsageDayModelBucket[]
 }
 
-/** GET /api/usage/teams/{id} — one team's breakdown (team admin only; an org
+/** GET /api/teams/{id}/usage — one team's breakdown (team admin only; an org
  *  admin who isn't a team admin gets a 403 and sees cross-team numbers in the
  *  org rollup instead). */
 export interface UsageTeamResponse {
@@ -1351,7 +1398,7 @@ export interface UsageTeamResponse {
   by_day_model?: UsageDayModelBucket[]
 }
 
-/** GET /api/usage/org — the org rollup (org admin only). Partition invariant
+/** GET /api/orgs/{id}/usage — the org rollup (org admin only). Partition invariant
  *  (from the backend): total_cost_usd === sum(by_team) + sum(org_level); by_user
  *  and by_category slice the same total on different axes. */
 export interface UsageOrgResponse {
@@ -1369,24 +1416,19 @@ export interface UsageOrgResponse {
   by_rule?: UsageRuleBucket[]
 }
 
-/** One team in GET /api/usage/org/team-caps — its id, name, and per-team daily
- *  spend cap (TFAC-482; null = no cap). The governance cap editor lists EVERY
- *  active team this way (not just those with spend), so an idle team can be
- *  pre-capped; window spend is looked up separately from the org rollup's by_team. */
+/** One row of POST /api/orgs/{id}/usage/team-caps/list — a team's id, name, and
+ *  per-team daily spend cap (null = no cap). The governance cap editor lists
+ *  EVERY active team (not just those with spend), so an idle team can be
+ *  pre-capped; window spend is looked up separately from the org rollup's
+ *  by_team. Org admin + governance only; 404 unlicensed. */
 export interface UsageTeamCap {
   team_id: string
   team_name: string
   cap: number | null
 }
 
-/** GET /api/usage/org/team-caps — every active team + its cap (org admin +
- *  governance only; 404 unlicensed). */
-export interface UsageTeamCapsResponse {
-  teams: UsageTeamCap[]
-}
-
 /** One row of the EE access & credential change-log (GET
- *  /api/usage/org/access-log, TFAC-484). `action_label` is the server-rendered
+ *  /api/orgs/{id}/usage/access-log/list, TFAC-484). `action_label` is the server-rendered
  *  human predicate ("changed Alice from member to admin") shown after the actor +
  *  timestamp; the actor/target/team names are pre-resolved ("" when a
  *  since-removed user/team no longer resolves). `action` is the raw discriminator
@@ -1406,17 +1448,12 @@ export interface AccessChangeRow {
   created_at: string
 }
 
-/** GET /api/usage/org/access-log — one page of the org-admin EE audit viewer
- *  (org admin + governance entitlement; 404 unlicensed). Newest-first; paginate
- *  via limit/offset and `has_more`. The `category` query narrows to membership vs
+/** POST /api/orgs/{id}/usage/access-log/list — the org-admin EE audit viewer (org
+ *  admin + governance entitlement; 404 unlicensed), newest-first, answering the
+ *  standard list envelope. The body's `category` narrows to membership vs
  *  credential vs policy (SSO connection, enforcement, domains, break-glass)
- *  changes. */
-export interface AccessLogResponse {
-  items: AccessChangeRow[]
-  limit: number
-  offset: number
-  has_more: boolean
-}
+ *  changes. The rows are AccessChangeRow. */
+export type AccessLogListRow = AccessChangeRow
 
 // --- Fleet console (TFAC-589) — mirrors ee/fleet DTOs ---
 
@@ -1558,12 +1595,12 @@ export interface FleetSandboxClaim {
   peak_mem_mb?: number
   cpu_usec?: number
   /** The driven conversation's status — the same vocabulary Conversation.Status
-   *  carries, so branch on it through a RunStatusValue-annotated helper rather
+   *  carries, so branch on it through a ConversationStatusValue-annotated helper rather
    *  than inline literals. */
-  status?: RunStatusValue
+  status?: ConversationStatusValue
   failure_kind?: string
   /** How the ENGAGEMENT ended (completed | failed | cancelled | requeued |
-   *  parked | reaped) — a claim vocabulary of its own, not a run status. */
+   *  parked | reaped) — a claim vocabulary of its own, not a conversation status. */
   outcome?: string
 }
 
@@ -1574,7 +1611,7 @@ export interface FleetSandboxes {
   sandboxes: FleetSandboxClaim[]
 }
 
-// FleetSandboxSample is one tick of a single sandbox's in-run series
+// FleetSandboxSample is one tick of a single sandbox's mid-engagement series
 // (GET /api/fleet/claims/{id}/series). CPU arrives CUMULATIVE: the consumer
 // differences consecutive samples into a rate, so a dropped tick self-heals
 // into a wider-but-correct interval instead of a gap that reads as idle.
@@ -1591,7 +1628,7 @@ export interface FleetSandboxSeries {
 }
 
 // UsageOrgOps — the org-scoped operations subset (TFAC-589): an org admin's own
-// queue waits + run durations, mirroring GET /api/usage/org/ops. SaaS-safe (no
+// queue waits + run durations, mirroring GET /api/orgs/{id}/usage/ops. SaaS-safe (no
 // cross-tenant machine truth).
 export interface UsageOrgOpsFailureKind {
   kind: string

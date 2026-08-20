@@ -33,7 +33,7 @@ func (noopScorer) Trigger(string) {}
 // newTestDB sets up an in-memory SQLite with schema + seed for integration tests.
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	}
 	// Stamp the bot claim — task stays status='queued' but the
 	// responsibility axis is committed.
-	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp agent claim: %v", err)
 	}
 

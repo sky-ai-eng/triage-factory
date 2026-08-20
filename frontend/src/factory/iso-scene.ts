@@ -766,7 +766,7 @@ const stationSpec = (
   col: number,
   row: number,
   queued: number,
-  runs: number,
+  conversations: number,
   label: string,
   eventType: string,
 ): Station => ({
@@ -783,7 +783,7 @@ const stationSpec = (
   // layer.
   id: eventType,
   queuedCount: queued,
-  runCount: runs,
+  conversationCount: conversations,
   label,
   ports: [
     { kind: 'input', direction: 'west', offset: 0.5, recessDepth: DEFAULT_PORT_RECESS_DEPTH },
@@ -1347,7 +1347,7 @@ export interface ClickedStationInfo {
   id: string
   label: string
   queuedCount: number
-  runCount: number
+  conversationCount: number
   /** Entities parked at this station with no active run. Drives
    *  the drawer's intake-tray chip list. */
   queued: FactoryEntity[]
@@ -2434,7 +2434,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   // ─── Per-station registry ─────────────────────────────────────
   // One row per station — keyed by event_type (= the station's id).
   // Pairs the spec/label with the live mesh handle (for setQueuedCount
-  // / setRunCount) and the latest ClickedStationInfo to replay when
+  // / setConversationCount) and the latest ClickedStationInfo to replay when
   // the user clicks. The reconciler below mutates `data` in place
   // each frame; click callback returns whatever's most recent.
   type StationRow = {
@@ -2466,7 +2466,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         id: spec.id,
         label: spec.label ?? spec.id,
         queuedCount: spec.queuedCount ?? 0,
-        runCount: spec.runCount ?? 0,
+        conversationCount: spec.conversationCount ?? 0,
         queued: [],
         runs: [],
       },
@@ -2504,7 +2504,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   const knownStations = new Set<string>(stationsByEvent.keys())
   const chipController = renderer.getSnapshotChipController()
   let latestSnapshot: FactorySnapshot | null = null
-  const lastTrayState = new Map<string, { queuedCount: number; runCount: number }>()
+  const lastTrayState = new Map<string, { queuedCount: number; conversationCount: number }>()
 
   // Live drawer feed. Per-station observer sets fire when the
   // station's content (queued entities + active runs) actually
@@ -2515,8 +2515,8 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
   const lastFiredHash = new Map<string, string>()
   const hashStationData = (data: ClickedStationInfo): string => {
     const queuedIds = data.queued.map((e) => e.id).join(',')
-    const runIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
-    return `${data.queuedCount}|${data.runCount}|${queuedIds}|${runIds}`
+    const conversationIds = data.runs.map((r) => `${r.run.ID}:${r.run.Status}`).join(',')
+    return `${data.queuedCount}|${data.conversationCount}|${queuedIds}|${conversationIds}`
   }
 
   const reconcile = (): void => {
@@ -2542,7 +2542,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       }
     }
 
-    // Update station tray data. setQueuedCount/setRunCount touch a
+    // Update station tray data. setQueuedCount/setConversationCount touch a
     // DynamicTexture; only call them when the count actually changes
     // to avoid texture re-uploads on idle frames. Click-replay data
     // is always refreshed so a same-count-different-entities case
@@ -2550,17 +2550,21 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
     for (const [eventType, row] of stationsByEvent) {
       const fs = latestSnapshot.stations[eventType]
       const runs = fs?.runs ?? []
-      const runEntityIds = new Set(runs.map((r) => r.task.entity_id))
+      const conversationEntityIds = new Set(runs.map((r) => r.task.entity_id))
       const allParked = parkedByStation.get(eventType) ?? []
-      const queued = allParked.filter((e) => !runEntityIds.has(e.id))
+      const queued = allParked.filter((e) => !conversationEntityIds.has(e.id))
       const queuedCount = queued.length
-      const runCount = runs.length
+      const conversationCount = runs.length
 
       const last = lastTrayState.get(eventType)
-      if (!last || last.queuedCount !== queuedCount || last.runCount !== runCount) {
+      if (
+        !last ||
+        last.queuedCount !== queuedCount ||
+        last.conversationCount !== conversationCount
+      ) {
         row.handle.setQueuedCount(queuedCount)
-        row.handle.setRunCount(runCount)
-        lastTrayState.set(eventType, { queuedCount, runCount })
+        row.handle.setConversationCount(conversationCount)
+        lastTrayState.set(eventType, { queuedCount, conversationCount })
       }
       // Lifetime counter: the station-handle API exposes this for every
       // station, so we update it unconditionally here with the latest
@@ -2570,7 +2574,7 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
         id: eventType,
         label: row.spec.label ?? eventType,
         queuedCount,
-        runCount,
+        conversationCount,
         queued,
         runs,
       }
@@ -2787,15 +2791,15 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
       region: null,
       resolve: () => {
         // Frame the station doing the most agent work — gated on active
-        // runs, never queued piles (a heap is not a spectacle). runCount
+        // runs, never queued piles (a heap is not a spectacle). conversationCount
         // is refreshed every frame by the reconciler (registered on
         // onBeforeRender before the director's tick, so it's current here);
         // a frame of staleness would be harmless either way since runs
         // turn over on the order of seconds.
         let best: StationRow | null = null
         for (const row of stationsByEvent.values()) {
-          if ((row.data.runCount ?? 0) <= 0) continue
-          if (!best || row.data.runCount > best.data.runCount) best = row
+          if ((row.data.conversationCount ?? 0) <= 0) continue
+          if (!best || row.data.conversationCount > best.data.conversationCount) best = row
         }
         if (!best) return null
         return {

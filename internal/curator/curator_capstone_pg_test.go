@@ -36,7 +36,6 @@ package curator
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,11 +76,11 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
 
 	// A "private" pinned repo for tenant A: a local bare upstream stands in
-	// for the private GitHub repo and is recorded in repo_profiles so the
+	// for the private GitHub repo and is recorded in repositories so the
 	// curator's admin-pool profile read resolves the clone URL + branch.
 	upstream := makeCapstoneUpstream(t)
 	const owner, repo = "acme", "private"
-	seedRepoProfile(t, h, orgA, owner, repo, upstream, "main")
+	seedRepository(t, h, orgA, owner, repo, upstream, "main")
 	projectA := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb", []string{owner + "/" + repo})
 
 	// Stub the agent so the dispatch reaches terminal without claude/gVisor.
@@ -105,7 +104,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	// --- TFAC-62: the pinned bare seeded on demand; auth path resolved ---
 	bareDir := paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo)
 	if !dirExists(bareDir) {
-		t.Errorf("pinned-repo bare was not seeded at %s — the GetSystem profile read or on-demand seed failed", bareDir)
+		t.Errorf("pinned-repo bare was not seeded at %s — the GetSystem repository read or on-demand seed failed", bareDir)
 	}
 	if !resolver.calledWith(orgA, owner) {
 		t.Errorf("clone-token resolver was not invoked for (%s, %s); the multi-mode auth path did not run (calls=%v)", orgA, owner, resolver.snapshot())
@@ -175,7 +174,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 		if cl.DurationMs == nil || *cl.DurationMs != 5 || cl.NumTurns == nil || *cl.NumTurns != 1 {
 			t.Errorf("claim telemetry = (%v, %v), want (5, 1) — the stub result's reported duration/turns", cl.DurationMs, cl.NumTurns)
 		}
-		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID)
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgA, conv.ID, 0)
 		if err != nil {
 			return err
 		}
@@ -215,7 +214,7 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	// --- no cross-tenant leakage: bob (orgB) cannot read alice's turn ---
 	aliceConvID := conversationIDFor(t, h, reqID)
 	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgB, bob, func(ts db.TxStores) error {
-		msgs, err := ts.Curator.ListConversationMessages(ctx, orgB, aliceConvID)
+		msgs, err := ts.Curator.ListConversationMessages(ctx, orgB, aliceConvID, 0)
 		if err != nil {
 			return err
 		}
@@ -281,7 +280,7 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	upstream := makeCapstoneUpstream(t)
 	const owner, repo = "acme", "shared"
-	seedRepoProfile(t, h, orgA, owner, repo, upstream, "main")
+	seedRepository(t, h, orgA, owner, repo, upstream, "main")
 	projA := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb-a", []string{owner + "/" + repo})
 	projB := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb-b", []string{owner + "/" + repo})
 
@@ -344,8 +343,8 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	coldUp := makeCapstoneUpstream(t)
 	hotUp := makeCapstoneUpstream(t)
 	// Distinct repos → distinct bares (the bare cache keys on owner/repo).
-	seedRepoProfile(t, h, orgCold, "acme", "cold", coldUp, "main")
-	seedRepoProfile(t, h, orgHot, "acme", "hot", hotUp, "main")
+	seedRepository(t, h, orgCold, "acme", "cold", coldUp, "main")
+	seedRepository(t, h, orgHot, "acme", "hot", hotUp, "main")
 
 	noToken := func(context.Context, string, string) worktree.CloneAuth { return worktree.CloneAuth{} }
 
@@ -404,7 +403,7 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	upstream := makeCapstoneUpstream(t)
-	seedRepoProfile(t, h, orgA, "acme", "repo", upstream, "main")
+	seedRepository(t, h, orgA, "acme", "repo", upstream, "main")
 	projA := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb", []string{"acme/repo"})
 
 	stub := &stubAgent{inFlight: make(chan struct{}, 1), release: make(chan struct{})}
@@ -647,30 +646,37 @@ func multimodeEnv(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 }
 
-// seedRepoProfile records a repo_profiles row (admin pool) so the curator's
+// seedRepository records a repositories row (admin pool) so the curator's
 // GetSystem read resolves a clone URL + branch for the pinned repo.
-func seedRepoProfile(t *testing.T, h *pgtest.Harness, orgID, owner, repo, cloneURL, defaultBranch string) {
+func seedRepository(t *testing.T, h *pgtest.Harness, orgID, owner, repo, cloneURL, defaultBranch string) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO repo_profiles (org_id, owner, repo, clone_url, default_branch, clone_status, updated_at)
+		INSERT INTO repositories (org_id, owner, repo, clone_url, default_branch, clone_status, updated_at)
 		VALUES ($1, $2, $3, $4, $5, 'ok', now())
 	`, orgID, owner, repo, cloneURL, defaultBranch)
 }
 
-// seedPgProjectPinned inserts a project with pinned_repos set (admin pool —
+// seedPgProjectPinned inserts a project with its pinned repos (admin pool —
 // no JWT claims in a bare test context). Mirrors seedPgProject in
-// curator_pg_test.go but threads the pins through.
+// curator_pg_test.go but threads the pins through: each one resolves to the
+// registry row it references, which the capstone fixture has already seeded.
 func seedPgProjectPinned(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, name string, pins []string) string {
 	t.Helper()
 	id := uuid.New().String()
-	pinsJSON, err := json.Marshal(pins)
-	if err != nil {
-		t.Fatalf("marshal pins: %v", err)
-	}
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, pinned_repos, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, now(), now())
-	`, id, orgID, userID, teamID, name, string(pinsJSON))
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now())
+	`, id, orgID, userID, teamID, name)
+	for i, pin := range pins {
+		owner, repo, ok := strings.Cut(pin, "/")
+		if !ok {
+			t.Fatalf("pinned repo %q is not an owner/repo slug", pin)
+		}
+		pgtest.MustExec(t, h.AdminDB, `
+			INSERT INTO project_pinned_repos (project_id, repository_id, "position")
+			VALUES ($1, $2, $3)
+		`, id, pgtest.SeedRepository(t, h, orgID, owner, repo), i)
+	}
 	return id
 }
 

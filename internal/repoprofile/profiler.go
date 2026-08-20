@@ -13,6 +13,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
+	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -36,10 +38,19 @@ type Profiler struct {
 	resolver   github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
 	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
-	repos      db.RepoStore            // profile reads + upserts go through the store
+	repos      db.RepositoryStore      // profile reads + upserts go through the store
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	ws         *websocket.Hub
+	// notify publishes repository_updated over ws. Built org-scoped (the
+	// local shape) in NewProfiler; SetRecipients rebuilds it with the
+	// multi-mode per-user fan-out.
+	notify *repoevent.Notifier
+	// recipients is the audience resolver SetRecipients captured (nil in
+	// local), kept alongside notify because the batch-failure toast needs
+	// it directly: its body names repo slugs, which are visibility-scoped
+	// data just like the event payloads.
+	recipients repoevent.RecipientsFunc
 
 	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
 	// closure over profileBatch that captures the recorder + system-job
@@ -56,18 +67,70 @@ type Profiler struct {
 // token). The limiter (nil → unlimited) bounds concurrent profiling sandboxes
 // against the other background jobs; it is captured by batchFn alongside the
 // recorder.
-func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepoStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
+func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepositoryStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
 	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
+	p.notify = repoevent.NewNotifier(ws, nil)
 	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
 	}
 	return p
 }
 
-// repoWithDocs groups a repo profile with the documentation text to send to the LLM.
+// SetRecipients switches the profiler's repository_updated broadcasts
+// AND its repo-naming toasts from the org-scoped local shape to the
+// multi-mode per-user fan-out: repositories is org-wide but its REST
+// read is visibility-scoped, and the websocket hub has no team axis, so
+// the audience must be resolved per emission (see internal/repoevent).
+// Multi-mode wiring only, called once at boot before any Trigger —
+// local mode never calls it, keeping the single org-wide broadcast N=1
+// has always had.
+func (p *Profiler) SetRecipients(recipients repoevent.RecipientsFunc) {
+	p.recipients = recipients
+	p.notify = repoevent.NewNotifier(p.ws, recipients)
+}
+
+// repoWithDocs groups the repository fields a cycle gathered with the
+// documentation text to send to the LLM. profile is the pass's own input to a
+// later Upsert, not a row it read — it carries no registry id, and the id the
+// batch's events are keyed on comes back from that Upsert.
 type repoWithDocs struct {
-	profile domain.RepoProfile
+	profile domain.Repository
 	docs    string
+}
+
+// fireBatchFailureToast surfaces a genuinely failed profiling batch to
+// the users who can see its repos. Local (no recipients resolver): one
+// org-wide toast naming every repo in the batch — N=1, nothing to scope.
+// Multi: the slugs in the body are visibility-scoped data, so resolve
+// each repo's audience and send each affected user a toast naming only
+// the repos they can see; a user outside every repo's audience gets
+// nothing. A per-repo resolution failure skips that repo's slug (fail
+// closed, same posture as repoevent.Notifier) — the row itself was still
+// saved by the fallback upsert either way.
+func (p *Profiler) fireBatchFailureToast(ctx context.Context, orgID string, batch []repoWithDocs) {
+	const bodyFmt = "Profiling failed for %s — rows saved without AI summary"
+	if p.recipients == nil {
+		names := make([]string, len(batch))
+		for i, d := range batch {
+			names[i] = d.profile.Slug()
+		}
+		toast.Warning(p.ws, orgID, fmt.Sprintf(bodyFmt, strings.Join(names, ", ")))
+		return
+	}
+	perUser := map[string][]string{}
+	for _, d := range batch {
+		uids, err := p.recipients(ctx, orgID, d.profile.Owner, d.profile.Repo)
+		if err != nil {
+			repoprofileLog.Error("resolve toast audience failed; omitting repo from failure toast", "repo", d.profile.Slug(), "error", err)
+			continue
+		}
+		for _, uid := range uids {
+			perUser[uid] = append(perUser[uid], d.profile.Slug())
+		}
+	}
+	for uid, names := range perUser {
+		toast.FireUser(p.ws, orgID, uid, toast.LevelWarning, "", fmt.Sprintf(bodyFmt, strings.Join(names, ", ")))
+	}
 }
 
 // Run iterates active orgs and profiles each one's configured repos.
@@ -116,7 +179,7 @@ func (p *Profiler) Run(ctx context.Context, force bool) error {
 // this cycle (see runOrg) — the Runner uses it to skip the bare-clone
 // bootstrap on a no-op TTL-skip cycle.
 func (p *Profiler) RunOrg(ctx context.Context, orgID string, force bool) (bool, error) {
-	repos, err := p.repos.ListConfiguredNamesSystem(ctx, orgID)
+	repos, err := p.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("load configured repos: %w", err)
 	}
@@ -153,7 +216,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 	// Resolve the clone protocol once for the whole run rather than
 	// re-reading per-org settings inside the per-repo loop. The setting
-	// can't change mid-run — handleSettingsPost serializes the org-
+	// can't change mid-run — handleOrgSettingsPatch serializes the org-
 	// settings write behind the same `onGitHubChanged` callback that
 	// owns this goroutine — so capturing it here matches actual
 	// semantics and avoids N redundant DB reads.
@@ -165,7 +228,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	}
 
 	var withDocs []repoWithDocs
-	var withoutDocs []domain.RepoProfile
+	var withoutDocs []domain.Repository
 
 	for _, name := range repos {
 		if err := ctx.Err(); err != nil {
@@ -179,19 +242,35 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		owner, repo := parts[0], parts[1]
 
-		// Skip repos that were recently profiled (unless forced)
-		if !force {
-			existing, err := p.repos.GetSystem(ctx, orgID, name)
-			if err != nil {
-				repoprofileLog.Warn("check existing profile failed, skipping", "repo", name, "error", err)
+		// One read of the stored row, serving three purposes: the TTL gate
+		// (skipped when forced), the registry id the websocket events below
+		// are keyed on, and proof the repository is still tracked. Ref-keyed,
+		// because name came out of the tracked set and is the same name the
+		// GitHub fetches are built from; the rename applied further down
+		// moves owner/repo and leaves the id alone, so an id read here stays
+		// the right one either way.
+		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		switch {
+		case existingErr != nil:
+			// Forced passes skip too: without the row there is no id to key
+			// the events on, and this pass would end in a write against the
+			// same store the read just failed on. The next cycle — or a
+			// re-press of the re-profile button — retries.
+			repoprofileLog.Warn("read repository row failed, skipping", "repo", name, "error", existingErr)
+			continue
+		case existing == nil:
+			// The tracked-set list this loop walks joins tracking to the
+			// registry, and tracking rows cascade with their repository — so
+			// a name with no row was untracked between that read and this
+			// one. Profiling it anyway would upsert the row back into
+			// existence, resurrecting a repository a config save just
+			// deleted.
+			repoprofileLog.Info("repository row gone since the tracked-set read, skipping", "repo", name)
+			continue
+		case !force && existing.ProfiledAt != nil:
+			if age := time.Since(*existing.ProfiledAt); age < reprofileTTL {
+				repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
 				continue
-			}
-			if existing != nil && existing.ProfiledAt != nil {
-				age := time.Since(*existing.ProfiledAt)
-				if age < reprofileTTL {
-					repoprofileLog.Debug("recently profiled, skipping", "repo", name, "age", age.Round(time.Hour), "ttl", reprofileTTL)
-					continue
-				}
 			}
 		}
 
@@ -225,21 +304,47 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			continue
 		}
 
-		// All fetches succeeded (metaErr nil ⇒ meta non-nil). Both HTTPS and
-		// SSH clone forms come back from the same /repos/:owner/:repo
-		// response, so picking is a one-line branch. Empty SSHURL (legacy GHE
-		// deployments without ssh_url surfaced) falls back to HTTPS so we
-		// always have *some* URL on the row.
+		// All fetches succeeded (metaErr nil ⇒ meta non-nil), which makes this
+		// the point where the profiler knows what GitHub currently calls the
+		// repository: a request for a renamed one redirects, so the response's
+		// full_name answers a question the request never asked. Applying it
+		// here rather than after the upsert is what keeps the upsert landing
+		// on the moved row instead of minting a second one under the old name.
+		//
+		// This is the rename path a PAT org has. The poller's App-grant
+		// listing sees the same fact within a cycle, but only for App orgs;
+		// here it costs one field on a response already in hand, bounded by
+		// the profile TTL.
+		if moved, ok := p.applyRenameFromMeta(ctx, orgID, name, meta); ok {
+			name = moved
+			owner, repo, _ = strings.Cut(name, "/")
+		}
+
+		// Both HTTPS and SSH clone forms come back from the same
+		// /repos/:owner/:repo response, so picking is a one-line branch. Empty
+		// SSHURL (legacy GHE deployments without ssh_url surfaced) falls back
+		// to HTTPS so we always have *some* URL on the row.
 		defaultBranch := meta.DefaultBranch
 		cloneURL := meta.CloneURL
 		if preferSSH && meta.SSHURL != "" {
 			cloneURL = meta.SSHURL
 		}
 
-		prof := domain.RepoProfile{
-			ID:            name,
-			Owner:         owner,
-			Repo:          repo,
+		// No ID: UpsertSystem keys on the identity columns below and hands
+		// back the row it wrote, which is where the id both emit sites key
+		// their event on comes from. Carrying one here would only invite a
+		// reader to believe this struct describes a row.
+		prof := domain.Repository{
+			Owner:  owner,
+			Repo:   repo,
+			Source: domain.RepoSourceGitHub,
+			// The repository id GitHub just sent on the same response the
+			// clone URL and default branch came from. This is the only place
+			// TF learns it — it is not worth a request of its own, and a row
+			// without one behaves exactly as it always has — so a repo whose
+			// meta fetch failed (skipped above) or that is inside its profile
+			// TTL simply keeps whatever id it already had.
+			ExternalID:    meta.ExternalID(),
 			HasReadme:     readme != "",
 			HasClaudeMd:   claudeMd != "",
 			HasAgentsMd:   agentsMd != "",
@@ -261,22 +366,26 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			prof.ProfiledAt = &now
 		}
 
-		// Persist docs flags immediately so the UI can show them before profiling completes
-		if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
+		// Persist docs flags immediately so the UI can show them before
+		// profiling completes.
+		stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+		if err != nil {
+			// Nothing landed, so nothing is announced: the event's job is to
+			// tell clients what the row now says, and a failed write left it
+			// saying what it said before. The repo still goes on into the
+			// batch below, whose own write is another attempt at the row.
 			repoprofileLog.Error("upsert docs flags failed", "repo", name, "error", err)
 		} else {
 			touched = true
-		}
-		if p.ws != nil {
-			p.ws.Broadcast(websocket.Event{
-				Type:  "repo_docs_updated",
-				OrgID: orgID,
-				Data: map[string]any{
-					"id":            name,
-					"has_readme":    prof.HasReadme,
-					"has_claude_md": prof.HasClaudeMd,
-					"has_agents_md": prof.HasAgentsMd,
-				},
+			// The row the upsert returned, not the struct handed to it: the
+			// flags agree either way, but the id and the slug are the row's —
+			// the stored casing, and an id this pass never read.
+			p.notify.Publish(ctx, orgID, repoevent.Update{
+				ID:          stored.ID,
+				Slug:        stored.Slug(),
+				HasReadme:   repoevent.Ptr(stored.HasReadme),
+				HasClaudeMd: repoevent.Ptr(stored.HasClaudeMd),
+				HasAgentsMd: repoevent.Ptr(stored.HasAgentsMd),
 			})
 		}
 
@@ -322,16 +431,15 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				repoprofileLog.Error("profile batch failed", "batch", i/profileBatchSize+1, "error", err)
 			}
 			if !backoff {
-				repoNames := make([]string, len(batch))
-				for j, d := range batch {
-					repoNames[j] = d.profile.ID
-				}
-				toast.Warning(p.ws, orgID, fmt.Sprintf("Profiling failed for %s — rows saved without AI summary", strings.Join(repoNames, ", ")))
+				p.fireBatchFailureToast(ctx, orgID, batch)
 			}
 			// Fallback: upsert without profile_text so the row at least exists.
+			// Nothing is published — the doc-flags emission above already said
+			// everything this write persists, and there is no profile text yet
+			// to announce.
 			for _, d := range batch {
-				if uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
-					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.ID, "error", uErr)
+				if _, uErr := p.repos.UpsertSystem(ctx, orgID, d.profile); uErr != nil {
+					repoprofileLog.Error("upsert fallback failed", "repo", d.profile.Slug(), "error", uErr)
 				} else {
 					touched = true
 				}
@@ -347,7 +455,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		now := time.Now()
 		for _, d := range batch {
 			prof := d.profile
-			if text := byRepo[prof.ID]; text != "" {
+			if text := byRepo[prof.Slug()]; text != "" {
 				prof.ProfileText = text
 			}
 			// Stamp on every successful batch result, even when the model
@@ -356,23 +464,21 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// fallback path above, which leaves profiled_at unset so the repo
 			// retries next cycle — error ≠ absence.)
 			prof.ProfiledAt = &now
-			if err := p.repos.UpsertSystem(ctx, orgID, prof); err != nil {
-				repoprofileLog.Error("upsert profile failed", "repo", prof.ID, "error", err)
+			stored, err := p.repos.UpsertSystem(ctx, orgID, prof)
+			if err != nil {
+				repoprofileLog.Error("upsert profile failed", "repo", prof.Slug(), "error", err)
 				continue
 			}
 			touched = true
-			if prof.ProfileText != "" {
+			// Off the stored row, so the text a client merges is the text the
+			// column holds and the key it merges under is the registry id.
+			if stored.ProfileText != "" {
 				profiled++
-				if p.ws != nil {
-					p.ws.Broadcast(websocket.Event{
-						Type:  "repo_profile_updated",
-						OrgID: orgID,
-						Data: map[string]any{
-							"id":           prof.ID,
-							"profile_text": prof.ProfileText,
-						},
-					})
-				}
+				p.notify.Publish(ctx, orgID, repoevent.Update{
+					ID:          stored.ID,
+					Slug:        stored.Slug(),
+					ProfileText: repoevent.Ptr(stored.ProfileText),
+				})
 			}
 		}
 	}
@@ -386,6 +492,33 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		repoprofileLog.Debug("profile run done", "profiled_with_ai", profiled, "without_docs", len(withoutDocs))
 	}
 	return touched, nil
+}
+
+// applyRenameFromMeta applies a rename this metadata response revealed and
+// reports the repository's current slug.
+//
+// tracked is the slug the request was made under; meta.FullName is what GitHub
+// answered with. Differing means the repository was renamed (or transferred —
+// same condition, since the id survives both). ok=false is the ordinary case:
+// the names agree, GitHub sent no id or name to compare, or the rename could
+// not be applied — and the caller then profiles under the name it already had,
+// which still resolves through GitHub's redirect.
+func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, tracked string, meta *github.RepoMeta) (string, bool) {
+	id := meta.ExternalID()
+	if meta.FullName == "" || id == "" || domain.SameRepoSlug(meta.FullName, tracked) {
+		return "", false
+	}
+	owner, repo, ok := strings.Cut(meta.FullName, "/")
+	if !ok || owner == "" || repo == "" {
+		return "", false
+	}
+	applied := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, []domain.RepoRef{{
+		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+	}})
+	if applied == 0 {
+		return "", false
+	}
+	return meta.FullName, true
 }
 
 // repoProfileInput is the per-repo JSON sent to the LLM.
@@ -404,7 +537,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
-			Repo: d.profile.ID,
+			Repo: d.profile.Slug(),
 			Docs: d.docs,
 		}
 	}

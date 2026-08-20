@@ -84,7 +84,7 @@ func TestCrossOrgHTTP_ProjectGet(t *testing.T) {
 func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-get")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-get")
 
 	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA, sidA).StatusCode; got != http.StatusOK {
 		t.Errorf("alice GET /api/agent/conversations/%s = %d, want 200", runA, got)
@@ -101,7 +101,7 @@ func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-arts")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-arts")
 
 	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/artifacts", sidA).StatusCode; got != http.StatusOK {
 		t.Errorf("alice GET /api/agent/conversations/%s/artifacts = %d, want 200", runA, got)
@@ -119,32 +119,33 @@ func TestCrossOrgHTTP_AgentArtifacts(t *testing.T) {
 func TestCrossOrgHTTP_AgentActions(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	runA := seedRunInOrg(t, r, orgA, alice, "run-acts")
+	runA := seedConversationInOrg(t, r, orgA, alice, "run-acts")
 
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/agent/conversations/%s/actions = %d, want 200", runA, got)
+	path := "/api/agent/conversations/" + runA + "/actions/list"
+	if got := r.postJSONWithSid("POST", path, sidA, map[string]any{}).StatusCode; got != http.StatusOK {
+		t.Errorf("alice POST %s = %d, want 200", path, got)
 	}
-	if got := r.requestWithSid("GET", "/api/agent/conversations/"+runA+"/actions", sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/agent/conversations/%s/actions = %d, want 404 (cross-org leak)", runA, got)
+	if got := r.postJSONWithSid("POST", path, sidB, map[string]any{}).StatusCode; got != http.StatusNotFound {
+		t.Errorf("bob POST %s = %d, want 404 (cross-org leak)", path, got)
 	}
 }
 
-// TestCrossOrgHTTP_TaskSwipe covers the mutating path: bob's swipe
+// TestCrossOrgHTTP_TaskClaim covers the mutating path: bob's claim
 // gesture against alice's task should appear as "task not found" to
 // bob, not as a 200 with a state change applied, and not as a 500. The
 // handler does a tx.Tasks.Get inside WithTx before any side effect; RLS
 // returns nil for the cross-org pair, handler 404s, no state mutated.
-func TestCrossOrgHTTP_TaskSwipe(t *testing.T) {
+func TestCrossOrgHTTP_TaskClaim(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	taskA := seedTaskInOrg(t, r, orgA, alice, "task-swipe")
+	taskA := seedTaskInOrg(t, r, orgA, alice, "task-claim")
 
-	body := `{"action":"claim","hesitation_ms":0}`
-	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/swipe", sidA, body); got != http.StatusOK {
-		t.Errorf("alice POST swipe on own task = %d, want 200", got)
+	body := `{"hesitation_ms":0}`
+	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/claim", sidA, body); got != http.StatusOK {
+		t.Errorf("alice POST claim on own task = %d, want 200", got)
 	}
-	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/swipe", sidB, body); got != http.StatusNotFound {
-		t.Errorf("bob POST swipe on cross-org task = %d, want 404", got)
+	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/claim", sidB, body); got != http.StatusNotFound {
+		t.Errorf("bob POST claim on cross-org task = %d, want 404", got)
 	}
 }
 
@@ -187,23 +188,23 @@ func seedProjectInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, name st
 	t.Helper()
 	projectID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, description, pinned_repos)
+		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, description)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, '', '[]'::jsonb)
+		        $4, '')
 	`, projectID, orgID, userID, name); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	return projectID
 }
 
-// seedRunInOrg inserts a full entity → event → task → prompt → run
+// seedConversationInOrg inserts a full entity → event → task → prompt → run
 // chain. Run is a manual trigger with the seeded user as creator and a
 // 'running' status so handleAgentStatus has live data to project.
-func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix string) string {
+func seedConversationInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix string) string {
 	t.Helper()
 	taskID := seedTaskInOrg(t, r, orgID, userID, suffix)
-	// prompts.id is text (not uuid); pass the slug directly. runs.prompt_id
+	// prompts.id is text (not uuid); pass the slug directly. conversations.prompt_id
 	// FKs into prompts(id, org_id) so the ID stored here is what the run
 	// references below.
 	promptID := "p-" + suffix + "-" + uuid.NewString()[:8]
@@ -216,26 +217,26 @@ func seedRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix stri
 		t.Fatalf("seed prompt: %v", err)
 	}
 	blueprintRunID := seedBlueprintRunInOrg(t, r, orgID, userID, taskID)
-	runID := uuid.NewString()
+	conversationID := uuid.NewString()
 	if _, err := r.h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model, creator_user_id, trigger_type, blueprint_run_id, blueprint_step_index)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 		        $4, 'running', 'm', $5, 'manual', $6, 0)
-	`, runID, orgID, taskID, promptID, userID, blueprintRunID); err != nil {
+	`, conversationID, orgID, taskID, promptID, userID, blueprintRunID); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
-	return runID
+	return conversationID
 }
 
 // seedBlueprintRunInOrg mints a blueprint + manual blueprint_run for the
 // given task in the given org via the admin pool, returning the
-// blueprint_run id. runs.blueprint_run_id is NOT NULL and FKs
+// blueprint_run id. conversations.blueprint_run_id is NOT NULL and FKs
 // blueprint_runs(id, org_id), so every multi-tenant run fixture needs a
 // parent blueprint_run first. Manual trigger_type requires
 // creator_user_id NOT NULL (blueprint_runs_creator_matches_trigger_type).
 // The blueprint and blueprint_run inherit the task's team (first team in
-// the org), matching how seedTaskInOrg / seedRunInOrg resolve team_id.
+// the org), matching how seedTaskInOrg / seedConversationInOrg resolve team_id.
 func seedBlueprintRunInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, taskID string) string {
 	t.Helper()
 	blueprintID := uuid.NewString()

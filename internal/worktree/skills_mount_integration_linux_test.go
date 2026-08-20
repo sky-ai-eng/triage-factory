@@ -64,8 +64,8 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 
 	// The shared worktree a blueprint's steps run in, built once (step 0's setup)
 	// and warm-reused by every later step.
-	const treeRunID = "itest-skills-tree"
-	wtDir, _ := sandboxingWorktree(t, treeRunID)
+	const treeRootKey = "itest-skills-tree"
+	wtDir, _ := sandboxingWorktree(t, treeRootKey)
 
 	// Step 0's launch hands the whole tree to the sandbox uid. From here on the
 	// orchestrator is a genuinely unprivileged, capability-less user with respect
@@ -74,7 +74,7 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 		t.Fatalf("ChownRunTree (step 0 launch): %v", err)
 	}
 
-	net, err := sandbox.SetupRunNetwork(ctx, treeRunID)
+	net, err := sandbox.SetupRunNetwork(ctx, treeRootKey)
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
@@ -84,9 +84,9 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 	// what makes "step N sees only its own skill" structural rather than a wipe.
 	step := func(t *testing.T, stepIdx int, promptName, body string) string {
 		t.Helper()
-		runID := "itest-skills-step-" + promptName
+		conversationID := "itest-skills-step-" + promptName
 		slug := skills.SlugForBlueprintStep(stepIdx, promptName)
-		staging := sandbox.TrustedSkillsSourcePath(runID)
+		staging := sandbox.TrustedSkillsSourcePath(conversationID)
 		prompt := &domain.Prompt{Name: promptName, Body: body, Source: "user"}
 		if err := skills.StageStepSkill(staging, slug, prompt, "brief for "+promptName); err != nil {
 			t.Fatalf("StageStepSkill (step %d): %v", stepIdx, err)
@@ -99,9 +99,9 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 		}
 
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
-			RunID:    treeRunID,
-			Worktree: wtDir,
-			SDKDir:   t.TempDir(),
+			ConversationID: treeRootKey,
+			Worktree:       wtDir,
+			SDKDir:         t.TempDir(),
 			Argv: []string{"/bin/sh", "-c",
 				`echo "--- listing"; ls -1 "$HOME/.claude/skills"; echo "--- content"; cat "$HOME/.claude/skills/` + slug + `/SKILL.md"`},
 			Env: []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/work"},

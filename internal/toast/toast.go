@@ -79,6 +79,31 @@ func Fire(hub Broadcaster, orgID string, level Level, title, body string) {
 	})
 }
 
+// FireUser is Fire narrowed to one user via the hub's per-connection
+// UserID filter. A toast body is a websocket payload like any other, so
+// one that names visibility-scoped data (repo slugs, project keys) must
+// not ride an org-wide broadcast in multi mode — the emit site resolves
+// the audience and fires per user, the same emit-time scoping the
+// sparse-update events use (see CLAUDE.md's websocket-events section).
+// userID must be non-empty: an empty userID here would silently widen
+// back to the whole org, so it's dropped instead.
+func FireUser(hub Broadcaster, orgID, userID string, level Level, title, body string) {
+	if isNilBroadcaster(hub) || body == "" || userID == "" {
+		return
+	}
+	hub.Broadcast(websocket.Event{
+		Type:   "toast",
+		OrgID:  orgID,
+		UserID: userID,
+		Data: Payload{
+			ID:    uuid.New().String(),
+			Level: level,
+			Title: title,
+			Body:  body,
+		},
+	})
+}
+
 // isNilBroadcaster catches both untyped nil and typed-nil pointers
 // (the common case — *websocket.Hub that was never initialized).
 func isNilBroadcaster(hub Broadcaster) bool {

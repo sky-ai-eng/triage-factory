@@ -74,10 +74,9 @@ func TestBuild_StableForSpec(t *testing.T) {
 }
 
 // TestBuild_ModeArmsDiverge is the reason the mode axis exists. Both modes now
-// check the same base-branch push policy, but they enforce it at opposite
-// postures — the multi proxy fails closed, the local pre-push hook fails open —
-// and only multi has an egress allowlist and a scoped per-run credential. A
-// single text serving both would have to assert something false in one.
+// mediate the managed Git path, but only multi puts the agent behind a
+// fail-closed egress boundary. Local is explicit that its process-scoped
+// routing is not a security boundary against the unsandboxed process.
 func TestBuild_ModeArmsDiverge(t *testing.T) {
 	local := Build(machinistSpec(ModeLocal))
 	multi := Build(machinistSpec(ModeMulti))
@@ -87,13 +86,11 @@ func TestBuild_ModeArmsDiverge(t *testing.T) {
 	if !strings.Contains(multi, "fails closed") {
 		t.Error("multi-mode text does not state that its gate fails closed")
 	}
-	if !strings.Contains(local, "fails open") {
-		t.Error("local-mode text does not state that its check fails open — an agent told otherwise would over-trust it")
+	if !strings.Contains(local, "not a security boundary") {
+		t.Error("local-mode text does not state the limit of its managed Git routing")
 	}
-	// The credential difference is the other half, and it survives 691: multi
-	// scopes per run, local pushes as the operator.
-	if !strings.Contains(local, "as the operator") {
-		t.Error("local-mode text does not state that raw git runs as the operator")
+	if !strings.Contains(local, "configured credential") {
+		t.Error("local-mode text does not state that managed Git uses TF's configured identity")
 	}
 }
 

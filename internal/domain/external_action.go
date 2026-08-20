@@ -17,6 +17,17 @@ import (
 // org-scoped credential is in, an individual user's own credential is out (the
 // Jira claim/swipe/done/requeue flows, already attributed natively in Jira).
 //
+// One amendment to "immutable", and exactly one: the record of the act —
+// Target, Action, DetailJSON, Credential, OccurredAt, and the url column as
+// captured — is frozen, while the POINTER to where the object now lives is
+// maintained. A repository rename fills the row's current_url column (in the
+// same transaction as the rest of its rewrite), and reads serve
+// COALESCE(current_url, url) through the URL field below, so the feed's link
+// keeps resolving after the freed name is re-claimed by a different
+// repository. current_url is the only column an UPDATE may touch; rewriting
+// Target on the same reasoning would make the log assert TF acted on a name
+// that did not exist at the time.
+//
 // Wherever the action carries a DB state change (the server approval flips), the
 // row is written in the SAME transaction as that change, so the log can't diverge
 // from the action. The bot funnels record alongside the artifact upsert under the
@@ -27,7 +38,7 @@ import (
 type ExternalAction struct {
 	ID    string `json:"id"`
 	OrgID string `json:"org_id"`
-	// TeamID is the action's team (denormalized from the run/artifact). Empty for
+	// TeamID is the action's team (denormalized from the conversation/artifact). Empty for
 	// an action with no team context (a dashboard board-drag on an org-wide PR) →
 	// SQL NULL. Backs the team-scoped read.
 	TeamID string `json:"team_id,omitempty"`
@@ -43,19 +54,24 @@ type ExternalAction struct {
 	// ExternalID is the provider-native id of the backing object (PR number /
 	// review node id / comment id / issue key / branch ref). Empty → SQL NULL.
 	ExternalID string `json:"external_id,omitempty"`
-	// URL links to the object; empty → SQL NULL.
+	// URL links to the object. On a read this is the maintained pointer —
+	// COALESCE(current_url, url), so it resolves under the object's current
+	// name — while the url column itself keeps the link as captured at the
+	// time of the act. Empty → SQL NULL.
 	URL string `json:"url,omitempty"`
 	// FromState / ToState carry a transition's endpoints (a Jira status move, a PR
 	// draft→open). Empty for a non-transition action → SQL NULL.
 	FromState string `json:"from_state,omitempty"`
 	ToState   string `json:"to_state,omitempty"`
-	// ConversationID is the producing run — the agent's for a bot/system action, the
-	// drafter's for an approval. Empty (→ SQL NULL) for an action with no run (a
-	// dashboard board-drag) or after the run is purged (FK ON DELETE SET NULL).
+	// ConversationID is the producing conversation — the agent's for a bot/system
+	// action, the drafter's for an approval. Empty (→ SQL NULL) for an action with
+	// no conversation (a dashboard board-drag) or after the conversation is purged
+	// (FK ON DELETE SET NULL).
 	ConversationID string `json:"conversation_id,omitempty"`
 	// ActorUserID is the human authorizer/initiator (the approver, the dragger,
-	// the kicking-off user of a manual run). Empty (→ SQL NULL) for an autonomous
-	// system action (an event-triggered bot run, the Jira board mirror).
+	// the kicking-off user of a manual conversation). Empty (→ SQL NULL) for an
+	// autonomous system action (an event-triggered bot conversation, the Jira
+	// board mirror).
 	ActorUserID string `json:"actor_user_id,omitempty"`
 	// Credential names the org credential used — one of the Credential* consts.
 	Credential string `json:"credential"`
@@ -85,9 +101,9 @@ const (
 	ActionPRMerged           = "pr_merged"
 
 	// Auto-merge is arming a merge, not performing one, which is why it is its
-	// own pair rather than a flavour of pr_merged: the run that enables it has
-	// merged nothing, and the merge it authorizes may land much later, triggered
-	// by a green check rather than by any agent.
+	// own pair rather than a flavour of pr_merged: the conversation that enables
+	// it has merged nothing, and the merge it authorizes may land much later,
+	// triggered by a green check rather than by any agent.
 	ActionPRAutoMergeEnabled  = "pr_auto_merge_enabled"
 	ActionPRAutoMergeDisabled = "pr_auto_merge_disabled"
 
@@ -164,7 +180,7 @@ const (
 	// {sha, new, http_status}. Appended unconditionally (no dedup key): each
 	// failed attempt is its own audit event, and sharing branch_pushed's
 	// deterministic key would let a failed attempt swallow the later
-	// successful push of the same (run, ref, sha).
+	// successful push of the same (conversation, ref, sha).
 	ActionBranchPushFailed = "branch_push_failed"
 
 	// Git operation denied by the per-run least-privilege gate — the git proxy
@@ -293,8 +309,8 @@ const (
 
 	// Releases. A published release is the most outward-facing thing on this
 	// list — it is what consumers of the repository actually fetch — so it is
-	// named even though the run that makes one is doing something well outside
-	// triage.
+	// named even though the conversation that makes one is doing something well
+	// outside triage.
 	//
 	// Uploading and deleting a release's ASSETS have no verbs, because they are
 	// unobservable here rather than unnamed: gh follows the absolute upload url
@@ -322,7 +338,7 @@ const (
 	// has no GitHub App. It sits on the ORG side of the ingestion gate beside
 	// the App, and the distinction the gate draws is about WHOSE ACT a row
 	// records, not whose token it is: this credential acts for the org on every
-	// run in it, exactly as the App does, and no user chose it per action. The
+	// conversation in it, exactly as the App does, and no user chose it per action. The
 	// excluded case is the opposite one — a user acting as themselves through
 	// their own authorization (the Jira claim/swipe/done/requeue flows), which
 	// is already attributed natively in the system it lands in.
@@ -342,17 +358,46 @@ const (
 	CredentialNone = "none"
 )
 
+// ExternalActionTypes is the closed action vocabulary — every Action* constant
+// above, in declaration order. Read APIs validate a caller's ?action= filter
+// against it so a typo is a rejected request rather than an authoritative-
+// looking empty page. Hand-maintained like AllEventTypes: a new Action*
+// constant belongs here too, or the feed can't be filtered by it.
+func ExternalActionTypes() []string {
+	return []string{
+		ActionPRCreated, ActionPRMarkedReady, ActionPRConvertedToDraft, ActionPREdited,
+		ActionPRClosed, ActionPRReopened, ActionPRMerged, ActionPRAutoMergeEnabled,
+		ActionPRAutoMergeDisabled, ActionPRReverted, ActionPRBranchUpdated,
+		ActionReviewSubmitted, ActionReviewDismissed, ActionReviewCommentEdited,
+		ActionReviewCommentDeleted, ActionCommentPosted, ActionCommentEdited,
+		ActionCommentDeleted, ActionReactionAdded, ActionReactionRemoved, ActionLabelAdded,
+		ActionLabelRemoved, ActionConversationLocked, ActionConversationUnlocked,
+		ActionWorkflowDispatched, ActionWorkflowRunCancelled, ActionBranchPushed,
+		ActionLinkedBranchCreated, ActionBranchPushFailed, ActionGitDenied,
+		ActionEgressDenied, ActionGHWriteDenied, ActionGHChannelWrite, ActionGraphQLWrite,
+		ActionIssueCreated, ActionIssueTransitioned, ActionIssueAssigned, ActionIssueUpdated,
+		ActionIssueCommentPosted, ActionIssueClosed, ActionIssueReopened, ActionIssueDeleted,
+		ActionIssuePinned, ActionIssueUnpinned, ActionIssueTransferred,
+		ActionReviewRequested, ActionReviewRequestRemoved, ActionRepoCreated,
+		ActionRepoEdited, ActionRepoDeleted, ActionRepoForked, ActionRepoArchived,
+		ActionRepoUnarchived, ActionLabelDefined, ActionLabelDefinitionEdited,
+		ActionLabelDefinitionDeleted, ActionReleaseCreated, ActionReleaseEdited,
+		ActionReleaseDeleted, ActionSlackMessagePosted, ActionSlackMessageEdited,
+		ActionSlackReactionAdded,
+	}
+}
+
 // BranchPushDedupKey builds the deterministic dedup key for a branch push:
-// "branch:<runID>:<ref>:<sha>". The git pre-push hook and the git-proxy
-// receive-pack backstop both observe the SAME push (same run, ref, sha), so they
+// "branch:<conversationID>:<ref>:<sha>". The git pre-push hook and the git-proxy
+// receive-pack backstop both observe the SAME push (same conversation, ref, sha), so they
 // produce an identical key and the twin collapses under ON CONFLICT(org_id,
 // dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
 // ref, or new commits) carries a different sha and is recorded as its own row.
 // This is one of the two actions with a deterministic natural key (the other is
 // EgressDenialDedupKey); every other action leaves DedupKey empty (the store
 // fills a uuid) so it can never be deduped away.
-func BranchPushDedupKey(runID, ref, sha string) string {
-	return strings.Join([]string{"branch", runID, ref, sha}, ":")
+func BranchPushDedupKey(conversationID, ref, sha string) string {
+	return strings.Join([]string{"branch", conversationID, ref, sha}, ":")
 }
 
 // EgressDenialDedupKey builds the deterministic dedup key for a refused sandbox

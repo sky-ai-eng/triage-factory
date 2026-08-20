@@ -17,14 +17,14 @@ import (
 
 // launchFixture is a claimed blueprint step with a worktree on disk — the
 // shape every pre-agent failure acts on. The conversation is claimed for real
-// (EnqueueRun + ClaimNextRun) so the claim id, the claim fence and the
+// (EnqueueConversation + ClaimNextConversation) so the claim id, the claim fence and the
 // re-claim all behave as they do in production.
 type launchFixture struct {
 	s        *Spawner
 	database *sql.DB
 	stores   db.Stores
 	br       *domain.BlueprintRun
-	run      domain.Conversation
+	conv     domain.Conversation
 	worktree string
 }
 
@@ -51,14 +51,14 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	}
 
 	bpID := "lfbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	promptID := "lfp-" + suffix
 	ensureTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "lfbr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: wt,
@@ -79,22 +79,23 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	br, err := stores.Blueprints.GetRunSystem(ctx, org, brID)
 	if err != nil || br == nil {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "lfrun-" + suffix, TaskID: task.ID, PromptID: promptID, Model: "claude-sonnet-4-6",
 		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0, WorktreePath: wt,
 	}); err != nil {
-		t.Fatalf("EnqueueRun: %v", err)
+		t.Fatalf("EnqueueConversation: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "lf-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "lf-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
-		t.Fatalf("ClaimNextRun: (%v, %v)", claimed, err)
+		t.Fatalf("ClaimNextConversation: (%v, %v)", claimed, err)
 	}
 
 	return &launchFixture{
@@ -102,7 +103,7 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 		database: database,
 		stores:   stores,
 		br:       br,
-		run:      *claimed,
+		conv:     *claimed,
 		worktree: wt,
 	}
 }
@@ -113,7 +114,7 @@ func (f *launchFixture) speak(t *testing.T, role, content string) {
 	t.Helper()
 	delivered := true
 	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: f.run.ID, Role: role, Content: content,
+		ConversationID: f.conv.ID, Role: role, Content: content,
 		Delivered: &delivered, WindowState: domain.MessageWindowActive,
 	}); err != nil {
 		t.Fatalf("insert transcript row: %v", err)
@@ -123,7 +124,7 @@ func (f *launchFixture) speak(t *testing.T, role, content string) {
 func (f *launchFixture) storedStatus(t *testing.T) string {
 	t.Helper()
 	var status sql.NullString
-	if err := f.database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, f.run.ID).Scan(&status); err != nil {
+	if err := f.database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, f.conv.ID).Scan(&status); err != nil {
 		t.Fatalf("read stored status: %v", err)
 	}
 	return status.String
@@ -131,7 +132,7 @@ func (f *launchFixture) storedStatus(t *testing.T) string {
 
 func (f *launchFixture) claimOutcomes(t *testing.T) []string {
 	t.Helper()
-	rows, err := f.database.Query(`SELECT COALESCE(outcome, '') FROM claims WHERE conversation_id = ? ORDER BY claimed_at`, f.run.ID)
+	rows, err := f.database.Query(`SELECT COALESCE(outcome, '') FROM claims WHERE conversation_id = ? ORDER BY claimed_at`, f.conv.ID)
 	if err != nil {
 		t.Fatalf("read claim outcomes: %v", err)
 	}
@@ -158,7 +159,7 @@ func (f *launchFixture) blueprintStatus(t *testing.T) string {
 
 func (f *launchFixture) transcript(t *testing.T) []domain.Message {
 	t.Helper()
-	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, f.run.ID)
+	rows, err := f.stores.Conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.ID)
 	if err != nil {
 		t.Fatalf("ListForAssemblySystem: %v", err)
 	}
@@ -174,7 +175,7 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 	f.speak(t, "user", "have another look at the failing check")
 	f.speak(t, "assistant", "on it")
 
-	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, f.run,
+	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, f.conv,
 		errors.New("connect to tool host: runsc: exit status 128"))
 
 	if st := f.storedStatus(t); st != "" {
@@ -195,8 +196,8 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 		}
 	}
 
-	reclaimed, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
-	if err != nil || reclaimed == nil || reclaimed.ID != f.run.ID {
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after requeue = (%v, %v), want the same conversation", reclaimed, err)
 	}
 	if reclaimed.Attempts != 2 {
@@ -216,14 +217,14 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	// re-claim the conversation the instant it parked.
 	pending := false
 	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: f.run.ID, Role: "user", Content: "and update the README",
+		ConversationID: f.conv.ID, Role: "user", Content: "and update the README",
 		Delivered: &pending, WindowState: domain.MessageWindowActive,
 	}); err != nil {
 		t.Fatalf("queue the follow-up: %v", err)
 	}
 
-	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent := f.conv
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("connect to tool host: runsc: exit status 128"))
 
@@ -248,7 +249,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 		}
 	}
 	if note == "" {
-		t.Fatal("no stop-note on the transcript; the run station would show a park with no explanation")
+		t.Fatal("no stop-note on the transcript; the RunStation would show a park with no explanation")
 	}
 	for _, want := range []string{"5 attempts", "exit status 128", "Send a message to retry"} {
 		if !strings.Contains(note, want) {
@@ -259,20 +260,20 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	// Nothing is left claimable: the queued follow-up was settled on the way
 	// down, so `open` is a rest state rather than an immediate re-claim that
 	// would make the budget buy nothing.
-	if got, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{}); err != nil || got != nil {
-		t.Fatalf("ClaimNextRun after the park = (%v, %v), want nothing claimable", got, err)
+	if got, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{}); err != nil || got != nil {
+		t.Fatalf("ClaimNextConversation after the park = (%v, %v), want nothing claimable", got, err)
 	}
 
 	// And the user's next message re-arms a whole fresh budget, which is what
 	// makes "send a message to retry" a true statement.
 	if _, err := f.stores.Conversations.InsertMessageSystem(context.Background(), runmode.LocalDefaultOrgID, &domain.Message{
-		ConversationID: f.run.ID, Role: "user", Content: "try again",
+		ConversationID: f.conv.ID, Role: "user", Content: "try again",
 		Delivered: &pending, WindowState: domain.MessageWindowActive,
 	}); err != nil {
 		t.Fatalf("send the follow-up: %v", err)
 	}
-	reclaimed, err := f.stores.RunQueue.ClaimNextRun(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
-	if err != nil || reclaimed == nil || reclaimed.ID != f.run.ID {
+	reclaimed, err := f.stores.ConversationQueue.ClaimNextConversation(context.Background(), "lf-exec", 1, db.ClaimPlacement{})
+	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after the follow-up = (%v, %v), want the same conversation", reclaimed, err)
 	}
 	if reclaimed.Attempts != 1 {
@@ -288,8 +289,8 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 func TestPreAgentFailure_ExhaustedOnAFirstEngagement_StillPoisonPills(t *testing.T) {
 	f := newLaunchFixture(t, "poison")
 
-	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent := f.conv
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("workspace setup: clone: repository not found"))
 
@@ -312,8 +313,8 @@ func TestPreAgentFailure_ExhaustedOnAFirstEngagement_StillPoisonPills(t *testing
 func TestPreAgentFailure_WithNoBlueprintInScope_Parks(t *testing.T) {
 	f := newLaunchFixture(t, "resume")
 
-	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent := f.conv
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, nil, spent,
 		errors.New("ensure workspace before resume failed: snapshot fetch: connection reset"))
 
@@ -335,17 +336,17 @@ func TestRunNativeAgent_ToolHostLaunchFailureRecordsNothing(t *testing.T) {
 	f.speak(t, "user", "have another look")
 	f.speak(t, "assistant", "on it")
 
-	task, err := f.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, f.run.TaskID)
+	task, err := f.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, f.conv.TaskID)
 	if err != nil || task == nil {
 		t.Fatalf("GetSystem task: (%v, %v)", task, err)
 	}
 
 	// No prebuilt run network, which is what a broker that could not build
 	// one leaves behind — LaunchToolHost refuses on exactly that.
-	disp := f.s.runNativeAgent(context.Background(), f.run.ID, *task, "do the thing", runConfig{
+	disp := f.s.runNativeAgent(context.Background(), f.conv.ID, *task, "do the thing", runConfig{
 		orgID:          runmode.LocalDefaultOrgID,
 		teamID:         runmode.LocalDefaultTeamID,
-		claimID:        f.run.ClaimID,
+		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
 		wtPath:         f.worktree,
 		runRoot:        f.worktree,
@@ -384,11 +385,11 @@ func TestParkAfterLaunchExhaustion_FencedClaimRecordsNothing(t *testing.T) {
 	f := newLaunchFixture(t, "fenced")
 	f.speak(t, "user", "keep going")
 
-	fenced := &fencedConversationStore{ConversationStore: f.s.agentRuns}
-	f.s.agentRuns = fenced
+	fenced := &fencedConversationStore{ConversationStore: f.s.conversations}
+	f.s.conversations = fenced
 
-	spent := f.run
-	spent.Attempts = maxRunAttempts
+	spent := f.conv
+	spent.Attempts = maxClaimAttempts
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent, errors.New("launch tool host: no route to broker"))
 
 	if fenced.inserts != 1 {

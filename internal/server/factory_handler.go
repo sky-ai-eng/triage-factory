@@ -70,7 +70,7 @@ type factoryRunSummaryJSON struct {
 	TotalCostUSD   *float64   `json:"TotalCostUSD"`
 	DurationMs     *int       `json:"DurationMs"`
 	NumTurns       *int       `json:"NumTurns"`
-	StopReason     string     `json:"StopReason"`
+	ParkReason     string     `json:"ParkReason"`
 	ResultSummary  string     `json:"ResultSummary"`
 	SessionID      string     `json:"SessionID"`
 	MemoryMissing  bool       `json:"MemoryMissing"`
@@ -93,7 +93,7 @@ func toFactoryRunSummary(r domain.Conversation) factoryRunSummaryJSON {
 		TotalCostUSD:   r.TotalCostUSD,
 		DurationMs:     r.DurationMs,
 		NumTurns:       r.NumTurns,
-		StopReason:     r.StopReason,
+		ParkReason:     string(r.ParkReason),
 		ResultSummary:  r.ResultSummary,
 		SessionID:      r.SessionID,
 		MemoryMissing:  r.MemoryMissing,
@@ -141,8 +141,8 @@ type factoryEntityJSON struct {
 	// PendingTasks groups active tasks for this entity by event_type.
 	// Drives the station drawer's drag-to-delegate flow: the frontend
 	// reads the dropped station's first entry and forwards its
-	// dedup_key (with entity_id + event_type) to /api/factory/delegate,
-	// which find-or-creates via the unique index on (entity_id,
+	// dedup_key (with entity_id + event_type) to POST /api/tasks, which
+	// find-or-creates via the unique index on (entity_id,
 	// event_type, dedup_key). If pending_tasks has no entry for the
 	// dropped station's event_type yet, that means there is no existing
 	// task for that event_type; the request still carries event_type and
@@ -160,7 +160,7 @@ type factoryEntityJSON struct {
 
 // pendingTaskRef is the minimal task reference shipped per queued
 // entity for the drag-to-delegate flow. dedup_key is what the request
-// to /api/factory/delegate carries (the handler keys find-or-create
+// to POST /api/tasks carries (the handler keys find-or-create
 // on entity_id + event_type + dedup_key). task_id is informational —
 // not consumed by the request today — and is kept available for
 // future UI hints like "this chip already has a task here."
@@ -205,13 +205,16 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	since := time.Now().Add(-24 * time.Hour)
+	since := time.Now().UTC().Add(-24 * time.Hour)
 	// Optional per-page team filter. Empty = the union of the
 	// viewer's teams; a team id narrows the entity belt to that team.
 	// Only the belt narrows here — the throughput counters stay at the
 	// viewer-union (a deliberate scope line; the belt is what "hides
 	// cross-team rows" refers to on the factory).
-	teamFilter := teamscope.FilterParam(r)
+	teamFilter, ok := teamscope.FilterParamStrict(w, r)
+	if !ok {
+		return
+	}
 
 	// Session user's GitHub login drives the "mine" flag. Identity lives in
 	// user_github_identities, host-scoped — resolve the org's
@@ -221,7 +224,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// factory should still render for a user who's only set up Jira.
 	var ghUsername string
 	var eventCounts, taskCounts, lifetimeCounts map[string]int
-	var activeRuns []domain.FactoryActiveRun
+	var activeConversations []domain.FactoryActiveConversation
 	var entityRows []domain.FactoryEntityRow
 	var recentByEntity map[string][]domain.FactoryRecentEvent
 	var pendingTasks []domain.PendingTaskRef
@@ -247,7 +250,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		}
 
 		// --- Active runs ----------------------------------------------
-		activeRuns, e = tx.Factory.ActiveRuns(r.Context(), orgID)
+		activeConversations, e = tx.Factory.ActiveConversations(r.Context(), orgID)
 		if e != nil {
 			return e
 		}
@@ -255,7 +258,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		// Join active runs onto stations. Each active run also needs to
 		// know the entity's author so "mine" tint is accurate — pre-fetch
 		// those entities.
-		for _, ar := range activeRuns {
+		for _, ar := range activeConversations {
 			if _, seen := runAuthors[ar.Task.EntityID]; seen {
 				continue
 			}
@@ -287,7 +290,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			return e
 		}
 
-		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenRuns(r.Context(), orgID, entityIDs)
+		openRunsByEntity, e = tx.Conversations.EntitiesWithOpenConversations(r.Context(), orgID, entityIDs)
 		return e
 	}); err != nil {
 		internalError(w, "factory", err)
@@ -321,11 +324,11 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 		stations[eventType] = st
 	}
 
-	for _, ar := range activeRuns {
+	for _, ar := range activeConversations {
 		st := ensureStation(ar.Task.EventType)
 		st.ActiveRuns++
 		st.Runs = append(st.Runs, factoryRunJSON{
-			Run:  toFactoryRunSummary(ar.Run),
+			Run:  toFactoryRunSummary(ar.Conversation),
 			Task: taskToJSON(ar.Task),
 			Mine: ghUsername != "" && runAuthors[ar.Task.EntityID] == ghUsername,
 		})
@@ -335,7 +338,7 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 	// --- Active entities ----------------------------------------------------
 	// Pending tasks per entity, grouped by event_type. Drives the
 	// drawer's drag-to-delegate flow. Uses the minimal
-	// ListActiveTaskRefsForEntities projection (id + entity_id +
+	// ListActiveRefsForEntities projection (id + entity_id +
 	// event_type + dedup_key) rather than the full Task struct so
 	// /api/factory/snapshot doesn't pay for the entity JOIN and the
 	// snapshot_json json_extract on every poll.

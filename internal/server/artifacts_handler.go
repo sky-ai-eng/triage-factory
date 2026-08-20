@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -23,26 +25,44 @@ import (
 //
 // ghResolver picks the right GitHub client (org App installation token → PAT)
 // per repo at call time, so App-only orgs work identically to PAT orgs. Mirrors
-// pendingPRsHandler's deps.
+// dashboardHandler's deps.
 type artifactsHandler struct {
-	tx         db.TxRunner
-	ws         *websocket.Hub
-	agentRuns  db.ConversationStore
-	ghResolver ghclient.Resolver
+	tx            db.TxRunner
+	ws            *websocket.Hub
+	conversations db.ConversationStore
+	ghResolver    ghclient.Resolver
 	// spawner is a lazy delegation-spawner accessor (wired by Server.routes via a
 	// closure over s.spawner) used to feed the drafting agent a <system-note> when
 	// a human resolves one of its artifacts (TFAC-493).
 	spawner func() *delegate.Spawner
 }
 
-// injectArtifactNote feeds the artifact's drafting run the agent-facing
-// <system-note> for a just-completed resolution. Fully decoupled from the
-// resolution itself: a live run is steered (the actual delivery runs on a
-// detached goroutine inside the spawner, so this returns immediately and never
-// blocks the response); a terminal/paused run gets nothing here and re-derives
-// the same note from the artifact row into its ledger on the next resume. Never
-// gates the blueprint (TFAC-379 #2). The artifact passed must carry its
-// post-resolution State so the right kind-specific copy is rendered.
+// artifactIDOr404 guards the {id} path value on every artifact-addressed route
+// — artifacts.id is a uuid column on Postgres. See uuidPathOr404.
+func artifactIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "artifact")
+}
+
+// writeUpstreamGitHub answers a GitHub call that failed: 502 with a static,
+// author-written prefix and the raw detail appended only in local mode (the
+// LocalDetail seam). The caller logs the error itself — this only shapes the
+// response.
+func writeUpstreamGitHub(w http.ResponseWriter, msg string, err error) {
+	httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+		Reason:  httpx.ReasonUpstreamUnavailable,
+		Message: msg + httpx.LocalDetail(err),
+	})
+}
+
+// injectArtifactNote feeds the artifact's drafting conversation the agent-
+// facing <system-note> for a just-completed resolution. Fully decoupled from
+// the resolution itself: a live conversation is steered (the actual delivery
+// runs on a detached goroutine inside the spawner, so this returns immediately
+// and never blocks the response); a terminal/paused conversation gets nothing
+// here and re-derives the same note from the artifact row into its ledger on
+// the next resume. Never gates the blueprint (TFAC-379 #2). The artifact
+// passed must carry its post-resolution State so the right kind-specific copy
+// is rendered.
 func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) {
 	if a.ConversationID == "" || ah.spawner == nil {
 		return
@@ -54,21 +74,48 @@ func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) 
 	sp.InjectArtifactNote(orgID, a.ConversationID, a)
 }
 
-// prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
-// live values pulled from GitHub (GetPRBasic) so the editor renders the current
-// PR, not a stale snapshot; the rest are the artifact's stable coordinates.
-type prArtifactJSON struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	Owner          string `json:"owner"`
-	Repo           string `json:"repo"`
-	Number         int    `json:"number"`
-	HeadBranch     string `json:"head_branch"`
-	BaseBranch     string `json:"base_branch"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	URL            string `json:"url"`
-	State          string `json:"state"`
+// prArtifactDetailsJSON is the `details` payload for a pull_request artifact.
+// Title/Body are the live values pulled from GitHub (GetPRBasic) so the editor
+// renders the current PR, not a stale snapshot; owner/repo/number are the
+// artifact's target parsed once here rather than by every client.
+type prArtifactDetailsJSON struct {
+	Owner      string `json:"owner"`
+	Repo       string `json:"repo"`
+	Number     int    `json:"number"`
+	HeadBranch string `json:"head_branch"`
+	BaseBranch string `json:"base_branch"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+}
+
+// composedArtifactDetails marshals a kind's composed `details` payload into
+// the read shape's embedded-JSON slot. The payloads are plain structs, so a
+// marshal failure is a programming error rather than a runtime condition —
+// it surfaces as a 500 rather than an artifact quietly served with null
+// details.
+func composedArtifactDetails(w http.ResponseWriter, art *domain.Artifact, details any) (json.RawMessage, bool) {
+	raw, err := json.Marshal(details)
+	if err != nil {
+		internalError(w, "artifacts", fmt.Errorf("marshal %s details (artifact %s): %w", art.Kind, art.ID, err))
+		return nil, false
+	}
+	return raw, true
+}
+
+// requireArtifactKind refuses a kind-scoped write against an artifact of some
+// other kind: 409, because the row exists and it is its kind that says no. A
+// 404 here would conflate "no such artifact" with "that operation does not
+// apply to this one", and a 200 over an ignored body would claim a write
+// nobody made.
+//
+// Every caller runs it before resolving an upstream client, so a wrong-kind
+// write cannot reach GitHub.
+func requireArtifactKind(w http.ResponseWriter, art *domain.Artifact, kind, article string) bool {
+	if art.Kind == kind {
+		return true
+	}
+	conflict(w, "artifact is not "+article+" (kind: "+art.Kind+")")
+	return false
 }
 
 // loadArtifact fetches an artifact by id and 404s if missing. It is the shared
@@ -110,7 +157,7 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			artifactsLog.Warn("github not configured", "org", orgID, "owner", o, "repo", rp, "error", err)
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub credentials not configured"})
+			writeNotConfigured(w, "GitHub is not connected for this workspace")
 			return nil, "", "", 0, false
 		}
 		internalError(w, "artifacts", err)
@@ -119,37 +166,74 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	return client, o, rp, n, true
 }
 
-// handleArtifactGet returns the PR artifact augmented with the live PR title and
-// body fetched from GitHub (1:1 display). On a live-fetch failure it degrades to
-// the proposed/edited snapshot stored in details_json so the overlay still renders
-// (a closed/merged PR or a transient GitHub blip shouldn't blank the editor).
+// handleArtifactGet serves one artifact of ANY kind, in the same shape the
+// conversation-scoped list serves it (artifactJSON): the kind-independent
+// envelope, with `kind` as the explicit discriminator over a kind-shaped
+// `details` payload. Only the two kinds with a composed representation — a
+// pull request read live from GitHub, a review assembled from its staged draft
+// — do work here; every other kind hands back the details_json the row already
+// stores.
+//
+// Serving every kind is what keeps this route from answering not-found for an
+// artifact that plainly exists: nonexistence and "no representation for that
+// kind" are different answers, and a branch or comment artifact reads the same
+// way here as it does in the conversation-scoped list.
+//
+// GET /api/artifacts/{id}
 func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
+	out := artifactEnvelope(*art)
 	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewGet(w, r, orgID, art)
-		return
 	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
+		details, ok := ah.prArtifactDetails(w, r, orgID, art)
+		if !ok {
+			return
+		}
+		if out.Details, ok = composedArtifactDetails(w, art, details); !ok {
+			return
+		}
+	case domain.ArtifactKindReview:
+		details, ok := ah.reviewArtifactDetails(w, r, orgID, art)
+		if !ok {
+			return
+		}
+		if out.Details, ok = composedArtifactDetails(w, art, details); !ok {
+			return
+		}
 	default:
-		notFound(w, "artifact")
-		return
+		out.Details = storedArtifactDetails(*art)
 	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// prArtifactDetails composes the pull_request `details` payload: the live PR
+// title and body fetched from GitHub (1:1 display), over the artifact's stored
+// coordinates. On a live-fetch failure it degrades to the proposed/edited
+// snapshot in details_json so the overlay still renders — a closed/merged PR or
+// a transient GitHub blip shouldn't blank the editor.
+func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (prArtifactDetailsJSON, bool) {
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
-		return
+		return prArtifactDetailsJSON{}, false
 	}
 
+	// A details parse failure is deliberately swallowed on this read: the
+	// fields it would supply are the fallback for a failed live fetch, so a
+	// corrupt row degrades to empty title/body rather than failing an overlay
+	// that could still render the live PR.
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
@@ -161,46 +245,46 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 		body = pr.Body
 	}
 
-	writeJSON(w, http.StatusOK, prArtifactJSON{
-		ID:             art.ID,
-		ConversationID: art.ConversationID,
-		Owner:          owner,
-		Repo:           repo,
-		Number:         number,
-		HeadBranch:     details.HeadBranch,
-		BaseBranch:     details.Base,
-		Title:          title,
-		Body:           body,
-		URL:            art.URL,
-		State:          art.State,
-	})
+	return prArtifactDetailsJSON{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		HeadBranch: details.HeadBranch,
+		BaseBranch: details.Base,
+		Title:      title,
+		Body:       body,
+	}, true
 }
 
-// handleArtifactUpdate edits the live PR's title/body 1:1 via UpdatePR and
+// handleArtifactPRUpdate edits the live PR's title/body 1:1 via UpdatePR and
 // refreshes the artifact's details_json snapshot. Pessimistic by contract: a
 // GitHub failure returns non-2xx and leaves the snapshot untouched, so the
 // frontend never shows a green "saved" over a write GitHub rejected. The proposed
 // snapshot (the agent's draft) is preserved — only the mutable snapshot moves.
-func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.Request) {
+//
+// Two refusals come before the GitHub client is even resolved, and that
+// ordering is the point of the route: an artifact of another kind is a 409,
+// and a body naming neither field is a 400. Between them, no request that
+// describes no edit can reach UpdatePR — which would otherwise rewrite the PR
+// with its own current content and record an audit row for it.
+//
+// PATCH /api/artifacts/{id}/pr
+func (ah *artifactsHandler) handleArtifactPRUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
-	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewUpdate(w, r, orgID, userID, art)
-		return
-	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
-	default:
-		notFound(w, "artifact")
+	if !requireArtifactKind(w, art, domain.ArtifactKindPullRequest, "a pull request") {
 		return
 	}
 
@@ -208,7 +292,14 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		Title *string `json:"title"`
 		Body  *string `json:"body"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	if req.Title == nil && req.Body == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide title, body, or both",
+		})
 		return
 	}
 
@@ -231,7 +322,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 			// We can't reconstruct the omitted field without the current PR state,
 			// and guessing from a stale snapshot risks clobbering. Fail loudly.
 			artifactsLog.Warn("GetPR for partial-edit baseline failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the current PR to apply a partial edit" + localDetail(err)})
+			writeUpstreamGitHub(w, "couldn't read the current PR to apply a partial edit", err)
 			return
 		}
 		title = live.Title
@@ -248,7 +339,9 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// out at approval. Fail fast and store the trimmed value.
 	title = strings.TrimSpace(title)
 	if title == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "title cannot be empty or whitespace-only"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "title cannot be empty or whitespace-only", Field: "title",
+		})
 		return
 	}
 
@@ -257,7 +350,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	// a readable reason.
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, title, body); err != nil {
 		artifactsLog.Warn("UpdatePR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
@@ -301,7 +394,10 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -332,7 +428,11 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 		var files []ghclient.PRFile
 		if files, err = gh.GetCompareFiles(r.Context(), owner, repo, finBase, finHead); err == nil {
 			if diff = ghclient.SingleFileDiff(files, file); diff == "" {
-				writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this review's diff (or lies beyond the file-listing cap)"})
+				httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{
+					Reason:  httpx.ReasonNotFound,
+					Message: "file " + file + " is not part of this review's diff (or lies beyond the file-listing cap)",
+					Field:   "file",
+				})
 				return
 			}
 		}
@@ -350,7 +450,11 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 			if files, err = gh.GetPRFiles(r.Context(), owner, repo, number); err == nil {
 				if file != "" {
 					if diff = ghclient.SingleFileDiff(files, file); diff == "" {
-						writeJSON(w, http.StatusNotFound, map[string]string{"error": "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)"})
+						httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{
+							Reason:  httpx.ReasonNotFound,
+							Message: "file " + file + " is not part of this PR's diff (or lies beyond the file-listing cap)",
+							Field:   "file",
+						})
 						return
 					}
 				} else {
@@ -363,7 +467,7 @@ func (ah *artifactsHandler) handleArtifactDiff(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		artifactsLog.Error("artifact diff failed",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "finalize_frame", useFin, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
@@ -403,11 +507,11 @@ func diffTruncationNote(fileCount int) string {
 // handleArtifactApprove promotes the draft PR to ready-for-review: it appends the
 // agentmeta footer to the body (UpdatePR), marks the PR ready (MarkPRReady),
 // flips the artifact to state=open, and captures the human verdict into
-// conversation_memory. Approval is a decoupled sidecar — it does NOT flip run status or
-// resume/terminate a blueprint; the only lifecycle effect is the shared
-// terminal-on-last task-closure check (closeTaskIfTerminalAndResolved), which
-// closes the task iff this was the last unresolved artifact on a cleanly-completed
-// run.
+// conversation_memory. Approval is a decoupled sidecar — it does NOT flip
+// conversation status or resume/terminate a blueprint; the only lifecycle
+// effect is the shared terminal-on-last task-closure check
+// (closeTaskIfTerminalAndResolved), which closes the task iff this was the last
+// unresolved artifact on a cleanly-completed blueprint run.
 //
 // The content promoted is read LIVE from GitHub (never the cached snapshot), so a
 // stale or malformed snapshot can neither revert a direct GitHub edit nor write an
@@ -415,14 +519,17 @@ func diffTruncationNote(fileCount int) string {
 // stripped first), so a retry after a partial failure leaves exactly one. The two
 // GitHub mutations come first and are pessimistic (non-2xx on failure); everything
 // after is detached best-effort bookkeeping — the PR is already ready, so a client
-// disconnect must not strand the run/task half-flipped.
+// disconnect must not strand the conversation/task half-flipped.
 func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
@@ -435,7 +542,9 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	case domain.ArtifactKindPullRequest:
 		// fall through to the PR path below
 	default:
-		notFound(w, "artifact")
+		// The row exists; its kind has nothing to submit. 409, not 404 — a
+		// branch artifact is not a missing artifact.
+		conflict(w, "artifacts of kind "+art.Kind+" cannot be approved")
 		return
 	}
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
@@ -447,10 +556,13 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	// click on an already-open or closed artifact would otherwise re-run the
 	// GitHub mutations — a spurious footer rewrite (new timestamp/cost) and a
 	// no-op MarkPRReady — so reject it as a conflict. The state transition is
-	// gated here rather than in resolvePR, which the read paths (GET/diff) share
+	// gated here rather than in ghForArtifact, which the read paths (GET/diff) share
 	// and must keep serving non-draft PRs.
 	if art.State != domain.ArtifactStatePRDraft {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting approval (state: " + art.State + ")"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "this PR is no longer a draft awaiting approval (state: " + art.State + ")",
+		})
 		return
 	}
 
@@ -469,7 +581,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	live, err := gh.GetPRBasic(r.Context(), owner, repo, number)
 	if err != nil {
 		artifactsLog.Warn("approve GetPR failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "couldn't read the PR to promote it" + localDetail(err)})
+		writeUpstreamGitHub(w, "couldn't read the PR to promote it", err)
 		return
 	}
 	finalTitle := live.Title
@@ -477,22 +589,23 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 
 	// Append the footer idempotently: strip any footer a prior (partially failed)
 	// approve already added before re-appending, so a retry can't stack footers.
-	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.agentRuns, orgID, art.ConversationID, "PR")
+	footeredBody := agentmeta.StripFooter(finalBody) + agentmeta.Build(ah.conversations, orgID, art.ConversationID, "PR")
 	if err := gh.UpdatePR(r.Context(), owner, repo, number, finalTitle, footeredBody); err != nil {
 		artifactsLog.Warn("approve UpdatePR (footer) failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 	if err := gh.MarkPRReady(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("MarkPRReady failed", "artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "GitHub API error" + localDetail(err)})
+		writeUpstreamGitHub(w, "GitHub API error", err)
 		return
 	}
 
-	// Post-success bookkeeping runs detached from r.Context(): the PR is already
-	// ready on GitHub, so a client disconnect mustn't leave the run/task in a
-	// half-cleaned state. Each step is best-effort + logged, and each gets its own
-	// tx so one failure doesn't roll back the others.
+	// Post-success bookkeeping runs detached from r.Context(): the PR is
+	// already ready on GitHub, so a client disconnect mustn't leave the
+	// conversation/task in a half-cleaned state. Each step is best-effort +
+	// logged, and each gets its own tx so one failure doesn't roll back the
+	// others.
 	cleanupCtx := context.WithoutCancel(r.Context())
 
 	// Step 1: flip the artifact to open and refresh its snapshot to the promoted
@@ -511,7 +624,7 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 		openArt.DetailsJSON = domain.MarshalPRArtifactDetails(details)
 	}
 	// Compose the audit row with the flip (TFAC-483): the org-App MarkPRReady is a
-	// human-authorized, org-executed write — run_id is the drafting run, actor is
+	// human-authorized, org-executed write — conversation_id is the drafting conversation, actor is
 	// the approver. Recording inside the flip tx keeps the audit row and the
 	// artifact state atomic (both land or neither).
 	if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
@@ -530,27 +643,31 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	if art.ConversationID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateRunMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			return err
 		}); err != nil {
-			artifactsLog.Warn("failed to record human verdict", "run", art.ConversationID, "error", err)
+			artifactsLog.Warn("failed to record human verdict", "conversation", art.ConversationID, "error", err)
 		}
 	}
 
 	// Step 3: terminal-on-last task closure. Approval is a decoupled sidecar — it
-	// never flips run status or resumes/terminates a blueprint. The only lifecycle
-	// effect is closing the task when this was the LAST unresolved artifact on an
-	// already-terminal blueprint (§3); otherwise a no-op.
+	// never flips conversation status or resumes/terminates a blueprint. The
+	// only lifecycle effect is closing the task when this was the LAST
+	// unresolved artifact on an already-terminal blueprint (§3); otherwise a
+	// no-op.
 	ah.closeTaskIfTerminalAndResolved(cleanupCtx, orgID, userID, art.ConversationID)
 
-	// Step 4: tell the drafting agent its PR was approved — live if the run is
-	// warm, else via its ledger on resume. Decoupled from the resolution above.
-	// Note the one carve-out to the ledger's "never miss" property: if the
-	// best-effort flip in step 1 failed (logged above), the artifact row stays at
-	// state=draft, so a terminal-run resume can't re-derive this note — the live
-	// steer is then the only delivery. That double-failure (flip failed AND no warm
-	// process) drops the note, which is acceptable here: the GitHub PR is already
-	// open (the authoritative fact), and the un-flipped draft has bigger problems
-	// than the note (it also blocks terminal-on-last closure until reconciliation).
+	// Step 4: tell the drafting agent its PR was approved — live if the
+	// conversation is warm, else via its ledger on resume. Decoupled from
+	// the resolution above. Note the one carve-out to the ledger's "never
+	// miss" property: if the best-effort flip in step 1 failed (logged
+	// above), the artifact row stays at state=draft, so a terminal
+	// conversation's resume can't re-derive this note — the live steer is
+	// then the only delivery. That double-failure (flip failed AND no warm
+	// process) drops the note, which is acceptable here: the GitHub PR is
+	// already open (the authoritative fact), and the un-flipped draft has
+	// bigger problems than the note (it also blocks terminal-on-last
+	// closure until reconciliation).
 	ah.injectArtifactNote(orgID, openArt)
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -560,34 +677,35 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	})
 }
 
-// handleArtifactDismiss resolves ONE artifact as a decoupled sidecar operation,
-// the per-item counterpart to approve: it abandons the GitHub object and flips
-// the artifact's state, never touching the run's lifecycle. A draft PR is closed
-// on GitHub (best-effort) and flipped to closed; a pending review has its GitHub
-// pending review deleted and is flipped to dismissed. Branches are never touched.
-// An already-terminal artifact (a non-draft PR / non-pending review) is a 409 —
-// there is nothing left to resolve. After the flip it runs the shared
+// handleArtifactDismiss resolves ONE draft pull request as a decoupled sidecar
+// operation, the per-item counterpart to approve: it abandons the GitHub object
+// and flips the artifact's state, never touching the conversation's lifecycle.
+// The draft PR is closed on GitHub (best-effort) and flipped to closed;
+// branches are never touched. An already-terminal artifact (a non-draft PR) is
+// a 409 — there is nothing left to resolve. After the flip it runs the shared
 // terminal-on-last task-closure check.
+//
+// POST /api/artifacts/{id}/dismiss
 func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
 	if !ok {
 		return
 	}
-	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewDismiss(w, r, orgID, userID, art)
-		return
-	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
-	default:
-		notFound(w, "artifact")
+	// Pull requests only. A review's abandonment reaches nothing outside this
+	// process — it is a local state flip — so it is a field write on the review
+	// sub-resource (PATCH …/review {state:"dismissed"}), not a verb. This verb
+	// exists because closing a PR is a real write to GitHub.
+	if !requireArtifactKind(w, art, domain.ArtifactKindPullRequest, "a pull request") {
 		return
 	}
 
@@ -595,7 +713,10 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	// terminal — there's no draft to abandon — so 409 rather than re-closing a PR
 	// the user already shipped or a prior dismiss already retired.
 	if art.State != domain.ArtifactStatePRDraft {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "this PR is no longer a draft awaiting resolution (state: " + art.State + ")"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "this PR is no longer a draft awaiting resolution (state: " + art.State + ")",
+		})
 		return
 	}
 
@@ -645,41 +766,43 @@ func artifactPRNumber(art *domain.Artifact) int {
 }
 
 // closeTaskIfTerminalAndResolved is the shared terminal-on-last task-closure
-// check, run after any per-artifact resolve (approve or dismiss). It re-reads the
-// artifact set governing the run and closes the task IFF the controlling run
+// check, run after any per-artifact resolve (approve or dismiss). It re-reads
+// the task's artifact set and closes the task IFF the controlling blueprint run
 // reached a CLEAN completion AND no unresolved artifact remains. Otherwise it
 // no-ops:
 //
-//   - a LIVE run keeps running — resolving an artifact never closes its task; the
-//     run's own eventual termination (terminateBlueprint / standalone completion)
-//     re-checks this and closes the task then.
-//   - a cleanly-completed run with other unresolved artifacts stays in the approval
-//     column; the last resolution is what closes it.
-//   - an ABORTED / FAILED / CANCELLED run leaves the task open for human attention
-//     regardless of artifact state — mirroring terminateBlueprint (blueprint.go)
+//   - a LIVE blueprint run keeps running — resolving an artifact never closes
+//     its task; the run's own eventual termination (terminateBlueprint /
+//     standalone completion) re-checks this and closes the task then.
+//   - a cleanly-completed blueprint run with other unresolved artifacts stays in
+//     the approval column; the last resolution is what closes it.
+//   - an ABORTED / FAILED / CANCELLED blueprint run leaves the task open for
+//     human attention regardless of artifact state — mirroring
+//     terminateBlueprint (blueprint.go)
 //     and processCompletion (run.go), which close the task only on a clean finish.
 //     Resolving a stray draft PR on an aborted blueprint must not override the
 //     "needs a human" disposition.
 //
 // No accept/dismiss distinction — the task closes on the last resolution
 // regardless of whether anything was accepted (epic decision #3). This is the
-// ONLY lifecycle effect of a resolve: it never flips runs.status or
+// ONLY lifecycle effect of a resolve: it never flips conversations.status or
 // resumes/terminates a blueprint.
 //
 // Governing signals: only a blueprint run is a task run, so only it can close a
 // task — clean completion is its blueprint run reaching status=completed. A
-// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run) is
-// task-less and is a no-op here. The "anything still unresolved?" check is scoped
-// to the whole TASK (all its runs), matching teardownTaskArtifacts, so a stranded
-// artifact from a prior attempt blocks closure.
+// non-blueprint run (origin <> 'blueprint' — a future interactive/ad-hoc run)
+// is task-less and is a no-op here. The "anything still unresolved?" check is
+// scoped to the whole TASK (all its conversations), matching
+// teardownTaskArtifacts, so a stranded artifact from a prior attempt blocks
+// closure.
 //
-// Detached + best-effort: the caller already mutated the GitHub object and flipped
-// the artifact, so a failure here must not unwind that. Fails CLOSED on the close
-// direction — any read error leaves the task open (recoverable; the next resolve
-// or run termination re-checks) rather than closing a task that may still hold
-// unresolved work.
-func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, runID string) {
-	if runID == "" {
+// Detached + best-effort: the caller already mutated the GitHub object and
+// flipped the artifact, so a failure here must not unwind that. Fails CLOSED on
+// the close direction — any read error leaves the task open (recoverable; the
+// next resolve or conversation termination re-checks) rather than closing a
+// task that may still hold unresolved work.
+func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, orgID, userID, conversationID string) {
+	if conversationID == "" {
 		return
 	}
 	var (
@@ -688,11 +811,11 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		unresolved    bool
 	)
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		// Step 1: only a blueprint run is a task run, so only it can drive
-		// terminal-on-last task closure. A non-blueprint run (origin <> 'blueprint'
-		// — a future interactive/ad-hoc run) is task-less by construction (NULL
-		// task_id), so there is nothing to close: leave taskID empty and no-op below.
-		br, _, bpErr := tx.Blueprints.GetRunForRun(ctx, orgID, runID)
+		// Step 1: only a blueprint run is task-linked, so only it can drive
+		// terminal-on-last task closure. A non-blueprint conversation (origin <>
+		// 'blueprint' — a future interactive/ad-hoc conversation) is task-less
+		// by construction (NULL task_id), so there is nothing to close: leave taskID empty and no-op below.
+		br, _, bpErr := tx.Blueprints.GetRunForConversation(ctx, orgID, conversationID)
 		if bpErr != nil {
 			return fmt.Errorf("blueprint lookup: %w", bpErr)
 		}
@@ -706,38 +829,42 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		if !closeEligible {
 			return nil // no need to scan artifacts if we can't close anyway
 		}
-		// Step 2: unresolved check scoped to the TASK (all its runs), matching
-		// teardownTaskArtifacts — not just the current blueprint's step runs. A
-		// stranded artifact from a prior attempt (e.g. a teardown that partially
-		// failed on a network blip) must block closure rather than be silently
-		// skipped, so we never close the task with an unresolved draft PR / pending
-		// review sitting on GitHub.
-		runs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
+		// Step 2: unresolved check scoped to the TASK (all its conversations),
+		// matching teardownTaskArtifacts — not just the current blueprint's step
+		// conversations. A stranded artifact from a prior attempt (e.g. a
+		// teardown that partially failed on a network blip) must block closure
+		// rather than be silently skipped, so we never close the task with an
+		// unresolved draft PR / pending review sitting on GitHub.
+		convs, e := tx.Conversations.ListForTask(ctx, orgID, taskID)
 		if e != nil {
-			return fmt.Errorf("list runs for task: %w", e)
+			return fmt.Errorf("list conversations for task: %w", e)
 		}
-		has, e := runsHaveUnresolvedArtifacts(ctx, tx, orgID, runs)
+		has, e := conversationsHaveUnresolvedArtifacts(ctx, tx, orgID, convs)
 		if e != nil {
 			return e
 		}
 		unresolved = has
 		return nil
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "run", runID, "error", err)
+		artifactsLog.Warn("terminal-on-last close check failed; leaving task open (fail closed)", "conversation", conversationID, "error", err)
 		return
 	}
 	if taskID == "" || !closeEligible || unresolved {
 		return
 	}
 
-	// Close in its own tx. Tasks.Close is idempotent (UPDATE ... WHERE status NOT IN
+	// Close in its own tx. Tasks.Close's WHERE is state-guarded (status NOT IN
 	// ('done','dismissed')), so two concurrent resolves that both pass the gate
-	// above race harmlessly — the second close is a 0-row no-op (worst case a
-	// duplicate task_updated broadcast), not an error.
+	// above race harmlessly: the second close matches nothing and answers
+	// db.ErrNoSuchTask, which this treats as "already closed by the other
+	// racer" rather than a real failure.
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+		_, err := tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+		return err
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "run", runID, "error", err)
+		if !errors.Is(err, db.ErrNoSuchTask) {
+			artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "conversation", conversationID, "error", err)
+		}
 		return
 	}
 	// Move the card to Done on peer boards without a refetch.
@@ -748,16 +875,17 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 	})
 }
 
-// runsHaveUnresolvedArtifacts reports whether any of the given runs still holds an
-// unresolved artifact (a draft PR or a ready review — domain.HasUnresolvedArtifacts),
-// reading each run's artifacts under the caller's tx. One query per run, bounded
+// conversationsHaveUnresolvedArtifacts reports whether any of the given
+// conversations still holds an unresolved artifact (a draft PR or a ready
+// review — domain.HasUnresolvedArtifacts), reading each conversation's
+// artifacts under the caller's tx. One query per conversation, bounded
 // by a blueprint's step count. Shared by the terminal-on-last check so the
 // "blueprint still has unresolved work" definition lives next to its single use.
-func runsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, runs []domain.Conversation) (bool, error) {
-	for i := range runs {
-		arts, err := tx.Artifacts.ListByRun(ctx, orgID, runs[i].ID)
+func conversationsHaveUnresolvedArtifacts(ctx context.Context, tx db.TxStores, orgID string, convs []domain.Conversation) (bool, error) {
+	for i := range convs {
+		arts, err := tx.Artifacts.ListByConversation(ctx, orgID, convs[i].ID)
 		if err != nil {
-			return false, fmt.Errorf("artifacts.ListByRun(%s): %w", runs[i].ID, err)
+			return false, fmt.Errorf("artifacts.ListByConversation(%s): %w", convs[i].ID, err)
 		}
 		if domain.HasUnresolvedArtifacts(arts) {
 			return true, nil

@@ -29,11 +29,11 @@ var artifactNonTerminalPredicate = fmt.Sprintf(`(
 	domain.ArtifactKindBranch, domain.ArtifactStateBranchPushed,
 )
 
-// artifactStore is the SQLite impl of db.ArtifactStore. SQLite is
-// single-tenant (local mode, N=1) with no RLS — org_id exists for parity
-// with the Postgres baseline and every caller passes LocalDefaultOrgID
-// (asserted at each entry). Mirrors the runs store (agentrun.go) for the
-// single-queryer shape and scan conventions. See TFAC-455.
+// artifactStore is the SQLite impl of db.ArtifactStore. SQLite is single-tenant
+// (local mode, N=1) with no RLS — org_id exists for parity with the Postgres
+// baseline and every caller passes LocalDefaultOrgID (asserted at each entry).
+// Mirrors the conversations store (conversation.go) for the single-queryer
+// shape and scan conventions. See TFAC-455.
 type artifactStore struct{ q queryer }
 
 func newArtifactStore(q queryer) db.ArtifactStore { return &artifactStore{q: q} }
@@ -69,7 +69,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// link) — once known they only ever fill in or migrate to a more specific
 	// value (pending PR owner/repo → owner/repo#123), never legitimately clear.
 	// A later upsert that can't supply them — a reconciliation pass, a Jira
-	// mutation whose run can't compute the browse URL, or a GitHub
+	// mutation whose conversation can't compute the browse URL, or a GitHub
 	// comment-update/delete that only knows the comment id, not its PR number —
 	// must not blank a value an earlier writer already stored. external_id/url
 	// are NULLIFed to NULL on insert, so COALESCE preserves them; target is NOT
@@ -79,14 +79,14 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// (state tracks the latest action).
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
-	// the artifact belongs to its CREATING run (domain.Artifact's doc), and
-	// team_id is denormalized off THAT SAME run — not off whichever writer
-	// happens to touch the row later — so a later writer touching the same
-	// dedup key (e.g. a different run editing a Slack message, or a
-	// re-delegate updating a GitHub comment) must not reassign either. Letting
-	// team_id follow the last writer while conversation_id stayed pinned to the first
-	// would desync the two and mis-scope the artifact out of its owning
-	// team's reads.
+	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
+	// and team_id is denormalized off THAT SAME conversation — not off whichever
+	// writer happens to touch the row later — so a later writer touching the
+	// same dedup key (e.g. a different conversation editing a Slack message, or
+	// a re-delegate updating a GitHub comment) must not reassign either.
+	// Letting team_id follow the last writer while conversation_id stayed
+	// pinned to the first would desync the two and mis-scope the artifact out
+	// of its owning team's reads.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
@@ -237,7 +237,7 @@ func (s *artifactStore) Get(ctx context.Context, orgID, id string) (*domain.Arti
 	return &a, nil
 }
 
-func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -246,19 +246,19 @@ func (s *artifactStore) ListByRun(ctx context.Context, orgID, runID string) ([]d
 		FROM artifacts
 		WHERE org_id = ? AND conversation_id = ?
 		ORDER BY created_at DESC, id DESC
-	`, orgID, runID)
+	`, orgID, conversationID)
 	if err != nil {
 		return nil, err
 	}
 	return scanArtifactRows(rows)
 }
 
-// ListByRunSystem is identical to ListByRun in SQLite: local mode is
+// ListByConversationSystem is identical to ListByConversation in SQLite: local mode is
 // single-tenant (N=1) with no RLS, so there is no admin/app pool split. The
 // method exists for parity with the Postgres store, where the spawner's park
 // check (no JWT-claims context) needs an admin-pool path.
-func (s *artifactStore) ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error) {
-	return s.ListByRun(ctx, orgID, runID)
+func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error) {
+	return s.ListByConversation(ctx, orgID, conversationID)
 }
 
 // ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
@@ -281,19 +281,20 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 	return scanArtifactRows(rows)
 }
 
-func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error) {
+func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(runIDs))
-	if len(runIDs) == 0 {
+	counts := make(map[string]int, len(conversationIDs))
+	if len(conversationIDs) == 0 {
 		return counts, nil
 	}
-	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
-	// SQLite's variable limit (chunkIDs) — the batched run-list path counts
-	// every run across many tasks, which can exceed the limit. A NULL conversation_id
-	// never matches IN, so detached artifacts are excluded for free.
-	for _, chunk := range chunkIDs(runIDs) {
+	// ?-placeholder IN list (SQLite has no array bind), chunked to stay
+	// inside SQLite's variable limit (chunkIDs) — the batched conversation-
+	// list path counts every conversation across many tasks, which can
+	// exceed the limit. A NULL conversation_id never matches IN, so
+	// detached artifacts are excluded for free.
+	for _, chunk := range chunkIDs(conversationIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, orgID)
@@ -311,13 +312,13 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 			return nil, err
 		}
 		for rows.Next() {
-			var runID string
+			var conversationID string
 			var n int
-			if err := rows.Scan(&runID, &n); err != nil {
+			if err := rows.Scan(&conversationID, &n); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			counts[runID] = n
+			counts[conversationID] = n
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -328,19 +329,19 @@ func (s *artifactStore) CountByRun(ctx context.Context, orgID string, runIDs []s
 	return counts, nil
 }
 
-func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	if len(runIDs) == 0 {
+	if len(conversationIDs) == 0 {
 		return nil, nil
 	}
 	// ?-placeholder IN list (SQLite has no array bind), chunked to stay inside
 	// SQLite's variable limit (chunkIDs). A NULL conversation_id never matches IN, so
 	// detached artifacts are excluded for free. Each conversation_id is in one chunk, so
-	// per-run grouping by the caller is unaffected by the chunk boundary.
+	// per-conversation grouping by the caller is unaffected by the chunk boundary.
 	var arts []domain.Artifact
-	for _, chunk := range chunkIDs(runIDs) {
+	for _, chunk := range chunkIDs(conversationIDs) {
 		placeholders := make([]string, len(chunk))
 		args := make([]any, 0, len(chunk)+1)
 		args = append(args, orgID)
@@ -366,9 +367,13 @@ func (s *artifactStore) ListByRuns(ctx context.Context, orgID string, runIDs []s
 	return arts, nil
 }
 
-func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countArtifacts(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	// Base WHERE only — the filter helper appends the optional predicates, the
 	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
@@ -376,9 +381,10 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 	query, args := appendArtifactFilters(query, []any{orgID, teamID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // appendArtifactFilters appends opts' optional provider/kind/state/time
@@ -388,6 +394,23 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 // against the CURRENT_TIMESTAMP-formatted created_at regardless of the driver's
 // bind serialization.
 func appendArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
+	query, args = appendArtifactPredicates(query, args, opts)
+	query += ` ORDER BY created_at DESC, id DESC`
+	if opts.Limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, opts.Limit)
+		// OFFSET only with a LIMIT — paging the newest-first feed.
+		if opts.Offset > 0 {
+			query += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
+	}
+	return query, args
+}
+
+// appendArtifactPredicates is the filter half alone — no ordering, no window —
+// so the count and the page apply exactly the same predicate.
+func appendArtifactPredicates(query string, args []any, opts db.ArtifactListOpts) (string, []any) {
 	if opts.Provider != "" {
 		query += ` AND provider = ?`
 		args = append(args, opts.Provider)
@@ -408,34 +431,36 @@ func appendArtifactFilters(query string, args []any, opts db.ArtifactListOpts) (
 		query += ` AND datetime(created_at) < datetime(?)`
 		args = append(args, opts.Until)
 	}
-	query += ` ORDER BY created_at DESC, id DESC`
-	if opts.Limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, opts.Limit)
-		// OFFSET only with a LIMIT — paging the newest-first feed.
-		if opts.Offset > 0 {
-			query += ` OFFSET ?`
-			args = append(args, opts.Offset)
-		}
-	}
 	return query, args
+}
+
+func (s *artifactStore) countArtifacts(ctx context.Context, where string, base []any, opts db.ArtifactListOpts) (int, error) {
+	query, args := appendArtifactPredicates(`SELECT COUNT(*) FROM artifacts WHERE `+where, base, opts)
+	var n int
+	err := s.q.QueryRowContext(ctx, query, args...).Scan(&n)
+	return n, err
 }
 
 // ListByOrgSystem is identical to a plain org read in SQLite: local mode is
 // single-tenant (N=1) with no RLS, so there is no admin/app pool split. It
 // returns ALL states (terminal included) for the bot-activity audit feed
 // (TFAC-483), in contrast to ListNonTerminalBySystem's reconciler working set.
-func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, error) {
+func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts db.ArtifactListOpts) ([]domain.Artifact, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	total, err := s.countArtifacts(ctx, `org_id = ?`, []any{orgID}, opts)
+	if err != nil {
+		return nil, 0, err
 	}
 	query := `SELECT ` + artifactColumns + ` FROM artifacts WHERE org_id = ?`
 	query, args := appendArtifactFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return scanArtifactRows(rows)
+	out, err := scanArtifactRows(rows)
+	return out, total, err
 }
 
 // ListNonTerminalBySystem is identical to a plain org read in SQLite: local
@@ -478,14 +503,14 @@ func scanArtifactRows(rows *sql.Rows) ([]domain.Artifact, error) {
 // unifies *sql.Row and *sql.Rows so this serves both the single-row Upsert
 // RETURNING and the list paths.
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
-	var runID, externalID, url, detailsJSON sql.NullString
+	var conversationID, externalID, url, detailsJSON sql.NullString
 	if err := sc.Scan(
-		&a.ID, &runID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
+		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
 		&externalID, &url, &a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return err
 	}
-	a.ConversationID = runID.String
+	a.ConversationID = conversationID.String
 	a.ExternalID = externalID.String
 	a.URL = url.String
 	a.DetailsJSON = detailsJSON.String

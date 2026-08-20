@@ -43,9 +43,18 @@ curl -fsS http://localhost:3000/readyz | jq .
 
 An org absent from `rate_limit.github` has no observation yet this process (never
 polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
-disabled), not zero remaining budget. Webhook-delivery freshness has no equivalent
-section yet — webhook ingestion invariants (dedup, reconciliation linkage) haven't
-landed, so there is no state to report.
+disabled), not zero remaining budget.
+
+Webhook delivery health is deliberately **not** here. Workspace Settings →
+GitHub access reports it per workspace — whether the App's webhook is
+configured, points at this deployment, and is being accepted — by asking GitHub
+directly (`/app/hook/config` + `/app/hook/deliveries`) rather than by waiting for
+a delivery. It stays off `/readyz` for two reasons: that endpoint is
+unauthenticated and carries no tenant configuration, and a workspace whose App is
+hookless is degraded in its **installation mirror**, not in this process's health
+— polling, task creation, and content processing are unaffected, and reporting a
+GitHub-side misconfiguration as a failing check would take a pod out of rotation
+for something no restart can fix.
 
 Alert on `age_seconds > 3 × interval_seconds` for whichever source/org you care
 about — that threshold is yours to pick; `/readyz` reports the raw numbers rather
@@ -294,6 +303,37 @@ run's own duration accounting deliberately discounts), `relay.call` /
 duration and turn count. Open any of them and the links menu walks to the
 setup trace, and vice versa.
 
+`workspace.snapshot` gets read more closely than the others, because it is
+the unbounded piece of a park: a git bundle, a tar of the whole scratch tree,
+and a blob upload. Nothing a person is watching waits on it — the park records
+that a persist is owed, flips the conversation, and captures afterwards — so a
+slow one costs storage lag and a resume's wait rather than a run that reports
+WORKING after you pressed stop. It splits into three children naming where:
+`workspace.snapshot.capture` (the git delta plus
+the session-transcript read, with `snapshot.bundle_bytes` /
+`snapshot.patch_bytes` / `snapshot.transcript_bytes`),
+`workspace.snapshot.archive` (the tar walk plus gzip, with
+`snapshot.raw_bytes` in against `size_bytes` out — the compression ratio),
+and `workspace.snapshot.put` (the blob write). Every span in the family
+carries `runtime`, and it is load-bearing: only a delegated SDK run snapshots
+a transcript, so transcript sizes are SDK-run data, not a property of all
+snapshots. The family is identical in both modes save for what `capture`
+covers — local runs the capture in-process, multi routes it through the
+privileged capture child, which is span-free like every privileged process,
+so the executor-side `capture` span is its measurement.
+
+The read against it is `engagement.workspace.ensure`, on the setup trace of
+whatever engagement picks the conversation back up. Its `workspace.provenance`
+says how that engagement's tree came to be — `warm` (the parked tree was still
+on this host), `rehydrated` (rebuilt from the blob), or `fresh` (there was no
+blob to rebuild from, so the tree holds only what reached the remote, and the
+agent is told so). `snapshot.waited_ms` is how long it spent waiting on a
+persist that was still in flight: zero on nearly every ensure, and the thing
+to look at when a resume is slow for no visible reason. A wait that runs to
+the `TF_SNAPSHOT_WAIT_SEC` bound (default 60s) and then reads `fresh` means the
+executor that owed the snapshot never produced one — pair it with that
+executor's `workspace.snapshot` span, or its absence.
+
 Two spans on that path measure someone else's work.
 `engagement.credentials.await` is the executor sitting in
 `awaiting_credentials` waiting for a bundle sealed to its sidecar's key, and
@@ -339,9 +379,9 @@ instead of whichever replica DNS happened to answer with.
 
 Grafana's home page is the **Triage Factory — Overview** dashboard, provisioned
 from [`docker/observability/dashboards/`](../../docker/observability/dashboards/)
-the same way the data sources are. Six rows — three answering "is TF healthy,
-and what is slow", then one each for the two pipelines whose spans need reading
-rather than aggregating, and one that should stay empty:
+the same way the data sources are. Seven rows — three answering "is TF healthy,
+and what is slow", then one each for the three pipelines whose spans need
+reading rather than aggregating, and one that should stay empty:
 
 - **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
   job cycles (scorer / profiler / classifier), API requests slower than 500 ms,
@@ -382,6 +422,16 @@ rather than aggregating, and one that should stay empty:
   failure. A local-mode run populates a subset of this row — there is no broker,
   sidecar, or credential span there at all — and those empty panels are the path
   not taken, not a fault.
+- **Workspace snapshots.** The `workspace.snapshot` family described above: one
+  row per snapshot with its duration and stored footprint, the
+  capture/archive/put phase breakdown, the capture member sizes, and the
+  archive's raw-in/compressed-out pair. Unlike the setup row, this one is
+  **fully populated in local mode** — the snapshot pipeline is the same code in
+  both modes, and tracing is gated on `TF_TRACES_ENDPOINT` alone. The one
+  mode difference is inside `capture`: multi runs it in a privileged,
+  span-free child, so the executor-side span is that child's only timing.
+  Filter the member-size panels on `runtime` before reading transcript sizes —
+  the transcript member exists only for delegated SDK runs.
 - **Audit pipeline.** `tf_audit_records_dropped_total` three ways: the total
   over the range, the rate by `stage`, and a filterable table by `op`. Unlike
   the trace rows, this one is read for its *absence* — flat zero is the

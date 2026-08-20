@@ -1,17 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { initialWizardState, persistOrg, bedrockFormError } from './steps'
+import { initialWizardState, persistOrgFields, bedrockFormError } from './steps'
 import type { WizardState } from './types'
 
-// The org save carries CONFIG ONLY — credentials live on their own resources.
-// That's what makes the App-XOR hazard structurally impossible: a wizard session
-// that tried the GitHub PAT path first (typed a token, failed/abandoned the
-// connect) then switched to the App path leaves the typed PAT lingering in the
-// in-memory form, and the whole-form save behind the later poll-interval / model
-// steps used to re-send it and 409 ("use the switch flow"), dead-ending the
-// wizard. It can't now: there is no field to re-send it in. These tests assert
-// the wire payload, since the payload is the whole property.
+// The org save is FIELD-SCOPED: a step's persist names exactly the fields its
+// card edits and nothing else rides the wire — not credentials (they live on
+// their own resources; there is no field to send one in), and not the rest of
+// the org form (so a step can't clobber a value written behind its back, like
+// the base URL a credential bind just persisted). These tests assert the wire
+// payload, since the payload is the whole property.
 
-// A loaded wizard state carrying a stale typed org PAT in the form.
+// A loaded wizard state carrying a stale typed org PAT in the form — the
+// abandoned-PAT-attempt residue that the old whole-form save used to re-send.
 function loadedStateWithStalePat(over: Partial<WizardState> = {}): WizardState {
   const base = initialWizardState()
   return {
@@ -22,63 +21,113 @@ function loadedStateWithStalePat(over: Partial<WizardState> = {}): WizardState {
   }
 }
 
-// Stub fetch and capture each request's parsed JSON body.
+const ORG_ID = '00000000-0000-0000-0000-000000000001'
+
+// Stub fetch and capture each request's parsed JSON body. The settings PATCH
+// answers with the settings resource, so the stub returns a version — the
+// persist folds it back into wizard state, and a stub that omitted it would
+// let a version-dropping regression pass.
 function captureSaveBodies(): () => Record<string, unknown>[] {
   const bodies: Record<string, unknown>[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn(async (_url: string, init?: RequestInit) => {
       bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
-      return new Response(JSON.stringify({}), { status: 200 })
+      return new Response(JSON.stringify({ version: 8 }), { status: 200 })
     }),
   )
   return () => bodies
 }
 
-describe('persistOrg — the org save carries no credentials', () => {
+// The persist's context: the state plus the patcher and the org the path names.
+function orgCtx(state: WizardState, patch: (p: Partial<WizardState>) => void = () => {}) {
+  return { state, patch, orgId: ORG_ID }
+}
+
+describe('persistOrgFields — each org step saves only what it owns', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  // Parameterized over the App states that used to need a scrub, plus the
-  // no-App case that used to be REQUIRED to send the token. All three now have
-  // the same answer, which is the point: the payload no longer depends on
-  // credential state at all.
-  const cases: { name: string; over: Partial<WizardState> }[] = [
-    { name: 'a live App is registered', over: { githubAppRegistered: true } },
-    {
-      name: 'a STAGED App is registered (the PAT is still live)',
-      over: { githubAppRegistered: true, githubAppStaged: true, hasGitHubPat: true },
-    },
-    { name: 'no App is registered', over: { githubAppRegistered: false } },
-  ]
+  it('sends exactly the named fields plus the concurrency token', async () => {
+    const bodies = captureSaveBodies()
+    await persistOrgFields('jira_poll_interval')(orgCtx(loadedStateWithStalePat()))
+    const sent = bodies()
+    expect(sent).toHaveLength(1)
+    expect(Object.keys(sent[0]).sort()).toEqual(['jira_poll_interval', 'version'])
+  })
 
-  for (const { name, over } of cases) {
-    it(`omits the typed org PAT when ${name}`, async () => {
-      const bodies = captureSaveBodies()
-      await persistOrg(loadedStateWithStalePat(over))
-      const sent = bodies()
-      expect(sent).toHaveLength(1)
-      expect(sent[0]).not.toHaveProperty('github_pat')
-      expect(sent[0]).not.toHaveProperty('jira_pat')
-      // The rest of the form still round-trips, so an unrelated save isn't lossy.
-      expect(sent[0]).toMatchObject({ github_base_url: 'https://github.com' })
-    })
-  }
+  // The old whole-form save had to scrub a lingering typed PAT out of the
+  // payload per App state; field-scoping makes the hazard structural — there is
+  // no field the token (or any neighbour value) could ride in.
+  it('cannot carry a stale typed PAT or an unrelated field', async () => {
+    const bodies = captureSaveBodies()
+    await persistOrgFields('github_clone_protocol')(
+      orgCtx(loadedStateWithStalePat({ githubAppRegistered: true })),
+    )
+    const sent = bodies()
+    expect(sent[0]).not.toHaveProperty('github_pat')
+    expect(sent[0]).not.toHaveProperty('github_base_url')
+    expect(sent[0]).toMatchObject({ github_clone_protocol: 'ssh' })
+  })
 
   it('refuses to save (and makes no request) when the org load failed', async () => {
     const bodies = captureSaveBodies()
     await expect(
-      persistOrg(loadedStateWithStalePat({ orgLoaded: false, githubAppRegistered: true })),
+      persistOrgFields('github_poll_interval')(
+        orgCtx(loadedStateWithStalePat({ orgLoaded: false })),
+      ),
     ).rejects.toThrow(/reopen the GitHub step/)
     expect(bodies()).toHaveLength(0)
+  })
+
+  // The settings row's concurrency token has to survive a save, or the wizard's
+  // SECOND org step would assert the version it loaded with and 409 against its
+  // own earlier write.
+  it('folds the post-save version back into wizard state', async () => {
+    captureSaveBodies()
+    const patched: Partial<WizardState>[] = []
+    await persistOrgFields('github_poll_interval')(
+      orgCtx(loadedStateWithStalePat(), (p) => patched.push(p)),
+    )
+    expect(patched.at(-1)?.org?.version).toBe(8)
+  })
+
+  it('sends the loaded version so a concurrent admin save is a conflict, not a clobber', async () => {
+    const bodies = captureSaveBodies()
+    const state = loadedStateWithStalePat()
+    state.org.version = 3
+    await persistOrgFields('github_poll_interval')(orgCtx(state))
+    expect(bodies()[0]).toMatchObject({ version: 3 })
+  })
+
+  // On a conflict the row is re-read and the fresh token folded into state
+  // before the error surfaces, so the user's immediate retry can succeed —
+  // "reload and re-apply" without a page reload.
+  it('re-reads the fresh version on a 409 so a retry can succeed', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method === 'PATCH'
+          ? new Response(JSON.stringify({ errors: [] }), { status: 409 })
+          : new Response(JSON.stringify({ version: 9 }), { status: 200 }),
+      ),
+    )
+    const patched: Partial<WizardState>[] = []
+    await expect(
+      persistOrgFields('github_poll_interval')(
+        orgCtx(loadedStateWithStalePat(), (p) => patched.push(p)),
+      ),
+    ).rejects.toThrow()
+    expect(patched.at(-1)?.org?.version).toBe(9)
   })
 })
 
 // TFAC-68: the Bedrock credential form's input-layer validation, shared by
 // the wizard key step's validate and the Settings section's Save gate. The
-// rules mirror the backend's 422 shapes: region always required; the selected
-// method's secrets required unless a credential for that SAME method is
-// already stored (switching methods always needs the new secrets).
+// rules mirror the backend's 400 shapes: the region and the selected shape's
+// own credential are both always required — each shape's bind route REPLACES
+// the credential, so there is no "leave blank to keep current" arm left on
+// either side of the wire.
 describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
   function bedrockState(over: Partial<WizardState> = {}, org: Partial<WizardState['org']> = {}) {
     const base = initialWizardState()
@@ -100,12 +149,12 @@ describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
     expect(bedrockFormError(s)).toMatch(/Bedrock API key/)
   })
 
-  it('accepts a blank bearer token when a bearer credential is stored (keep current)', () => {
+  it('still requires the bearer token when one is already stored (no keep-current)', () => {
     const s = bedrockState(
       { bedrockConnected: true, bedrockStoredMethod: 'bearer' },
       { bedrock_auth_method: 'bearer' },
     )
-    expect(bedrockFormError(s)).toBeNull()
+    expect(bedrockFormError(s)).toMatch(/Bedrock API key/)
   })
 
   it('requires the key pair when switching methods, even though a bearer is stored', () => {

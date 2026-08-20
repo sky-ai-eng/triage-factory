@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
-import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiList, httpErrorMessage } from '../lib/apiClient'
+import { fetchTeamRoster } from '../lib/teamRoster'
+import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 // TeamMemberPicker is the team roster's "add member" affordance (TFAC-444): a
@@ -21,17 +23,10 @@ interface OrgMemberApiRow {
   role: string
 }
 
-interface TeamRosterApiRow {
-  user_id: string
-}
-
-// 'member' leads — the common add. 'viewer' is assignable now but read-only
-// enforcement is a later slice (TFAC-447), so it's labelled as such.
-const ADD_ROLES: { value: string; label: string }[] = [
-  { value: 'member', label: 'member' },
-  { value: 'admin', label: 'admin' },
-  { value: 'viewer', label: 'viewer (read-only soon)' },
-]
+// 'member' leads — the common add. The roster's own <select> orders these
+// admin-first; the picker's order is its own, but the labels come from the
+// shared map so the two surfaces can't describe the same role differently.
+const ADD_ROLES = ['member', 'admin', 'viewer']
 
 export default function TeamMemberPicker({ orgId, teamId, onAdded }: TeamMemberPickerProps) {
   const [open, setOpen] = useState(false)
@@ -80,13 +75,19 @@ function PickerModal({
   useEffect(() => {
     let alive = true
     Promise.all([
-      apiJSON<{ members: OrgMemberApiRow[] }>('/members', { org: orgId }),
-      apiJSON<{ members: TeamRosterApiRow[] }>(`/api/teams/${teamId}/members`),
+      // page_size at the route max: the picker's candidate set is "org
+      // members minus team members", which needs both rosters whole. An org
+      // past 200 members would need a search-as-you-type picker rather than a
+      // longer page.
+      apiList<OrgMemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
+        page_size: 200,
+      }),
+      fetchTeamRoster(teamId),
     ])
       .then(([org, team]) => {
         if (!alive) return
         const onTeam = new Set(team.members.map((m) => m.user_id))
-        const addable = org.members.filter((m) => !onTeam.has(m.user_id))
+        const addable = org.items.filter((m) => !onTeam.has(m.user_id))
         setCandidates(addable)
         setSelected(addable[0]?.user_id ?? '')
       })
@@ -198,8 +199,8 @@ function PickerModal({
                   className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
                 >
                   {ADD_ROLES.map((r) => (
-                    <option key={r.value} value={r.value}>
-                      {r.label}
+                    <option key={r} value={r}>
+                      {TEAM_ROLE_LABELS[r] ?? r}
                     </option>
                   ))}
                 </select>

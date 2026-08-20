@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -193,7 +194,7 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 	t.Helper()
 	const ref = "github_app_999_client_secret"
 	if err := rig.srv.tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.GitHubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+		if _, err := tx.GitHubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              "999",
 			Slug:               "tf-connect-test",
@@ -202,6 +203,11 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 			PEMRef:             "github_app_999_pem",
 			RegisteredByUserID: userID,
 		}); err != nil {
+			return err
+		}
+		// The class registration writes alongside the row, in the same
+		// transaction — a fixture that skips it models an unreachable state.
+		if _, err := tx.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			return err
 		}
 		return tx.Secrets.Put(context.Background(), orgID, ref, clientSecret, "test client secret")
@@ -324,6 +330,8 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"login":"corp-octocat"}`)
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, "corp-octocat@example.com")
 		default:
 			http.NotFound(w, r)
 		}
@@ -366,15 +374,18 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 	// driveCallback (the GitHub login) already wrote a login_claim row on
 	// github.com; Connect adds a SEPARATE binding for the org's (stub) host.
 	// Scope the readback to the host Connect wrote.
-	var login, source, host string
+	var login, email, source, host string
 	if err := rig.h.AdminDB.QueryRow(`
-		SELECT login, source, github_base_url FROM user_github_identities
+		SELECT login, email, source, github_base_url FROM user_github_identities
 		 WHERE user_id = $1 AND github_base_url = $2
-	`, alice.String(), ghStub.URL).Scan(&login, &source, &host); err != nil {
+	`, alice.String(), ghStub.URL).Scan(&login, &email, &source, &host); err != nil {
 		t.Fatalf("read user_github_identities: %v", err)
 	}
 	if login != "corp-octocat" {
 		t.Errorf("login = %q, want corp-octocat", login)
+	}
+	if email != "corp-octocat@example.com" {
+		t.Errorf("email = %q, want corp-octocat@example.com", email)
 	}
 	if source != "connect_oauth" {
 		t.Errorf("source = %q, want connect_oauth", source)
@@ -394,6 +405,30 @@ func TestGitHubConnect_CallbackBindsIdentity(t *testing.T) {
 	}
 	if claimRows != 1 {
 		t.Errorf("login_claim github.com row count = %d, want 1 (Connect must not disturb it)", claimRows)
+	}
+}
+
+func TestGitHubLoginClaimCapturesVerifiedEmail(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+	userID := rig.seedUser()
+	claims := validClaimsFor(userID)
+	claims["email_verified"] = true
+
+	resp, _ := rig.driveCallbackClaims(claims)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302", resp.StatusCode)
+	}
+
+	var email sql.NullString
+	if err := rig.h.AdminDB.QueryRow(`
+		SELECT email FROM user_github_identities
+		 WHERE user_id = $1 AND github_base_url = 'https://github.com' AND source = 'login_claim'
+	`, userID.String()).Scan(&email); err != nil {
+		t.Fatalf("read login-claim email: %v", err)
+	}
+	if want := userID.String() + "@test"; email.String != want {
+		t.Errorf("email = %q, want %q", email.String, want)
 	}
 }
 
@@ -533,7 +568,7 @@ func TestGitHubIdentityStatus(t *testing.T) {
 
 	// Bind via the store under the resolved origin (what the gate reads).
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), ghesHost, "octocat", "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), ghesHost, "octocat", "", "", "connect_oauth")
 	}); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
@@ -563,7 +598,7 @@ func TestGitHubConnect_IdentityPersistsAcrossLoginProvider(t *testing.T) {
 	seedOrgGitHubHost(t, rig, orgA.String(), "https://github.com")
 
 	if err := rig.srv.tx.WithTx(context.Background(), orgA.String(), alice.String(), func(tx db.TxStores) error {
-		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "corp-login", "connect_oauth")
+		return tx.Users.UpsertGitHubIdentity(context.Background(), alice.String(), "https://github.com", "corp-login", "", "", "connect_oauth")
 	}); err != nil {
 		t.Fatalf("seed connect identity: %v", err)
 	}
@@ -619,7 +654,8 @@ func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
 			return err
 		}
 		set.GitHubBaseURL = host
-		return tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		_, err = tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		return err
 	}); err != nil {
 		t.Fatalf("seed org github host: %v", err)
 	}
@@ -638,6 +674,10 @@ func TestGitHubIdentityPAT_BindsIdentityAndDiscardsToken(t *testing.T) {
 
 	var gotAuth string
 	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octo-pat@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
@@ -758,5 +798,53 @@ func TestGitHubIdentityPAT_HostUnreachable_Returns502(t *testing.T) {
 	}
 	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, deadURL); login != "" {
 		t.Errorf("identity row written despite unreachable host: %q", login)
+	}
+}
+
+// TestGitHubIdentityPAT_CapturesNumericUserID pins the second of the two
+// writers of user_github_identities.github_user_id (the Connect OAuth callback
+// is the other): the whoami that proves the token also reports which account it
+// is, and both halves of that answer are persisted. The login is what the rest
+// of the product matches on today; the id is what stays true if the user
+// renames.
+func TestGitHubIdentityPAT_CapturesNumericUserID(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	ctx := context.Background()
+
+	ghStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "octo-pat@example.com")
+			return
+		}
+		if r.URL.Path != "/api/v3/user" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":583231,"login":"octo-pat"}`)
+	}))
+	t.Cleanup(ghStub.Close)
+	seedLocalOrgGitHubHost(t, s, ghStub.URL)
+
+	rec := doJSON(t, s, "POST",
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",
+		map[string]any{"pat": "ghp_secret_token"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+
+	var githubUserID, email sql.NullString
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT github_user_id, email FROM user_github_identities WHERE user_id = ? AND github_base_url = ?`,
+		runmode.LocalDefaultUserID, ghStub.URL).Scan(&githubUserID, &email); err != nil {
+		t.Fatalf("read GitHub identity: %v", err)
+	}
+	if githubUserID.String != "583231" {
+		t.Errorf("github_user_id = %q, want %q", githubUserID.String, "583231")
+	}
+	if email.String != "octo-pat@example.com" {
+		t.Errorf("email = %q, want %q", email.String, "octo-pat@example.com")
 	}
 }

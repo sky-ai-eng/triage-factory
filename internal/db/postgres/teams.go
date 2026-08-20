@@ -64,12 +64,29 @@ func (s *teamsStore) GetSettingsSystem(ctx context.Context, teamID string) (doma
 	return getTeamSettings(ctx, s.admin, teamID)
 }
 
-func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.TeamSettings, error) {
+// pgTeamSettingsColumns is the canonical projection of a team_settings row, in
+// the order scanTeamSettings reads them. Both reads SELECT it and both writes
+// RETURN it, so the write shape cannot drift from the read shape.
+//
+// array_to_json(...)::text round-trips text[] as a JSON literal.
+// database/sql + pgx stdlib doesn't ship a scanner for *[]string, so the JSON
+// detour is the portable shape — matches what the jira_project_status_rules
+// reader does for its array columns.
+const pgTeamSettingsColumns = `array_to_json(jira_projects)::text,
+		       ai_reprioritize_threshold, ai_preference_update_interval,
+		       default_model, auto_delegate_enabled, auto_mode_enabled,
+		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
+		       max_daily_cost_usd, branch_template, review_posture,
+		       base_branch_push_policy`
+
+// scanTeamSettings decodes one team_settings row in pgTeamSettingsColumns order.
+func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	var (
 		projectsJSON            string
 		aiThreshold, aiInterval int
 		defaultModel            string
 		autoDelegate            bool
+		autoMode                bool
 		permAbsentGraceMS       int
 		permAbsentAutodeny      bool
 		maxDailyCost            sql.NullFloat64
@@ -77,39 +94,18 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		reviewPosture           string
 		basePushPolicy          string
 	)
-	// array_to_json(...)::text round-trips text[] as a JSON literal.
-	// database/sql + pgx stdlib doesn't ship a scanner for *[]string,
-	// so the JSON detour is the portable shape — matches what the
-	// jira_project_status_rules reader does for its array columns.
-	err := q.QueryRowContext(ctx, `
-		SELECT array_to_json(jira_projects)::text,
-		       ai_reprioritize_threshold, ai_preference_update_interval,
-		       default_model, auto_delegate_enabled,
-		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
-		       max_daily_cost_usd, branch_template, review_posture,
-		       base_branch_push_policy
-		FROM team_settings WHERE team_id = $1
-	`, teamID).Scan(
+	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
-		&defaultModel, &autoDelegate,
+		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		// See OrgsStore for the rationale. Matches team_settings'
-		// schema DEFAULT clauses.
-		return domain.DefaultTeamSettings(), nil
-	}
-	if err != nil {
-		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	); err != nil {
+		return domain.TeamSettings{}, err
 	}
 	projects := []string{}
 	if projectsJSON != "" {
 		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
 			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
-		}
-		if projects == nil {
-			projects = []string{}
 		}
 	}
 	return domain.TeamSettings{
@@ -118,6 +114,7 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 		AIPreferenceUpdateInterval:      aiInterval,
 		DefaultModel:                    defaultModel,
 		AutoDelegateEnabled:             autoDelegate,
+		AutoModeEnabled:                 autoMode,
 		PermissionAbsentGraceMS:         permAbsentGraceMS,
 		PermissionAbsentAutodenyEnabled: permAbsentAutodeny,
 		MaxDailyCostUSD:                 maxDailyCost.Float64, // NULL → 0 (no cap)
@@ -127,7 +124,23 @@ func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.Team
 	}, nil
 }
 
-func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Team, error) {
+func getTeamSettings(ctx context.Context, q queryer, teamID string) (domain.TeamSettings, error) {
+	set, err := scanTeamSettings(q.QueryRowContext(ctx, `
+		SELECT `+pgTeamSettingsColumns+`
+		FROM team_settings WHERE team_id = $1
+	`, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		// See OrgsStore for the rationale. Matches team_settings'
+		// schema DEFAULT clauses.
+		return domain.DefaultTeamSettings(), nil
+	}
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("read team_settings: %w", err)
+	}
+	return set, nil
+}
+
+func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
 	// teams_select RLS gates on org access, not team membership, so it
 	// returns every team in the org. The memberships join is what
 	// narrows to the caller's own teams — memberships_select lets a user
@@ -140,25 +153,94 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string) ([]domain.Te
 	// t.deleted_at IS NULL hides archived teams from the selectors (TFAC-448) —
 	// the request-facing read filter mirrored on the SQLite impl; the lifecycle
 	// paths read archived teams through the ...System variants instead.
-	rows, err := s.app.QueryContext(ctx, `
-		SELECT t.id::text, t.org_id::text, t.slug, t.name, t.created_at, m.role::text
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM teams t
 		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
 		WHERE t.org_id = $1 AND t.deleted_at IS NULL
-		ORDER BY t.created_at ASC, t.id ASC
-	`, orgID)
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count teams for user: %w", err)
+	}
+
+	query := `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, COALESCE(t.description, ''), t.created_at, m.role::text
+		FROM teams t
+		JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		ORDER BY t.created_at ASC, t.id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list teams for user: %w", err)
+		return nil, 0, fmt.Errorf("list teams for user: %w", err)
 	}
 	defer rows.Close()
-	return scanTeams(rows)
+	teams, err := scanTeams(rows)
+	return teams, total, err
 }
 
-func (s *teamsStore) Archive(ctx context.Context, teamID string) error {
+// Get reads under the caller's claims: teams_select gates on org access, so a
+// team in the caller's org resolves whether or not they are on it, and the
+// LEFT JOIN reports their role as empty when they are not. A cross-org id is
+// invisible to the policy and comes back nil — the not-found the disclosure
+// rule asks for, produced by the database rather than by a handler predicate.
+// pgTeamRowColumns is the canonical projection of a teams ROW, in the order
+// scanTeamRow reads them. Get SELECTs it alongside the caller's membership
+// role, and the archive/restore writes RETURN it — role is not in the list
+// because it is not a column of this table: it is the caller's own membership,
+// which Get resolves through a join and a write has no view on.
+const pgTeamRowColumns = `id::text, org_id::text, slug, name, COALESCE(description, ''), created_at, deleted_at`
+
+func scanTeamRow(scan func(...any) error) (domain.Team, error) {
+	var (
+		t       domain.Team
+		deleted sql.NullTime
+	)
+	if err := scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
+		return domain.Team{}, err
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	return t, nil
+}
+
+func (s *teamsStore) Get(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
+	var (
+		t       domain.Team
+		deleted sql.NullTime
+		role    sql.NullString
+	)
+	err := s.app.QueryRowContext(ctx, `
+		SELECT t.id::text, t.org_id::text, t.slug, t.name, COALESCE(t.description, ''),
+		       t.created_at, t.deleted_at, m.role::text
+		FROM teams t
+		LEFT JOIN memberships m ON m.team_id = t.id AND m.user_id = tf.current_user_id()
+		WHERE t.id = $1 AND t.org_id = $2
+	`, teamID, orgID).Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted, &role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get team: %w", err)
+	}
+	if deleted.Valid {
+		t.DeletedAt = &deleted.Time
+	}
+	t.Role = role.String
+	return &t, nil
+}
+
+func (s *teamsStore) Archive(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.app, teamID, true)
 }
 
-func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
+func (s *teamsStore) Restore(ctx context.Context, teamID string) (domain.Team, error) {
 	return setTeamArchived(ctx, s.app, teamID, false)
 }
 
@@ -168,31 +250,29 @@ func (s *teamsStore) Restore(ctx context.Context, teamID string) error {
 // team, restoring a live one) affects zero rows and surfaces as ErrTeamNotFound
 // so the handler answers 404/409 rather than silently succeeding. App pool:
 // teams_update RLS gates org-admin via the handler.
-func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) error {
-	var res sql.Result
-	var err error
-	if archive {
-		res, err = q.ExecContext(ctx, `
-			UPDATE teams SET deleted_at = now(), updated_at = now()
-			WHERE id = $1 AND deleted_at IS NULL
-		`, teamID)
-	} else {
-		res, err = q.ExecContext(ctx, `
+func setTeamArchived(ctx context.Context, q queryer, teamID string, archive bool) (domain.Team, error) {
+	stmt := `
 			UPDATE teams SET deleted_at = NULL, updated_at = now()
 			WHERE id = $1 AND deleted_at IS NOT NULL
-		`, teamID)
+			RETURNING ` + pgTeamRowColumns
+	if archive {
+		stmt = `
+			UPDATE teams SET deleted_at = now(), updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+			RETURNING ` + pgTeamRowColumns
+	}
+	// No row scanned means the state-guarded WHERE matched nothing — already
+	// archived, already active, missing, or invisible under RLS — which is
+	// db.ErrTeamNotFound, the same answer the rows-affected probe here used to
+	// synthesize.
+	t, err := scanTeamRow(q.QueryRowContext(ctx, stmt, teamID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Team{}, db.ErrTeamNotFound
 	}
 	if err != nil {
-		return fmt.Errorf("set team archived=%v: %w", archive, err)
+		return domain.Team{}, fmt.Errorf("set team archived=%v: %w", archive, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("set team archived: rows affected: %w", err)
-	}
-	if n == 0 {
-		return db.ErrTeamNotFound
-	}
-	return nil
+	return t, nil
 }
 
 func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error) {
@@ -218,16 +298,28 @@ func (s *teamsStore) GetSystem(ctx context.Context, orgID, teamID string) (*doma
 	return &t, nil
 }
 
-func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
-	rows, err := s.admin.QueryContext(ctx, `
+func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Team, int, error) {
+	var total int
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM teams WHERE org_id = $1 AND deleted_at IS NOT NULL
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count archived teams: %w", err)
+	}
+	query := `
 		SELECT id::text, org_id::text, slug, name, COALESCE(description, ''),
 		       created_at, deleted_at
 		FROM teams
 		WHERE org_id = $1 AND deleted_at IS NOT NULL
-		ORDER BY deleted_at DESC, id ASC
-	`, orgID)
+		ORDER BY deleted_at DESC, id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.admin.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list archived teams: %w", err)
+		return nil, 0, fmt.Errorf("list archived teams: %w", err)
 	}
 	defer rows.Close()
 	out := []domain.Team{}
@@ -237,14 +329,14 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string)
 			deleted sql.NullTime
 		)
 		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &deleted); err != nil {
-			return nil, fmt.Errorf("scan archived team: %w", err)
+			return nil, 0, fmt.Errorf("scan archived team: %w", err)
 		}
 		if deleted.Valid {
 			t.DeletedAt = &deleted.Time
 		}
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error) {
@@ -267,6 +359,51 @@ func (s *teamsStore) ListActiveForOrgSystem(ctx context.Context, orgID string) (
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+func (s *teamsStore) ListActiveCapsForOrgSystem(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.TeamCap, int, error) {
+	var total int
+	if err := s.admin.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM teams WHERE org_id = $1 AND deleted_at IS NULL
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count active teams: %w", err)
+	}
+	// LEFT JOIN, not JOIN: a team with no settings row has no cap, and an
+	// inner join would silently drop it from the editor that exists to give
+	// it one.
+	query := `
+		SELECT t.id::text, t.name, ts.max_daily_cost_usd
+		FROM teams t
+		LEFT JOIN team_settings ts ON ts.team_id = t.id
+		WHERE t.org_id = $1 AND t.deleted_at IS NULL
+		ORDER BY t.name ASC, t.id ASC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.admin.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team caps: %w", err)
+	}
+	defer rows.Close()
+	out := []domain.TeamCap{}
+	for rows.Next() {
+		var (
+			c   domain.TeamCap
+			cap sql.NullFloat64
+		)
+		if err := rows.Scan(&c.TeamID, &c.TeamName, &cap); err != nil {
+			return nil, 0, fmt.Errorf("scan team cap: %w", err)
+		}
+		if cap.Valid && cap.Float64 > 0 {
+			v := cap.Float64
+			c.Cap = &v
+		}
+		out = append(out, c)
+	}
+	return out, total, rows.Err()
 }
 
 func (s *teamsStore) NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error) {
@@ -397,7 +534,7 @@ func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 	out := []domain.Team{}
 	for rows.Next() {
 		var t domain.Team
-		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.CreatedAt, &t.Role); err != nil {
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Slug, &t.Name, &t.Description, &t.CreatedAt, &t.Role); err != nil {
 			return nil, fmt.Errorf("scan team: %w", err)
 		}
 		out = append(out, t)
@@ -405,7 +542,7 @@ func scanTeams(rows *sql.Rows) ([]domain.Team, error) {
 	return out, rows.Err()
 }
 
-func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) error {
+func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain.TeamSettings) (domain.TeamSettings, error) {
 	projects := u.JiraProjects
 	if projects == nil {
 		projects = []string{}
@@ -416,20 +553,22 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	// team admin cannot set their own cap), so its GetSettings→UpdateSettings flow
 	// writes back exactly what it read; the cap is *changed* only by the org-admin
 	// SetDailyCostCapSystem path.
-	_, err := s.app.ExecContext(ctx, `
+	stored, err := scanTeamSettings(s.app.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
 			ai_preference_update_interval, default_model, auto_delegate_enabled,
+			auto_mode_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			max_daily_cost_usd, branch_template, review_posture,
 			base_branch_push_policy, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			jira_projects = EXCLUDED.jira_projects,
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
 			ai_preference_update_interval = EXCLUDED.ai_preference_update_interval,
 			default_model = EXCLUDED.default_model,
 			auto_delegate_enabled = EXCLUDED.auto_delegate_enabled,
+			auto_mode_enabled = EXCLUDED.auto_mode_enabled,
 			permission_absent_grace_ms = EXCLUDED.permission_absent_grace_ms,
 			permission_absent_autodeny_enabled = EXCLUDED.permission_absent_autodeny_enabled,
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
@@ -437,17 +576,18 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			review_posture = EXCLUDED.review_posture,
 			base_branch_push_policy = EXCLUDED.base_branch_push_policy,
 			updated_at = now()
-	`,
+		RETURNING `+pgTeamSettingsColumns,
 		teamID, projects, u.AIReprioritizeThreshold,
 		u.AIPreferenceUpdateInterval, u.DefaultModel, u.AutoDelegateEnabled,
+		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloat(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
 		u.BaseBranchPushPolicy,
-	)
+	).Scan)
 	if err != nil {
-		return fmt.Errorf("upsert team_settings: %w", err)
+		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 // SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for teamID
@@ -460,49 +600,81 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 // and ON CONFLICT touches only the cap so the team's other settings are never
 // clobbered. org_id isn't a column on team_settings (it FKs teams), so scoping
 // is by the teamID the org-admin handler already verified is in the org.
-func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error {
+func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error) {
 	// ≤ 0 → SQL NULL ("no cap"); any positive value is the cap.
 	var capArg any
 	if capUSD > 0 {
 		capArg = capUSD
 	}
-	if _, err := s.admin.ExecContext(ctx, `
+	// RETURNING projects the whole settings row: the insert arm fills every
+	// other column from schema defaults, so the row this lands in is one the
+	// caller has never seen.
+	stored, err := scanTeamSettings(s.admin.QueryRowContext(ctx, `
 		INSERT INTO team_settings (team_id, max_daily_cost_usd, updated_at)
 		VALUES ($1, $2, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			updated_at = now()
-	`, teamID, capArg); err != nil {
-		return fmt.Errorf("set team daily cost cap: %w", err)
+		RETURNING `+pgTeamSettingsColumns,
+		teamID, capArg).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("set team daily cost cap: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error) {
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+	// 0. The filtered total, on the same pool and the same FROM as the page
+	//    below — a count taken through a different join could disagree with
+	//    the rows it is meant to describe.
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.team_id = $1
+	`, teamID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count team members: %w", err)
+	}
+
 	// 1. Core roster on the app pool (RLS-gated). memberships_select lets any
 	//    org member read a team-in-org's roster; display_name is nullable, so
 	//    COALESCE renders the empty string (matching GetDisplayName's "").
-	rows, err := s.app.QueryContext(ctx, `
+	//    The ORDER BY ends in m.user_id: two members sharing a display name
+	//    would otherwise tie, and a tie under LIMIT/OFFSET is a row that
+	//    repeats on one page and never appears on another.
+	query := `
 		SELECT m.user_id::text, COALESCE(u.display_name, ''), m.role::text
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
 		WHERE m.team_id = $1
-		ORDER BY COALESCE(u.display_name, ''), m.user_id
-	`, teamID)
+		ORDER BY COALESCE(u.display_name, ''), m.user_id`
+	args := []any{teamID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list team members: %w", err)
+		return nil, 0, fmt.Errorf("list team members: %w", err)
 	}
 	defer rows.Close()
 	out := []domain.TeamMember{}
+	ids := []string{}
 	for rows.Next() {
 		var m domain.TeamMember
 		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.Role); err != nil {
-			return nil, fmt.Errorf("scan team member: %w", err)
+			return nil, 0, fmt.Errorf("scan team member: %w", err)
 		}
 		out = append(out, m)
+		ids = append(ids, m.UserID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate team members: %w", err)
+		return nil, 0, fmt.Errorf("iterate team members: %w", err)
+	}
+	if len(out) == 0 {
+		return out, total, nil
 	}
 
 	// 2. Identity enrichment on the admin pool, scoped to this team's members
@@ -511,26 +683,28 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	//    RLS can't show a peer's binding, but the roster's whole purpose is to
 	//    show every teammate's readiness; the membership join keeps the
 	//    admin-pool read scoped to exactly the members the RLS roster already
-	//    returned. Host resolution mirrors the org roster: an unset
-	//    github_base_url resolves to github.com (EffectiveGitHubHost), an unset
-	//    jira_base_url normalizes to "" and matches nothing.
+	//    returned, and the id list narrows it further to the page in hand so
+	//    the enrichment costs the window rather than the whole roster. Host
+	//    resolution mirrors the org roster: an unset github_base_url resolves
+	//    to github.com (EffectiveGitHubHost), an unset jira_base_url
+	//    normalizes to "" and matches nothing.
 	ghMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh
 		JOIN memberships m ON m.user_id = gh.user_id AND m.team_id = $1
-		WHERE gh.github_base_url = $2
-	`, teamID, db.EffectiveGitHubHost(githubBaseURL))
+		WHERE gh.github_base_url = $2 AND gh.user_id = ANY($3)
+	`, teamID, db.EffectiveGitHubHost(githubBaseURL), pgUUIDArray(ids))
 	if err != nil {
-		return nil, fmt.Errorf("list team member github identities: %w", err)
+		return nil, 0, fmt.Errorf("list team member github identities: %w", err)
 	}
 	jiraMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT j.user_id::text, j.account_id
 		FROM user_jira_identities j
 		JOIN memberships m ON m.user_id = j.user_id AND m.team_id = $1
-		WHERE j.jira_base_url = $2
-	`, teamID, db.NormalizeJiraHost(jiraBaseURL))
+		WHERE j.jira_base_url = $2 AND j.user_id = ANY($3)
+	`, teamID, db.NormalizeJiraHost(jiraBaseURL), pgUUIDArray(ids))
 	if err != nil {
-		return nil, fmt.Errorf("list team member jira identities: %w", err)
+		return nil, 0, fmt.Errorf("list team member jira identities: %w", err)
 	}
 
 	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
@@ -543,7 +717,7 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 			out[i].JiraAccountID = &acct
 		}
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // queryIdentityMap runs a (user_id, value) query on q and returns the

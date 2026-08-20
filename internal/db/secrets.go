@@ -9,7 +9,7 @@ import (
 // process that was never handed the secret-decryption key (TFAC-614):
 // TF_ROLE=executor in multi mode, which never loads TF_SECRET_ENCRYPTION_KEY
 // at boot — all per-run credential material arrives pre-resolved via sealed
-// run_credentials bundles instead. A distinct, greppable sentinel rather
+// claim_credentials bundles instead. A distinct, greppable sentinel rather
 // than a generic auth/decrypt failure, so a consumer that was missed when
 // converting to the bundle path fails loudly at the first call instead of
 // silently misbehaving.
@@ -49,6 +49,23 @@ type SecretStore interface {
 	// optional (stored as ""). The value is encrypted app-side and
 	// stored in org_secrets keyed on (orgID, NULL user, key); rotations
 	// overwrite the same row.
+	//
+	// Exempt from the returned-row rule. org_secrets does carry non-secret
+	// row metadata (id, description, created_at, updated_at) — but no
+	// existing read on this store ever answers with it: Get/GetSystem hand
+	// back the decrypted value alone, never a projected column set, so
+	// there is no point read whose column list and scanner a RETURNING
+	// could share. The standard's mechanism is "project the point read's
+	// shape onto the write" — this store has no row-shaped point read to
+	// project, so applying it to Put means inventing a new read shape
+	// nothing here has ever needed, which is a read-shape addition, not a
+	// mechanical write-shape convergence (the ticket's own "if it converts
+	// instead" case, needing its own domain type and matching point read
+	// argued for on its own). Whatever a future row carried, it must still
+	// exclude the ciphertext and the plaintext value themselves — widening
+	// what a caller can obtain is the opposite of what this credential
+	// surface exists to prevent. Same answer as ClaimCredentialsStore.Put,
+	// for the same reason.
 	Put(ctx context.Context, orgID, key, value, description string) error
 
 	// Get returns the stored secret value, or ("", nil) when no
@@ -77,7 +94,7 @@ type SecretStore interface {
 
 	// Delete removes a secret. Returns ok=false when no row
 	// matched, matching the pattern of other "did the write land"
-	// helpers on Stores (RequeueTask, MarkConversationCancelledIfActive).
+	// helpers on Stores (RequeueTask, SnoozeTask).
 	Delete(ctx context.Context, orgID, key string) (ok bool, err error)
 
 	// PutUser writes (or rotates) a per-user secret — a credential
@@ -95,6 +112,11 @@ type SecretStore interface {
 	// more than one Jira host, so host-scoping is the *consumer's* job:
 	// it composes the key (e.g. "jira_token/<host>") before calling.
 	// There is deliberately no separate host parameter here.
+	//
+	// Exempt from the returned-row rule, for the same reason as Put: GetUser
+	// answers with a value, never a row, so there is no point read to
+	// project org_secrets' non-secret columns onto — and nothing beyond
+	// them may ever be handed back.
 	PutUser(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// GetUser returns the stored per-user secret value, or ("", nil)
@@ -108,7 +130,7 @@ type SecretStore interface {
 
 	// GetUserSystem reads a per-user secret WITHOUT a request JWT, for
 	// system code acting as a user — the write-actor resolver building
-	// a JiraClientForUser on a background run path is the motivating
+	// a jira.Resolver.ForUser client on a background run path is the motivating
 	// caller. Takes orgID + userID explicitly: in multi mode it runs on
 	// the admin pool (supabase_admin bypasses RLS), which trusts the
 	// passed args and performs no current_org_id() / current_user_id()
@@ -136,6 +158,11 @@ type SecretStore interface {
 	// System-code-only, same discipline as GetUserSystem. The app pool's
 	// RLS WITH CHECK would reject a write under another user's id, so
 	// request handlers stay on the claims-checked PutUser.
+	//
+	// Exempt from the returned-row rule, same reason as Put/PutUser: no
+	// point read on this store to project the row's non-secret columns
+	// onto, and no outcome may echo back the ciphertext or plaintext
+	// value.
 	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// DeleteUser removes a per-user secret. Returns ok=false when no

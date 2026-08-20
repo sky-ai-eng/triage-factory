@@ -65,10 +65,10 @@ func (s *Server) tracedHandler() http.Handler {
 		s.withSecurityHeaders(s.mux),
 		"http.server", // unused; httpSpanName ignores the operation
 		// Server spans record url.path, and TF's API is not all opaque
-		// ids — PATCH /api/repos/{owner}/{repo} puts a customer's repo
-		// name in the concrete path. The scrubber drops it; the span name
-		// below keeps the uninterpolated pattern, which is the dimension
-		// worth having anyway.
+		// ids — GET /api/repos/by-name/{owner}/{repo} and the dashboard's
+		// PR family put a customer's repo name in the concrete path. The
+		// scrubber drops it; the span name below keeps the uninterpolated
+		// pattern, which is the dimension worth having anyway.
 		otelhttp.WithTracerProvider(telemetry.ScrubbedTracerProvider()),
 		otelhttp.WithSpanNameFormatter(httpSpanName),
 		otelhttp.WithFilter(traceableRequest),

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -28,7 +29,7 @@ import (
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -52,7 +53,7 @@ func newTestServer(t *testing.T) *Server {
 	}
 	// Handlers now re-check team_agents.enabled before
 	// stamping the bot claim (the spec's bot-disabled-team handling).
-	// Production seeds this via BootstrapLocalAgent; tests need the
+	// Production seeds this via BootstrapTeamAgent; tests need the
 	// same row or every delegate gesture 409s.
 	if _, err := database.Exec(
 		`INSERT OR IGNORE INTO team_agents (team_id, agent_id, enabled) VALUES (?, ?, 1)`,
@@ -62,6 +63,72 @@ func newTestServer(t *testing.T) *Server {
 	}
 	stores := sqlitestore.New(database)
 	return New(database, stores)
+}
+
+// fixtureUUID derives a stable uuid from a readable seed, so fixtures keep
+// their legible names ("r_msg", "t_ba") while producing ids the handlers'
+// path guards accept — those guards answer 404 for anything that isn't a uuid,
+// because on Postgres the columns behind them are uuid typed. Same seed →
+// same id, within a run and across runs, so a test can name an id it expects
+// to see in a response without threading the value through.
+func fixtureUUID(seed string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(seed)).String()
+}
+
+// The settings resources, addressed the way the routes are: the org's under
+// its org, the team's under its team. Tests run in local mode, so the org id is
+// the sentinel tenant and the team segment takes the "default" alias.
+func orgSettingsPath() string { return "/api/orgs/" + runmode.LocalDefaultOrgID + "/settings" }
+
+func teamSettingsPath(teamID string) string { return "/api/teams/" + teamID + "/settings" }
+
+func teamJiraProjectsPath(teamID string) string { return "/api/teams/" + teamID + "/jira-projects" }
+
+// orgSettingsVersion reads the settings row's current concurrency token.
+func orgSettingsVersion(t *testing.T, s *Server) int {
+	t.Helper()
+	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
+	if rec.Code != 200 {
+		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	return out.Version
+}
+
+// patchOrgSettings sends an org-settings PATCH with the row's LIVE version
+// folded in, which is what a client that just read the form would do. A test
+// asserting the conflict behaviour itself passes the version explicitly instead
+// (see the concurrency case), so this helper never hides the token from a test
+// that is about it.
+func patchOrgSettings(t *testing.T, s *Server, body map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	withVersion := map[string]any{"version": orgSettingsVersion(t, s)}
+	for k, v := range body {
+		withVersion[k] = v
+	}
+	return doJSON(t, s, "PATCH", orgSettingsPath(), withVersion)
+}
+
+// patchOrgSettingsOK is patchOrgSettings for the happy path: it fails the test
+// on any non-200 and hands back the decoded settings resource, which is what
+// the PATCH answers with (including the next version and any advisory
+// `warning`).
+func patchOrgSettingsOK(t *testing.T, s *Server, body map[string]any) map[string]any {
+	t.Helper()
+	rec := patchOrgSettings(t, s, body)
+	if rec.Code != 200 {
+		t.Fatalf("PATCH %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode org settings response: %v", err)
+	}
+	return resp
 }
 
 // doJSON performs a JSON request against the server's mux and returns
@@ -88,29 +155,78 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 }
 
 // seedConfiguredRepo tracks owner/repo on the default team so tests that
-// pin repos pass the validatePinnedRepos existence check (which now reads
-// team_github_repos), and upserts the matching repo_profiles row the
+// pin repos pass the validatePinnedRepos existence check (which reads
+// team_github_repos), and upserts the matching repositories row the
 // Curator's repo-materialization eventually wants more of (clone_url,
-// default_branch). The team's tracked set is the source of
-// truth; the team_github_repos insert is accumulative so multiple seed
-// calls don't clobber each other the way ReplaceForTeam would.
-func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) {
+// default_branch). The team's tracked set is the source of truth; the
+// team_github_repos insert is accumulative so multiple seed calls don't
+// clobber each other the way ReplaceForTeam would.
+//
+// The registry row comes first: tracking references it by id.
+// Returns the registry row id, which is how every repo route and every
+// repo-identifying payload field addresses it.
+func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	if _, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO team_github_repos (team_id, owner, repo)
-		VALUES (?, ?, ?)
-		ON CONFLICT(team_id, owner, repo) DO NOTHING
-	`, runmode.LocalDefaultTeamID, owner, repo); err != nil {
-		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
-	}
-	if err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
-		ID:            owner + "/" + repo,
+	ctx := context.Background()
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
 	}); err != nil {
 		t.Fatalf("seed configured repo %s/%s: %v", owner, repo, err)
 	}
+	// Scoped the same way the store's own resolver is, on all four columns of
+	// the folded identity index. The fixture is single-org today, so org_id and
+	// source cannot yet select the wrong row — which is the reason to bind them
+	// now, while "there is only one" is an accident of the fixture rather than
+	// something this query is entitled to assume.
+	var repositoryID string
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id FROM repositories
+		 WHERE org_id = ? AND source = ?
+		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&repositoryID); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO team_github_repos (team_id, repository_id, org_id)
+		VALUES (?, ?, ?)
+		ON CONFLICT(team_id, repository_id) DO NOTHING
+	`, runmode.LocalDefaultTeamID, repositoryID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("track repo %s/%s on default team: %v", owner, repo, err)
+	}
+	return repositoryID
+}
+
+// seedUntrackedRepo mints a registry row no team tracks — the registry is a
+// superset of the tracked set, so this is a real state, and it is the one that
+// separates "no such repository" from "not yours to pin".
+func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
+	t.Helper()
+	if _, err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+		Owner:         owner,
+		Repo:          repo,
+		DefaultBranch: "main",
+	}); err != nil {
+		t.Fatalf("seed untracked repo %s/%s: %v", owner, repo, err)
+	}
+	return repoIDFor(t, s, owner, repo)
+}
+
+// repoIDFor resolves an already-seeded repository's registry id. Same folded
+// lookup seedConfiguredRepo does, for the tests that seed through another
+// path (or that need the id again after a rename moved the name).
+func repoIDFor(t *testing.T, s *Server, owner, repo string) string {
+	t.Helper()
+	var id string
+	if err := s.db.QueryRowContext(context.Background(), `
+		SELECT id FROM repositories
+		 WHERE org_id = ? AND source = ?
+		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&id); err != nil {
+		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
+	}
+	return id
 }
 
 // blueprintRunSeq makes the blueprint / blueprint_run IDs minted by
@@ -121,9 +237,10 @@ var blueprintRunSeq int
 
 // seedBlueprintRunSQLite mints a blueprint + blueprint_run for the given
 // task on the local-default org/team and returns the blueprint_run id.
-// runs.blueprint_run_id is NOT NULL, so every fixture that inserts a row
-// into runs must first create a blueprint_run for that task and point the
-// run at it. SQLite's blueprint_runs has no org_id/creator_user_id, but
+// conversations.blueprint_run_id is NOT NULL, so every fixture that inserts
+// a row into conversations must first create a blueprint_run for that task
+// and point the run at it. SQLite's blueprint_runs has no
+// org_id/creator_user_id, but
 // worktree_path is NOT NULL.
 func seedBlueprintRunSQLite(t *testing.T, database *sql.DB, taskID string) string {
 	t.Helper()

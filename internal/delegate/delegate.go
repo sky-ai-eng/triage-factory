@@ -38,9 +38,9 @@ import (
 //     is the source of truth for cleanup, which iterates the table at
 //     runAgent terminal.
 type runConfig struct {
-	orgID     string  // tenant scope for every store call inside this run's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
-	claimID   string  // the engagement driving this run — the claims row ClaimNextRun minted, threaded through so teardown can stamp the run's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed run in scope, which record no actuals.
-	teamID    string  // the run's owning team (runs.team_id, NOT NULL), stamped alongside orgID from the claimed run row; read at construction to populate agenthost.RunInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the run-bearing terminal literals (dispatchClaimedRun / handlePreAgentFailure); empty only on the CancelBlueprint / paused-cleanup paths that have a task but no claimed run in scope.
+	orgID     string  // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
+	claimID   string  // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
+	teamID    string  // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
 	scope     string  // what the agent is scoped to (repo, PR, issue)
 	toolsRef  string  // tool documentation to inject
 	wtPath    string  // initial cwd: GitHub PR worktree, or Jira run-root
@@ -98,6 +98,11 @@ type runConfig struct {
 	// (PrebuiltNetwork/PrebuiltProxyEnv) and the agenthost (ProxyCredentials);
 	// the dispatcher owns its teardown (after runAgent returns).
 	sidecar *runSidecar
+
+	// localGit is the local-mode per-engagement Git credential proxy. It starts
+	// before workspace setup and is owned by the dispatcher, which keeps it live
+	// through the agent invocation and closes it afterward.
+	localGit *localGitChannel
 }
 
 // ErrTaskBusy is returned by Delegate on the event path when the fenced
@@ -129,7 +134,7 @@ type DelegateOpts struct {
 	// OrgIDFrom accessors; router-triggered calls pass the local-
 	// mode sentinel until the per-org router lands. The goroutine
 	// caches this on cfg.orgID and every downstream store call
-	// (run row, side-tables, memory, chain steps) routes under it.
+	// (conversation row, side-tables, memory, chain steps) routes under it.
 	// Required — callers must always set this; the spawner trusts
 	// the input and does not re-validate.
 	OrgID string
@@ -143,7 +148,7 @@ type DelegateOpts struct {
 	// TriggerType is "manual" (user clicked Delegate) or "event"
 	// (router auto-fired from a matched event_handler). Drives the
 	// routing decision inside the goroutine: synthetic-claims for
-	// manual (so prompts_select RLS filters by user, runs_insert RLS
+	// manual (so prompts_select RLS filters by user, conversations_insert RLS
 	// sees creator_user_id), admin pool for event (router has no
 	// user identity to project). Defaults to "manual" if empty.
 	//
@@ -158,20 +163,21 @@ type DelegateOpts struct {
 	TriggerType string
 
 	// TriggerID is the event_handler ID for event-triggered runs,
-	// empty for manual. Recorded on the runs row for audit.
+	// empty for manual. Recorded on the conversations row for audit.
 	TriggerID string
 
 	// TriggeringEventID is the event instance that fired this run, for
 	// event-triggered delegations; empty for manual. Server-side
 	// provenance like TriggerID — the router threads it from the event
 	// being processed (immediate path) or the pending firing row (drain
-	// path). Paired with TriggerID it drives the runs_event_trigger_fence:
+	// path). Paired with TriggerID it drives the conversations_event_trigger_fence:
 	// the event-path insert is conflict-aware, so a replayed event whose
 	// first run already committed returns ErrAlreadyFired instead of
-	// spawning a duplicate. Required on the event path — CreateIfNotFiredSystem
-	// rejects an empty value (it would bind NULL and silently skip the fence)
-	// with ErrFenceRequiresEventAndTrigger. Manual delegation never sets this
-	// field; it uses the unfenced Create, which doesn't write the column.
+	// spawning a duplicate. Required on the event path —
+	// BlueprintStore.CreateRunIfNotFiredSystem rejects an empty value (it would
+	// bind NULL and silently skip the fence) with
+	// ErrBlueprintRunFenceRequiresEventAndTrigger. Manual delegation never sets
+	// this field; it uses the unfenced Create, which doesn't write the column.
 	TriggeringEventID string
 
 	// CreatorUserID is the user who initiated this Delegate call.
@@ -188,7 +194,7 @@ type DelegateOpts struct {
 	// handlers hold the agent they claimed the task with; the drain path passes
 	// the task's already-stamped claim). Delegate freezes it onto
 	// blueprint_runs.actor_agent_id at mint, and every step run inherits it onto
-	// runs.actor_agent_id. Empty is tolerated (→ NULL on the row, the honest
+	// conversations.actor_agent_id. Empty is tolerated (→ NULL on the row, the honest
 	// "no actor" answer) but every production caller supplies it, so the run's
 	// execution attribution never depends on re-reading a task claim that may
 	// not be written yet at step 0.
@@ -269,7 +275,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	triggerID := opts.TriggerID
 
 	// Pair creator_user_id with trigger_type per the audit-honesty
-	// invariant. Manual runs (swipe-delegate / drag-to-Agent / factory
+	// invariant. Manual runs (the delegate route / drag-to-Agent / factory
 	// drop) carry the initiating user's id as the creator. Event-
 	// triggered runs carry NULL — there's no human delegator. The
 	// schema CHECK enforces this pairing so the seeder can't drift.
@@ -366,7 +372,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		TriggerID:         triggerID,
 		TriggeringEventID: triggeringEventID,
 		// Freeze the executing bot at mint. Every step run inherits this onto
-		// runs.actor_agent_id, so execution attribution is resolved once here
+		// conversations.actor_agent_id, so execution attribution is resolved once here
 		// rather than re-derived from the task claim per step (which is empty at
 		// step 0 on the event path and cleared by a mid-blueprint takeover).
 		ActorAgentID: opts.ActorAgentID,
@@ -430,7 +436,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 		verb = "Auto-fired blueprint"
 	}
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("%s: %s (%s)",
-		verb, truncateToastMsg(blueprint.Name, 60), shortRunID(blueprintRunID)))
+		verb, truncateToastMsg(blueprint.Name, 60), shortConversationID(blueprintRunID)))
 
 	// The blueprint_run is live → place the task in_progress immediately.
 	s.recomputeTaskBoardColumn(orgID, task.ID)
@@ -477,9 +483,9 @@ func cloneHostBase(cloneURL string) string {
 // On the executor path (sidecar non-nil) the GetPR client and the host-side
 // clone both route through the run's credential sidecar — the client against
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
-// orchestrator holds no GitHub credential for either. Elsewhere (all/local)
-// ghClient is the resolver-built client and the clone injects a real token.
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar) (runConfig, error) {
+// orchestrator holds no GitHub credential for either. Local reads the PR through
+// the resolver-built client and routes the clone through its loopback proxy.
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
@@ -503,7 +509,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
 
-	s.updatePhase(ctx, orgID, runID, claimID, domain.ClaimPhaseFetching)
+	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
 	// Named for the phase it reports, so the trace and the run station agree
 	// on what the engagement was doing. On the executor path this GET is not
 	// a direct call to GitHub — it crosses the run's sidecar REST proxy — so
@@ -544,7 +550,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 	// pr.SSHURL is also empty there, and we leave headCloneURL = ""
 	// so CreateForPR's hasHeadRepo=false branch fires correctly.
 	upstreamCloneURL, headCloneURL := pr.BaseCloneURL, pr.CloneURL
-	if s.useSSHCloneProtocol(ctx, orgID, runID) {
+	if localGit == nil && s.useSSHCloneProtocol(ctx, orgID, conversationID) {
 		if pr.BaseSSHURL == "" {
 			return runConfig{}, fmt.Errorf("PR #%d on %s/%s: SSH clone protocol selected but GitHub did not return base.repo.ssh_url; switch to HTTPS in Settings or check your GHE config", prNumber, owner, repo)
 		}
@@ -560,24 +566,25 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 		return runConfig{}, fmt.Errorf("PR #%d on %s/%s: GitHub did not return a usable upstream URL; cannot create worktree", prNumber, owner, repo)
 	}
 
-	s.updatePhase(ctx, orgID, runID, claimID, domain.ClaimPhaseCloning)
-	// Resolve the host-side clone credential. In multi mode the clone routes
-	// through the sidecar's git proxy (CloneAuthViaGitProxy): git is
+	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseCloning)
+	// Resolve the host-side clone credential. In both modes the clone routes
+	// through a git proxy (CloneAuthViaGitProxy): git is
 	// rewritten from the upstream host to the proxy URL and presents only the
-	// per-run placeholder, so the real App token stays in the sidecar. The
+	// per-run placeholder, so the real credential stays in the proxy. The
 	// insteadOf upstream is the clone URL's scheme+host (matching the sandbox
-	// agent's own git-proxy pairs, which use the org git base). Local keeps
-	// its existing path — the operator's SSH key or anonymous HTTPS, no
-	// injected credential (the former in-process token mint is gone with the
-	// fused single-process shape).
+	// agent's own git-proxy pairs, which use the org git base). Local uses its
+	// loopback proxy; multi uses the credential sidecar's proxy.
 	var cloneAuth worktree.CloneAuth
 	if sidecar != nil {
 		cloneAuth = worktree.CloneAuthViaGitProxy(sidecar.res.GitProxyURL, cloneHostBase(upstreamCloneURL), sidecar.res.GitProxyToken)
+	} else if localGit != nil {
+		cloneAuth = localGit.cloneAuth(upstreamCloneURL)
 	}
-	// rootKey (the blueprint run id), not this step's run id, keys the worktree
-	// dir + its per-run push config — the PR worktree IS the shared run-root, and
-	// a cold rehydrate rebuilds it under the same key. CleanupPRConfig reclaims
-	// via filepath.Base(wtPath), so it follows this key automatically.
+	// rootKey (the blueprint run id), not this step's conversation id, keys the
+	// worktree dir + its per-run push config — the PR worktree IS the shared
+	// run-root, and a cold rehydrate rebuilds it under the same key.
+	// CleanupPRConfig reclaims via filepath.Base(wtPath), so it follows this
+	// key automatically.
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
@@ -593,8 +600,8 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 	// Fence refusals are excluded here and at the two sibling setups below:
 	// setWorktreePath already logged the ownership loss, and this line's
 	// subject is a write that failed on a row this engagement still owns.
-	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, runID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("update worktree path for run failed", "run", runID, "error", err)
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("update worktree path for conversation failed", "conversation", conversationID, "error", err)
 	}
 
 	// Record the eager worktree in conversation_worktrees so the least-privilege gates
@@ -606,14 +613,14 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, runID, claimID, rootKe
 	// what the multi-PR review anchor (add-review-comment) resolves the PR's
 	// worktree HEAD through. Log-and-continue like SetWorktreePathSystem above:
 	// a failure degrades to denied pushes (a clear 403), never a crash.
-	if s.runWorktrees != nil {
-		if _, _, werr := s.runWorktrees.InsertSystem(context.Background(), orgID, domain.RunWorktree{
-			RunID:  runID,
-			RepoID: owner + "/" + repo,
-			Path:   wtPath,
-			Ref:    worktree.PRRefSlug(prNumber),
+	if s.conversationWorktrees != nil {
+		if _, _, werr := s.conversationWorktrees.InsertSystem(context.Background(), orgID, domain.ConversationWorktree{
+			ConversationID: conversationID,
+			RepoID:         owner + "/" + repo,
+			Path:           wtPath,
+			Ref:            worktree.PRRefSlug(prNumber),
 		}); werr != nil {
-			delegateLog.Warn("record eager worktree in conversation_worktrees failed; pushes to this repo will be denied until retried", "run", runID, "repo", owner+"/"+repo, "error", werr)
+			delegateLog.Warn("record eager worktree in conversation_worktrees failed; pushes to this repo will be denied until retried", "conversation", conversationID, "repo", owner+"/"+repo, "error", werr)
 		}
 	}
 
@@ -668,7 +675,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 	}
 	sk, err := prskeleton.FetchPR(ctx, ghClient, owner, repo, prNumber)
 	if err != nil {
-		delegateLog.Warn("fetch PR history skeleton failed; run continues without it",
+		delegateLog.Warn("fetch PR history skeleton failed; the conversation continues without it",
 			"repo", owner+"/"+repo, "pr", prNumber, "error", err)
 		return ""
 	}
@@ -687,24 +694,24 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // jira tool surfaces are exposed since the agent
 // will need both to implement and ship a PR.
 //
-// runs.worktree_path is set to the run-root. The resume path reads this
+// conversations.worktree_path is set to the run-root. The resume path reads this
 // field as the cwd to resume the session in (`claude --resume` keys
 // session storage by cwd-encoded ~/.claude/projects/<encoded>, and we
 // passed cwd=runRoot to the original agentproc.Run). Even though Jira
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
-func (s *Spawner) setupJira(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a blueprint-run resource — shared across every step and
 	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
-	// (the blueprint run id), not this step's run id. runID still stamps the
-	// per-run worktree_path record below.
+	// (the blueprint run id), not this step's conversation id. conversationID
+	// still stamps the per-conversation worktree_path record below.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("set worktree_path for Jira run failed; resume will reject this run", "run", runID, "error", err)
+	if err := s.setWorktreePath(context.Background(), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("set worktree_path for Jira conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
 	// Block briefly so the project classifier can decide this
@@ -737,17 +744,17 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, runID, claimID, rootKey 
 //     template — GH tools are included because the agent acquires repos on
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
-//     the run still works with base tools.
-func (s *Spawner) setupSlack(ctx context.Context, orgID, runID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
-	// Keyed by rootKey (the blueprint run id), not this step's run id — the
-	// run-root is blueprint-scoped and cold-rehydrates under the same key. See
-	// setupJira.
+//     the conversation still works with base tools.
+func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+	// Keyed by rootKey (the blueprint run id), not this step's conversation id
+	// — the run-root is blueprint-scoped and cold-rehydrates under the same key.
+	// See setupJira.
 	runRoot, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
-	if err := s.setWorktreePath(context.Background(), orgID, runID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Warn("set worktree_path for Slack run failed; resume will reject this run", "run", runID, "error", err)
+	if err := s.setWorktreePath(context.Background(), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
 	toolsRef := agentprompt.GitHubToolsReference()

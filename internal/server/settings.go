@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -36,6 +39,11 @@ type settingsHandler struct {
 	// getter (not a captured value) because routes register before the app
 	// injects the resolver; nil when no ambient AWS SDK is wired (local mode).
 	bedrockRole func() bedrockRoleResolver
+	// kickJira re-dues Jira polling after this handler binds the org's Jira
+	// credential. The poller callbacks live on the Server, so the single
+	// construction site in routes() hands this handler the one method rather
+	// than a back-reference to the whole server.
+	kickJira func(r *http.Request, orgID string)
 }
 
 // bedrockRoleResolver is the slice of internal/llmcred the Bedrock role-setup
@@ -60,7 +68,7 @@ const secretKeyAnthropicAPIKey = "anthropic_api_key"
 var jiraProjectKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 
 // normalizeJiraProjectKey trims whitespace and uppercases. Used at
-// the HTTP boundary in handleSettingsPost (the write path) and in
+// the HTTP boundary in handleTeamJiraProjectsPut (the write path) and in
 // validateTrackerKeys (the read/compare path) so lookups match
 // regardless of how the user typed the key.
 func normalizeJiraProjectKey(s string) string {
@@ -184,7 +192,7 @@ func jiraProjectsEqual(a, b []jiraProjectConfig) bool {
 }
 
 // projectConfigsToRules is the inverse of rulesToProjectConfigsOrdered. Used
-// by handleSettingsPost when persisting the team's project list back
+// by handleTeamJiraProjectsPut when persisting the team's project list back
 // to jira_project_status_rules via JiraStatusRulesStore.ReplaceForTeam.
 func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectStatusRules {
 	out := make([]domain.JiraProjectStatusRules, 0, len(projects))
@@ -311,17 +319,48 @@ func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
 	return keys
 }
 
+// The org's Jira service credential body, one struct per deployment. The
+// deployment is an EXPLICIT discriminator rather than something inferred from
+// which fields came back non-empty: inference made a half-filled Cloud form and
+// a Data Center bind indistinguishable at the point where it mattered, and it
+// meant the other flavor's fields were accepted and dropped. Two structs behind
+// a strict decode make sending `pat` to a Cloud bind a 400 that names the
+// field.
+//
+// The values are jira.Deployment's, so the discriminator a client sends is the
+// same string the status read hands back in jira_deployment — one spelling for
+// one concept across the surface.
+type jiraCredentialDeployment struct {
+	Deployment string `json:"deployment"`
+}
+
+// jiraCloudCredential is deployment "cloud": an Atlassian API token (email +
+// token → Basic auth, REST v3).
+type jiraCloudCredential struct {
+	Deployment string `json:"deployment"`
+	URL        string `json:"url"`
+	Email      string `json:"email"`
+	Token      string `json:"token"`
+}
+
+// jiraDataCenterCredential is deployment "data_center": a personal access
+// token (Bearer, REST v2).
+type jiraDataCenterCredential struct {
+	Deployment string `json:"deployment"`
+	URL        string `json:"url"`
+	PAT        string `json:"pat"`
+}
+
 // handleJiraConnect binds (or rotates) the org's Jira service credential. It is
 // the Jira half of the credential-resource pair — see org_credentials.go for
 // why credentials are their own routes rather than fields on the bulk settings
 // save; handleJiraCredentialDelete is the unbind.
 //
-// It accepts both backends, keyed off the credential shape the client sends
-// (the deployment is chosen explicitly in the onboarding step's picker): a
-// Cloud site is connected with an Atlassian API token (email + token, Basic /
-// REST v3); a Data Center host with a personal access token (Bearer / REST
-// v2). The chosen scheme is recorded as an auth-method marker so the system
-// resolver (jira.Resolver.ForSystem) rebuilds the matching client.
+// The caller names its deployment and supplies exactly that deployment's
+// fields. The chosen scheme is recorded as an auth-method marker so the system
+// resolver (jira.Resolver.ForSystem) rebuilds the matching client, and it is
+// what the credential is validated under — so what the user filled in, what we
+// checked against Jira, and what the resolver will later do all agree.
 //
 // Org-admin gated at the handler, from the {org_id} path segment. The DB layer
 // enforces it too (org_settings_update RLS), but an explicit 403 beats an
@@ -333,45 +372,60 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	var req struct {
-		URL   string `json:"url"`
-		PAT   string `json:"pat"`
-		Email string `json:"email"`
-		Token string `json:"token"`
-	}
-	if !decodeJSON(w, r, &req, "") {
+	body, ok := httpx.BodyBytes(w, r)
+	if !ok {
 		return
 	}
-	if req.URL == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url is required"})
+	deployment, ok := decodeJiraDeployment(w, body)
+	if !ok {
 		return
 	}
 
-	// The deployment is chosen explicitly upstream (the onboarding step's
-	// Cloud-vs-Data-Center picker) and carried by which credential shape the
-	// client sends: a Cloud API token (email + token → Basic, REST v3) or a
-	// Data Center PAT (Bearer, REST v2). Honoring the sent shape — rather than
-	// re-sniffing the host here — keeps the fields the user filled and the
-	// scheme we validate in agreement; a host that disagrees with the chosen
-	// scheme simply fails the /myself validation below. Any Cloud field present
-	// commits to the Cloud path (and requires both halves), so a half-filled
-	// Cloud form reports the Cloud error rather than silently falling to DC. The
-	// chosen scheme is persisted as a marker so the system resolver
-	// (jira.Resolver.ForSystem) rebuilds the matching client.
-	cloud := req.Email != "" || req.Token != ""
-	var cfg jira.Config
+	var (
+		cfg   jira.Config
+		url   string
+		cloud = deployment == jira.DeploymentCloud
+		pat   string
+		email string
+		token string
+	)
 	if cloud {
-		if req.Email == "" || req.Token == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "email and API token are required for Jira Cloud"})
+		var req jiraCloudCredential
+		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
 			return
 		}
-		cfg = jira.CloudAPIToken(req.URL, req.Email, req.Token)
+		url, email, token = req.URL, req.Email, req.Token
+		var v httpx.Validation
+		if url == "" {
+			v.Missing("url")
+		}
+		if email == "" {
+			v.Missing("email")
+		}
+		if token == "" {
+			v.Missing("token")
+		}
+		if v.Flush(w, http.StatusBadRequest) {
+			return
+		}
+		cfg = jira.CloudAPIToken(url, email, token)
 	} else {
-		if req.PAT == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a personal access token is required for Jira Data Center"})
+		var req jiraDataCenterCredential
+		if !httpx.DecodeJSONStrictBytes(w, body, &req) {
 			return
 		}
-		cfg = jira.DataCenterPAT(req.URL, req.PAT)
+		url, pat = req.URL, req.PAT
+		var v httpx.Validation
+		if url == "" {
+			v.Missing("url")
+		}
+		if pat == "" {
+			v.Invalid("pat", "a personal access token is required for Jira Data Center")
+		}
+		if v.Flush(w, http.StatusBadRequest) {
+			return
+		}
+		cfg = jira.DataCenterPAT(url, pat)
 	}
 
 	jiraUser, err := auth.ValidateJira(r.Context(), cfg)
@@ -384,13 +438,15 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// the validation above is the real authority (custom domains exist), so
 		// this never blocks a combo that actually authenticates.
 		msg := err.Error()
-		switch hostDeployment := jira.DeploymentForHost(req.URL); {
+		switch hostDeployment := jira.DeploymentForHost(url); {
 		case cloud && hostDeployment == jira.DeploymentDataCenter:
 			msg += " — this looks like a Data Center URL, which uses a personal access token rather than an email + API token. Double-check your Jira deployment."
 		case !cloud && hostDeployment == jira.DeploymentCloud:
 			msg += " — this looks like an Atlassian Cloud URL, which uses an email + API token rather than a personal access token. Double-check your Jira deployment."
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": msg})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonUpstreamRejected, Message: msg,
+		})
 		return
 	}
 
@@ -415,16 +471,16 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
-		creds.JiraURL = req.URL
+		creds.JiraURL = url
 		if cloud {
-			creds.JiraEmail = req.Email
-			creds.JiraAPIToken = req.Token
+			creds.JiraEmail = email
+			creds.JiraAPIToken = token
 			creds.JiraAuthMethod = string(jira.AuthMethodCloudAPIToken)
 		} else {
-			creds.JiraPAT = req.PAT
+			creds.JiraPAT = pat
 			creds.JiraAuthMethod = string(jira.AuthMethodDCPAT)
 		}
-		orgSet.JiraBaseURL = req.URL
+		orgSet.JiraBaseURL = url
 		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
 			return fmt.Errorf("store credentials: %w", err)
 		}
@@ -435,7 +491,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := integrations.ClearJiraOtherScheme(r.Context(), tx.Secrets, orgID, jira.AuthMethod(creds.JiraAuthMethod)); err != nil {
 			return fmt.Errorf("clear stale jira credential: %w", err)
 		}
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
+		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return fmt.Errorf("save org settings: %w", err)
 		}
 		// Audit the org Jira credential bind/rotate in the same tx,
@@ -443,7 +499,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(req.URL)),
+			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(url)),
 		}); err != nil {
 			return fmt.Errorf("audit credential set: %w", err)
 		}
@@ -452,10 +508,15 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
-		settingsLog.Error("jira connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to connect Jira"})
+		internalError(w, "settings", fmt.Errorf("persist jira connection: %w", err))
 		return
 	}
+
+	// Re-due Jira polling under the new credential. The unbind has always done
+	// this; the bind used to get it second-hand from the fused setup route, so
+	// without it an org that just connected Jira would poll nothing until its
+	// next scheduled cycle.
+	se.kickJira(r, orgID)
 
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status":       "connected",
@@ -463,135 +524,39 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// handleAnthropicConnect validates and stores the org's Anthropic API key — the
-// Claude-credentials analog of handleJiraConnect, and the SINGLE validated write
-// path for the anthropic_api_key vault secret (the bulk org-settings POST no
-// longer accepts it, so a key reaching the vault has always passed
-// ValidateAnthropicAPIKey here).
+// decodeJiraDeployment takes the lenient first look at a Jira credential body:
+// just the discriminator, so the caller can then decode STRICTLY into that
+// deployment's own struct and have the other one's fields come back as
+// UNKNOWN_FIELD. It is the only place on this surface that reads a body without
+// strictness, and it reads exactly one field.
 //
-// An empty key is the "use system Claude Code credentials" selection (local
-// only): it clears any stored key so the credential resolver falls back to the
-// inherited-env / subscription path. There's nothing to validate, so it skips
-// straight to the Delete arm. A non-empty key is validated against Anthropic
-// first; a rejected or unreachable key returns 422 and nothing is written.
-//
-// Requires an active org because the write goes through the SecretStore — same
-// multi-mode rationale as handleJiraConnect / handleSettingsPost.
-func (se *settingsHandler) handleAnthropicConnect(w http.ResponseWriter, r *http.Request) {
-	userID := ClaimsFrom(r.Context()).Subject
-	orgID, ok := requireOrg(w, r)
-	if !ok {
-		return
+// An absent or unrecognized value is a 400 rather than a fallback to either
+// backend: guessing is what this discriminator replaced.
+func decodeJiraDeployment(w http.ResponseWriter, body []byte) (jira.Deployment, bool) {
+	var probe jiraCredentialDeployment
+	if err := json.Unmarshal(body, &probe); err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "invalid request body",
+		})
+		return "", false
 	}
-	var req struct {
-		APIKey string `json:"api_key"`
+	switch jira.Deployment(probe.Deployment) {
+	case jira.DeploymentCloud:
+		return jira.DeploymentCloud, true
+	case jira.DeploymentDataCenter:
+		return jira.DeploymentDataCenter, true
 	}
-	if !decodeJSON(w, r, &req, "") {
-		return
+	reason := httpx.ReasonInvalidField
+	if probe.Deployment == "" {
+		reason = httpx.ReasonMissingField
 	}
-	key := strings.TrimSpace(req.APIKey)
-
-	// Empty key ⟺ "system credentials": clear the stored key (and its ref) so the
-	// resolver degrades to the local subscription/env fallback. The Bedrock set
-	// goes too — "system credentials" means no org-level LLM credential of any
-	// provider, and the resolver would otherwise fall through to a stale Bedrock
-	// config. Idempotent — a Delete with no matching row is not an error.
-	if key == "" {
-		if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			// Settings first: its refs are the record of which provider was
-			// actually configured, and the audit rows below must not claim a
-			// removal for a provider that was never set.
-			orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-			if err != nil {
-				return fmt.Errorf("load org settings: %w", err)
-			}
-			removed := configuredLLMCredentialKinds(orgSet)
-			if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
-				return fmt.Errorf("clear Anthropic key: %w", err)
-			}
-			if err := clearBedrockSecrets(r, tx, orgID); err != nil {
-				return err
-			}
-			orgSet.AnthropicAPIKeyRef = ""
-			orgSet.BedrockCredentialsRef = ""
-			if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-				return err
-			}
-			// Switching to system credentials revokes the org's stored LLM
-			// credential — the removal side of the bind this endpoint's other
-			// arm records.
-			return recordCredentialRemovals(r.Context(), tx, orgID, userID, removed)
-		}); err != nil {
-			settingsLog.Error("anthropic connect clear failed", "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update Claude credentials"})
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
-		return
-	}
-
-	// Validate before storing. Both failure modes (rejected key, unreachable) are
-	// surfaced verbatim as a 422 — mirroring handleJiraConnect, which also folds
-	// "bad credential" and "couldn't reach the host" into one 422 for the connect
-	// surface.
-	if err := auth.ValidateAnthropicAPIKey(r.Context(), key); err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
-		return
-	}
-
-	// One WithTx for the vault write + the ref update, like handleJiraConnect.
-	// The admin gate is enforced at the DB layer in multi mode: UpdateSettings
-	// goes through org_settings_update RLS, which gates on the org-admin role, so
-	// a non-admin member's call is rejected there. Because the Secrets.Put and
-	// UpdateSettings share one transaction, that rejection rolls back the vault
-	// write too — the key can never land for a non-admin. (Same rationale as
-	// handleJiraConnect / handleSettingsPost; no handler-level RequireOrgAdmin,
-	// matching the Jira sibling.)
-	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		if err := tx.Secrets.Put(r.Context(), orgID, secretKeyAnthropicAPIKey, key, "Org's Anthropic API key"); err != nil {
-			return fmt.Errorf("store Anthropic key: %w", err)
-		}
-		// Provider exclusivity (mirrors handleBedrockConnect): a stored
-		// Bedrock set would be dead config under the resolver's
-		// Anthropic-first precedence — clear it so the UI never shows two
-		// providers configured at once.
-		droppedBedrock := orgSet.BedrockCredentialsRef != ""
-		if err := clearBedrockSecrets(r, tx, orgID); err != nil {
-			return err
-		}
-		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-		orgSet.BedrockCredentialsRef = ""
-		if err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
-		}
-		// Audit the org Anthropic key bind/rotate in the same tx. The
-		// empty-key arm above records the matching credential_removed. No host
-		// for an API key.
-		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
-			ActorUserID: userID,
-			Action:      domain.AccessActionCredentialSet,
-			DetailJSON:  accessDetailCredential(domain.CredentialKindAnthropicKey, ""),
-		}); err != nil {
-			return err
-		}
-		// The exclusivity sweep revoked a stored Bedrock credential — record it
-		// as its own removal rather than leaving it implied by the bind.
-		if !droppedBedrock {
-			return nil
-		}
-		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
-			[]string{domain.CredentialKindBedrock})
-	}); err != nil {
-		settingsLog.Error("anthropic connect persist failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store Claude credentials"})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "connected"})
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason: reason,
+		Message: fmt.Sprintf("deployment must be %q (an Atlassian Cloud site) or %q (self-hosted Jira Server / Data Center)",
+			jira.DeploymentCloud, jira.DeploymentDataCenter),
+		Field: "deployment",
+	})
+	return "", false
 }
 
 // handleJiraStatuses returns available statuses for given Jira projects.
@@ -600,12 +565,32 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
 	projects := r.URL.Query()["project"]
+	// Validate every requested key against the same grammar the write path
+	// enforces. Unvalidated, a garbage key reached Jira and came back as a
+	// 502 — an upstream failure standing in for a malformed request.
+	for _, p := range projects {
+		if !jiraProjectKeyRe.MatchString(normalizeJiraProjectKey(p)) {
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidParam,
+				Message: "project " + strconv.Quote(p) + " is not a valid Jira project key",
+				Field:   "project",
+			})
+			return
+		}
+	}
 	// Read creds + (if needed) the team's tracked-projects fallback
 	// through the app pool inside WithTx so the org_secrets read and
 	// team_settings_select run under the user's claims.
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A failed credential read is a 500, not "Jira not configured" —
+		// telling a configured org to re-enter its credentials is the
+		// swallowed-error failure mode this sweep closes.
+		var lerr error
+		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load integration credentials: %w", lerr)
+		}
 		if len(projects) > 0 {
 			return nil
 		}
@@ -629,11 +614,15 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	// alone would 400 a configured Cloud org here.
 	cfg, ok := integrations.JiraSystemConfig(creds)
 	if !ok {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Jira not configured"})
+		writeNotConfigured(w, "Jira is not connected for this workspace")
 		return
 	}
 	if len(projects) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no projects specified"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "no projects specified, and this workspace's team tracks none",
+			Field:   "project",
+		})
 		return
 	}
 
@@ -647,7 +636,10 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 	for i, proj := range projects {
 		projectStatuses, err := client.ProjectStatuses(r.Context(), proj)
 		if err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "failed to fetch statuses for " + proj + " from Jira" + localDetail(err)})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+				Reason:  httpx.ReasonUpstreamUnavailable,
+				Message: "failed to fetch statuses for " + proj + " from Jira" + httpx.LocalDetail(err),
+			})
 			return
 		}
 		if i == 0 {
@@ -697,10 +689,10 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	// machinery is ever touched in multi mode. The UI hides the button there;
 	// this is the defense-in-depth backstop.
 	if runmode.Current() != runmode.ModeLocal {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"ok":    false,
-			"error": "ssh clone protocol is not available in this deployment",
-		})
+		// A route that doesn't exist in this deployment mode is a plain 404
+		// in the envelope — not a verdict body, which is reserved for a
+		// probe that actually ran.
+		notFound(w, "route")
 		return
 	}
 	// Probe target tracks the configured GitHub base URL so the Test
@@ -714,10 +706,11 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 	userID := ClaimsFrom(r.Context()).Subject
 	var creds auth.Credentials
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
-		return nil
+		var lerr error
+		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		return lerr
 	}); err != nil {
-		internalError(w, "settings", err)
+		internalError(w, "settings", fmt.Errorf("load integration credentials: %w", err))
 		return
 	}
 	sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)

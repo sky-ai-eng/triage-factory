@@ -197,10 +197,10 @@ type Config struct {
 	// in via this flag.
 	AllowNonLoopback bool
 
-	// RunID is the run identifier this proxy serves. Carried for
-	// future per-run policy / observability; the proxy itself does not
-	// branch on it today.
-	RunID string
+	// ConversationID is the conversation this proxy serves. Carried for
+	// future per-conversation policy / observability; the proxy itself does
+	// not branch on it today.
+	ConversationID string
 
 	// IncomingToken, when non-empty, is the per-run secret every request
 	// must present before the proxy injects the real credential and
@@ -240,8 +240,8 @@ type Config struct {
 	// client-side hooks but not the network layer — this is multi mode's
 	// authoritative push-outcome observer; the pre-push hook (which fires
 	// BEFORE the transfer and cannot know the outcome) stands down there.
-	// Local mode has no proxy, so its hook-based capture (pre-push timing,
-	// --no-verify gap) is accepted (nil here).
+	// A run with no proxy falls back to hook-based capture (pre-push timing,
+	// --no-verify gap); managed local and multi Git both wire this callback.
 	//
 	// Contract: the proxy never blocks, alters, or fails a push on account of
 	// this callback. It runs after the response is back to the client, under a

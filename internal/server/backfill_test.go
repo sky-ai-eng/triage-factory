@@ -11,6 +11,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 func mustEntity(t *testing.T, database *sql.DB, source, sourceID, kind, title string) *domain.Entity {
@@ -32,7 +33,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	seedConfiguredRepo(t, s, "sky-ai-eng", "other-repo")
 
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "Auth",
 		PinnedRepos:    []string{"sky-ai-eng/triage-factory"},
 		JiraProjectKey: "SKY",
@@ -40,6 +41,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pid := created.ID
 
 	// Two GitHub entities, only one in pinned_repos.
 	mustEntity(t, s.db, "github", "sky-ai-eng/triage-factory#1", "pr", "in pin")
@@ -48,19 +50,11 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	mustEntity(t, s.db, "jira", "SKY-100", "issue", "matching jira")
 	mustEntity(t, s.db, "jira", "FOO-200", "issue", "non-matching jira")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
 
-	gotIDs := make(map[string]bool, len(resp.Candidates))
-	for _, c := range resp.Candidates {
+	gotIDs := make(map[string]bool, len(candidates))
+	for _, c := range candidates {
 		gotIDs[c.SourceID] = true
 	}
 	if !gotIDs["sky-ai-eng/triage-factory#1"] {
@@ -83,26 +77,19 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 // anything from the unconfigured project.
 func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 	s := newTestServer(t)
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	pid := created.ID
 
 	mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T1")
 	mustEntity(t, s.db, "jira", "ANY-1", "issue", "T2")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(resp.Candidates) != 2 {
-		t.Errorf("expected 2 candidates with empty config, got %d", len(resp.Candidates))
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
+	if len(candidates) != 2 {
+		t.Errorf("expected 2 candidates with empty config, got %d", len(candidates))
 	}
 }
 
@@ -112,35 +99,32 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	pid := created.ID
+	created2, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	other := created2.ID
 
 	already := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "already in")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, already.ID, &pid, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, already.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
 	elsewhere := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "elsewhere")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, elsewhere.ID, &other, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, elsewhere.ID, &other, ""); err != nil {
 		t.Fatal(err)
 	}
 	free := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "unassigned")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+pid+"/backfill-candidates", nil)
-	var resp struct {
-		Candidates []backfillCandidate `json:"candidates"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	candidates := decodeList[backfillCandidate](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+pid+"/backfill-candidates/list", map[string]any{})).Items
 
 	got := map[string]string{}
-	for _, c := range resp.Candidates {
+	for _, c := range candidates {
 		got[c.ID] = c.CurrentProjectName
 	}
 	if _, ok := got[already.ID]; ok {
@@ -160,10 +144,11 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
 	b := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "B")
 
@@ -183,7 +168,7 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	}
 	// Real entities applied; bogus id surfaces as a per-row failure
 	// rather than being silently counted (relies on
-	// db.AssignEntityProject returning sql.ErrNoRows on 0-row UPDATE).
+	// EntityStore.AssignProject returning sql.ErrNoRows on 0-row UPDATE).
 	if resp.Applied != 2 {
 		t.Errorf("applied = %d, want 2 (a + b; bogus id should fail)", resp.Applied)
 	}
@@ -205,6 +190,66 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	}
 }
 
+// TestBackfill_BatchAccounting pins the batch-policy invariant: every
+// submitted id is accounted for. A request-level fault — an empty list, a
+// blank id, a repeated id — fails the whole call rather than being dropped
+// mid-loop, and a well-formed batch answers applied + failed = submitted.
+func TestBackfill_BatchAccounting(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "owner", "repo")
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	if err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	pid := created.ID
+	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
+
+	// Request-level faults, each rejected whole.
+	for _, tc := range []struct {
+		name string
+		ids  []string
+	}{
+		{"empty list", []string{}},
+		{"blank id", []string{a.ID, "  "}},
+		{"duplicate id", []string{a.ID, a.ID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doJSON(t, s, http.MethodPost, "/api/projects/"+pid+"/backfill", map[string]any{"entity_ids": tc.ids})
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, httpx.ReasonInvalidField, "entity_ids")
+		})
+	}
+
+	// A well-formed batch: three submitted, one assignable, two failures.
+	closed := mustEntity(t, s.db, "github", "owner/repo#9", "pr", "closed")
+	if _, err := s.db.Exec(`UPDATE entities SET state='closed' WHERE id=?`, closed.ID); err != nil {
+		t.Fatalf("close entity: %v", err)
+	}
+	submitted := []string{a.ID, closed.ID, "00000000-0000-4000-8000-0000000009ff"}
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/"+pid+"/backfill", map[string]any{"entity_ids": submitted})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Applied int               `json:"applied"`
+		Failed  []backfillFailure `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Applied+len(resp.Failed) != len(submitted) {
+		t.Errorf("applied(%d) + failed(%d) = %d, want %d — every submitted id must be accounted for",
+			resp.Applied, len(resp.Failed), resp.Applied+len(resp.Failed), len(submitted))
+	}
+	for _, f := range resp.Failed {
+		if len(f.Errors) == 0 || f.Errors[0].Reason == "" {
+			t.Errorf("failed row %s carries no structured reason: %+v", f.EntityID, f.Errors)
+		}
+	}
+}
+
 // TestBackfill_RejectsOutOfScopeAndClosed verifies the server-side
 // eligibility gate: a stale or tampered request with ids for closed
 // entities or entities outside the project's tracker scope must be
@@ -215,7 +260,7 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "in-scope")
 	seedConfiguredRepo(t, s, "owner", "out-of-scope")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "P",
 		PinnedRepos:    []string{"owner/in-scope"},
 		JiraProjectKey: "SKY",
@@ -223,12 +268,13 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 
 	inScope := mustEntity(t, s.db, "github", "owner/in-scope#1", "pr", "ok")
 	outScope := mustEntity(t, s.db, "github", "owner/out-of-scope#2", "pr", "wrong repo")
 	wrongJira := mustEntity(t, s.db, "jira", "FOO-9", "issue", "wrong project")
 	closedEnt := mustEntity(t, s.db, "github", "owner/in-scope#3", "pr", "closed")
-	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedEnt.ID); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedEnt.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -252,7 +298,10 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	}
 	failedByID := map[string]string{}
 	for _, f := range resp.Failed {
-		failedByID[f.EntityID] = f.Error
+		if len(f.Errors) == 0 {
+			t.Fatalf("failed row %s carries no errors item", f.EntityID)
+		}
+		failedByID[f.EntityID] = f.Errors[0].Message
 	}
 	if msg := failedByID[outScope.ID]; msg == "" || !strings.Contains(msg, "outside") {
 		t.Errorf("out-of-scope github entity: failure = %q, want 'outside ... scope'", msg)
@@ -283,10 +332,11 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 func TestBackfill_StampsClassifiedAt(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 	e := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T")
 
 	pre, err := sqlitestore.New(s.db).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

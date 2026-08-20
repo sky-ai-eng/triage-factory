@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ActivityFeed from './ActivityFeed'
 import type { ActivityAction, ActivityArtifact } from '../types'
+import { listBody } from '../test/apiResponse'
 
 const action = (over: Partial<ActivityAction>): ActivityAction => ({
   id: 'x1',
@@ -27,13 +28,17 @@ const artifact = (over: Partial<ActivityArtifact>): ActivityArtifact => ({
   ...over,
 })
 
-// stubByView returns action rows for ?view=actions requests and artifact rows for
-// ?view=objects, recording every request url. The default lens is actions, so the
-// first load hits the actions branch; toggling to Objects refetches the other.
-function stubByView(actionsRows: ActivityAction[], objectsRows: ActivityArtifact[] = []) {
+// stubByLens answers the actions list route with action rows and the artifacts
+// list route with artifact rows, recording every request. The two lenses are
+// two routes now, so the stub branches on the path rather than on a ?view= —
+// which is exactly the property the split bought: a request can only reach the
+// rows whose shape it can render.
+function stubByLens(actionsRows: ActivityAction[], objectsRows: ActivityArtifact[] = []) {
   const fetchMock = vi.fn().mockImplementation((url: string) => {
-    const rows = String(url).includes('view=objects') ? objectsRows : actionsRows
-    return Promise.resolve({ ok: true, json: () => Promise.resolve(rows) })
+    const rows: (ActivityAction | ActivityArtifact)[] = String(url).includes('/artifacts/list')
+      ? objectsRows
+      : actionsRows
+    return Promise.resolve({ ok: true, ...listBody(rows) })
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -43,12 +48,18 @@ function calledUrls(fetchMock: ReturnType<typeof vi.fn>): string[] {
   return fetchMock.mock.calls.map((c) => String(c[0]))
 }
 
+// calledBodies parses each recorded request's JSON body — the filters live
+// there now, not in a query string.
+function calledBodies(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown>[] {
+  return fetchMock.mock.calls.map((c) => JSON.parse(String((c[1] as RequestInit)?.body ?? '{}')))
+}
+
 describe('ActivityFeed', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('defaults to the Actions lens: renders verb + target + actor rows, requesting view=actions', async () => {
-    const fetchMock = stubByView([
+  it('defaults to the Actions lens: renders verb + target + actor rows, reading the actions route', async () => {
+    const fetchMock = stubByLens([
       action({ id: 'pr', action: 'pr_created', target: 'org/repo#9', url: 'https://gh/pr9' }),
       action({
         id: 'mv',
@@ -61,7 +72,7 @@ describe('ActivityFeed', () => {
       }),
     ])
 
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
 
     // The action's target + humanized verb render once the feed loads (the verb
     // also labels an action-filter <option>, so assert on the row via getAllByText).
@@ -73,27 +84,28 @@ describe('ActivityFeed', () => {
     // A team-feed row with no resolved actor reads as a bot action.
     expect(screen.getAllByText('bot').length).toBeGreaterThan(0)
 
-    // The first request selected the actions lens + the default page size.
-    expect(calledUrls(fetchMock)[0]).toContain('/api/usage/teams/t1/activity')
-    expect(calledUrls(fetchMock)[0]).toContain('view=actions')
-    expect(calledUrls(fetchMock)[0]).toContain('limit=50')
+    // The first request addressed the actions resource and asked for the
+    // default page size in the body.
+    expect(calledUrls(fetchMock)[0]).toBe('/api/teams/t1/usage/actions/list')
+    expect(calledBodies(fetchMock)[0]).toMatchObject({ page_size: 50 })
   })
 
-  it('toggles to the Objects lens — refetches view=objects and renders artifact rows', async () => {
-    const fetchMock = stubByView(
+  it('toggles to the Objects lens — reads the artifacts route and renders artifact rows', async () => {
+    const fetchMock = stubByLens(
       [action({ id: 'pr', target: 'org/repo#1' })],
       [artifact({ id: 'art', target: 'org/repo#42', url: 'https://gh/pr42', state: 'merged' })],
     )
 
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#1') // actions lens first
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
 
-    // The Objects lens row (an artifact) appears, and a request carried view=objects.
+    // The Objects lens row (an artifact) appears, and a request hit the
+    // artifacts route.
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     await waitFor(() =>
-      expect(calledUrls(fetchMock).some((u) => u.includes('view=objects'))).toBe(true),
+      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/artifacts/list'),
     )
     // The merged artifact's state badge rides its row (terminal states included).
     const prLink = screen
@@ -108,19 +120,19 @@ describe('ActivityFeed', () => {
     // which is what made the section's height jump on every toggle.
     let releaseObjects: (rows: ActivityArtifact[]) => void = () => {}
     const fetchMock = vi.fn().mockImplementation((url: string) => {
-      if (String(url).includes('view=objects')) {
+      if (String(url).includes('/artifacts/list')) {
         return new Promise((resolve) => {
-          releaseObjects = (rows) => resolve({ ok: true, json: () => Promise.resolve(rows) })
+          releaseObjects = (rows) => resolve({ ok: true, ...listBody(rows) })
         })
       }
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve([action({ id: 'pr', target: 'org/repo#1' })]),
+        ...listBody([action({ id: 'pr', target: 'org/repo#1' })]),
       })
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#1')
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
@@ -134,29 +146,36 @@ describe('ActivityFeed', () => {
   })
 
   it('shows a zero state when the log is empty', async () => {
-    stubByView([])
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    stubByLens([])
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     expect(await screen.findByText(/no actions/i)).toBeInTheDocument()
   })
 
-  it('drives a server-side query param when the action filter changes', async () => {
-    const fetchMock = stubByView([action({ id: 'pr', target: 'org/repo#9' })])
-    render(<ActivityFeed baseUrl="/api/usage/org/activity" showTeam />)
+  it('drives a server-side filter in the body when the action filter changes', async () => {
+    const fetchMock = stubByLens([action({ id: 'pr', target: 'org/repo#9' })])
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
     await screen.findByText('org/repo#9')
 
-    // Picking an action refetches with ?action=… (the backend filters + pages).
+    // Picking an action refetches with action in the body (the backend filters
+    // + pages).
     fireEvent.change(screen.getByLabelText('action'), { target: { value: 'pr_created' } })
     await waitFor(() =>
-      expect(calledUrls(fetchMock).some((u) => u.includes('action=pr_created'))).toBe(true),
+      expect(calledBodies(fetchMock).some((b) => b.action === 'pr_created')).toBe(true),
     )
 
-    // Picking a time range adds ?since=… (the range tab → a date bound).
+    // Picking a time range adds `since` (the range tab → a date bound).
     fireEvent.click(screen.getByText('30D'))
-    await waitFor(() => expect(calledUrls(fetchMock).some((u) => u.includes('since='))).toBe(true))
+    await waitFor(() =>
+      expect(calledBodies(fetchMock).some((b) => typeof b.since === 'string')).toBe(true),
+    )
+
+    // The actions body never carries an artifacts-only filter — the routes
+    // decode strictly, so a stray `state` would be a 400, not a no-op.
+    expect(calledBodies(fetchMock).every((b) => !('state' in b) && !('kind' in b))).toBe(true)
   })
 
   it('org Actions feed shows the owning team + actor, and narrows in-memory by team', async () => {
-    stubByView([
+    stubByLens([
       action({
         id: 'a',
         team_id: 't1',
@@ -175,7 +194,7 @@ describe('ActivityFeed', () => {
       }),
     ])
 
-    render(<ActivityFeed baseUrl="/api/usage/org/activity" showTeam />)
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
 
     // Both rows present, tagged with team + the authorizing actor.
     expect(await screen.findByText('org/repo#1')).toBeInTheDocument()
@@ -190,24 +209,26 @@ describe('ActivityFeed', () => {
     expect(screen.queryByText('org/repo#2')).not.toBeInTheDocument()
   })
 
-  it('pages with "load more" when a full page comes back, appending the next page', async () => {
+  it('pages with "load more", sending the server\'s token back for the next page', async () => {
     const page1 = Array.from({ length: 50 }, (_, i) =>
       action({ id: `p1-${i}`, target: `org/repo#${i}` }),
     )
     const page2 = [action({ id: 'p2-0', target: 'org/repo#999' })]
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(page1) })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(page2) })
+      .mockResolvedValueOnce({ ok: true, ...listBody(page1, 'tok-2', 51) })
+      .mockResolvedValueOnce({ ok: true, ...listBody(page2, '', 51) })
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#0')
 
     fireEvent.click(screen.getByRole('button', { name: /load more/i }))
 
     expect(await screen.findByText('org/repo#999')).toBeInTheDocument()
-    expect(calledUrls(fetchMock).some((u) => u.includes('offset=50'))).toBe(true)
+    // The next page is addressed by the token the server minted, not by an
+    // offset the client counted — the client never computes a position.
+    expect(calledBodies(fetchMock).some((b) => b.page_token === 'tok-2')).toBe(true)
   })
 
   it('surfaces a load error with context', async () => {
@@ -216,13 +237,12 @@ describe('ActivityFeed', () => {
       vi.fn().mockResolvedValue({
         ok: false,
         status: 500,
-        text: () => Promise.resolve(''),
-        clone: () => ({ json: () => Promise.resolve({ error: 'boom' }) }),
+        text: () =>
+          Promise.resolve(JSON.stringify({ errors: [{ reason: 'CONFLICT', message: 'boom' }] })),
       }),
     )
-    render(<ActivityFeed baseUrl="/api/usage/teams/t1/activity" />)
-    await waitFor(() =>
-      expect(screen.getByText(/Couldn't load activity: boom/)).toBeInTheDocument(),
-    )
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
+    // The server's message reaches the user verbatim — no fallback prefix.
+    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })
 })

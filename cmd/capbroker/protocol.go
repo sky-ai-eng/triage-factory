@@ -118,8 +118,8 @@ type emptyArgs struct{}
 type emptyResult struct{}
 
 type setupNetworkArgs struct {
-	RunID     string `json:"run_id"`
-	SubnetIdx uint8  `json:"subnet_idx"`
+	ConversationID string `json:"conversation_id"`
+	SubnetIdx      uint8  `json:"subnet_idx"`
 }
 
 type setupNetworkResult struct {
@@ -147,7 +147,7 @@ type ensureRootfsResult struct {
 // anything — so a compromised orchestrator can supply data the sandbox sees
 // but cannot make the broker exec arbitrary code with capabilities.
 // Params.ContainerID is the run's unique lifecycle key — the broker
-// registers, waits, and kills by it, never by the non-unique RunID.
+// registers, waits, and kills by it, never by the non-unique ConversationID.
 type launchRunArgs struct {
 	Params sandbox.LaunchParams `json:"params"`
 }
@@ -222,32 +222,35 @@ type removeRunTreeArgs struct {
 }
 
 // captureRunDeltaArgs carries the fd-passthrough data for the streamed
-// capture: StdoutSocketPath names the per-capture unix socket the
+// capture: StagingDir names the parent-owned member destination and
+// StdoutSocketPath names the per-capture unix socket the
 // orchestrator-side IPCClient is already listening on (validated with
 // sandbox.ValidateCaptureStdoutSocketPath before the broker dials it) — the
-// capture child's raw stdout streams straight to it over a passed-through
-// fd, exactly like LaunchRun's StdioSocketPath, so the delta's bytes never
-// ride this RPC's request/response frames at all.
+// capture child's small JSON manifest streams straight to it over a
+// passed-through fd, exactly like LaunchRun's StdioSocketPath. Large members
+// never enter either channel.
 type captureRunDeltaArgs struct {
-	Worktree         string `json:"worktree"`
+	Worktree string `json:"worktree"`
+	// Additive in protocol v2: the client and broker ship in one binary, and an
+	// absent value fails the staging-dir boundary check instead of being
+	// misinterpreted as another operation shape.
+	StagingDir       string `json:"staging_dir"`
 	StdoutSocketPath string `json:"stdout_socket_path"`
-	// SessionID, when set, tells the capture child to also read the run's
-	// Claude session transcript (owner-only to the sandbox uid) into the
-	// emitted worktree.CapturedState. Empty for a run with no session.
+	// SessionID, when set, tells the capture child to stage the run's Claude
+	// session transcript (owner-only to the sandbox uid). Empty for a run with
+	// no session.
 	SessionID string `json:"session_id,omitempty"`
 }
 
 // captureRunDeltaResult carries only success/error plus a bounded stderr
-// tail — diagnostics, never run data. The delta itself (a worktree.GitDelta
-// the ORCHESTRATOR decodes; the broker never interprets it) crosses over
-// the passed-through socket named in captureRunDeltaArgs, not this result,
-// so unlike the pre-v2 shape this fits comfortably under maxFrameSize like
-// every other method's result.
+// tail — diagnostics, never run data. The manifest crosses over the
+// passed-through socket named in captureRunDeltaArgs, while the large members
+// land in StagingDir, so this result fits comfortably under maxFrameSize.
 type captureRunDeltaResult struct {
 	StderrTail string `json:"stderr_tail,omitempty"`
 }
 
-// methodCallNames are the wire-name constants shared by client and server.
+// The method* constants are the wire names shared by client and server.
 const (
 	methodPing            = "Ping"
 	methodSetupNetwork    = "SetupNetwork"

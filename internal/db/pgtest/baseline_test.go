@@ -28,7 +28,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 		"prompts", "projects", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",
 		"messages", "claim_credentials", "conversation_memory", "conversation_memory_entities", "pending_firings", "conversation_worktrees",
-		"swipe_events", "poller_state", "repo_profiles",
+		"swipe_events", "poller_state", "repositories",
 		// org_secrets replaces the Supabase Vault secret path (TFAC-402):
 		// app-encrypted ciphertext in a normal RLS table.
 		"org_secrets",
@@ -919,11 +919,11 @@ func TestProjectKnowledge_OCC(t *testing.T) {
 	}
 }
 
-// TestProjectKnowledge_RunValidation — passing a p_updated_by_run that
-// belongs to another user fails because runs RLS hides it. Without
-// this gate, a caller could attribute their KB write to someone else's
-// run, polluting audit chronology.
-func TestProjectKnowledge_RunValidation(t *testing.T) {
+// TestProjectKnowledge_ConversationValidation — passing a
+// p_updated_by_conversation that belongs to another user fails because
+// conversations RLS hides it. Without this gate, a caller could attribute
+// their KB write to someone else's conversation, polluting audit chronology.
+func TestProjectKnowledge_ConversationValidation(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
@@ -939,7 +939,7 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 		t.Fatalf("seed KB: %v", err)
 	}
 
-	// Seed bob's run in his own org. Use AdminDB so we don't have to
+	// Seed bob's conversation in his own org. Use AdminDB so we don't have to
 	// build the full task/event/prompt chain.
 	bobOrg := SeedOrg(t, h, "bob-other-org", bob)
 	bobTeam := SeedTeam(t, h, bobOrg, "default")
@@ -948,26 +948,26 @@ func TestProjectKnowledge_RunValidation(t *testing.T) {
 	bobTask := seedTask(t, h, bobOrg, bob, bobEntity, "github:pr:opened")
 	bobPrompt := seedPrompt(t, h, bobOrg, bob, "p1")
 	bobBR := seedBlueprintRun(t, h, bobOrg, bob, bobTask)
-	var bobRun string
+	var bobConversation string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5, 'running') RETURNING id
-	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobRun); err != nil {
-		t.Fatalf("seed bob run: %v", err)
+	`, bobOrg, bob, bobTask, bobPrompt, bobBR).Scan(&bobConversation); err != nil {
+		t.Fatalf("seed bob conversation: %v", err)
 	}
 
-	// Alice tries to attribute her KB update to bob's run. RLS on
-	// runs hides bob's row from alice's session, so the EXISTS check
+	// Alice tries to attribute her KB update to bob's conversation. RLS on
+	// conversations hides bob's row from alice's session, so the EXISTS check
 	// inside the function fails.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
 		var v int
 		return tx.QueryRow(
 			`SELECT update_project_knowledge($1, $2, $3, $4)`,
-			pkID, 1, "v2-with-stolen-run", bobRun,
+			pkID, 1, "v2-with-stolen-conversation", bobConversation,
 		).Scan(&v)
 	})
 	if err == nil {
-		t.Fatalf("update with stolen run did not error — run validation broken")
+		t.Fatalf("update with stolen conversation did not error — conversation validation broken")
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
@@ -1584,11 +1584,11 @@ func TestFK_CrossOrgRejected(t *testing.T) {
 // TestRLS_ChildTablesInheritParentVisibility — denormalized child
 // rows (task_events, messages, conversation_memory, conversation_memory_entities,
 // conversation_worktrees, pending_firings) must NOT be visible to org members
-// who can't see the parent task/run. Earlier policies gated only on
+// who can't see the parent task/conversation. Earlier policies gated only on
 // org_id, leaking metadata across users in the same org. EXISTS-on-parent
 // inherits the parent table's RLS. (artifacts is excluded: it scopes
-// directly on team_id like runs, not via EXISTS-on-run, so it has its
-// own team-visibility coverage in artifacts_test.go.)
+// directly on team_id like conversations, not via EXISTS-on-conversation,
+// so it has its own team-visibility coverage in artifacts_test.go.)
 func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -1597,7 +1597,7 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 	bob := SeedUser(t, h, "bob")
 	AddOrgMember(t, h, bob, orgA, teamA, "member", "member")
 
-	// Alice creates a task + a run + child rows. All in orgA. The
+	// Alice creates a task + a conversation + child rows. All in orgA. The
 	// team-default would make these rows visible to bob too
 	// (same team), which would hide the "child inherits parent
 	// visibility" property this test pins. Pin the parents at
@@ -1619,25 +1619,25 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		t.Fatalf("seed task: %v", err)
 	}
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
-	var runID string
+	var conversationID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, visibility, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, 'private', $4, $5, $6, 'running') RETURNING id
-	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&runID); err != nil {
-		t.Fatalf("seed run: %v", err)
+	`, orgA, alice, teamA, taskID, prompt, bpRun).Scan(&conversationID); err != nil {
+		t.Fatalf("seed conversation: %v", err)
 	}
 	// Seed one child row per parent kind we care about.
 	MustExec(t, h.AdminDB, `INSERT INTO task_events (org_id, task_id, event_id, kind)
 		SELECT $1, $2, e.id, 'closed' FROM events e WHERE e.entity_id = $3 LIMIT 1`,
 		orgA, taskID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, content) VALUES ($1, $2, 'assistant', 'hi')`,
-		orgA, runID)
+		orgA, conversationID)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory (org_id, conversation_id, entity_id, agent_content) VALUES ($1, $2, $3, 'note')`,
-		orgA, runID, entityA)
+		orgA, conversationID, entityA)
 	MustExec(t, h.AdminDB, `INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role) VALUES ($1, $2, $3, 'primary')`,
-		orgA, runID, entityA)
-	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repo_id, path, ref) VALUES ($1, $2, 'octo/repo', '/tmp/x', 'pr-1')`,
-		orgA, runID)
+		orgA, conversationID, entityA)
+	MustExec(t, h.AdminDB, `INSERT INTO conversation_worktrees (org_id, conversation_id, repository_id, path, ref) VALUES ($1, $2, $3, '/tmp/x', 'pr-1')`,
+		orgA, conversationID, SeedRepository(t, h, orgA, "octo", "repo"))
 
 	// Alice sees all her child rows.
 	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -1656,8 +1656,8 @@ func TestRLS_ChildTablesInheritParentVisibility(t *testing.T) {
 		t.Fatalf("alice query: %v", err)
 	}
 
-	// Bob (same org, NOT the run/task creator) must see ZERO of these
-	// child rows — tasks_select and runs_select gate on creator, so
+	// Bob (same org, NOT the conversation/task creator) must see ZERO of these
+	// child rows — tasks_select and conversations_select gate on creator, so
 	// the EXISTS-on-parent in each child policy returns false for him.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		for _, table := range []string{"task_events", "messages", "conversation_memory", "conversation_memory_entities", "conversation_worktrees"} {
@@ -2110,11 +2110,12 @@ func seedBlueprint(t *testing.T, h *Harness, orgID, creatorID, name string) stri
 	return id
 }
 
-// seedBlueprintRun mints a blueprint + blueprint_run for taskID so a runs row
-// can reference blueprint_runs(id). The column is nullable, but the
-// runs_origin_requires_parents CHECK requires it (plus task_id/prompt_id) to be
-// set when origin='blueprint' (the default). Returns the blueprint_run id.
-// Admin-pool insert (creator routing isn't under test here).
+// seedBlueprintRun mints a blueprint + blueprint_run for taskID so a
+// conversations row can reference blueprint_runs(id). The column is
+// nullable, but the conversations_origin_requires_parents CHECK requires it
+// (plus task_id/prompt_id) to be set when origin='blueprint' (the default).
+// Returns the blueprint_run id. Admin-pool insert (creator routing isn't
+// under test here).
 func seedBlueprintRun(t *testing.T, h *Harness, orgID, creatorID, taskID string) string {
 	t.Helper()
 	bpID := seedBlueprint(t, h, orgID, creatorID, "bp-"+taskID[:8])
@@ -2447,12 +2448,12 @@ func TestRLS_OrgMembershipsBootstrapStillWorks(t *testing.T) {
 //   - Stale state: an org_memberships row was deleted but the
 //     corresponding memberships rows weren't cascaded.
 //   - Privilege confusion: code path that adds a memberships row
-//     without going through the canonical addOrgMember flow.
+//     without going through the canonical AddOrgMember flow.
 //   - Attacker-controlled team_id: someone discovers a team_id in
 //     orgA and tries to use a memberships row to read it.
 //
 // In all cases the policies must deny. This test fabricates the state
-// directly via AdminDB (bypassing the addOrgMember helper that pairs
+// directly via AdminDB (bypassing the AddOrgMember helper that pairs
 // the two rows) and verifies the deny path on every swept table.
 func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	h := Shared(t)
@@ -2462,7 +2463,7 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 
 	// Mallory has a memberships row for teamA (orgA's team) but no
 	// org_memberships row in orgA. Constructed with raw INSERTs so we
-	// bypass the addOrgMember helper that pairs the two rows.
+	// bypass the AddOrgMember helper that pairs the two rows.
 	mallory := SeedUser(t, h, "mallory")
 	MustExec(t, h.AdminDB,
 		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, mallory, teamA)
@@ -2475,12 +2476,12 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 	promptID := seedPrompt(t, h, orgA, alice, "p1")
 	projectID := seedProject(t, h, orgA, alice, "proj-a")
 	bpRun := seedBlueprintRun(t, h, orgA, alice, taskID)
-	var runID string
+	var conversationID string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, task_id, prompt_id, blueprint_run_id, status)
 		VALUES ($1, $2, $3, $4, $5, $6, 'running') RETURNING id
-	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&runID); err != nil {
-		t.Fatalf("seed run: %v", err)
+	`, orgA, alice, teamA, taskID, promptID, bpRun).Scan(&conversationID); err != nil {
+		t.Fatalf("seed conversation: %v", err)
 	}
 	var ehID string
 	if err := h.AdminDB.QueryRow(`
@@ -2512,14 +2513,14 @@ func TestRLS_TeamMembershipWithoutOrgAccessDenied(t *testing.T) {
 		// so the UPDATE matches nothing.
 		updates := map[string]string{
 			"tasks":          `UPDATE tasks          SET status        = 'pwned' WHERE id = $1`,
-			"conversations":  `UPDATE conversations  SET stop_reason   = 'pwned' WHERE id = $1`,
+			"conversations":  `UPDATE conversations  SET park_reason   = 'pwned' WHERE id = $1`,
 			"prompts":        `UPDATE prompts        SET body          = 'pwned' WHERE id = $1`,
 			"projects":       `UPDATE projects       SET description   = 'pwned' WHERE id = $1`,
 			"event_handlers": `UPDATE event_handlers SET name          = 'pwned' WHERE id = $1`,
 		}
 		ids := map[string]string{
 			"tasks":          taskID,
-			"conversations":  runID,
+			"conversations":  conversationID,
 			"prompts":        promptID,
 			"projects":       projectID,
 			"event_handlers": ehID,
@@ -2591,7 +2592,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	carol := SeedUser(t, h, "carol")
 	AddOrgMember(t, h, carol, orgA, teamA, "member", "member") // org member but not admin
 
-	// Seed an entity + event + parent task + prompt so the task/runs
+	// Seed an entity + event + parent task + prompt so the task/conversations
 	// INSERTs below have parents to reference (created via AdminDB so
 	// the seeds themselves bypass the policy we're testing).
 	entityA := seedEntity(t, h, orgA, "github", "octo/repo#org-insert")
@@ -2601,9 +2602,9 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 	`, orgA, entityA).Scan(&evtID); err != nil {
 		t.Fatalf("seed event: %v", err)
 	}
-	// Parent task + prompt + blueprint_run for the runs INSERT case below.
-	// blueprint_run_id must be set so the runs row clears the
-	// runs_origin_requires_parents CHECK (origin defaults to 'blueprint');
+	// Parent task + prompt + blueprint_run for the conversations INSERT case below.
+	// blueprint_run_id must be set so the conversations row clears the
+	// conversations_origin_requires_parents CHECK (origin defaults to 'blueprint');
 	// otherwise the INSERT would fail at the CHECK level and never exercise
 	// the RLS admin gate this test is asserting.
 	parentTaskID := seedTask(t, h, orgA, alice, entityA, "github:pr:opened")
@@ -2693,7 +2694,7 @@ func TestRLS_NonAdminCannotInsertOrgVisible(t *testing.T) {
 // is the current-claimant state; both set is forbidden.
 //
 // This is the schema-level invariant the claim-flip helpers
-// (SetTaskClaimedByAgent / SetTaskClaimedByUser) rely on: each does a
+// (SetClaimedByAgent / SetClaimedByUser) rely on: each does a
 // single UPDATE that sets one column AND clears the other in the same
 // statement, so the XOR is never temporarily violated. A direct SQL
 // attempt to set both at once must be rejected.
@@ -3076,9 +3077,15 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	carol := SeedUser(t, h, "carol")
 	AddOrgMember(t, h, carol, orgA, teamB, "member", "admin")
 
+	// The registry rows the tracking rows reference. Minted on the admin pool
+	// because this test is about the team_github_repos policies, not about who
+	// may create a repository.
+	repoA := SeedRepository(t, h, orgA, "acme", "a-repo")
+	repoB := SeedRepository(t, h, orgA, "acme", "b-repo")
+
 	// carol (admin of teamB) tracks a repo for teamB.
 	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'b-repo')`, teamB)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamB, repoB, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("carol INSERT teamB repo: %v", err)
@@ -3087,7 +3094,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// alice (admin of teamA — owner is implicitly team admin) tracks a
 	// repo for teamA.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a-repo')`, teamA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	}); err != nil {
 		t.Fatalf("alice INSERT teamA repo: %v", err)
@@ -3096,7 +3103,10 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// bob (member of teamA only) sees exactly teamA's row — teamB's row
 	// is filtered out by the membership semi-join in the SELECT policy.
 	if err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		rows, e := tx.Query(`SELECT repo FROM team_github_repos ORDER BY repo`)
+		rows, e := tx.Query(`
+			SELECT r.repo FROM team_github_repos g
+			JOIN repositories r ON r.id = g.repository_id
+			ORDER BY r.repo`)
 		if e != nil {
 			return e
 		}
@@ -3120,7 +3130,7 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	// bob (non-admin) cannot INSERT into teamA — INSERT WITH CHECK is
 	// admin-gated → SQLSTATE 42501.
 	err := h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'sneaky')`, teamA)
+		_, e := tx.Exec(`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`, teamA, repoA, orgA)
 		return e
 	})
 	assertPgCode(t, err, "42501", "bob INSERT teamA repo (non-admin)")
@@ -3155,65 +3165,107 @@ func TestRLS_TeamGitHubRepos(t *testing.T) {
 	}
 }
 
-// TestOrgTrackedRepos_OrgBoundaryAndTeamBypass pins the security contract
-// of the tf.org_tracked_repos() SECURITY DEFINER helper: it
-// bypasses the per-team SELECT RLS (a within-org, non-security boundary)
-// so the repo_profiles reconcile can read the full org union, but it
-// holds the ORG boundary — a caller's claims org must match the requested
-// org, so it can never read another org's tracked repos.
-func TestOrgTrackedRepos_OrgBoundaryAndTeamBypass(t *testing.T) {
+// TestTeamGitHubRepos_TrackingSurvivesUntrackingTheRegistryRow pins the
+// negative space of the tracked-set foreign key: untracking is a delete on
+// team_github_repos and leaves the registry row standing, while deleting the
+// registry row cascades the tracking rows away with it.
+//
+// It replaces the old tf.org_tracked_repos() bypass test. That SECURITY
+// DEFINER helper existed so a team admin's app-pool transaction could read
+// every team's tracked repos while reconciling the repositories table from
+// their union; the reconcile is gone (the foreign key keeps the two in step),
+// and so is the helper.
+func TestTeamGitHubRepos_TrackingSurvivesUntrackingTheRegistryRow(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-	teamA2 := SeedTeam(t, h, orgA, "team-a2") // alice is NOT a member
+	orgA, _, teamA := SeedOrgWithUser(t, h, "alice")
+	teamA2 := SeedTeam(t, h, orgA, "team-a2")
+
+	repoID := SeedTrackedRepo(t, h, orgA, teamA, "acme", "a1")
+	SeedTrackedRepo(t, h, orgA, teamA2, "acme", "a1") // shared by both teams
+
+	// Untracking on one team leaves the registry row and the other team's
+	// tracking row alone.
+	MustExec(t, h.AdminDB, `DELETE FROM team_github_repos WHERE team_id = $1`, teamA)
+	var registryRows, trackingRows int
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM repositories WHERE id = $1`, repoID).Scan(&registryRows); err != nil {
+		t.Fatalf("count registry rows: %v", err)
+	}
+	if registryRows != 1 {
+		t.Errorf("registry rows after untracking = %d; want 1 — untracking must not delete the repository", registryRows)
+	}
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM team_github_repos WHERE repository_id = $1`, repoID,
+	).Scan(&trackingRows); err != nil {
+		t.Fatalf("count tracking rows: %v", err)
+	}
+	if trackingRows != 1 {
+		t.Errorf("tracking rows after one team untracked = %d; want 1 (the other team)", trackingRows)
+	}
+
+	// The other direction cascades: a tracking row is a statement about a
+	// repository and cannot outlive it.
+	MustExec(t, h.AdminDB, `DELETE FROM repositories WHERE id = $1`, repoID)
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM team_github_repos WHERE repository_id = $1`, repoID,
+	).Scan(&trackingRows); err != nil {
+		t.Fatalf("count tracking rows after registry delete: %v", err)
+	}
+	if trackingRows != 0 {
+		t.Errorf("tracking rows after the registry row went = %d; want 0 (ON DELETE CASCADE)", trackingRows)
+	}
+}
+
+// TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable pins the composite
+// foreign keys. A tracking row joins a team to a repository and both belong to
+// an org, so the row carries org_id and references (team_id, org_id) and
+// (repository_id, org_id) rather than the two ids alone.
+//
+// This is asserted on the ADMIN pool on purpose: RLS refuses a cross-org write
+// on the app pool, and the store refuses one before it reaches the database at
+// all. Both of those are checks somebody has to remember to keep. The
+// constraint is the one that holds when they are bypassed, and the admin pool
+// is where "bypassed" is testable.
+//
+// The failure this prevents is quiet rather than loud. A row pairing org A's
+// team with org B's repository satisfies both single-column keys, and every
+// org-scoped read filters it out — so the save reports success and the repo is
+// never tracked, never polled, never profiled.
+func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	orgA, _, teamA := SeedOrgWithUser(t, h, "alice")
 	orgB, _, teamB := SeedOrgWithUser(t, h, "bob")
+	repoA := SeedRepository(t, h, orgA, "acme", "shared")
+	repoB := SeedRepository(t, h, orgB, "acme", "shared")
 
-	// Tracked repos: two teams in orgA (alice belongs to only one), one in orgB.
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a1')`, teamA)
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'acme', 'a2')`, teamA2)
-	MustExec(t, h.AdminDB, `INSERT INTO team_github_repos (team_id, owner, repo) VALUES ($1, 'beta', 'b1')`, teamB)
-
-	// Under alice's claims, the helper returns the WHOLE org-A union — both
-	// teamA and teamA2 — even though alice isn't a member of teamA2 (the
-	// intentional team-RLS bypass).
-	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		if e := tx.QueryRow(`SELECT count(*) FROM tf.org_tracked_repos($1)`, orgA).Scan(&n); e != nil {
-			return e
-		}
-		if n != 2 {
-			t.Errorf("org_tracked_repos(orgA) returned %d repos; want 2 (both teams, team RLS bypassed)", n)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("alice org_tracked_repos(orgA): %v", err)
+	// org A's team pointed at org B's repository, stamped with either org.
+	// Whichever org_id is written, one of the two composite keys has no parent.
+	for _, tc := range []struct{ name, org string }{
+		{"stamped with the team's org", orgA},
+		{"stamped with the repository's org", orgB},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.AdminDB.Exec(
+				`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+				teamA, repoB, tc.org)
+			if err == nil {
+				t.Fatal("a cross-tenant tracking row was accepted; the composite foreign keys are not doing their job")
+			}
+			if !strings.Contains(err.Error(), "foreign key") && !strings.Contains(err.Error(), "23503") {
+				t.Errorf("refused for the wrong reason: %v", err)
+			}
+		})
 	}
 
-	// But a DIRECT table read under alice still honors the per-team SELECT
-	// RLS — she sees only teamA's row, not teamA2's. The boundary is intact
-	// at the table level; only the definer helper bridges it.
-	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		if e := tx.QueryRow(`SELECT count(*) FROM team_github_repos`).Scan(&n); e != nil {
-			return e
-		}
-		if n != 1 {
-			t.Errorf("direct team_github_repos read saw %d rows; want 1 (team RLS still enforced)", n)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("alice direct read: %v", err)
-	}
-
-	// The ORG boundary holds: alice (claims org A) asking for org B's union
-	// is rejected by the helper's guard — no cross-org read.
-	err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		var n int
-		return tx.QueryRow(`SELECT count(*) FROM tf.org_tracked_repos($1)`, orgB).Scan(&n)
-	})
-	if err == nil {
-		t.Fatal("org_tracked_repos(orgB) under org-A claims should be rejected, got nil error")
-	}
-	assertPgCode(t, err, "P0001", "cross-org org_tracked_repos (raise_exception)")
+	// The same-tenant pairs still insert, so the constraint is discriminating
+	// rather than just strict.
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamA, repoA, orgA)
+	MustExec(t, h.AdminDB,
+		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
+		teamB, repoB, orgB)
 }

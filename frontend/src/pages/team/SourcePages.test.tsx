@@ -25,20 +25,30 @@ const BODY = {
 function stub(payloads: Record<string, unknown>) {
   const fetchMock = vi.fn((input: unknown, init?: RequestInit) => {
     const path = String(input).split('?')[0]
-    if (init && init.method && init.method !== 'GET') {
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
-    }
     if (path in payloads) {
-      const body = JSON.stringify(payloads[path])
+      // A `/list` route answers the paging envelope, so its payload is written
+      // here as the rows alone and wrapped on the way out — the reads are POSTs
+      // and are matched by path like any other, since the method is about how
+      // the request is framed rather than whether it writes.
+      const raw = payloads[path]
+      const body = path.endsWith('/list')
+        ? { items: raw, next_page_token: '', total_count: (raw as unknown[]).length }
+        : raw
+      const text = JSON.stringify(body)
       // Both readers: fetchTeamSettings takes .json(), apiJSON takes .text()
       // and parses it itself so a 200 index.html cannot reach a caller as a
       // native SyntaxError.
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: () => Promise.resolve(payloads[path]),
-        text: () => Promise.resolve(body),
+        json: () => Promise.resolve(body),
+        text: () => Promise.resolve(text),
       })
+    }
+    // Every write these pages make is a replace-set whose ack carries nothing
+    // the page reads back.
+    if (init && init.method && init.method !== 'GET') {
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('{}') })
     }
     return Promise.resolve({
       ok: false,
@@ -85,8 +95,8 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('GitHub source page', () => {
   const REPOS = {
-    '/api/settings/team/t1/repos': { repos: ['sky/agent-runner', 'sky/planner'] },
-    '/api/github/repos': [
+    '/api/teams/t1/github-repos': { repos: ['sky/agent-runner', 'sky/planner'] },
+    '/api/github/repos/list': [
       { full_name: 'sky/agent-runner' },
       { full_name: 'sky/planner' },
       { full_name: 'sky/docs-site' },
@@ -122,8 +132,8 @@ describe('GitHub source page', () => {
 
   it('lists a tracked repository the picker can no longer see', async () => {
     stub({
-      '/api/settings/team/t1/repos': { repos: ['sky/vanished'] },
-      '/api/github/repos': [{ full_name: 'sky/planner' }],
+      '/api/teams/t1/github-repos': { repos: ['sky/vanished'] },
+      '/api/github/repos/list': [{ full_name: 'sky/planner' }],
     })
     render(<GitHubSource {...BODY} />)
 
@@ -154,7 +164,7 @@ describe('GitHub source page', () => {
 
 describe('Jira source page', () => {
   const SETTINGS = {
-    '/api/settings/team/t1': {
+    '/api/teams/t1/settings': {
       team_settings: {
         JiraProjects: ['PLAT'],
         AIReprioritizeThreshold: 0,

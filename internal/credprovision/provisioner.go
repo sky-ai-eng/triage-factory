@@ -1,8 +1,8 @@
 // Package credprovision is the brain-side half of TFAC-614's sealed
-// per-run credential channel: it resolves a claimed run's LLM/GitHub/Jira
-// credentials (using the real, key-bearing secret store only the brain
+// per-claim credential channel: it resolves a claimed conversation's
+// LLM/GitHub/Jira credentials (using the real, key-bearing secret store only the brain
 // holds), seals them to the claiming executor's published X25519 public
-// key (credseal), and writes the result to run_credentials for that
+// key (credseal), and writes the result to claim_credentials for that
 // executor to unseal.
 //
 // Manager is brain-unit member the same way the fleet reaper and drain
@@ -36,23 +36,22 @@ import (
 // LLM material through — declared here so the provisioner's test can stub it
 // without a real STS minter. The production impl is *llmcred.Resolver.
 type llmResolver interface {
-	ResolveForBundle(ctx context.Context, orgID, runID string) (llmcred.Material, error)
+	ResolveForBundle(ctx context.Context, orgID, conversationID string) (llmcred.Material, error)
 }
 
 var log = slog.Default().With("component", "credprovision")
 
-// DefaultAwaitingSweepInterval is the backstop-sweep cadence for runs
-// whose active claim is parked in phase='awaiting_credentials' — the fast
-// path is the
-// executor's cred_request tf_ctl notification; this recovers anything that
-// notification dropped (the relay is lossy by design). Short, because it
-// gates run START latency.
+// DefaultAwaitingSweepInterval is the backstop-sweep cadence for
+// conversations whose active claim is parked in phase='awaiting_credentials'
+// — the fast path is the executor's cred_request tf_ctl notification; this
+// recovers anything that notification dropped (the relay is lossy by
+// design). Short, because it gates conversation START latency.
 const DefaultAwaitingSweepInterval = 5 * time.Second
 
 // DefaultRefreshSweepInterval is the cadence the refresh sweep runs at.
 const DefaultRefreshSweepInterval = 5 * time.Minute
 
-// DefaultRefreshAfter is how old an active run's sealed bundle must be
+// DefaultRefreshAfter is how old an active claim's sealed bundle must be
 // before the refresh sweep re-mints its GitHub tokens. GitHub installation
 // tokens are hour-lived; this refreshes well within that window.
 const DefaultRefreshAfter = 30 * time.Minute
@@ -66,7 +65,7 @@ type jiraSystemResolver interface {
 	ResolveSystemCredential(ctx context.Context, orgID string) (jira.SystemCredential, error)
 }
 
-// Manager resolves and seals per-run credential bundles. Holds the real,
+// Manager resolves and seals per-claim credential bundles. Holds the real,
 // key-bearing db.Stores (brain-side only) plus the GitHub/Jira resolvers
 // built against it.
 type Manager struct {
@@ -80,7 +79,7 @@ type Manager struct {
 // normal (secret-bearing) db.Stores, never the disabled-secrets bundle an
 // executor holds. llm is the shared LLM-credential resolver
 // (internal/llmcred): for a role-mode Bedrock org it mints a short-lived STS
-// session credential (executor-bound: per-run session name + the executor
+// session credential (executor-bound: per-conversation session name + the executor
 // egress network condition); for every other mode it passes the stored
 // material through. nil falls back to agentproc's raw-secret resolution (no
 // role support) — only for callers that don't wire llmcred.
@@ -93,19 +92,19 @@ func NewManager(stores db.Stores, llm llmResolver) *Manager {
 	}
 }
 
-// ProvisionForRun resolves runID's credentials and seals them to its
-// current claimant's published pubkey, writing run_credentials. Called
+// ProvisionForConversation resolves conversationID's credentials and seals them to its
+// current claimant's published pubkey, writing claim_credentials. Called
 // synchronously off the executor's cred_request notification (the fast
 // path) and by both sweeps (the backstop / refresh paths) — idempotent and
-// safe to call repeatedly for the same run.
+// safe to call repeatedly for the same conversation.
 //
-// A no-op (nil error, no write) when the run isn't currently claimed by
+// A no-op (nil error, no write) when the conversation isn't currently claimed by
 // anyone, or the claiming instance hasn't published a pubkey — there is
 // nothing to seal to. Not an error: the claim may have just been released
 // (reaped, requeued) between the notification firing and this handler
 // running; the executor's own timeout/requeue path is what recovers that
 // window, not this function surfacing an error.
-func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err error) {
+func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversationID string) (err error) {
 	// The brain's half of the credential handshake, as its OWN root. It is
 	// deliberately not joined to the executor's awaiting-credentials span:
 	// the tf_ctl doorbell that usually triggers this is lossy by design (the
@@ -114,7 +113,7 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	// with no requester at all. conversation.id is the join; put the same id
 	// in a Tempo query and both sides come back.
 	ctx, span := tracer.Start(ctx, "credentials.provision", trace.WithNewRoot(),
-		trace.WithAttributes(telemetry.ConversationID(runID), telemetry.OrgID(orgID)))
+		trace.WithAttributes(telemetry.ConversationID(conversationID), telemetry.OrgID(orgID)))
 	defer func() {
 		if err != nil {
 			span.RecordError(err)
@@ -123,9 +122,9 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		span.End()
 	}()
 
-	claim, ok, err := m.stores.RunQueue.GetClaim(ctx, orgID, runID)
+	claim, ok, err := m.stores.ConversationQueue.GetClaim(ctx, orgID, conversationID)
 	if err != nil {
-		return fmt.Errorf("credprovision: read claim for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: read claim for conversation %s: %w", conversationID, err)
 	}
 	if !ok || claim.ExecutorID == "" {
 		span.SetAttributes(telemetry.Outcome("unclaimed"))
@@ -138,14 +137,14 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	}
 	if inst == nil {
 		log.Warn("claiming instance not found; skipping (not yet registered)",
-			"run", runID, "executor", claim.ExecutorID)
+			"conversation", conversationID, "executor", claim.ExecutorID)
 		span.SetAttributes(telemetry.Outcome("executor_unregistered"))
 		return nil
 	}
-	// Seal to the run's per-run sidecar key when the executor published one
-	// for this claim — a bundle sealed to it opens only inside that run's
+	// Seal to the claim's per-run sidecar key when the executor published one
+	// for this claim — a bundle sealed to it opens only inside that claim's
 	// sidecar process, so the orchestrator holds no unseal authority. The
-	// per-instance key is the fallback for a run whose sidecar hasn't
+	// per-instance key is the fallback for a claim whose sidecar hasn't
 	// published (or a deployment still on the per-instance channel).
 	sealPubKey := claim.CredPubKey
 	if sealPubKey == "" {
@@ -153,14 +152,14 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	}
 	if sealPubKey == "" {
 		log.Warn("no sidecar or instance pubkey to seal to; skipping (not yet published, or not an executor)",
-			"run", runID, "executor", claim.ExecutorID)
+			"conversation", conversationID, "executor", claim.ExecutorID)
 		span.SetAttributes(telemetry.Outcome("no_recipient_key"))
 		return nil
 	}
 	if inst.BootEpoch != claim.BootEpoch {
-		// The claiming executor has restarted since it claimed this run —
+		// The claiming executor has restarted since it claimed this conversation —
 		// a new boot, a new ephemeral keypair, a new epoch. Nothing in
-		// this boot is waiting on this run_id; the reaper's stale-
+		// this boot is waiting on this conversation; the reaper's stale-
 		// heartbeat sweep is what recovers it (TFAC-586), not this
 		// function. Sealing against the new epoch here would be wrong:
 		// the executor compares a bundle's epoch against its OWN current
@@ -168,15 +167,15 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		// but writing it under a claim that names an EARLIER epoch would
 		// desync the executor's understanding of which claim this bundle
 		// answers. Skip and let the reaper requeue.
-		log.Warn("claiming executor's boot epoch has moved on since this run was claimed; skipping (reaper will requeue)",
-			"run", runID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
+		log.Warn("claiming executor's boot epoch has moved on since this conversation was claimed; skipping (reaper will requeue)",
+			"conversation", conversationID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
 		span.SetAttributes(telemetry.Outcome("stale_boot_epoch"))
 		return nil
 	}
 
 	pubBytes, err := base64.StdEncoding.DecodeString(sealPubKey)
 	if err != nil || len(pubBytes) != 32 {
-		return fmt.Errorf("credprovision: run %s claim carries a malformed recipient pubkey", runID)
+		return fmt.Errorf("credprovision: conversation %s claim carries a malformed recipient pubkey", conversationID)
 	}
 	var pub [32]byte
 	copy(pub[:], pubBytes)
@@ -185,16 +184,16 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 
 	// Resolve LLM material through the shared llmcred seam — role-mode orgs
 	// mint a short-lived STS session credential here (executor-bound: the
-	// run id as RoleSessionName for per-run CloudTrail attribution, plus the
+	// conversation id as RoleSessionName for per-conversation CloudTrail attribution, plus the
 	// executor egress network condition), every other mode passes through.
 	// A role-mode mint failure has nothing to fall back to (no raw key
 	// stored), so it fails the provision per PS-H5: no bundle is written,
 	// the executor's awaiting-credentials wait times out and requeues, and
 	// the error names AssumeRole + the role ARN (surfaced by llmcred).
 	if m.llm != nil {
-		mat, err := m.llm.ResolveForBundle(ctx, orgID, runID)
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
 		if err != nil && !llmcred.IsNoCredentials(err) {
-			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (run %s): %w", orgID, runID, err)
+			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (conversation %s): %w", orgID, conversationID, err)
 		}
 		bundle.LLM = mat.Env
 		if !mat.Expiry.IsZero() {
@@ -208,8 +207,8 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 		bundle.LLM = llm
 	}
 
-	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, runID); err != nil {
-		return fmt.Errorf("credprovision: resolve github credentials for run %s: %w", runID, err)
+	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, conversationID); err != nil {
+		return fmt.Errorf("credprovision: resolve github credentials for conversation %s: %w", conversationID, err)
 	} else {
 		bundle.GitHub = gh
 	}
@@ -226,37 +225,37 @@ func (m *Manager) ProvisionForRun(ctx context.Context, orgID, runID string) (err
 	// free of provider-specific credential symbols. A provider with nothing
 	// configured for this org/team is simply absent from the map.
 	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
-		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, RunID: runID,
+		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, ConversationID: conversationID,
 	}); err != nil {
-		return fmt.Errorf("credprovision: resolve provider credentials for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: resolve provider credentials for conversation %s: %w", conversationID, err)
 	} else {
 		bundle.Providers = providers
 	}
 
 	plaintext, err := bundle.Marshal()
 	if err != nil {
-		return fmt.Errorf("credprovision: marshal bundle for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: marshal bundle for conversation %s: %w", conversationID, err)
 	}
 	sealed, err := credseal.Seal(pub, plaintext)
 	if err != nil {
-		return fmt.Errorf("credprovision: seal bundle for run %s: %w", runID, err)
+		return fmt.Errorf("credprovision: seal bundle for conversation %s: %w", conversationID, err)
 	}
-	if err := m.stores.RunCredentials.Put(ctx, orgID, runID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
-		return fmt.Errorf("credprovision: write bundle for run %s: %w", runID, err)
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed); err != nil {
+		return fmt.Errorf("credprovision: write bundle for conversation %s: %w", conversationID, err)
 	}
-	log.Debug("provisioned run credential bundle", "run", runID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
+	log.Debug("provisioned claim credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
 }
 
-// resolveGitHub resolves the run's GitHub credential: nil when the org has
+// resolveGitHub resolves the conversation's GitHub credential: nil when the org has
 // no usable GitHub credential at all (a Jira-only org — no regression, its
-// runs do no git). Otherwise mints a repo-scoped installation token (an
+// conversations do no git). Otherwise mints a repo-scoped installation token (an
 // active App) — or the org PAT, unscoped (a PAT can't be narrowed) — for
-// every repo in the run's authorized set (the same team-tracked ∩
+// every repo in the conversation's authorized set (the same team-tracked ∩
 // conversation_worktrees intersection the git proxy's live authorize gate uses, see
 // gitAuthorizeDecision in internal/delegate/spawner.go).
-func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runID string) (*credbundle.GitHubCreds, error) {
+func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conversationID string) (*credbundle.GitHubCreds, error) {
 	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
 	if !ok {
 		return nil, nil
@@ -269,7 +268,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 		return nil, nil
 	}
 
-	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, runID)
+	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
@@ -294,7 +293,7 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 		if !ok {
 			continue
 		}
-		tok, err := scoped.TokenForRepoScoped(ctx, orgID, owner, repo, nil)
+		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
 			if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 				continue
@@ -309,10 +308,10 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 	}
 
 	// The real-gh channel's single team-set-scoped token: ONE installation
-	// token over the run's authorized repos under the primary owner (App orgs),
+	// token over the conversation's authorized repos under the primary owner (App orgs),
 	// or the org PAT (PAT orgs). The injector proxy injects this on every
 	// request, so its own repo scope IS the policy — no per-request path
-	// parsing. Minting is per-installation, so a run whose authorized set spans
+	// parsing. Minting is per-installation, so a conversation whose authorized set spans
 	// multiple owners gets gh-channel coverage for the primary owner only;
 	// repos under other owners surface GitHub's standard 404 on this channel
 	// (the per-repo RepoTokens above still cover them for the exec/git channels
@@ -320,18 +319,18 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 	//
 	// EVERY failure here is non-fatal, deliberately unlike the per-repo loop
 	// above: this token is additive: a bundle without it still serves the
-	// exec-verb channel and the git proxy from RepoTokens, so the run works with
+	// exec-verb channel and the git proxy from RepoTokens, so the conversation works with
 	// only the gh channel degraded. Hard-failing would turn "gh unavailable"
-	// into "run cannot start" — and the failure is reachable in normal
+	// into "conversation cannot start" — and the failure is reachable in normal
 	// operation, not just on a blip: a "selected repositories" App install 422s
 	// a mint naming a repo outside its grant, which would otherwise abort every
-	// run for that org. The next refresh sweep re-mints.
+	// conversation for that org. The next refresh sweep re-mints.
 	if owner, names := cliChannelScope(m.taskPrimaryRepo(ctx, orgID, taskID), repoIDs); owner != "" {
 		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
 		switch {
 		case err != nil:
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				log.Warn("gh-channel token mint failed; run continues without the gh channel",
+				log.Warn("gh-channel token mint failed; conversation continues without the gh channel",
 					"org", orgID, "owner", owner, "repos", len(names), "error", err)
 			}
 		case cliTok.Value != "":
@@ -343,8 +342,8 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, runI
 
 // cliChannelScope picks the single owner the real-gh channel's team-set token
 // is minted for, and the bare repo names under it. Preference: the owner of
-// the run's primary repo (the repo a delegated run actually works on), else —
-// for an unanchored run whose authorized set is the team's whole tracked set —
+// the conversation's primary repo (the repo a delegated conversation actually works on), else —
+// for an unanchored conversation whose authorized set is the team's whole tracked set —
 // the owner with the most authorized repos (alphabetically-first owner breaks a
 // tie, for a deterministic seal). repoIDs are "owner/repo"; primaryRepo is
 // "owner/repo" or "". Returns ("", nil) when repoIDs is empty.
@@ -381,29 +380,29 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 	return best, byOwner[best]
 }
 
-// authorizedRepos returns the run's authorized repo set as "owner/repo"
-// strings: every distinct repo in the run's conversation_worktrees ledger, PLUS the
+// authorizedRepos returns the conversation's authorized repo set as "owner/repo"
+// strings: every distinct repo in the conversation's conversation_worktrees ledger, PLUS the
 // task's own primary repo — both filtered to what the team tracks. The
 // conversation_worktrees half is the credential-minting mirror of
 // gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
 // same intersection live at the git proxy; minting outside that set would
 // be pointless (the proxy would 403 it anyway). The task-repo half exists
-// because provisioning happens BEFORE the run's very first clone —
-// conversation_worktrees has no rows yet for a fresh claim, only for a resumed run
-// or one that already cloned before a refresh — so without it, a fresh
-// run's initial host-side clone (setupGitHub's resolveCloneToken, before
-// any worktree exists) would get no token at all.
+// because provisioning happens BEFORE the conversation's very first clone —
+// conversation_worktrees has no rows yet for a fresh claim, only for a resumed
+// conversation or one that already cloned before a refresh — so without it, a
+// fresh conversation's initial host-side clone (setupGitHub's clone auth,
+// before any worktree exists) would get no token at all.
 //
-// A run with no GitHub anchor — a Slack mention, a Jira issue, a taskless
-// run — has neither a GitHub task-repo nor any worktree, so the set above is
+// A conversation with no GitHub anchor — a Slack mention, a Jira issue, a taskless
+// conversation — has neither a GitHub task-repo nor any worktree, so the set above is
 // empty and its bundle would carry no GitHub credential at all: it couldn't
-// read a PR diff, check a CI status, or `workspace add` a repo. Such a run
+// read a PR diff, check a CI status, or `workspace add` a repo. Such a conversation
 // falls back to the team's whole tracked set so it can reach the repos its
 // team operates on. This widens READ/API reach, not push authority: the
 // tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
 // conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
-func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, runID string) ([]string, error) {
+func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
 	}
@@ -429,8 +428,8 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, ru
 	if repoID := m.taskPrimaryRepo(ctx, orgID, taskID); repoID != "" {
 		add(repoID)
 	}
-	if m.stores.RunWorktrees != nil {
-		rows, err := m.stores.RunWorktrees.ListSystem(ctx, orgID, runID)
+	if m.stores.ConversationWorktrees != nil {
+		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
 		if err != nil {
 			return nil, err
 		}
@@ -439,9 +438,9 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, ru
 		}
 	}
 
-	// Unanchored run: no task-repo, no worktree. Grant the team's tracked set
+	// Unanchored conversation: no task-repo, no worktree. Grant the team's tracked set
 	// (already the tracking source of truth, so no per-repo TracksRepoSystem
-	// re-check) rather than shipping a run with no GitHub credential at all.
+	// re-check) rather than shipping a bundle with no GitHub credential at all.
 	if len(out) == 0 {
 		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID)
 		if err != nil {
@@ -456,7 +455,7 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, ru
 
 // taskPrimaryRepo resolves a GitHub task's own target repo as "owner/repo"
 // from its entity source id ("owner/repo#42" for a PR/issue task) — the
-// same parse delegate.ownerForTask/setupGitHub use, duplicated here rather
+// same parse delegate.ownerRepoForTask uses, duplicated here rather
 // than exported since it's a two-line string split and importing
 // internal/delegate from here would be a layering inversion (delegate is
 // the executor-side consumer, not something the brain-side provisioner

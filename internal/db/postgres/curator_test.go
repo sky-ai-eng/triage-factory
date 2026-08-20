@@ -69,7 +69,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("alice seed: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != convID {
 		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, convID)
 	}
@@ -94,7 +94,7 @@ func TestCuratorStore_Postgres_PrivateVisibility_SelfOnly(t *testing.T) {
 		} else if conv != nil {
 			t.Errorf("bob read alice's conversation %s — private-visibility RLS leak", conv.ID)
 		}
-		if msgs, err := ts.Curator.ListConversationMessages(ctx, orgID, convID); err != nil {
+		if msgs, err := ts.Curator.ListConversationMessages(ctx, orgID, convID, 0); err != nil {
 			return err
 		} else if len(msgs) != 0 {
 			t.Errorf("bob read %d of alice's messages — private-visibility RLS leak", len(msgs))

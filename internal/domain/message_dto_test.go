@@ -20,7 +20,7 @@ func wireKeys(t *testing.T, dto MessageDTO) map[string]any {
 	return wire
 }
 
-// A live surface accumulates a run's spend from the streamed rows between reads
+// A live surface accumulates a conversation's spend from the streamed rows between reads
 // of the conversation's SUM, so the per-row stamp has to survive the wire —
 // including the difference between "no stamp" and "settled at zero", which a
 // non-pointer field would collapse.

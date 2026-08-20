@@ -10,15 +10,15 @@ import (
 )
 
 // ExecutorClaimsFactory is what a per-backend test file hands to
-// RunExecutorClaimsConformance. Returns the wired RunQueueStore and the seeder
+// RunExecutorClaimsConformance. Returns the wired ConversationQueueStore and the seeder
 // that stages the history the read projects.
-type ExecutorClaimsFactory func(t *testing.T) (store db.RunQueueStore, seed ExecutorClaimsSeeder)
+type ExecutorClaimsFactory func(t *testing.T) (store db.ConversationQueueStore, seed ExecutorClaimsSeeder)
 
 // ExecutorClaimRow is one claims row the seeder stages verbatim.
 type ExecutorClaimRow struct {
-	RunID      string
-	ExecutorID string
-	ClaimedAt  time.Time
+	ConversationID string
+	ExecutorID     string
+	ClaimedAt      time.Time
 	// ReleasedAt nil stages a LIVE claim — the shape whose sandbox may still
 	// be growing under the operator's eyes.
 	ReleasedAt *time.Time
@@ -34,12 +34,17 @@ type ExecutorClaimRow struct {
 // Both callbacks write rows directly rather than driving the store's own
 // mutations: the states this read must render (a released claim carrying
 // teardown actuals, a live one carrying none, an ordering across claims minted
-// inside the same second) accumulate across a run's whole life through several
-// subsystems, and no single store call the suite could make reaches them.
+// inside the same second) accumulate across a conversation's whole life
+// through several subsystems, and no single store call the suite could make
+// reaches them.
 type ExecutorClaimsSeeder struct {
-	// Run stages one conversation in the given terminal state and returns its
+	// OrgID owns the staged rows. The operator reads below are cross-org by
+	// construction and ignore it; the org-scoped claim→executor read needs it.
+	OrgID string
+
+	// Conversation stages one conversation in the given terminal state and returns its
 	// id. failureKind may be empty (an unclassified or non-failed run).
-	Run func(t *testing.T, status, failureKind string) (runID string)
+	Conversation func(t *testing.T, status, failureKind string) (conversationID string)
 
 	// Claim stages one claims row and returns its id.
 	Claim func(t *testing.T, row ExecutorClaimRow) (claimID string)
@@ -61,19 +66,19 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("newest_first_scoped_to_the_executor_and_capped", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		// Three claims for ours, one for a neighbour executor on the same box's
 		// deployment — the neighbour must not appear.
 		var ids []string
 		for i, off := range []time.Duration{0, time.Minute, 2 * time.Minute} {
 			released := base.Add(off + 30*time.Second)
 			ids = append(ids, seed.Claim(t, ExecutorClaimRow{
-				RunID: runID, ExecutorID: "exec-a", ClaimedAt: base.Add(off),
+				ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base.Add(off),
 				ReleasedAt: &released, Outcome: "completed", PeakMemMB: iptr(100 + i),
 			}))
 		}
 		seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-b", ClaimedAt: base.Add(3 * time.Minute),
+			ConversationID: conversationID, ExecutorID: "exec-b", ClaimedAt: base.Add(3 * time.Minute),
 		})
 
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "exec-a", 0)
@@ -103,10 +108,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("projects_actuals_lifetime_and_conversation_state", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "failed", "memory_limit")
+		conversationID := seed.Conversation(t, "failed", "memory_limit")
 		released := base.Add(90 * time.Second)
 		claimID := seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "failed",
 			PeakMemMB: iptr(2048), CPUUsec: i64ptr(42_000_000),
 		})
@@ -119,7 +124,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 			t.Fatalf("expected 1 claim, got %d: %+v", len(got), got)
 		}
 		c := got[0]
-		if c.ID != claimID || c.ConversationID != runID {
+		if c.ID != claimID || c.ConversationID != conversationID {
 			t.Fatalf("identity wrong: %+v", c)
 		}
 		if c.OrgID == "" {
@@ -151,8 +156,8 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		// A live claim: never released, never measured (the teardown that
 		// measures hasn't happened). It is still real occupancy on the box, so
 		// it must be listed rather than filtered out for lacking numbers.
-		runID := seed.Run(t, "running", "")
-		seed.Claim(t, ExecutorClaimRow{RunID: runID, ExecutorID: "exec-a", ClaimedAt: base})
+		conversationID := seed.Conversation(t, "running", "")
+		seed.Claim(t, ExecutorClaimRow{ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base})
 
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "exec-a", 25)
 		if err != nil {
@@ -176,10 +181,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 	t.Run("partially_measured_claim_keeps_the_half_it_has", func(t *testing.T) {
 		// The pre-5.19 kernel shape: cpu.stat lands, memory.peak does not.
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		released := base.Add(time.Minute)
 		seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "completed", CPUUsec: i64ptr(7),
 		})
 
@@ -197,7 +202,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("empty_for_an_executor_with_no_claims", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Run(t, "completed", "")
+		_ = seed.Conversation(t, "completed", "")
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "control-pod-1", 25)
 		if err != nil {
 			t.Fatalf("a control pod with no claims must read empty, not error: %v", err)
@@ -209,10 +214,10 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_matches_the_list_projection", func(t *testing.T) {
 		store, seed := mk(t)
-		runID := seed.Run(t, "completed", "")
+		conversationID := seed.Conversation(t, "completed", "")
 		released := base.Add(time.Minute)
 		claimID := seed.Claim(t, ExecutorClaimRow{
-			RunID: runID, ExecutorID: "exec-a", ClaimedAt: base,
+			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
 			ReleasedAt: &released, Outcome: "completed",
 			PeakMemMB: iptr(512), CPUUsec: i64ptr(1_500_000),
 		})
@@ -238,7 +243,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_reports_an_unknown_id_as_absent", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Run(t, "completed", "")
+		_ = seed.Conversation(t, "completed", "")
 		// A well-formed id that names nothing, and a malformed one — the
 		// operator can type either into a URL. Both are misses, not faults:
 		// on Postgres a non-uuid bind would otherwise surface as a 500.
@@ -250,6 +255,44 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 			if got != nil {
 				t.Errorf("ClaimByIDSystem(%q) = %+v, want nil", id, got)
 			}
+		}
+	})
+
+	t.Run("ClaimExecutorSystem_resolves_the_writing_engagement", func(t *testing.T) {
+		store, seed := mk(t)
+		conversationID := seed.Conversation(t, "open", "")
+		released := base.Add(time.Minute)
+		claimID := seed.Claim(t, ExecutorClaimRow{
+			ConversationID: conversationID, ExecutorID: "exec-writer", ClaimedAt: base,
+			ReleasedAt: &released, Outcome: "parked",
+		})
+
+		// Released, deliberately: the resume ladder asks this about the
+		// engagement that owed a snapshot, which has let the conversation go by
+		// the time anyone waits on its blob.
+		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, claimID)
+		if err != nil {
+			t.Fatalf("ClaimExecutorSystem: %v", err)
+		}
+		if !ok || got != "exec-writer" {
+			t.Errorf("ClaimExecutorSystem = (%q, %v), want (exec-writer, true)", got, ok)
+		}
+	})
+
+	t.Run("ClaimExecutorSystem_reports_an_unknown_id_as_absent", func(t *testing.T) {
+		store, seed := mk(t)
+		_ = seed.Conversation(t, "open", "")
+		// A well-formed id naming nothing is a miss. A malformed one is NOT
+		// folded into that: the dialects disagree on it (Postgres refuses the
+		// uuid cast, SQLite compares it as text), and an error reads to the
+		// caller as "cannot tell whether the writer is alive", which is the
+		// right answer for an id it had no business holding.
+		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, "33333333-3333-4333-8333-333333333333")
+		if err != nil {
+			t.Errorf("ClaimExecutorSystem(unknown) errored: %v", err)
+		}
+		if ok || got != "" {
+			t.Errorf("ClaimExecutorSystem(unknown) = (%q, %v), want (\"\", false)", got, ok)
 		}
 	})
 }

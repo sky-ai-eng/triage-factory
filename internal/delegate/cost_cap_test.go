@@ -25,7 +25,7 @@ import (
 // the cap read $0 and never trip.
 func newCostCapTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -48,7 +48,7 @@ func setDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 		t.Fatalf("get settings: %v", err)
 	}
 	set.MaxDailyCostUSD = cap
-	if err := store.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := store.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, set); err != nil {
 		t.Fatalf("set daily cost cap: %v", err)
 	}
 }
@@ -251,14 +251,14 @@ func delegatableFixture(t *testing.T, database *sql.DB, suffix string) (domain.T
 	}
 
 	bpID := "capbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	pid := "capp-" + suffix
 	ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{pid}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{pid}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	return *task, bpID
@@ -284,17 +284,17 @@ func TestDelegate_DailyCostCap_BlocksAndMintsNoBlueprintRun(t *testing.T) {
 	seedSpendAt(t, database, 12, time.Now().UTC()) // over cap
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
 		CreatorUserID:       runmode.LocalDefaultUserID,
 	})
 	if !errors.Is(err, ErrDailyCostCapReached) {
-		t.Fatalf("Delegate over cap must return ErrDailyCostCapReached, got runID=%q err=%v", runID, err)
+		t.Fatalf("Delegate over cap must return ErrDailyCostCapReached, got conversationID=%q err=%v", conversationID, err)
 	}
-	if runID != "" {
-		t.Errorf("blocked Delegate must return empty runID, got %q", runID)
+	if conversationID != "" {
+		t.Errorf("blocked Delegate must return empty conversationID, got %q", conversationID)
 	}
 	if n := countBlueprintRuns(t, database, task.ID); n != 0 {
 		t.Errorf("blocked Delegate minted %d blueprint_run rows; want 0 (no DB write past the cap)", n)
@@ -310,7 +310,7 @@ func TestDelegate_UnderCap_Proceeds(t *testing.T) {
 	seedSpendAt(t, database, 5, time.Now().UTC()) // well under cap
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
@@ -319,7 +319,7 @@ func TestDelegate_UnderCap_Proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate under cap must proceed, got err=%v", err)
 	}
-	if runID == "" {
+	if conversationID == "" {
 		t.Error("successful Delegate must return a blueprint_run id")
 	}
 	if n := countBlueprintRuns(t, database, task.ID); n != 1 {
@@ -335,7 +335,7 @@ func TestDelegate_NoCap_Proceeds(t *testing.T) {
 	seedSpendAt(t, database, 9999, time.Now().UTC()) // huge spend, but no cap set
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
@@ -344,8 +344,8 @@ func TestDelegate_NoCap_Proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate with no cap must proceed, got err=%v", err)
 	}
-	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
-		t.Errorf("no-cap Delegate should mint a blueprint_run; runID=%q", runID)
+	if conversationID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("no-cap Delegate should mint a blueprint_run; conversationID=%q", conversationID)
 	}
 }
 
@@ -366,7 +366,7 @@ func licenseGovernance(t *testing.T) {
 func setTeamDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 	t.Helper()
 	store := sqlitestore.New(database).Teams
-	if err := store.SetDailyCostCapSystem(context.Background(), runmode.LocalDefaultTeamID, cap); err != nil {
+	if _, err := store.SetDailyCostCapSystem(context.Background(), runmode.LocalDefaultTeamID, cap); err != nil {
 		t.Fatalf("set team daily cost cap: %v", err)
 	}
 }
@@ -502,17 +502,17 @@ func TestDelegate_TeamDailyCostCap_BlocksAndMintsNoBlueprintRun(t *testing.T) {
 	seedSpendAt(t, database, 12, time.Now().UTC()) // team over cap
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
 		CreatorUserID:       runmode.LocalDefaultUserID,
 	})
 	if !errors.Is(err, ErrDailyCostCapReached) {
-		t.Fatalf("Delegate over team cap must return ErrDailyCostCapReached, got runID=%q err=%v", runID, err)
+		t.Fatalf("Delegate over team cap must return ErrDailyCostCapReached, got conversationID=%q err=%v", conversationID, err)
 	}
-	if runID != "" {
-		t.Errorf("blocked Delegate must return empty runID, got %q", runID)
+	if conversationID != "" {
+		t.Errorf("blocked Delegate must return empty conversationID, got %q", conversationID)
 	}
 	if n := countBlueprintRuns(t, database, task.ID); n != 0 {
 		t.Errorf("team-cap-blocked Delegate minted %d blueprint_run rows; want 0", n)
@@ -527,7 +527,7 @@ func TestDelegate_TeamUnderCap_Proceeds(t *testing.T) {
 	seedSpendAt(t, database, 5, time.Now().UTC()) // well under
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
@@ -536,8 +536,8 @@ func TestDelegate_TeamUnderCap_Proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Delegate under team cap must proceed, got err=%v", err)
 	}
-	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
-		t.Errorf("under-team-cap Delegate should mint one blueprint_run; runID=%q", runID)
+	if conversationID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("under-team-cap Delegate should mint one blueprint_run; conversationID=%q", conversationID)
 	}
 }
 
@@ -550,7 +550,7 @@ func TestDelegate_TeamCap_EntitlementOff_Ignored(t *testing.T) {
 	seedSpendAt(t, database, 50, time.Now().UTC()) // over the (dormant) team cap
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
@@ -559,8 +559,8 @@ func TestDelegate_TeamCap_EntitlementOff_Ignored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unlicensed governance → team cap dormant → Delegate must proceed, got err=%v", err)
 	}
-	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
-		t.Errorf("dormant-team-cap Delegate should mint one blueprint_run; runID=%q", runID)
+	if conversationID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("dormant-team-cap Delegate should mint one blueprint_run; conversationID=%q", conversationID)
 	}
 }
 
@@ -575,7 +575,7 @@ func TestDelegate_TeamCap_UnownedTaskSkipped(t *testing.T) {
 	seedSpendAt(t, database, 50, time.Now().UTC())
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	runID, err := s.Delegate(task, DelegateOpts{
+	conversationID, err := s.Delegate(task, DelegateOpts{
 		OrgID:               runmode.LocalDefaultOrgID,
 		ExplicitBlueprintID: bpID,
 		TriggerType:         "manual",
@@ -584,7 +584,7 @@ func TestDelegate_TeamCap_UnownedTaskSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unowned task (teamID \"\") must skip the team cap and proceed, got err=%v", err)
 	}
-	if runID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
-		t.Errorf("unowned-task Delegate should mint one blueprint_run; runID=%q", runID)
+	if conversationID == "" || countBlueprintRuns(t, database, task.ID) != 1 {
+		t.Errorf("unowned-task Delegate should mint one blueprint_run; conversationID=%q", conversationID)
 	}
 }

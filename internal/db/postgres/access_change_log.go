@@ -68,7 +68,7 @@ func (s *accessChangeLogStore) record(ctx context.Context, q queryer, orgID stri
 	return err
 }
 
-func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, error) {
+func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts domain.AccessChangeListOpts) ([]domain.AccessChange, int, error) {
 	limit := opts.Limit
 	if limit <= 0 {
 		limit = 100
@@ -87,6 +87,12 @@ func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts
 			args = append(args, a)
 		}
 		where += " AND action IN (" + strings.Join(ph, ", ") + ")"
+	}
+	// The count applies the same org + category predicate on the same pool as
+	// the page, before the window's placeholders are appended.
+	var total int
+	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_change_log WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
 	}
 	n++
 	limitPh := fmt.Sprintf("$%d", n)
@@ -107,7 +113,7 @@ func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts
 		 ORDER BY created_at DESC, id DESC
 		 LIMIT `+limitPh+offsetClause, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -118,9 +124,9 @@ func (s *accessChangeLogStore) ListByOrg(ctx context.Context, orgID string, opts
 			&e.ID, &e.OrgID, &e.ActorUserID, &e.Action,
 			&e.TargetUserID, &e.TeamID, &e.DetailJSON, &e.CreatedAt,
 		); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }

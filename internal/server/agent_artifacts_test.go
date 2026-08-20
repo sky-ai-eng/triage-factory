@@ -12,12 +12,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// seedRunArtifact stamps an artifact onto runID on the local-default org/team
+// seedConversationArtifact stamps an artifact onto conversationID on the local-default org/team
 // and returns the stored row (with its generated id). UpsertSystem mirrors how
 // the exec choke point records artifacts in production.
-func seedRunArtifact(t *testing.T, s *Server, runID string, a domain.Artifact) domain.Artifact {
+func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a domain.Artifact) domain.Artifact {
 	t.Helper()
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -27,17 +27,18 @@ func seedRunArtifact(t *testing.T, s *Server, runID string, a domain.Artifact) d
 	return stored
 }
 
-// TestHandleAgentArtifacts pins the run-scoped artifact read (TFAC-465): every
-// artifact a run produced, across kinds, projected with its stable coordinates
-// and details parsed — an object for a PR, null for a detail-less comment.
+// TestHandleAgentArtifacts pins the conversation-scoped artifact read
+// (TFAC-465): every artifact a conversation produced, across kinds, projected
+// with its stable coordinates and details parsed — an object for a PR, null
+// for a detail-less comment.
 func TestHandleAgentArtifacts(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "arts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "arts", "completed")
 
-	pr := seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+	pr := seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 42, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/42", "Add thing", "Body.", true))
-	comment := seedRunArtifact(t, s, runID, domain.Artifact{
+	comment := seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
 		Target: "octo/repo#42", ExternalID: "555",
 		URL:      "https://github.com/octo/repo/pull/42#issuecomment-555",
@@ -45,7 +46,7 @@ func TestHandleAgentArtifacts(t *testing.T) {
 		DedupKey: domain.ArtifactDedupKey("github", "comment", "555", ""),
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET artifacts = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -96,8 +97,8 @@ func TestHandleAgentArtifacts(t *testing.T) {
 // never a 500 from a failed response marshal.
 func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "corrupt", "completed")
-	art := seedRunArtifact(t, s, runID, domain.Artifact{
+	conversationID := seedSteerConversation(t, s.db, "corrupt", "completed")
+	art := seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo#1",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "corrupt1",
 	})
@@ -105,7 +106,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 		t.Fatalf("corrupt details: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200 (corrupt details must not 500); body=%s", rec.Code, rec.Body.String())
 	}
@@ -121,49 +122,50 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 	}
 }
 
-// TestHandleAgentArtifacts_Empty pins that a run with no artifacts returns an
+// TestHandleAgentArtifacts_Empty pins that a conversation with no artifacts returns an
 // empty JSON array (200 []), never null — the board card can render a 0 count
 // without special-casing.
 func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "noarts", "completed")
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID+"/artifacts", nil)
+	conversationID := seedSteerConversation(t, s.db, "noarts", "completed")
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
-		t.Errorf("empty run artifacts body = %q, want []", body)
+		t.Errorf("empty conversation artifacts body = %q, want []", body)
 	}
 }
 
-// TestHandleAgentArtifacts_RunNotFound pins the 404 for an unknown (or
-// not-visible) run — the run read is the authorization gate, so a missing run
-// is indistinguishable from a cross-team one.
-func TestHandleAgentArtifacts_RunNotFound(t *testing.T) {
+// TestHandleAgentArtifacts_UnknownConversationNotFound pins the 404 for an
+// unknown (or not-visible) conversation — the conversation read is the
+// authorization gate, so a missing conversation is indistinguishable from a
+// cross-team one.
+func TestHandleAgentArtifacts_UnknownConversationNotFound(t *testing.T) {
 	s := newTestServer(t)
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/r_ghost/artifacts", nil)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("GET missing run = %d, want 404; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET missing conversation = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
-// TestRunResponse_ArtifactCount pins artifact_count on the single-run response
+// TestConversationResponse_ArtifactCount pins artifact_count on the single-conversation response
 // (GET /api/agent/conversations/{id}).
-func TestRunResponse_ArtifactCount(t *testing.T) {
+func TestConversationResponse_ArtifactCount(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "cnt", "completed")
-	seedRunArtifact(t, s, runID, domain.Artifact{
+	conversationID := seedSteerConversation(t, s.db, "cnt", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c1",
 	})
-	seedRunArtifact(t, s, runID, domain.Artifact{
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c2",
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
@@ -174,24 +176,24 @@ func TestRunResponse_ArtifactCount(t *testing.T) {
 	}
 }
 
-// TestRunResponse_ArtifactCount_Unresolved pins that a completed run with an
-// unresolved draft PR reports the right artifact_count (from CountByRun) and the
+// TestConversationResponse_ArtifactCount_Unresolved pins that a completed conversation with an
+// unresolved draft PR reports the right artifact_count (from CountByConversation) and the
 // derived approval signal (has_unresolved_artifacts + unresolved_pr_count) — the
 // successor to the legacy pending_kind overlay.
-func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
+func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "park", "completed")
-	seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+	conversationID := seedSteerConversation(t, s.db, "park", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 7, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/7", "T", "B", true))
-	seedRunArtifact(t, s, runID, domain.Artifact{
+	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo#7",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "pk1",
 	})
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET run = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("GET conversation = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var m map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
@@ -208,48 +210,43 @@ func TestRunResponse_ArtifactCount_Unresolved(t *testing.T) {
 	}
 }
 
-// TestRunResponse_HasUnresolved_List pins that the derived approval signal
-// propagates through the run-LIST endpoint — the batched ListByRuns path,
-// distinct from the single-run path. Guards the list endpoint against a silent
-// has_unresolved_artifacts regression.
-func TestRunResponse_HasUnresolved_List(t *testing.T) {
+// TestConversationResponse_HasUnresolved_List pins that the derived approval
+// signal propagates through the conversation-LIST endpoint — the batched
+// ListByConversations path, distinct from the single-conversation path. Guards
+// the list endpoint against a silent has_unresolved_artifacts regression.
+func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
-	runID := seedSteerRun(t, s.db, "pklist", "completed")
-	seedRunArtifact(t, s, runID, domain.NewPullRequestArtifact(
+	conversationID := seedSteerConversation(t, s.db, "pklist", "completed")
+	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id=t_pklist", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	convs := listConversations(t, s, fixtureUUID("t_pklist"))
+	if len(convs) != 1 {
+		t.Fatalf("listed %d conversations, want 1", len(convs))
 	}
-	var runs []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("listed %d runs, want 1", len(runs))
-	}
-	if got := runs[0]["has_unresolved_artifacts"]; got != true {
+	if got := convs[0]["has_unresolved_artifacts"]; got != true {
 		t.Errorf("has_unresolved_artifacts = %v, want true", got)
 	}
-	if got := runs[0]["unresolved_pr_count"]; got != float64(1) {
+	if got := convs[0]["unresolved_pr_count"]; got != float64(1) {
 		t.Errorf("unresolved_pr_count = %v, want 1", got)
 	}
 }
 
-// TestRunResponse_ArtifactCount_List pins that the batched count flows through
-// the run-list path (GET /api/agent/conversations?task_id=...): two runs on one task get
-// their own correct counts from the single CountByRun batch.
-func TestRunResponse_ArtifactCount_List(t *testing.T) {
+// TestConversationResponse_ArtifactCount_List pins that the batched count flows
+// through the conversation-list path (POST /api/agent/conversations/list): two
+// conversations on one task get their own correct counts from the single
+// CountByConversation batch.
+func TestConversationResponse_ArtifactCount_List(t *testing.T) {
 	s := newTestServer(t)
-	// seedSteerRun mints task t_lst with run r_lst and prompt p_lst; add a
-	// second run on the same task so the list path counts more than one run.
-	run1 := seedSteerRun(t, s.db, "lst", "completed")
-	const taskID = "t_lst"
-	const run2 = "r_lst2"
+	// seedSteerConversation mints task t_lst with conversation r_lst and prompt
+	// p_lst; add a second conversation on the same task so the list path counts
+	// more than one conversation.
+	conv1 := seedSteerConversation(t, s.db, "lst", "completed")
+	taskID := fixtureUUID("t_lst")
+	conv2 := fixtureUUID("r_lst2")
 	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, 'p_lst', 'completed', 'manual', ?, 0)`, run2, taskID, brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, 'completed', 'manual', ?, 0)`, conv2, taskID, fixtureUUID("p_lst"), brID)
 
 	mkComment := func(key string) domain.Artifact {
 		return domain.Artifact{
@@ -257,26 +254,19 @@ func TestRunResponse_ArtifactCount_List(t *testing.T) {
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}
 	}
-	seedRunArtifact(t, s, run1, mkComment("l1"))
-	seedRunArtifact(t, s, run1, mkComment("l2"))
-	seedRunArtifact(t, s, run2, mkComment("l3"))
+	seedConversationArtifact(t, s, conv1, mkComment("l1"))
+	seedConversationArtifact(t, s, conv1, mkComment("l2"))
+	seedConversationArtifact(t, s, conv2, mkComment("l3"))
 
-	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations?task_id="+taskID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET runs = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	convs := listConversations(t, s, taskID)
+	if len(convs) != 2 {
+		t.Fatalf("listed %d conversations, want 2", len(convs))
 	}
-	var runs []map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &runs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if len(runs) != 2 {
-		t.Fatalf("listed %d runs, want 2", len(runs))
-	}
-	want := map[string]float64{run1: 2, run2: 1}
-	for _, m := range runs {
+	want := map[string]float64{conv1: 2, conv2: 1}
+	for _, m := range convs {
 		id, _ := m["ID"].(string)
 		if got := m["artifact_count"]; got != want[id] {
-			t.Errorf("run %s artifact_count = %v, want %v", id, got, want[id])
+			t.Errorf("conversation %s artifact_count = %v, want %v", id, got, want[id])
 		}
 	}
 }

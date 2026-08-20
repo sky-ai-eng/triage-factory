@@ -8,7 +8,7 @@ import (
 )
 
 // credRequestProvisionTimeout bounds a single cred_request handler's
-// ProvisionForRun call (TFAC-614) — well inside the executor's own
+// ProvisionForConversation call (TFAC-614) — well inside the executor's own
 // 2-minute awaiting-credentials deadline, so a stalled DB/GitHub
 // round-trip degrades to one deferred backstop-sweep retry instead of
 // leaking a goroutine per dropped notification.
@@ -30,16 +30,20 @@ func (a *App) pollSoon(source, orgID string) {
 	a.publishCtl(ctlbus.Message{Kind: "pollsoon", Source: source, OrgID: orgID})
 }
 
-// triggerScorer/triggerProfiler/triggerClassifier relay a background
-// Manager's Trigger(orgID) the same way pollSoon relays PollSoon. Wired
-// as the server's SetScorerTrigger/SetProfilerTrigger callbacks and the
-// spawner's classifier-wait trigger (internal/app/subsystems.go) — every
-// one of those callers may run on a standby control pod, and the
-// classifier one may also run on an executor (which has no local
-// classifier object at all).
+// triggerScorer/triggerProfiler/triggerClassifier/triggerReach relay a
+// background Manager's Trigger(orgID) the same way pollSoon relays PollSoon.
+// Wired as the server's SetScorerTrigger/SetProfilerTrigger/SetReachTrigger
+// callbacks and the spawner's classifier-wait trigger
+// (internal/app/subsystems.go) — every one of those callers may run on a
+// standby control pod, and the classifier one may also run on an executor
+// (which has no local classifier object at all). The reach one is driven by a
+// REQUEST — a picker read finding the mirror stale, the refresh control, a
+// credential save — which is exactly the shape that lands wherever the load
+// balancer put it.
 func (a *App) triggerScorer(orgID string)               { a.triggerManager("scorer", orgID, false) }
 func (a *App) triggerProfiler(orgID string, force bool) { a.triggerManager("profiler", orgID, force) }
 func (a *App) triggerClassifier(orgID string)           { a.triggerManager("classifier", orgID, false) }
+func (a *App) triggerReach(orgID string, force bool)    { a.triggerManager("reach", orgID, force) }
 
 // triggerManager is the shared relay body: dispatch in-process when this
 // pod holds the brain, else publish the tf_ctl relay message for the
@@ -78,6 +82,10 @@ func (a *App) dispatchManagerTrigger(manager, orgID string, force bool) {
 	case "reconciler":
 		if a.reconciler != nil {
 			a.reconciler.Trigger(orgID)
+		}
+	case "reach":
+		if a.reachCache != nil {
+			a.reachCache.Trigger(orgID, force)
 		}
 	default:
 		appLog.Warn("tf_ctl: unknown manager in trigger relay", "manager", manager)
@@ -119,29 +127,29 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		// timeout here just costs one deferred pass — the backstop sweep
 		// (internal/credprovision.RunAwaitingSweep) retries it. Unlike
 		// a.dispatchManagerTrigger's fire-and-forget Trigger() channel
-		// send, ProvisionForRun does real work and its error is worth
+		// send, ProvisionForConversation does real work and its error is worth
 		// logging.
 		if a.credProvisioner != nil {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForRun(ctx, msg.OrgID, msg.RunID); err != nil {
-					appLog.Warn("tf_ctl: cred_request provision failed", "run", msg.RunID, "error", err)
+				if err := a.credProvisioner.ProvisionForConversation(ctx, msg.OrgID, msg.ConversationID); err != nil {
+					appLog.Warn("tf_ctl: cred_request provision failed", "conversation", msg.ConversationID, "error", err)
 				}
 			}()
 		}
 	case "curator_cred_request":
 		// The curator-turn analog of cred_request: a home executor
 		// standing a turn's credential sidecar up nudges the brain to seal that
-		// turn's bundle. msg.RunID carries the curator conversation id. Same
+		// turn's bundle. msg.ConversationID carries the curator conversation id. Same
 		// holder-gated, bounded-context, backstop-swept shape as cred_request
 		// above; nil at TF_ROLE=executor / local (never the brain holder).
 		if a.credProvisioner != nil {
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
 				defer cancel()
-				if err := a.credProvisioner.ProvisionForCuratorTurn(ctx, msg.OrgID, msg.RunID); err != nil {
-					appLog.Warn("tf_ctl: curator_cred_request provision failed", "request", msg.RunID, "error", err)
+				if err := a.credProvisioner.ProvisionForCuratorTurn(ctx, msg.OrgID, msg.ConversationID); err != nil {
+					appLog.Warn("tf_ctl: curator_cred_request provision failed", "request", msg.ConversationID, "error", err)
 				}
 			}()
 		}

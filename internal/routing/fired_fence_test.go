@@ -23,9 +23,9 @@ import (
 // fenceStubDelegator mirrors the production spawner's event-path fence
 // (delegate.Spawner.Delegate → BlueprintStore.CreateRunIfNotFiredSystem): the
 // relocated replay fence lives on blueprint_runs, so it mints a blueprint_run
-// fenced on (triggering_event_id, trigger_id) + a linked run row, and returns
-// delegate.ErrAlreadyFired when the fence trips. This lets the router
-// integration tests exercise the real ErrAlreadyFired handling in
+// fenced on (triggering_event_id, trigger_id) + a linked conversation row,
+// and returns delegate.ErrAlreadyFired when the fence trips. This lets the
+// router integration tests exercise the real ErrAlreadyFired handling in
 // tryAutoDelegate without standing up a worktree + agent. A manual call
 // (TriggerType != "event") inserts unconditionally, matching the spawner's
 // manual branch.
@@ -39,11 +39,15 @@ func (s *fenceStubDelegator) Delegate(task domain.Task, opts delegate.DelegateOp
 	return stubDelegateRun(s.db, task, opts)
 }
 
-func (s *fenceStubDelegator) StopAndCancelBlueprint(orgID, runID, userID string, cause delegate.StopCause) error {
+func (s *fenceStubDelegator) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
 }
 
-func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, runID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
+	return nil
+}
+
+func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
 
@@ -111,35 +115,36 @@ func fenceRouter(database *sql.DB, spawner Delegator) *Router {
 		st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 }
 
-func fenceRunCount(t *testing.T, database *sql.DB, entityID string) int {
+func fenceConversationCount(t *testing.T, database *sql.DB, entityID string) int {
 	t.Helper()
 	var n int
 	if err := database.QueryRow(`
 		SELECT COUNT(*) FROM conversations r JOIN tasks t ON t.id = r.task_id WHERE t.entity_id = ?
 	`, entityID).Scan(&n); err != nil {
-		t.Fatalf("count runs: %v", err)
+		t.Fatalf("count conversations: %v", err)
 	}
 	return n
 }
 
-// fenceCompleteRuns moves every run on the entity to a terminal status,
-// reopening the task's auto-run gate — exactly the boot-recovery
-// window (the first run already went terminal) the replay re-fires into.
-func fenceCompleteRuns(t *testing.T, database *sql.DB, entityID string) {
+// fenceCompleteConversations moves every conversation on the entity to a
+// terminal status, reopening the task's auto-run gate — exactly the
+// boot-recovery window (the first conversation already went terminal) the
+// replay re-fires into.
+func fenceCompleteConversations(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		UPDATE conversations SET status = 'completed', completed_at = ?
 		WHERE task_id IN (SELECT id FROM tasks WHERE entity_id = ?)
 	`, time.Now(), entityID); err != nil {
-		t.Fatalf("complete runs: %v", err)
+		t.Fatalf("complete conversations: %v", err)
 	}
 }
 
 // TestHandleEvent_ReplayedEvent_FiresExactlyOnce is a regression test
-// for the immediate-fire window: an event auto-fires a run, the run reaches
-// terminal (reopening the task's gate), then the at-least-once router
+// for the immediate-fire window: an event auto-fires a conversation, which
+// reaches terminal (reopening the task's gate), then the at-least-once router
 // queue replays the SAME event after boot recovery. Pre-fence the replay
-// passed the reopened gate and spawned a duplicate run; the
+// passed the reopened gate and spawned a duplicate conversation; the
 // (triggering_event_id, trigger_id) fence turns it into a clean skip.
 func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 	database := newTestDB(t)
@@ -149,23 +154,23 @@ func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 
 	evt := recordFenceEvent(t, database, entityID)
 
-	// First delivery: immediate fire creates run R1.
+	// First delivery: immediate fire creates conversation R1.
 	router.HandleEvent(context.Background(), evt)
-	if n := fenceRunCount(t, database, entityID); n != 1 {
-		t.Fatalf("after first delivery: want 1 run, got %d", n)
+	if n := fenceConversationCount(t, database, entityID); n != 1 {
+		t.Fatalf("after first delivery: want 1 conversation, got %d", n)
 	}
 
 	// R1 goes terminal — the task's gate reopens.
-	fenceCompleteRuns(t, database, entityID)
+	fenceCompleteConversations(t, database, entityID)
 
 	// Replay the same event instance (same evt.ID, as boot recovery would).
 	router.HandleEvent(context.Background(), evt)
 
-	if n := fenceRunCount(t, database, entityID); n != 1 {
-		t.Errorf("after replay: want exactly 1 run (fence dedups the replay), got %d", n)
+	if n := fenceConversationCount(t, database, entityID); n != 1 {
+		t.Errorf("after replay: want exactly 1 conversation (fence dedups the replay), got %d", n)
 	}
 	// Delegate was attempted both times (the gate was open on the replay);
-	// the fence, not the gate, is what prevented the duplicate run.
+	// the fence, not the gate, is what prevented the duplicate conversation.
 	if c := atomic.LoadInt64(&stub.calls); c != 2 {
 		t.Errorf("want 2 Delegate attempts (fire + fenced replay), got %d", c)
 	}
@@ -173,7 +178,8 @@ func TestHandleEvent_ReplayedEvent_FiresExactlyOnce(t *testing.T) {
 
 // TestHandleEvent_DistinctEvents_FireIndependently pins that the fence is
 // per event instance, not per trigger: two distinct ci_check_failed events
-// on the same entity (which dedup to one task) each fire their own run.
+// on the same entity (which dedup to one task) each fire their own
+// conversation.
 func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	database := newTestDB(t)
 	entityID := setupFenceScenario(t, database)
@@ -183,8 +189,9 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	e1 := recordFenceEvent(t, database, entityID)
 	router.HandleEvent(context.Background(), e1)
 	// Terminal so the second event immediate-fires too (rather than queueing
-	// behind an active run — that's the drain path, tested separately).
-	fenceCompleteRuns(t, database, entityID)
+	// behind an active conversation — that's the drain path, tested
+	// separately).
+	fenceCompleteConversations(t, database, entityID)
 
 	e2 := recordFenceEvent(t, database, entityID)
 	if e2.ID == e1.ID {
@@ -192,26 +199,26 @@ func TestHandleEvent_DistinctEvents_FireIndependently(t *testing.T) {
 	}
 	router.HandleEvent(context.Background(), e2)
 
-	if n := fenceRunCount(t, database, entityID); n != 2 {
-		t.Errorf("two distinct events on one entity: want 2 runs, got %d", n)
+	if n := fenceConversationCount(t, database, entityID); n != 2 {
+		t.Errorf("two distinct events on one entity: want 2 conversations, got %d", n)
 	}
 }
 
 // TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate covers the drain
 // path's fence handling: a pending firing whose triggering event
-// already has a committed run (a prior drain fired it but died before
-// MarkFired, or the immediate path fired it before this firing was popped)
-// must skip with reason "already_fired" rather than spawn a duplicate or
-// retry forever.
+// already has a committed blueprint run (a prior drain fired it but died
+// before MarkFired, or the immediate path fired it before this firing was
+// popped) must skip with reason "already_fired" rather than spawn a
+// duplicate or retry forever.
 func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	database := newTestDB(t)
 	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
 	stub := &fenceStubDelegator{db: database}
 
 	// A blueprint_run for (eventID, triggerID) already committed (the relocated
-	// fence's firing unit), plus its step run — the prior firing that the drain
-	// must detect as already-fired. Resolve the trigger's real blueprint id (the
-	// trigger seed remapped it to a wrapping blueprint).
+	// fence's firing unit), plus its step conversation — the prior firing that
+	// the drain must detect as already-fired. Resolve the trigger's real
+	// blueprint id (the trigger seed remapped it to a wrapping blueprint).
 	var blueprintID string
 	if err := database.QueryRow(`SELECT blueprint_id FROM event_handlers WHERE id = ?`, triggerID).Scan(&blueprintID); err != nil {
 		t.Fatalf("resolve blueprint id: %v", err)
@@ -263,8 +270,9 @@ func TestDrainTask_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	if rows[0].SkipReason != domain.PendingFiringSkipAlreadyFired {
 		t.Errorf("skip_reason = %q, want %q", rows[0].SkipReason, domain.PendingFiringSkipAlreadyFired)
 	}
-	// Still exactly one run — the fence kept the drain from duplicating.
-	if n := fenceRunCount(t, database, entityID); n != 1 {
-		t.Errorf("want 1 run (drain fenced), got %d", n)
+	// Still exactly one conversation — the fence kept the drain from
+	// duplicating.
+	if n := fenceConversationCount(t, database, entityID); n != 1 {
+		t.Errorf("want 1 conversation (drain fenced), got %d", n)
 	}
 }

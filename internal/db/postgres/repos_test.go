@@ -3,8 +3,10 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -15,16 +17,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRepoStore_Postgres runs the shared conformance suite against
-// the Postgres RepoStore impl. Wires both pools against AdminDB
+// TestRepositoryStore_Postgres runs the shared conformance suite against
+// the Postgres RepositoryStore impl. Wires both pools against AdminDB
 // (BYPASSRLS) so behavior tests stay independent of the auth path;
 // the cross-org leakage test below exercises the org_id filter
 // directly.
-func TestRepoStore_Postgres(t *testing.T) {
+func TestRepositoryStore_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	dbtest.RunRepoStoreConformance(t, func(t *testing.T) (db.RepoStore, string) {
+	dbtest.RunRepositoryStoreConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
 		t.Helper()
 		h.Reset(t)
 		orgID, _, _ := seedPgRepoOrg(t, h)
@@ -32,11 +34,11 @@ func TestRepoStore_Postgres(t *testing.T) {
 	})
 }
 
-// TestRepoStore_Postgres_CrossOrgLeakage pins the defense-in-depth
+// TestRepositoryStore_Postgres_CrossOrgLeakage pins the defense-in-depth
 // org_id filter on every read + mutation path. RLS via
-// repo_profiles_all also enforces this, but the org_id = $N clause
+// repositories_all also enforces this, but the org_id = $N clause
 // in each query is the belt to RLS's suspenders.
-func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
+func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -46,8 +48,8 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo into orgA only.
-	if err := stores.Repos.Upsert(ctx, orgA, domain.RepoProfile{
-		ID: "octo/widget", Owner: "octo", Repo: "widget",
+	if _, err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
+		Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
 	}); err != nil {
@@ -55,19 +57,19 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// Get(orgB, octo/widget) must return nil despite the row existing.
-	if got, err := stores.Repos.Get(ctx, orgB, "octo/widget"); err != nil {
+	if got, err := stores.Repos.GetByRef(ctx, orgB, domain.RepoRefFromSlug("octo/widget")); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
 		t.Errorf("orgB Get returned orgA repo %s", got.ID)
 	}
 
 	// List cross-org must return empty.
-	got, err := stores.Repos.List(ctx, orgB)
+	got, total, err := stores.Repos.List(ctx, orgB, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("List cross-org: %v", err)
 	}
-	if len(got) != 0 {
-		t.Errorf("orgB List returned %d rows, want 0", len(got))
+	if len(got) != 0 || total != 0 {
+		t.Errorf("orgB List returned %d rows (total %d), want 0 / 0", len(got), total)
 	}
 
 	// ListWithContent cross-org must also return empty.
@@ -84,19 +86,27 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB CountConfigured = %d, want 0", n)
 	}
 
-	// UpdateBaseBranch cross-org must not touch orgA's row.
-	if err := stores.Repos.UpdateBaseBranch(ctx, orgB, "octo/widget", "hack"); err != nil {
-		t.Fatalf("UpdateBaseBranch cross-org: %v", err)
+	// UpdateBaseBranch cross-org must not touch orgA's row. The id-keyed
+	// writer is handed orgA's REAL row id under orgB's org scope, which is the
+	// only shape of this attack that survives the split: a caller who has
+	// somehow learned the handle still cannot reach across the tenant, and
+	// gets told the row does not exist rather than silently writing nothing.
+	rowA, err := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget"))
+	if err != nil || rowA == nil {
+		t.Fatalf("read orgA's row: got=%v err=%v", rowA, err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got.BaseBranch != "" {
+	if _, err := stores.Repos.UpdateBaseBranch(ctx, orgB, rowA.ID, "hack"); !errors.Is(err, db.ErrNoSuchRepository) {
+		t.Errorf("cross-org UpdateBaseBranch = %v, want db.ErrNoSuchRepository", err)
+	}
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.BaseBranch != "" {
 		t.Errorf("orgA's BaseBranch was mutated by orgB UpdateBaseBranch: got %q", got.BaseBranch)
 	}
 
 	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if err := stores.Repos.UpdateCloneStatus(ctx, orgB, "octo", "widget", "failed", "hack", "other"); err != nil {
+	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
 		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got.CloneStatus == "failed" {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.CloneStatus == "failed" {
 		t.Errorf("orgA's CloneStatus was mutated by orgB UpdateCloneStatus: got %q", got.CloneStatus)
 	}
 
@@ -104,20 +114,20 @@ func TestRepoStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	if err := stores.Repos.SetConfigured(ctx, orgB, []string{"another/repo"}); err != nil {
 		t.Fatalf("SetConfigured cross-org: %v", err)
 	}
-	if got, _ := stores.Repos.Get(ctx, orgA, "octo/widget"); got == nil {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got == nil {
 		t.Errorf("orgA's repo was deleted by orgB SetConfigured")
 	}
 }
 
-// TestRepoStore_Postgres_CrossOrgRLSDenied pins the production RLS
-// layer for repo_profiles. Where CrossOrgLeakage above wires both
+// TestRepositoryStore_Postgres_CrossOrgRLSDenied pins the production RLS
+// layer for repositories. Where CrossOrgLeakage above wires both
 // pools against AdminDB to prove the defense-in-depth WHERE-clause
 // filter is intact, this test runs the store through the app pool
-// under tf_app with real JWT claims so the actual repo_profiles_all
+// under tf_app with real JWT claims so the actual repositories_all
 // policy is exercised. Same-org reads succeed; cross-org reads are
 // silently filtered (USING); cross-org Upsert raises 42501 from the
 // WITH CHECK side of the same policy.
-func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
+func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -129,8 +139,8 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed a repo in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	if err := stores.Repos.UpsertSystem(ctx, orgA, domain.RepoProfile{
-		ID: "octo/rls", Owner: "octo", Repo: "rls",
+	if _, err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
+		Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
 	}); err != nil {
@@ -139,7 +149,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -155,7 +165,7 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Get(ctx, orgA, "octo/rls")
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -171,25 +181,26 @@ func TestRepoStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_write_denied", func(t *testing.T) {
 		// bob's claims point at orgB; Upsert against orgA would land
-		// a row with org_id=orgA. The repo_profiles_all policy's
+		// a row with org_id=orgA. The repositories_all policy's
 		// WITH CHECK requires org_id = tf.current_org_id(), so 42501
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.RepoProfile{
-				ID: "octo/rls-write", Owner: "octo", Repo: "rls-write",
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
+				Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
+			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})
 }
 
-// TestRepoStore_Postgres_ListTeamScoped_RLS pins the multi-mode discovery
+// TestRepositoryStore_Postgres_ListTeamScoped_RLS pins the multi-mode discovery
 // read (TFAC-559): under the app pool with real RLS, a member's
 // ListTeamScoped semi-joins through team_github_repos and returns only the
 // repos their own team(s) track — not the org-wide union. A teamless
-// member gets zero rows even though repo_profiles has entries.
-func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
+// member gets zero rows even though the repositories table has entries.
+func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	ctx := context.Background()
@@ -222,10 +233,10 @@ func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 
 	listAs := func(userID string) []string {
 		t.Helper()
-		var got []domain.RepoProfile
+		var got []domain.Repository
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.Repos.ListTeamScoped(ctx, orgA)
+			got, _, e = tx.Repos.ListTeamScoped(ctx, orgA, db.ListOpts{Limit: 50})
 			return e
 		}); err != nil {
 			t.Fatalf("ListTeamScoped(%s): %v", userID, err)
@@ -244,10 +255,104 @@ func TestRepoStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 	}
 }
 
-func repoIDs(profiles []domain.RepoProfile) []string {
+// TestRepositoryStore_Postgres_ReturnedRow_AppPool is where the returned-row
+// standard's RLS caveat is actually tested. The shared conformance run above
+// wires both pools against AdminDB (BYPASSRLS), so it pins the SQL and not the
+// policies; this one runs the same assertion through tf_app with RLS active.
+//
+// The load-bearing case is an upsert's UPDATE arm: `UPDATE … RETURNING` yields
+// a row only if the policies let the writer SELECT it. repositories_all is
+// org-scoped for USING and WITH CHECK alike, so it does today — and a policy
+// narrowed later would fail here rather than silently return nothing to a
+// caller that is about to publish it.
+func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, userID, _ := seedPgRepoOrg(t, h)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	write := func(what string, fn func(tx db.TxStores) error) {
+		t.Helper()
+		if err := stores.Tx.WithTx(ctx, orgID, userID, fn); err != nil {
+			t.Fatalf("%s under the app pool: %v", what, err)
+		}
+	}
+	// The follow-up read runs through the app pool too, so both halves of the
+	// comparison are what an RLS-scoped caller can see.
+	read := func(id string) func() (*domain.Repository, error) {
+		return func() (*domain.Repository, error) {
+			var row *domain.Repository
+			err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+				var e error
+				row, e = tx.Repos.Get(ctx, orgID, id)
+				return e
+			})
+			return row, err
+		}
+	}
+
+	// ProfiledAt is set so the comparisons follow the row's one pointer field:
+	// a timestamptz decoded differently on the write's RETURNING than on the
+	// read's SELECT is exactly the drift this test is here to catch, and a nil
+	// pointer on both sides would hide it.
+	profiled := time.Now().UTC().Truncate(time.Second)
+	var created, updated, branched, seeded domain.Repository
+	write("Upsert (insert arm)", func(tx db.TxStores) error {
+		var e error
+		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Owner: "Acme", Repo: "Api",
+			ProfileText: "v1", DefaultBranch: "main", ExternalID: "1296269",
+			ProfiledAt: &profiled,
+		})
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (insert arm, app pool)", created, read(created.ID))
+
+	write("Upsert (update arm)", func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Owner: "acme", Repo: "api",
+			ProfileText: "v2", DefaultBranch: "main",
+			ProfiledAt: &profiled,
+		})
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "Upsert (update arm, app pool)", updated, read(created.ID))
+	if updated.ID != created.ID || updated.ExternalID != "1296269" {
+		t.Errorf("update arm returned %+v, want the existing row with its stored id", updated)
+	}
+
+	write("UpdateBaseBranch", func(tx db.TxStores) error {
+		var e error
+		branched, e = tx.Repos.UpdateBaseBranch(ctx, orgID, created.ID, "develop")
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "UpdateBaseBranch (app pool)", branched, read(created.ID))
+
+	var stamped *domain.Repository
+	write("UpdateCloneStatusByRef", func(tx db.TxStores) error {
+		var e error
+		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		return e
+	})
+	if stamped == nil {
+		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
+	}
+	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
+
+	write("SeedCloneURL", func(tx db.TxStores) error {
+		var e error
+		seeded, e = tx.Repos.SeedCloneURL(ctx, orgID, created.ID, "https://example.test/acme/api.git")
+		return e
+	})
+	dbtest.AssertWriteReturnedStoredRow(t, "SeedCloneURL (app pool)", seeded, read(created.ID))
+}
+
+func repoIDs(profiles []domain.Repository) []string {
 	out := make([]string, len(profiles))
 	for i, p := range profiles {
-		out[i] = p.ID
+		out[i] = p.Slug()
 	}
 	return out
 }

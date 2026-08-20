@@ -16,6 +16,8 @@
 // onboarding deployment picker, NOT inferred from the field group: Cloud
 // authenticates with an Atlassian API token (email + token, Basic / REST v3),
 // Data Center with a personal access token (Bearer / REST v2).
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+
 export type JiraDeployment = 'cloud' | 'data_center'
 
 // JIRA_DEPLOYMENT_OPTIONS is the shared label set for the deployment picker,
@@ -66,11 +68,14 @@ export interface JiraConnectCreds {
   jira_api_token: string
 }
 
-// connectJira binds the org-level Jira service credential. The deployment
-// (chosen upstream) selects which credential shape is sent — Cloud sends
-// {url, email, token}; Data Center sends {url, pat}. Returns a discriminated
-// result mirroring saveOrgConfig — the caller surfaces the error inline
-// (wizard error line) or as a toast (Settings).
+// connectJira binds the org-level Jira service credential. The deployment is
+// sent EXPLICITLY and selects which credential shape rides with it — Cloud
+// sends {url, email, token}; Data Center sends {url, pat}. The server decodes
+// against that deployment's struct alone, so the other one's fields are a 400
+// rather than something quietly dropped; sending only the chosen pair is
+// therefore a requirement, not a tidiness. Returns a discriminated result
+// mirroring patchOrgSettings — the caller surfaces the error inline (wizard error
+// line) or as a toast (Settings).
 export async function connectJira(
   orgId: string,
   url: string,
@@ -79,20 +84,21 @@ export async function connectJira(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const body =
     deployment === 'cloud'
-      ? { url: url.trim(), email: creds.jira_email.trim(), token: creds.jira_api_token.trim() }
-      : { url: url.trim(), pat: creds.jira_pat.trim() }
+      ? {
+          deployment,
+          url: url.trim(),
+          email: creds.jira_email.trim(),
+          token: creds.jira_api_token.trim(),
+        }
+      : { deployment, url: url.trim(), pat: creds.jira_pat.trim() }
   try {
-    const res = await fetch(`/api/orgs/${orgId}/jira/access/credential`, {
+    await apiFetch(`/api/orgs/${orgId}/jira/access/credential`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Connection failed' }
-    }
     return { ok: true }
-  } catch {
-    return { ok: false, error: 'Could not connect to server' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'The connection failed.') }
   }
 }

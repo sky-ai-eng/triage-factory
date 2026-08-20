@@ -21,7 +21,7 @@ const (
 // A row carries at most one intent that actually changes placement:
 //   - PinnedInstanceID set  → the key is pinned to that one instance,
 //     regardless of the hash or the instance's liveness (the claim's aging
-//     tier still spills a pinned-but-dead owner's runs, so a pin never
+//     tier still spills a pinned-but-dead owner's conversations, so a pin never
 //     wedges work — it only steers the warm path).
 //   - Replicas > 0          → the top-Replicas rendezvous candidates all
 //     count as preferred, bounding a hot monorepo's cache to K executors on

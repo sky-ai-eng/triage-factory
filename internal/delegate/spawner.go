@@ -41,14 +41,14 @@ import (
 // without standing up real git worktrees on disk.
 var worktreePushTargetBranch = worktree.PushTargetBranch
 
-// shortRunID truncates a run UUID to 8 chars for toast messages — full UUIDs
+// shortConversationID truncates a run UUID to 8 chars for toast messages — full UUIDs
 // are noisy in a notification. Kept consistent so users can cross-reference
 // the runs page listing.
-func shortRunID(runID string) string {
-	if len(runID) < 8 {
-		return runID
+func shortConversationID(conversationID string) string {
+	if len(conversationID) < 8 {
+		return conversationID
 	}
-	return runID[:8]
+	return conversationID[:8]
 }
 
 // QueueDrainer is the interface the spawner uses to notify the per-task
@@ -77,24 +77,24 @@ type EventPublisher interface {
 // reviewer connected to a different pod than the one running a
 // permission check still counts as present. See presentFor.
 type PresenceChecker interface {
-	PresentFor(ctx context.Context, orgID, runID string) bool
+	PresentFor(ctx context.Context, orgID, conversationID string) bool
 }
 
 // Spawner manages delegated agent runs.
 type Spawner struct {
-	database   *sql.DB
-	prompts    db.PromptStore
-	agents     db.AgentStore // resolves actor for run.actor_agent_id stamping
-	blueprints db.BlueprintStore
-	runQueue   db.RunQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
-	// runCredentials is the sealed per-run credential bundle channel
+	database          *sql.DB
+	prompts           db.PromptStore
+	agents            db.AgentStore // resolves actor for run.actor_agent_id stamping
+	blueprints        db.BlueprintStore
+	conversationQueue db.ConversationQueueStore // the run queue the dispatcher drains: enqueue a step, claim it, run it, react
+	// claimCredentials is the sealed per-run credential bundle channel
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
-	runCredentials db.RunCredentialsStore
+	claimCredentials db.ClaimCredentialsStore
 	// curatorStore is the curator-turn half of the credential handshake:
 	// BringUpCuratorSidecar publishes the turn's sidecar pubkey onto the
 	// conversation's active claim via
-	// curatorStore.PublishTurnCredPubKeySystem and polls runCredentials
+	// curatorStore.PublishTurnCredPubKeySystem and polls claimCredentials
 	// (keyed by the conversation id — the shared claim_credentials channel)
 	// for the sealed bundle the brain wrote. nil-safe (local never brings a
 	// curator sidecar up); a nil store makes BringUpCuratorSidecar degrade
@@ -108,15 +108,16 @@ type Spawner struct {
 	// cadence when > 0, same override shape.
 	awaitingCredentialsPollIntervalOverride time.Duration
 	tasks                                   db.TaskStore         // re-read tasks for run lifecycle handlers
-	agentRuns                               db.ConversationStore // run lifecycle + transcript
+	conversations                           db.ConversationStore // run lifecycle + transcript
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	artifacts                               db.ArtifactStore     // review + draft-PR artifact lookup on processCompletion park check
-	// stagedInjections is the durable, producer-agnostic "stage for next resume"
-	// agent-injection queue (TFAC-501). The generic staged-injection API (StageOrDeliverInjection
-	// / stagedInjectionsForResume) appends here when a target run has no warm process
-	// and flushes on the next resume. Admin-pool System methods only — both the
-	// producer (an eventbus subscriber) and the consumer (a resume goroutine) run
-	// without JWT claims. Nil-safe (tests passing a partial db.Stores{}).
+	// stagedInjections is the durable, producer-agnostic "stage for next
+	// resume" agent-injection queue (TFAC-501). The generic staged-injection
+	// API (StageOrDeliverInjection / stagedInjectionsForResume) appends here
+	// when a target run has no warm process and flushes on the next resume.
+	// Admin-pool System methods only — both the producer (an eventbus
+	// subscriber) and the consumer (a resume goroutine) run without JWT
+	// claims. Nil-safe (tests passing a partial db.Stores{}).
 	stagedInjections db.StagedInjectionStore
 	events           db.EventStore // admin-pool GetMetadataSystem for post-run prompt building
 	// taskMemory routes the post-completion UpsertAgentMemorySystem
@@ -124,11 +125,11 @@ type Spawner struct {
 	// pool store. Both fire inside the runAgent goroutine, which has
 	// no JWT-claims context, so they hit the admin pool in Postgres.
 	taskMemory db.TaskMemoryStore
-	// runWorktrees serves the spawner's per-run cleanup defers (Jira
+	// conversationWorktrees serves the spawner's per-run cleanup defers (Jira
 	// runs accumulate lazy worktrees via the agent's `workspace add`
 	// CLI; the defer iterates and removes them). Goroutine-internal
 	// callers, all routed through the admin-pool System variants.
-	runWorktrees db.RunWorktreeStore
+	conversationWorktrees db.ConversationWorktreeStore
 	// orgs reads per-org settings (GitHub clone protocol, the TFAC-477 daily
 	// spend cap) from org_settings during run setup. Post-internal/config
 	// deletion; every per-org read goes through OrgsStore.GetSettingsSystem
@@ -151,14 +152,14 @@ type Spawner struct {
 	// (RecordSystem — the detached mirror has no JWT-claims context). A plain
 	// store ref like s.jiraRules; nil-safe (a partial test Stores skips recording).
 	externalActions db.ExternalActionStore
-	// repos reads repo_profiles under the admin pool (GetSystem) for the one
+	// repos reads repositories under the admin pool (GetSystem) for the one
 	// thing a workspace rehydrate needs and cannot derive: the repo's upstream
 	// clone URL. The first claim gets that URL from the PR object it already
 	// fetched; a later step / a resume fetches no PR, so the profile — written
 	// in the org's configured protocol — is the URL's home. A plain store ref
 	// like s.orgs; nil-safe (a partial test Stores yields no URL, and the
 	// rehydrate degrades to the bare-must-already-exist path).
-	repos db.RepoStore
+	repos db.RepositoryStore
 	// teams reads per-team settings under the admin pool (GetSettingsSystem)
 	// at spawn time — currently the TFAC-392 presence-gated absent-auto-deny
 	// knobs (grace window + on/off toggle). Resolved once per run when the
@@ -167,10 +168,17 @@ type Spawner struct {
 	teams db.TeamsStore
 	// instances is the fleet membership registry RunInstanceHeartbeat
 	// renews on a timer. A plain store ref like s.jiraRules; nil-safe (a nil
-	// store makes the heartbeat loop a logged no-op, same shape as RunQueue on
+	// store makes the heartbeat loop a logged no-op, same shape as ConversationQueue on
 	// RunDispatcher). Also the liveness read the cross-pod signal seam
 	// (TFAC-585) uses to decide whether a run's executor is still around.
 	instances db.InstanceStore
+	// workspaceSnapshots is the durable per-snapshot-key lifecycle record the
+	// teardown writes around its blob write: 'pending' before the capture,
+	// 'written'/'failed' after, CAS'd on this engagement's claim so a late
+	// upload from a displaced engagement never overwrites a successor's newer
+	// blob. A plain store ref like s.instances; nil-safe (a partial test
+	// Stores still writes the blob, with no lifecycle recorded against it).
+	workspaceSnapshots db.WorkspaceSnapshotStore
 	// instanceStats is the 1-minute fleet telemetry sink RunInstanceStatSampler
 	// writes (TFAC-589). Nil-safe: a nil store makes the sampler a logged no-op,
 	// same shape as instances on the heartbeat loop.
@@ -185,25 +193,25 @@ type Spawner struct {
 	// ordinary claimable work. Wired unconditionally in NewSpawner — both
 	// dialects support it (local mode's dispatcher claims its own resumed
 	// runs the same way). Nil-safe (a partial test Stores{} skips it).
-	pendingInput db.RunPendingInputStore
+	pendingInput db.ConversationPendingInputStore
 	// pendingFirings lets the owner's signal-apply loop compensate a cross-
 	// pod `inject` signal whose target run turned out dead by the time it
 	// was applied: it enqueues the pending_firing itself so the additive
 	// event's intent survives (TFAC-585's "gone" ack path). Wired
 	// unconditionally — both dialects support pending_firings.
 	pendingFirings db.PendingFiringsStore
-	// runSignals is the cross-pod run-control outbox (TFAC-585, Postgres
-	// only). Nil except when SetRunSignals wires it — always nil in local
+	// conversationSignals is the cross-pod run-control outbox (TFAC-585, Postgres
+	// only). Nil except when SetConversationSignals wires it — always nil in local
 	// mode and in every test that doesn't opt in, which is what keeps
 	// s.controller as the plain inProcessController and every cross-pod
 	// code path (crossPodController, the apply loop, StageOrDeliverAdditiveEvent's
 	// remote branch) a no-op/never-reached by construction. Guarded by mu
 	// like the other post-construction seams.
-	runSignals db.RunSignalStore
-	// signalNotifyDB is the admin-pool *sql.DB SetRunSignals wires
-	// alongside runSignals — NOTIFY needs no session affinity (unlike
+	conversationSignals db.ConversationSignalStore
+	// signalNotifyDB is the admin-pool *sql.DB SetConversationSignals wires
+	// alongside conversationSignals — NOTIFY needs no session affinity (unlike
 	// LISTEN), so it rides whatever pooled connection is at hand. Nil
-	// exactly when runSignals is nil.
+	// exactly when conversationSignals is nil.
 	signalNotifyDB *sql.DB
 	// ackWaiters holds one wake channel per in-flight signal a control
 	// request on this pod is waiting to see acked, keyed by conversation_signals.id.
@@ -280,6 +288,16 @@ type Spawner struct {
 	// their writes against the same issue (which could drag a Done ticket back
 	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
 	jiraMirrorLocks keyedMutex
+	// workspaceLocks serializes mutation of one snapshot key's workspace tree
+	// within this process. Two things in an executor touch a parked tree: an
+	// engagement materializing it (ensureWorkspace — warm stat or cold
+	// rehydrate) and the eviction sweep deleting it. They run in the same
+	// process, so a bare "is anyone claimed on this key" read is a check
+	// against a fact that can change a line later; holding this across the
+	// decision is what makes the answer still true at the removal. Keyed by
+	// (org, blueprint_run_id) — the key a tree belongs to, not a conversation.
+	// Its own keyed lock, independent of mu; zero value ready.
+	workspaceLocks keyedMutex
 
 	// blobs is the durable blob/object store handle for the blueprint
 	// workspace seam: local mode → an on-disk store under the state root,
@@ -289,7 +307,7 @@ type Spawner struct {
 	// by mu like the credential seam it sits beside.
 	blobs storage.Storage
 
-	cancels map[string]context.CancelFunc // runID → cancel the entire run
+	cancels map[string]context.CancelFunc // conversationID → cancel the entire run
 	// engagements holds the live claim attempt's trace root for each run
 	// currently dispatching, keyed by run id — the seam between the setup
 	// span (which ends at agent-live) and the punctual spans that link back
@@ -301,7 +319,7 @@ type Spawner struct {
 	// SetCuratorTurnDriver). nil where no curator runtime is built.
 	curatorTurnDriver CuratorTurnDriver
 
-	dispatchWake          chan struct{}                                     // best-effort latency nudge for the run-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
+	dispatchWake          chan struct{}                                     // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
 	eventPublisher        EventPublisher                                    // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 	waitForClassification func(ctx context.Context, orgID, entityID string) // hook that blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant — the read goes through the org-scoped admin-pool store, not a raw query. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
@@ -339,7 +357,7 @@ type Spawner struct {
 	// never be a reason to fail to ASK it.
 	permissions db.PermissionStore
 	// executorID is this spawner instance's executor identity, stamped onto
-	// runs.executor_id at claim and resume. Empty at construction —
+	// claims.executor_id at claim and resume. Empty at construction —
 	// production wires the persistent instance-registry id via
 	// SetExecutorID once main resolves it, alongside bootEpoch (the pair
 	// the heartbeat loop's fenced renewal keys on), and the empty default
@@ -365,7 +383,7 @@ type Spawner struct {
 	// runSem bounds how many runs execute off the dispatcher at once — a
 	// process-wide cap so a burst of queued steps doesn't fan into an
 	// unbounded number of agent subprocesses. Sized in NewSpawner
-	// (DefaultMaxConcurrentRuns) and replaceable via SetMaxConcurrentRuns
+	// (DefaultMaxConcurrentClaims) and replaceable via SetMaxConcurrentClaims
 	// before the dispatcher starts. Each drain acquires a slot before
 	// claiming and the run goroutine releases it on terminal.
 	runSem chan struct{}
@@ -389,9 +407,19 @@ type Spawner struct {
 	// means use DefaultSnapshotRetentionTTL; tests inject a short value via
 	// SetSnapshotRetentionTTL. Read through snapshotRetention().
 	snapshotRetentionTTL time.Duration
+	// snapshotWaitTimeout bounds how long a cold resume waits on a workspace
+	// snapshot whose record says a persist is in flight — the hung-writer
+	// backstop, not the expected duration. Zero means DefaultSnapshotWait; set
+	// once at startup via SetSnapshotWaitTimeout (TF_SNAPSHOT_WAIT_SEC) and
+	// read through snapshotWait().
+	snapshotWaitTimeout time.Duration
+	// snapshotWaitPollInterval is how often that wait re-reads the record and
+	// the blob store. Zero means snapshotWaitPoll; tests shrink it so a wait
+	// with a real ladder behind it still runs in milliseconds.
+	snapshotWaitPollInterval time.Duration
 	// memFloorMB is the dispatch memory guardrail: when available memory
 	// (hostmem.AvailableMB — cgroup-scoped when confined)
-	// drops below this, drainRunQueue defers claims (runs stay queued)
+	// drops below this, drainConversationQueue defers claims (runs stay queued)
 	// until memory recovers. Zero disables. Set once at startup via
 	// SetDispatchMemFloor; the probe is injectable for tests.
 	memFloorMB int
@@ -509,46 +537,47 @@ type Spawner struct {
 // partial db.Stores{} — every field is a nil-safe interface.
 func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, wsHub *websocket.Hub, model string) *Spawner {
 	s := &Spawner{
-		database:         database,
-		prompts:          stores.Prompts,
-		agents:           stores.Agents,
-		blueprints:       stores.Blueprints,
-		runQueue:         stores.RunQueue,
-		runCredentials:   stores.RunCredentials,
-		curatorStore:     stores.Curator,
-		tasks:            stores.Tasks,
-		agentRuns:        stores.Conversations,
-		entities:         stores.Entities,
-		artifacts:        stores.Artifacts,
-		stagedInjections: stores.StagedInjections,
-		events:           stores.Events,
-		taskMemory:       stores.TaskMemory,
-		runWorktrees:     stores.RunWorktrees,
-		orgs:             stores.Orgs,
-		spend:            stores.Spend,
-		jiraRules:        stores.JiraStatusRules,
-		externalActions:  stores.ExternalActions,
-		repos:            stores.Repos,
-		teams:            stores.Teams,
-		instances:        stores.Instances,
-		instanceStats:    stores.InstanceStats,
-		sandboxStats:     stores.SandboxStats,
-		pendingInput:     stores.RunPendingInput,
-		pendingFirings:   stores.PendingFirings,
-		permissions:      stores.Permissions,
-		tx:               stores.Tx,
-		ghClient:         ghClient,
-		wsHub:            wsHub,
-		model:            model,
-		cancels:          make(map[string]context.CancelFunc),
-		engagements:      make(map[string]*engagement),
-		dispatchWake:     make(chan struct{}, 1),
-		procs:            make(map[string]*liveRunHandle),
-		permPending:      make(map[string]*pendingPermission),
-		ackWaiters:       make(map[int64]chan struct{}),
-		signalApplyWake:  make(chan struct{}, 1),
-		runSem:           make(chan struct{}, DefaultMaxConcurrentRuns),
-		memAvailMB:       hostmem.AvailableMB,
+		database:              database,
+		prompts:               stores.Prompts,
+		agents:                stores.Agents,
+		blueprints:            stores.Blueprints,
+		conversationQueue:     stores.ConversationQueue,
+		claimCredentials:      stores.ClaimCredentials,
+		curatorStore:          stores.Curator,
+		tasks:                 stores.Tasks,
+		conversations:         stores.Conversations,
+		entities:              stores.Entities,
+		artifacts:             stores.Artifacts,
+		stagedInjections:      stores.StagedInjections,
+		events:                stores.Events,
+		taskMemory:            stores.TaskMemory,
+		conversationWorktrees: stores.ConversationWorktrees,
+		orgs:                  stores.Orgs,
+		spend:                 stores.Spend,
+		jiraRules:             stores.JiraStatusRules,
+		externalActions:       stores.ExternalActions,
+		repos:                 stores.Repos,
+		teams:                 stores.Teams,
+		instances:             stores.Instances,
+		workspaceSnapshots:    stores.WorkspaceSnapshots,
+		instanceStats:         stores.InstanceStats,
+		sandboxStats:          stores.SandboxStats,
+		pendingInput:          stores.ConversationPendingInput,
+		pendingFirings:        stores.PendingFirings,
+		permissions:           stores.Permissions,
+		tx:                    stores.Tx,
+		ghClient:              ghClient,
+		wsHub:                 wsHub,
+		model:                 model,
+		cancels:               make(map[string]context.CancelFunc),
+		engagements:           make(map[string]*engagement),
+		dispatchWake:          make(chan struct{}, 1),
+		procs:                 make(map[string]*liveRunHandle),
+		permPending:           make(map[string]*pendingPermission),
+		ackWaiters:            make(map[int64]chan struct{}),
+		signalApplyWake:       make(chan struct{}, 1),
+		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
+		memAvailMB:            hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
 	// Report capacity by default (executor/all); a pure-control pod flips
@@ -565,13 +594,13 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 // that can't be used over SSH, and the runtime container has no
 // ssh-agent/key/known_hosts. orgs is nil-safe and any store failure logs +
 // defaults to HTTPS, matching the prior config.Load() degrade path.
-func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, runID string) bool {
+func (s *Spawner) useSSHCloneProtocol(ctx context.Context, orgID, conversationID string) bool {
 	if s.orgs == nil {
 		return false
 	}
 	settings, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		delegateLog.Warn("load org settings to pick clone protocol failed; defaulting to HTTPS", "run", runID, "error", err)
+		delegateLog.Warn("load org settings to pick clone protocol failed; defaulting to HTTPS", "conversation", conversationID, "error", err)
 		return false
 	}
 	return domain.EffectiveCloneProtocol(settings.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
@@ -649,14 +678,14 @@ func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
 	}
 	raw, err := json.Marshal(metadata)
 	if err != nil {
-		delegateLog.Warn("marshal run lifecycle event metadata failed", "event_type", eventType, "error", err)
+		delegateLog.Warn("marshal conversation lifecycle event metadata failed", "event_type", eventType, "error", err)
 		return
 	}
 	pub.Publish(domain.Event{
 		OrgID:        orgID,
 		EventType:    eventType,
 		MetadataJSON: string(raw),
-		OccurredAt:   time.Now(),
+		OccurredAt:   time.Now().UTC(),
 	})
 }
 
@@ -705,9 +734,9 @@ func (s *Spawner) SetPublicURL(url string) {
 // this run in the TF UI. Empty publicURL degrades to "" (no wrong fallbacks:
 // never fabricate a localhost link when the deployment has no configured
 // public URL). Local mode's run route has no org segment
-// (frontend/src/main.tsx "/runs/:runID"); multi mode nests every route under
-// "/orgs/:org_id" ("/orgs/:org_id/runs/:runID").
-func (s *Spawner) runURLFor(orgID, runID string) string {
+// (frontend/src/main.tsx "/runs/:conversationID"); multi mode nests every route under
+// "/orgs/:org_id" ("/orgs/:org_id/runs/:conversationID").
+func (s *Spawner) runURLFor(orgID, conversationID string) string {
 	s.mu.Lock()
 	publicURL := s.publicURL
 	s.mu.Unlock()
@@ -715,9 +744,9 @@ func (s *Spawner) runURLFor(orgID, runID string) string {
 		return ""
 	}
 	if runmode.Current() == runmode.ModeMulti {
-		return publicURL + "/orgs/" + orgID + "/runs/" + runID
+		return publicURL + "/orgs/" + orgID + "/runs/" + conversationID
 	}
-	return publicURL + "/runs/" + runID
+	return publicURL + "/runs/" + conversationID
 }
 
 // notifyDrainer fires the QueueDrainer hook for a task if a drainer is
@@ -849,7 +878,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // account-wide App installation token, a bundle's RepoTokens are scoped
 // per-repo, so an owner alone is ambiguous whenever a run's authorized set
 // covers more than one repo under the same account — passing "" there
-// would let bundleRepoToken's map iteration pick an arbitrary sibling
+// would let credbundle.ResolveRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
 func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
 	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
@@ -877,8 +906,8 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 // the worktree's LIVE current branch mapped through its configured push
 // refspec — "you may push where a bare `git push` from your checkout lands"
 // (TFAC-498, refspec-aware) — read fresh from disk per call rather than a
-// prescribed conversation_worktrees.FeatureBranch. The refspec mapping matters for PR
-// worktrees: the checkout is the run-namespaced triagefactory/<runID>/pr-<n>
+// branch prescribed when the worktree was reserved. The refspec mapping matters for PR
+// worktrees: the checkout is the run-namespaced triagefactory/<rootKey>/pr-<n>
 // while push tracking maps it to the PR's real head branch, and the
 // receive-pack command block the ref gate inspects carries that REMOTE ref —
 // comparing against the local name rejected every PR push with a 403
@@ -893,12 +922,12 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 // depends on errors — a misconfigured or degraded gate must never allow-all,
 // and in particular must never authorize a base/protected ref just because the
 // profile that names them couldn't be read.
-func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) (gitproxy.Decision, error) {
+func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, owner, repo string) (gitproxy.Decision, error) {
 	// Repos is required: it names the repo's protected refs. Without it we can't
 	// honor the "base/protected refs are refused" guarantee, so a wiring missing
 	// it must deny rather than fall through to authorizing whatever branch the
 	// checkout is on (which could be the base branch).
-	if stores.TeamGitHubRepos == nil || stores.RunWorktrees == nil || stores.Repos == nil {
+	if stores.TeamGitHubRepos == nil || stores.ConversationWorktrees == nil || stores.Repos == nil {
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	repoID := owner + "/" + repo
@@ -909,7 +938,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if !tracks {
 		return gitDenyNotTracked(repoID), nil
 	}
-	rows, err := stores.RunWorktrees.ListSystem(ctx, info.OrgID, info.RunID)
+	rows, err := stores.ConversationWorktrees.ListSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
@@ -921,7 +950,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	// denies) rather than silently authorizing — being unable to tell whether
 	// the live branch IS the base branch, or whether the team lifted the guard,
 	// is exactly when we must not allow the push.
-	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoID, info.IsEventTriggered)
+	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, domain.RepoRef{Owner: owner, Repo: repo}, info.IsEventTriggered)
 	if err != nil {
 		return gitproxy.Decision{}, err
 	}
@@ -935,7 +964,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		found = true
 		// A HEAD file read plus a few `git config --file` subprocesses per
 		// matching row (the current branch comes from a plain .git/HEAD read,
-		// no subprocess). conversation_worktrees is keyed (run_id, repo_id, ref), so
+		// no subprocess). conversation_worktrees is keyed (conversation_id, repo_id, ref), so
 		// several rows can match; git ops per run are few enough that per-row
 		// spawning stays fine.
 		branch := worktreePushTargetBranch(w.Path)
@@ -1009,18 +1038,18 @@ func gitDenyNotAttached(repoID string) gitproxy.Decision {
 // isTaskOwnRepo reports whether (owner, repo) is the GitHub repo of the run's
 // own task — the repo the run was created to work on. It authorizes the initial
 // setup clone for read before that repo's conversation_worktrees ledger row exists (the
-// row is written post-clone). RunInfo carries no task id, so the run is resolved
+// row is written post-clone). ConversationInfo carries no task id, so the run is resolved
 // to its task here. Non-GitHub tasks and any resolution failure report false,
 // falling back to the ledger gate (fail closed).
-func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo, owner, repo string) bool {
-	if stores.Conversations == nil || stores.Tasks == nil || info.RunID == "" {
+func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, owner, repo string) bool {
+	if stores.Conversations == nil || stores.Tasks == nil || info.ConversationID == "" {
 		return false
 	}
-	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.RunID)
-	if err != nil || run == nil || run.TaskID == "" {
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
+	if err != nil || conv == nil || conv.TaskID == "" {
 		return false
 	}
-	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
+	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
 	if err != nil || task == nil || task.EntitySource != "github" {
 		return false
 	}
@@ -1047,15 +1076,16 @@ func isTaskOwnRepo(ctx context.Context, stores db.Stores, info agenthost.RunInfo
 // credential the sidecar reports after bring-up reaches this recorder and the
 // denial recorder beside it through a single object.
 //
-// In multi mode this observer is authoritative for push capture — every push
-// transits the proxy (even `git push --no-verify`, which skips client hooks),
-// and the pre-push hook stands down there (githooks.PushCaptureEnvVar) because
-// it fires before the transfer and would record failed pushes as artifacts.
+// On the managed Git path this observer is authoritative for push capture —
+// every ordinary push transits the proxy (even `git push --no-verify`, which
+// skips client hooks), and the pre-push hook stands down there
+// (githooks.PushCaptureEnvVar) because it fires before the transfer and would
+// record failed pushes as artifacts.
 //
 // Best-effort: a non-branch ref or a record failure is dropped (logged), never
 // surfaced. By the time this runs the push has already completed upstream, so
 // nothing it does can block, alter, or fail the push.
-func gitPushRecorder(host *agenthost.LocalClient, info agenthost.RunInfo) func(context.Context, gitproxy.PushedRef) {
+func gitPushRecorder(host *agenthost.LocalClient, info agenthost.ConversationInfo) func(context.Context, gitproxy.PushedRef) {
 	return func(ctx context.Context, push gitproxy.PushedRef) {
 		art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
 		if !ok {
@@ -1067,7 +1097,7 @@ func gitPushRecorder(host *agenthost.LocalClient, info agenthost.RunInfo) func(c
 		}
 		if _, err := host.UpsertArtifact(ctx, art); err != nil {
 			delegateLog.Warn("git-proxy push capture: record branch artifact failed",
-				"run", info.RunID, "repo", push.Repo, "ref", push.Ref, "error", err)
+				"conversation", info.ConversationID, "repo", push.Repo, "ref", push.Ref, "error", err)
 		}
 	}
 }
@@ -1113,14 +1143,14 @@ func (s *Spawner) getRunSecrets() agentproc.SecretsReader {
 // write meets the same fence and abandons the run properly. Aborting from
 // here instead would mean a terminal write on a conversation this executor no
 // longer owns, which is the one thing a fenced-out engagement must not do.
-func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase string) {
+func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimID, phase string) {
 	// Clearing the phase IS agent-live — the one signal both runtimes share —
 	// so it is where the engagement's trace root ends (standing decision 5).
 	// Ahead of the write, because the span should measure bring-up rather than
 	// the bookkeeping that announces it, and because a fence refusal below
 	// still leaves the setup we just traced worth exporting.
 	if phase == "" {
-		s.endEngagement(runID, engagementLive)
+		s.endEngagement(conversationID, engagementLive)
 	}
 	// Detached from cancellation exactly as the former context.Background()
 	// was — a shutdown mid-setup must not abort the progress write — but
@@ -1129,21 +1159,21 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase 
 	ctx = context.WithoutCancel(ctx)
 	var err error
 	if claimID != "" {
-		err = s.agentRuns.SetClaimPhaseSystem(ctx, orgID, runID, claimID, phase)
+		_, err = s.conversations.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, phase)
 	} else {
-		err = s.agentRuns.SetActiveClaimPhaseSystem(ctx, orgID, runID, phase)
+		_, err = s.conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
-			"run", runID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "phase", phase, "error", err)
 	} else if err != nil {
-		delegateLog.Warn("update phase for run failed", "run", runID, "error", err)
+		delegateLog.Warn("update phase for conversation failed", "conversation", conversationID, "error", err)
 	}
 	display := phase
 	if display == "" {
 		display = "running"
 	}
-	s.broadcastRunUpdate(orgID, runID, display)
+	s.broadcastConversationUpdate(orgID, conversationID, display)
 	// Board placement is not mirrored per-run from setup progress here:
 	// the blueprint orchestrator drives the aggregate column via
 	// recomputeTaskBoardColumn at its transition points (blueprint start, step
@@ -1173,16 +1203,16 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, runID, claimID, phase 
 // wants to change course on losing ownership can, and so the two outcomes stay
 // distinguishable at the call site. No caller does today: a missing path costs
 // a cold rehydrate on the next resume, not the run.
-func (s *Spawner) setWorktreePath(ctx context.Context, orgID, runID, claimID, path string) error {
+func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, claimID, path string) error {
 	var err error
 	if claimID != "" {
-		err = s.agentRuns.SetWorktreePathForClaimSystem(ctx, orgID, runID, claimID, path)
+		_, err = s.conversations.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, path)
 	} else {
-		err = s.agentRuns.SetWorktreePathSystem(ctx, orgID, runID, path)
+		_, err = s.conversations.SetWorktreePathSystem(ctx, orgID, conversationID, path)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused a worktree_path write — a successor owns this conversation; its own workspace stands",
-			"run", runID, "claim_id", claimID, "org_id", orgID, "worktree_path", path, "error", err)
+			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "worktree_path", path, "error", err)
 	}
 	return err
 }
@@ -1237,12 +1267,12 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	if err != nil || br == nil {
 		return
 	}
-	runs, err := s.blueprints.RunsForBlueprintSystem(ctx, orgID, br.ID)
+	convs, err := s.blueprints.ConversationsForBlueprintSystem(ctx, orgID, br.ID)
 	if err != nil {
 		return
 	}
 	target := "in_progress"
-	for _, r := range runs {
+	for _, r := range convs {
 		if r.Status == "open" {
 			target = "in_review"
 			break
@@ -1255,15 +1285,15 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	// (in_review), so the two checks are unordered as far as the result goes; the
 	// loop above runs first only as an optimization — the artifact reads are
 	// skipped once a parked-open run has already forced in_review (and reuse the
-	// runs slice already loaded above rather than re-fetching).
-	if target != "in_review" && s.runsHaveUnresolvedArtifacts(ctx, orgID, runs) {
+	// convs slice already loaded above rather than re-fetching).
+	if target != "in_review" && s.conversationsHaveUnresolvedArtifacts(ctx, orgID, convs) {
 		target = "in_review"
 	}
 	// Idempotent: skip the write + WS broadcast when already at the target.
 	if task.Status == target {
 		return
 	}
-	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
+	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
 		delegateLog.Warn("set board column for task failed", "column", target, "task", taskID, "error", err)
 		return
 	}
@@ -1307,7 +1337,7 @@ func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID s
 	if task.Status == "in_review" {
 		return // idempotent
 	}
-	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
+	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
 		delegateLog.Warn("place task in approval column failed", "task", taskID, "error", err)
 		return
 	}
@@ -1317,7 +1347,7 @@ func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID s
 // broadcastTaskUpdate emits a task_updated WS event so the
 // board can refetch / patch the card without polling. Payload
 // matches the shared event shape (task_id + status) the other
-// emitters use (handleSwipe, handleSnooze, handleTaskAdvance,
+// emitters use (broadcastTaskStatus on the task PATCH arms,
 // finalizeRequeue), so the FE's typed WSEvent ('task_updated':
 // {task_id, status}) holds across producers.
 func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
@@ -1332,47 +1362,51 @@ func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {
 }
 
 // updateBreakerCounter is a no-op stub. The breaker is now query-based
-// (see routing.Router + db.CountConsecutiveFailedRuns). Kept as a call site
+// (see routing.Router + db.CountConsecutiveFailedConversations). Kept as a call site
 // placeholder until all callers are cleaned up.
 func (s *Spawner) updateBreakerCounter(taskID, triggerType, status string) {
 	// Breaker is query-based now — no per-task counter to update.
 	// See internal/routing/router.go and internal/db/tasks.go.
 }
 
-// broadcastRunUpdate stamps the run's owning org on the event so the
+// broadcastConversationUpdate stamps the run's owning org on the event so the
 // hub's per-connection scoping filter routes it only to clients
 // authed against that tenant. Every caller is inside a goroutine
 // that already has orgID in scope (the run's tenant, set at
 // Delegate() entry and threaded through every helper).
-func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
+func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status string) {
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "conversation_update",
 			OrgID:          orgID,
-			ConversationID: runID,
+			ConversationID: conversationID,
 			Data:           map[string]string{"status": status},
 		})
 	}
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Status:         status,
 	})
 }
 
-// broadcastRunResumable is broadcastRunUpdate's late-workspace arm: the same
+// broadcastConversationResumable is broadcastConversationUpdate's late-workspace arm: the same
 // conversation_update carrying the parked status the row already has, plus the
-// one thing that changed — the workspace snapshot exists, so a follow-up can
-// land now.
+// one thing that changed — this conversation's workspace is accounted for, so
+// a follow-up can land now.
 //
-// It closes a window nothing else can. A cross-pod stop parks the row and
-// announces `open` from control, seconds before the executor's teardown writes
-// the snapshot; between those two moments the run read honestly answers "not
-// resumable", and without this the browser would keep that answer until
-// someone reloaded the page.
+// It closes one window and only that one. A cross-pod stop parks the row and
+// announces `open` from control, before the executor holding the workspace has
+// recorded that it owes a persist for it; between those moments the run read
+// honestly answers "not resumable", and the browser would keep that answer
+// until someone reloaded. The executor's teardown fires this the instant its
+// record lands — when the answer changes, not when the blob appears. Every
+// other park needs nothing of the sort: an engagement parking its own run
+// opens the record before its own flip, so that flip's `open` is already
+// resumable when it reaches a client.
 //
 // The status rides along rather than a new event type because resumability is
 // an attribute of the already-announced park, not a new situation — the same
-// shape broadcastRunFailed uses for failure_kind, and it makes the field
+// shape broadcastConversationFailed uses for failure_kind, and it makes the field
 // two-way: a retention sweep that collects the snapshot can announce
 // `resumable: false` the same way, disabling an open composer live instead of
 // failing on send. Consumers must therefore merge a repeated `open`
@@ -1380,55 +1414,55 @@ func (s *Spawner) broadcastRunUpdate(orgID, runID, status string) {
 //
 // The hub's cross-pod backplane is what puts it in front of a browser attached
 // to some other pod, so the executor emitting it is enough.
-func (s *Spawner) broadcastRunResumable(orgID, runID string) {
+func (s *Spawner) broadcastConversationResumable(orgID, conversationID string) {
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "conversation_update",
 			OrgID:          orgID,
-			ConversationID: runID,
+			ConversationID: conversationID,
 			Data:           map[string]any{"status": domain.StatusOpen, "resumable": true},
 		})
 	}
 	resumable := true
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, events.SystemConversationStatusMetadata{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Status:         domain.StatusOpen,
 		Resumable:      &resumable,
 	})
 }
 
-// broadcastRunFailed is broadcastRunUpdate's failure arm: the same
-// agent_run_update event with the machine-readable failure kind
+// broadcastConversationFailed is broadcastConversationUpdate's failure arm: the same
+// conversation_update event with the machine-readable failure kind
 // alongside the status flip, so the frontend can render kind-specific
 // failure copy without a refetch. The key is omitted (not sent empty)
 // for an unclassified failure — consumers treat absence as "generic
 // failed", which keeps the payload backward compatible.
-func (s *Spawner) broadcastRunFailed(orgID, runID string, kind domain.RunFailureKind) {
+func (s *Spawner) broadcastConversationFailed(orgID, conversationID string, kind domain.ConversationFailureKind) {
 	data := map[string]string{"status": "failed"}
-	if kind != domain.RunFailureUnclassified {
+	if kind != domain.ConversationFailureUnclassified {
 		data["failure_kind"] = string(kind)
 	}
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "conversation_update",
 			OrgID:          orgID,
-			ConversationID: runID,
+			ConversationID: conversationID,
 			Data:           data,
 		})
 	}
-	meta := events.SystemConversationStatusMetadata{ConversationID: runID, Status: "failed"}
-	if kind != domain.RunFailureUnclassified {
+	meta := events.SystemConversationStatusMetadata{ConversationID: conversationID, Status: "failed"}
+	if kind != domain.ConversationFailureUnclassified {
 		meta.FailureKind = string(kind)
 	}
 	s.publishEvent(orgID, domain.EventSystemConversationStatus, meta)
 }
 
-func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.Message) {
+func (s *Spawner) broadcastMessage(orgID, conversationID string, msg *domain.Message) {
 	if s.wsHub != nil {
 		s.wsHub.Broadcast(websocket.Event{
 			Type:           "message",
 			OrgID:          orgID,
-			ConversationID: runID,
+			ConversationID: conversationID,
 			Data:           msg.ToDTO(),
 		})
 	}
@@ -1446,7 +1480,7 @@ func (s *Spawner) broadcastMessage(orgID, runID string, msg *domain.Message) {
 		tools = append(tools, tool)
 	}
 	s.publishEvent(orgID, domain.EventSystemConversationActivity, events.SystemConversationActivityMetadata{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Tools:          tools,
 	})
 }

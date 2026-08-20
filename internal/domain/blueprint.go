@@ -2,6 +2,7 @@ package domain
 
 import (
 	"encoding/json"
+	"slices"
 	"time"
 )
 
@@ -18,6 +19,23 @@ const (
 	BlueprintRunStatusFailed    BlueprintRunStatus = "failed"
 	BlueprintRunStatusCancelled BlueprintRunStatus = "cancelled"
 )
+
+// BlueprintRunStatuses is the closed vocabulary above, for the list route's
+// filter validation and its error message. Order is lifecycle-then-terminal so
+// the message reads naturally.
+var BlueprintRunStatuses = []string{
+	string(BlueprintRunStatusRunning),
+	string(BlueprintRunStatusCompleted),
+	string(BlueprintRunStatusAborted),
+	string(BlueprintRunStatusFailed),
+	string(BlueprintRunStatusCancelled),
+}
+
+// ValidBlueprintRunStatus reports whether s is one of BlueprintRunStatuses. A
+// status outside the vocabulary is a client fault, not an empty page.
+func ValidBlueprintRunStatus(s string) bool {
+	return slices.Contains(BlueprintRunStatuses, s)
+}
 
 // Terminal reports whether the status is an end state (no further steps will
 // run). A terminal blueprint_run must hold zero non-terminal child runs — the
@@ -138,7 +156,7 @@ type BlueprintStep struct {
 //
 //   - StepIndex / Brief reconstruct the BlueprintStep (Step).
 //   - PromptID is kept (despite the frozen content) for the step's usage
-//     increment, the runs row's prompt_id, and skill-slug stability.
+//     increment, the conversations row's prompt_id, and skill-slug stability.
 //   - PromptName / PromptBody / Source / AllowedTools / Model reconstruct the
 //     *Prompt (Prompt). Source is load-bearing: MaterializeStepSkill writes an
 //     imported skill verbatim but synthesizes frontmatter for a user/system
@@ -183,7 +201,7 @@ func (p BlueprintPlanStep) Step(blueprintID string) BlueprintStep {
 // delegation — every blueprint, including a 1-step one, mints exactly one (a
 // single prompt is a 1-step blueprint; there is no separate single-prompt
 // path). Owns the shared worktree across all steps. Per-step state lives on the
-// runs table linked back via runs.blueprint_run_id (NOT NULL).
+// conversations table linked back via conversations.blueprint_run_id (NOT NULL).
 type BlueprintRun struct {
 	ID          string               `json:"id"`
 	BlueprintID string               `json:"blueprint_id"`
@@ -196,14 +214,14 @@ type BlueprintRun struct {
 	// CreateRunIfNotFiredSystem, whose (triggering_event_id, trigger_id) unique
 	// index returns ErrAlreadyFired on an at-least-once event replay. The
 	// blueprint_run is the firing unit, so the fence lives here rather than on
-	// the per-step runs. Forward-only provenance — not read back into the run
+	// the per-step conversations. Forward-only provenance — not read back into the run
 	// projection.
 	TriggeringEventID string `json:"triggering_event_id,omitempty"`
 	// ActorAgentID is the agents.id of the bot executing this blueprint run
 	// (blueprint_runs.actor_agent_id). Resolved once at the
 	// delegation entry point — from the task's bot claim, or the org agent the
-	// router/handler already holds — and frozen here at mint. Every step run
-	// inherits it onto runs.actor_agent_id, so execution attribution is stable
+	// router/handler already holds — and frozen here at mint. Every step's
+	// conversation inherits it onto conversations.actor_agent_id, so execution attribution is stable
 	// across steps and survives a mid-blueprint user takeover (which clears the
 	// task claim but not who ran the bot's steps). Empty = NULL (no actor: minted
 	// before agent bootstrap, or the agent row was later deleted → SET NULL).

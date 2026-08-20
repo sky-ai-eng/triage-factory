@@ -145,12 +145,7 @@ func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got []map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listEventHandlers(t, s, "rule")
 	var sawJira, sawGithub bool
 	for _, h := range got {
 		if h["id"] == jiraID {
@@ -174,9 +169,7 @@ func TestHandleEventHandlersList_GatedHandlerVisibleWithFeature(t *testing.T) {
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	rec := doJSON(t, s, http.MethodGet, "/api/event-handlers?kind=rule", nil)
-	var got []map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listEventHandlers(t, s, "rule")
 	var sawJira bool
 	for _, h := range got {
 		if h["id"] == jiraID {
@@ -192,8 +185,7 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	s := newTestServer(t)
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "gated rule",
 		"default_priority": 0.5,
@@ -202,10 +194,9 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var got map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if got["error"] != "event source not enabled for this organization" {
-		t.Errorf("error message = %q", got["error"])
+	got := firstErrorMessage(t, rec)
+	if got != "event source not enabled for this organization" {
+		t.Errorf("error message = %q", got)
 	}
 }
 
@@ -213,8 +204,7 @@ func TestHandleEventHandlerCreate_UngatedEventTypeUnaffected(t *testing.T) {
 	s := newTestServer(t)
 	gateJiraForTest(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventGitHubPROpened,
 		"name":             "github rule",
 		"default_priority": 0.5,
@@ -230,8 +220,7 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       domain.EventJiraIssueAssigned,
 		"name":             "now allowed",
 		"default_priority": 0.5,
@@ -242,42 +231,52 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 	}
 }
 
-// --- filterEventHandlersByGate (Part 4) ---
+// --- the event-handler list's entitlement gate (Part 4) ---
+//
+// The gate now filters in the store's query (so the page and total_count agree
+// about what the caller can see), which makes it an end-to-end assertion rather
+// than a pure one over a slice.
 
-func TestFilterEventHandlersByGate_DropsGatedKeepsUngated(t *testing.T) {
+func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
+	s := newTestServer(t)
+	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
+	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
+
 	gateJiraForTest(t)
 
-	handlers := []domain.EventHandler{
-		{ID: "jira-1", EventType: domain.EventJiraIssueAssigned},
-		{ID: "gh-1", EventType: domain.EventGitHubPROpened},
+	page := decodeList[domain.EventHandler](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{}))
+	ids := map[string]bool{}
+	for _, h := range page.Items {
+		ids[h.ID] = true
 	}
-	got := filterEventHandlersByGate("any-org", handlers)
-	if len(got) != 1 || got[0].ID != "gh-1" {
-		t.Fatalf("filterEventHandlersByGate = %v, want only gh-1 (jira gated off)", got)
+	if ids[jiraRule] {
+		t.Error("a handler bound to a gated event type must be hidden")
+	}
+	if !ids[ghRule] {
+		t.Error("a handler bound to an ungated event type must stay visible")
+	}
+	// A hidden row must not be counted either — a total that included it
+	// would render as a missing row on a page claiming more.
+	if page.Total() != len(page.Items) {
+		t.Errorf("total = %d but the page held %d rows", page.Total(), len(page.Items))
 	}
 }
 
-func TestFilterEventHandlersByGate_GrantedFeatureKeepsBoth(t *testing.T) {
+func TestEventHandlerList_GrantedFeatureKeepsBoth(t *testing.T) {
+	s := newTestServer(t)
+	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
+
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
+	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
 
-	handlers := []domain.EventHandler{
-		{ID: "jira-1", EventType: domain.EventJiraIssueAssigned},
-		{ID: "gh-1", EventType: domain.EventGitHubPROpened},
+	page := decodeList[domain.EventHandler](t, doJSON(t, s, http.MethodPost, "/api/event-handlers/list", map[string]any{}))
+	ids := map[string]bool{}
+	for _, h := range page.Items {
+		ids[h.ID] = true
 	}
-	got := filterEventHandlersByGate("any-org", handlers)
-	if len(got) != 2 {
-		t.Fatalf("filterEventHandlersByGate = %v, want both handlers once entitled", got)
-	}
-}
-
-func TestFilterEventHandlersByGate_EmptyInputReturnsNonNil(t *testing.T) {
-	got := filterEventHandlersByGate("any-org", nil)
-	if got == nil {
-		t.Fatal("filterEventHandlersByGate(nil) returned nil, want a non-nil empty slice (serializes as [] not null)")
-	}
-	if len(got) != 0 {
-		t.Fatalf("filterEventHandlersByGate(nil) = %v, want empty", got)
+	if !ids[jiraRule] || !ids[ghRule] {
+		t.Errorf("items = %v, want both handlers once entitled", ids)
 	}
 }
 
@@ -285,8 +284,7 @@ func TestFilterEventHandlersByGate_EmptyInputReturnsNonNil(t *testing.T) {
 // its id.
 func createUserRuleFor(t *testing.T, s *Server, eventType string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":             "rule",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       eventType,
 		"name":             "rule for " + eventType,
 		"default_priority": 0.5,

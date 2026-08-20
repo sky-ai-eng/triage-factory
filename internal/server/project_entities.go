@@ -1,11 +1,13 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // projectEntitiesHandler serves the per-project entities panel endpoint,
@@ -31,22 +33,48 @@ type projectEntity struct {
 	CreatedAt               time.Time  `json:"created_at"`
 }
 
-// handleProjectEntities returns the list of active entities assigned
-// to this project, ordered most-recently-polled first.
+// projectEntityListRequest is the body of
+// POST /api/projects/{id}/entities/list. The project is the path id and the
+// active-only rule is the resource's definition, so the body is paging alone.
+type projectEntityListRequest struct {
+	httpx.PageRequest
+}
+
+// handleProjectEntities returns the active entities assigned to this project,
+// ordered most-recently-polled first.
 //
 // Active-only: terminal-state entities (closed PRs, completed Jiras)
 // are filtered out at the DB layer. The panel surfaces work that's
 // still in flight; historical context lives elsewhere (entity detail
 // pages, future audit views) so the panel stays scannable.
+//
+// POST /api/projects/{id}/entities/list
 func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
-	var project *domain.Project
-	var entities []domain.ProjectPanelEntity
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
+
+	var req projectEntityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		project  *domain.Project
+		entities []domain.ProjectPanelEntity
+		total    int
+	)
 	if err := pe.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
@@ -56,13 +84,16 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 		if project == nil {
 			return nil
 		}
-		entities, e = tx.Entities.ListProjectPanel(r.Context(), orgID, projectID)
+		entities, total, e = tx.Entities.ListProjectPanel(r.Context(), orgID, projectID,
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
-		entitiesLog.Error("load project entities failed", "project", projectID, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project entities"})
+		internalError(w, "entities", fmt.Errorf("load entities for project %s: %w", projectID, err))
 		return
 	}
+	// The project gate stays a 404 rather than an empty page: the path id is
+	// the resource being addressed, so a project the caller cannot see is a
+	// missing address, not a filter that matched nothing.
 	if project == nil {
 		notFound(w, "project")
 		return
@@ -83,6 +114,5 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 			CreatedAt:               e.CreatedAt,
 		})
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"entities": out})
+	httpx.WriteList(w, page, out, total)
 }

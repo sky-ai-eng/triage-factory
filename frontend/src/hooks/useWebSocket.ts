@@ -87,7 +87,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
 
 // Track per-repo clone_status across WS events so we only fire the
 // "clone failed" toast on the *transition* into 'failed', not on every
-// repo_profile_updated event with the same failed status. Module-level
+// repository_updated event carrying the same failed status. Module-level
 // (not React state) so the dedupe survives page navigations and the
 // short-lived useWebSocket subscriptions on individual pages.
 const cloneStatusByRepo = new Map<string, 'ok' | 'failed' | 'pending'>()
@@ -130,12 +130,17 @@ function ensureConnected() {
       // or import path), fire a sticky error toast with a CTA to the
       // Repos page. Doing it here (rather than in Repos.tsx) means the
       // user sees it even when they're on Board / Settings / Tasks.
-      if (event.type === 'repo_profile_updated' && event.data && typeof event.data === 'object') {
+      if (event.type === 'repository_updated' && event.data && typeof event.data === 'object') {
         const data = event.data as {
           id?: string
+          slug?: string
           clone_status?: 'ok' | 'failed' | 'pending'
           clone_error_kind?: 'ssh' | 'other'
         }
+        // Keyed on the row id, worded with the slug — the two jobs the
+        // event's two identity fields exist to keep apart. Keying on the
+        // name would restart the dedupe on a rename and re-fire a toast
+        // for a failure the user already saw.
         if (data.id && data.clone_status) {
           const prev = cloneStatusByRepo.get(data.id)
           cloneStatusByRepo.set(data.id, data.clone_status)
@@ -144,7 +149,7 @@ function ensureConnected() {
             toastStore.push({
               level: 'error',
               title: 'Clone failed',
-              body: `Could not clone ${data.id}${kind}. Open the Repos page for details.`,
+              body: `Could not clone ${data.slug ?? 'a repository'}${kind}. Open the Repos page for details.`,
               action: { label: 'Go to Repos', to: '/repos' },
             })
           }

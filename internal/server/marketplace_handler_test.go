@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -227,7 +228,7 @@ func TestMarketplace_NoToggleGate(t *testing.T) {
 		t.Fatalf("publish with marketplace_enabled=false: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
 
-	listReq := r.req(http.MethodGet, "/api/marketplace/listings", r.admin, nil)
+	listReq := r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{})
 	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, listReq); rec.Code != http.StatusOK {
 		t.Fatalf("list with marketplace_enabled=false: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -409,7 +410,7 @@ func TestMarketplacePublish_UnknownEventTypeIs400(t *testing.T) {
 	}
 }
 
-// TestMarketplacePublish_UnknownKindIs400 and missing-field validation.
+// TestMarketplacePublish_ValidationErrors covers unknown-kind and missing-field validation.
 func TestMarketplacePublish_ValidationErrors(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "validate-me", "mission", "", "")
@@ -480,14 +481,12 @@ func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 	if repubRec.Code != http.StatusOK {
 		t.Fatalf("republish: status = %d, want 200; body=%s", repubRec.Code, repubRec.Body.String())
 	}
-	var verResp struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(repubRec.Body.Bytes(), &verResp); err != nil {
+	var updated domain.MarketplaceListing
+	if err := json.Unmarshal(repubRec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if verResp.Version != 2 {
-		t.Fatalf("republish version = %d, want 2", verResp.Version)
+	if updated.CurrentVersion != 2 {
+		t.Fatalf("republish response current_version = %d, want 2 (the resource, not a bare version echo)", updated.CurrentVersion)
 	}
 
 	detail := r.getListingDetail(t, r.admin, pubResp.ID)
@@ -672,8 +671,10 @@ func TestMarketplaceListingBySource_ShowsDelisted(t *testing.T) {
 	}
 }
 
-// TestMarketplaceListingBySource_RoundTrip: the by-source lookup is null
-// before publish and resolves the active listing after.
+// TestMarketplaceListingBySource_RoundTrip: the by-source lookup 404s before
+// publish — it used to answer 200 with a literal null, the only single read in
+// the surface that reported absence in the body — and resolves the active
+// listing after.
 func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	r := newMarketplaceRig(t)
 	promptID := r.seedPrompt(t, r.teamID, "lookup-me", "mission", "", "")
@@ -681,11 +682,8 @@ func TestMarketplaceListingBySource_RoundTrip(t *testing.T) {
 	beforeReq := r.req(http.MethodGet, "/api/marketplace/listings/by-source/"+promptID, r.admin, nil)
 	beforeReq.SetPathValue("source_id", promptID)
 	beforeRec := doMarketplaceJSON(r.mh.handleMarketplaceListingBySource, beforeReq)
-	if beforeRec.Code != http.StatusOK {
-		t.Fatalf("by-source before publish: status = %d, want 200; body=%s", beforeRec.Code, beforeRec.Body.String())
-	}
-	if body := strings.TrimSpace(beforeRec.Body.String()); body != "null" {
-		t.Fatalf("by-source before publish = %q, want null", body)
+	if beforeRec.Code != http.StatusNotFound {
+		t.Fatalf("by-source before publish: status = %d, want 404; body=%s", beforeRec.Code, beforeRec.Body.String())
 	}
 
 	publishRec := doMarketplaceJSON(r.mh.handleMarketplacePublish,
@@ -774,17 +772,25 @@ func (r *marketplaceRig) publishListing(t *testing.T, callerID string, body map[
 	return resp.ID
 }
 
+// list calls the browse list as callerID. query is the old query string
+// ("kind=prompt", "sort=votes", ""), parsed here into the body the route now
+// takes so the call sites stay readable.
 func (r *marketplaceRig) list(t *testing.T, callerID, query string) []domain.ListingSummary {
 	t.Helper()
-	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?"+query, callerID, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list %q: status = %d, want 200; body=%s", query, rec.Code, rec.Body.String())
+	body := map[string]any{}
+	for _, kv := range strings.Split(query, "&") {
+		if kv == "" {
+			continue
+		}
+		k, val, _ := strings.Cut(kv, "=")
+		decoded, err := url.QueryUnescape(val)
+		if err != nil {
+			t.Fatalf("unescape %q: %v", val, err)
+		}
+		body[k] = decoded
 	}
-	var out []domain.ListingSummary
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode list response: %v", err)
-	}
-	return out
+	rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", callerID, body))
+	return decodeList[domain.ListingSummary](t, rec).Items
 }
 
 func listingIDs(summaries []domain.ListingSummary) []string {
@@ -867,10 +873,10 @@ func TestMarketplaceList_KindFilter(t *testing.T) {
 // sort value before ever reaching the store.
 func TestMarketplaceList_InvalidKindOrSortIs400(t *testing.T) {
 	r := newMarketplaceRig(t)
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?kind=widget", r.admin, nil)); rec.Code != http.StatusBadRequest {
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"kind": "widget"})); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad kind: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodGet, "/api/marketplace/listings?sort=popularity", r.admin, nil)); rec.Code != http.StatusBadRequest {
+	if rec := doMarketplaceJSON(r.mh.handleMarketplaceList, r.req(http.MethodPost, "/api/marketplace/listings/list", r.admin, map[string]any{"sort": "popularity"})); rec.Code != http.StatusBadRequest {
 		t.Errorf("bad sort: status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }

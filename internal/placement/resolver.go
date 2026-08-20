@@ -40,8 +40,8 @@ type Config struct {
 	// in DB time.
 	Liveness time.Duration
 
-	// Aging is the tier-2 spillover delay: how long a queued run waits for
-	// its preferred owner before any executor may claim it. Not used by the
+	// Aging is the tier-2 spillover delay: how long a queued conversation waits
+	// for its preferred owner before any executor may claim it. Not used by the
 	// resolver's ranking — carried so the explainer can report the exact
 	// number the claim runs with.
 	Aging time.Duration
@@ -84,7 +84,7 @@ func (r *Resolver) Enabled() bool { return r.cfg != Config{} && r.cfg.Enabled }
 
 // Candidate is one instance's placement standing for a key: its rendezvous
 // rank plus the liveness/eligibility facts that placed (or excluded) it.
-// Carries everything the explainer prints and everything PreferredForRun
+// Carries everything the explainer prints and everything PreferredForConversation
 // needs, so a Plan is self-contained.
 type Candidate struct {
 	InstanceID string
@@ -119,8 +119,8 @@ type Candidate struct {
 
 // Plan is the resolved placement for one key: the full candidate order
 // (eligible and not) and the preferred set that the enqueue stamp draws
-// from. Empty PreferredSet means no live owner — the run is stamped NULL and
-// claimable by anyone immediately.
+// from. Empty PreferredSet means no live owner — the conversation is stamped
+// NULL and claimable by anyone immediately.
 type Plan struct {
 	Enabled    bool
 	OrgID      string
@@ -128,7 +128,7 @@ type Plan struct {
 	KeyValue   string
 	Candidates []Candidate // full order, eligible first (rendezvous), then excluded
 	// PreferredSet is the ordered preferred instance ids (pin, or top-K).
-	// PreferredForRun draws the single stamp from it.
+	// PreferredForConversation draws the single stamp from it.
 	PreferredSet []string
 	// Override is the row in effect, or nil. Surfaced by the explainer.
 	Override *domain.PlacementOverride
@@ -136,25 +136,26 @@ type Plan struct {
 	Liveness time.Duration
 }
 
-// PreferredForRun picks the single preferred_executor_id to stamp on a run
-// from the plan's preferred set. With one owner (the default and every pin)
-// it is that owner; with a hot-key replica count it spreads runs across the
-// top-K deterministically by run id, so all K caches stay warm and no single
-// replica head-of-line-blocks the key. Empty when there is no live owner.
-func (p Plan) PreferredForRun(runID string) string {
+// PreferredForConversation picks the single preferred_executor_id to stamp on a
+// conversation from the plan's preferred set. With one owner (the default and
+// every pin) it is that owner; with a hot-key replica count it spreads
+// conversations across the top-K deterministically by conversation id, so all K
+// caches stay warm and no single replica head-of-line-blocks the key. Empty
+// when there is no live owner.
+func (p Plan) PreferredForConversation(conversationID string) string {
 	switch len(p.PreferredSet) {
 	case 0:
 		return ""
 	case 1:
 		return p.PreferredSet[0]
 	default:
-		idx := hash64(runID, "") % uint64(len(p.PreferredSet))
+		idx := hash64(conversationID, "") % uint64(len(p.PreferredSet))
 		return p.PreferredSet[idx]
 	}
 }
 
 // Resolve computes the Plan for (orgID, keyKind, keyValue), used at enqueue
-// to stamp a run. A disabled resolver short-circuits to a plan with no
+// to stamp a conversation. A disabled resolver short-circuits to a plan with no
 // preferred set (callers stamp nothing). Any store error is returned; the
 // caller decides whether to proceed with no affinity (enqueue does — a failed
 // placement read must never block minting work).

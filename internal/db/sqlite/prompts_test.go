@@ -19,13 +19,13 @@ import (
 // against the SQLite impl. Each subtest opens a fresh in-memory DB so
 // state doesn't leak between assertions.
 func TestPromptStore_SQLite(t *testing.T) {
-	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.RunSeederForStats) {
+	dbtest.RunPromptStoreConformance(t, func(t *testing.T) (db.PromptStore, string, string, dbtest.ConversationSeederForStats) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seeder := func(t *testing.T, promptID string, statusByOffset []string) []string {
 			t.Helper()
-			return seedSQLiteRunsForStats(t, conn, promptID, statusByOffset)
+			return seedSQLiteConversationsForStats(t, conn, promptID, statusByOffset)
 		}
 		return stores.Prompts, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, seeder
 	})
@@ -36,7 +36,7 @@ func TestPromptStore_SQLite(t *testing.T) {
 // don't pollute each other.
 func openSQLiteForTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -49,14 +49,14 @@ func openSQLiteForTest(t *testing.T) *sql.DB {
 	return conn
 }
 
-// seedSQLiteRunsForStats inserts entity+task+run rows for each entry
+// seedSQLiteConversationsForStats inserts entity+task+conversation rows for each entry
 // in statusByOffset so PromptStore.Stats has data to aggregate.
 // started_at is staggered by `i` days back so the per-day grouping
 // has variation.
 //
-// RunStore hasn't migrated yet (wave 3b), so the seeder owns raw SQL
-// — the conformance harness is intentionally schema-blind.
-func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusByOffset []string) []string {
+// The conformance harness is intentionally schema-blind, so the
+// seeder owns raw SQL.
+func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string, statusByOffset []string) []string {
 	t.Helper()
 	now := time.Now().UTC()
 
@@ -85,32 +85,32 @@ func seedSQLiteRunsForStats(t *testing.T, conn *sql.DB, promptID string, statusB
 		t.Fatalf("seed task: %v", err)
 	}
 
-	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	ids := make([]string, 0, len(statusByOffset))
 	for i, status := range statusByOffset {
-		runID := uuid.New().String()
+		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
 		if _, err := conn.Exec(`
 			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id)
 			VALUES (?, ?, ?, ?, ?, ?)
-		`, runID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
-			t.Fatalf("seed run %d: %v", i, err)
+		`, conversationID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
+			t.Fatalf("seed conversation %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped
 		// ledger row + one released claim carrying the duration telemetry.
 		if _, err := conn.Exec(`
 			INSERT INTO messages (conversation_id, role, subtype, content, cost_usd, created_at)
 			VALUES (?, 'assistant', '', 'work', 0.01, ?)
-		`, runID, startedAt); err != nil {
-			t.Fatalf("seed run message %d: %v", i, err)
+		`, conversationID, startedAt); err != nil {
+			t.Fatalf("seed conversation message %d: %v", i, err)
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
 			VALUES (?, ?, 'exec-p', 1, ?, ?, 'completed', 100)
-		`, uuid.New().String(), runID, startedAt, startedAt); err != nil {
-			t.Fatalf("seed run claim %d: %v", i, err)
+		`, uuid.New().String(), conversationID, startedAt, startedAt); err != nil {
+			t.Fatalf("seed conversation claim %d: %v", i, err)
 		}
-		ids = append(ids, runID)
+		ids = append(ids, conversationID)
 	}
 	return ids
 }

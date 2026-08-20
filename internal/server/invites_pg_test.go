@@ -17,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // ---------- grantOrgMembership (the TFAC-416 primitive) ----------
@@ -116,7 +117,7 @@ func TestGrantOrgMembership_Idempotent(t *testing.T) {
 
 // ---------- accept state machine (POST /api/invites/accept) ----------
 
-// TestInviteAccept_Valid_MintsMembershipAndStamps: a clean redeem mints the
+// TestInviteAccept_Valid_OrgOnly: a clean redeem mints the
 // org membership, leaves the user team-less (target NULL), stamps
 // accepted_at/accepted_by, and points the session at the org.
 func TestInviteAccept_Valid_OrgOnly(t *testing.T) {
@@ -256,21 +257,26 @@ func TestInviteAccept_EmailMismatch_409(t *testing.T) {
 		t.Fatalf("status = %d; want 409 (body=%s)", resp.StatusCode, raw)
 	}
 	var body struct {
-		Error        string `json:"error"`
-		InvitedEmail string `json:"invited_email"`
+		Errors []struct {
+			Reason  string `json:"reason"`
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	_ = json.Unmarshal([]byte(raw), &body)
-	if body.InvitedEmail != "someone-else@test" {
-		t.Errorf("invited_email = %q; want someone-else@test", body.InvitedEmail)
+	if len(body.Errors) != 1 || body.Errors[0].Reason != httpx.ReasonInviteEmailMismatch {
+		t.Fatalf("errors = %+v; want one INVITE_EMAIL_MISMATCH item", body.Errors)
+	}
+	if !strings.Contains(body.Errors[0].Message, "someone-else@test") {
+		t.Errorf("message %q; want it to name the invited address", body.Errors[0].Message)
 	}
 	// The actionable message must steer toward the INVITED address, not the
 	// caller's — re-inviting the account they're wrongly signed in as is the
 	// misleading direction.
-	if !strings.Contains(body.Error, "re-invite someone-else@test") {
-		t.Errorf("error message %q; want it to re-invite the invited address", body.Error)
+	if !strings.Contains(body.Errors[0].Message, "re-invite someone-else@test") {
+		t.Errorf("error message %q; want it to re-invite the invited address", body.Errors[0].Message)
 	}
-	if strings.Contains(body.Error, "re-invite "+invitee.String()+"@test") {
-		t.Errorf("error message re-invites the caller's address (misleading): %q", body.Error)
+	if strings.Contains(body.Errors[0].Message, "re-invite "+invitee.String()+"@test") {
+		t.Errorf("error message re-invites the caller's address (misleading): %q", body.Errors[0].Message)
 	}
 	if n := countOrgMemberships(t, r.h, invitee.String(), orgID.String()); n != 0 {
 		t.Errorf("org_memberships = %d; want 0 on mismatch", n)
@@ -560,9 +566,10 @@ func TestInviteCreate_PendingDup_409(t *testing.T) {
 	}
 }
 
-// TestInviteCreate_NonAdmin_404: a plain member can't create invites — 404
-// (non-disclosure), no row.
-func TestInviteCreate_NonAdmin_404(t *testing.T) {
+// TestInviteCreate_NonAdminIsForbidden: a plain member can't create invites —
+// 403 naming the missing role (they can see their own org) rather than 404,
+// and no row.
+func TestInviteCreate_NonAdminIsForbidden(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 	owner := r.seedUser()
@@ -573,13 +580,14 @@ func TestInviteCreate_NonAdmin_404(t *testing.T) {
 
 	resp := doInviteReq(r, http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "x@example.com", "role": "member"})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d; want 404 (non-admin); body=%s", resp.StatusCode, readBody(resp))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 (non-admin); body=%s", resp.StatusCode, readBody(resp))
 	}
 }
 
-// TestInviteList_ReturnsActive: GET /api/invites surfaces the just-created
-// invite for the admin's org.
+// TestInviteList_ReturnsActive: the invite list surfaces the just-created
+// invite for the admin's org, and the single read answers with the same row —
+// without the accept URL, which exists only in the create response.
 func TestInviteList_ReturnsActive(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
@@ -590,19 +598,47 @@ func TestInviteList_ReturnsActive(t *testing.T) {
 	_ = doInviteReq(r, http.MethodPost, "/api/invites", sid,
 		map[string]string{"email": "listed@example.com", "role": "member"})
 
-	resp := doInviteReq(r, http.MethodGet, "/api/invites", sid, nil)
+	resp := doInviteReq(r, http.MethodPost, "/api/invites/list", sid, map[string]any{})
 	raw := readBody(resp)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d; want 200 (body=%s)", resp.StatusCode, raw)
 	}
-	var list []struct {
-		Email string `json:"email"`
+	var page struct {
+		Items []struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		} `json:"items"`
+		TotalCount int `json:"total_count"`
 	}
-	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+	if err := json.Unmarshal([]byte(raw), &page); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(list) != 1 || list[0].Email != "listed@example.com" {
-		t.Errorf("list = %+v; want one entry for listed@example.com", list)
+	if len(page.Items) != 1 || page.TotalCount != 1 || page.Items[0].Email != "listed@example.com" {
+		t.Fatalf("list = %+v (total %d); want one entry for listed@example.com", page.Items, page.TotalCount)
+	}
+
+	single := doInviteReq(r, http.MethodGet, "/api/invites/"+page.Items[0].ID, sid, nil)
+	singleRaw := readBody(single)
+	if single.StatusCode != http.StatusOK {
+		t.Fatalf("single read status = %d; want 200 (body=%s)", single.StatusCode, singleRaw)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(singleRaw), &got); err != nil {
+		t.Fatalf("decode single read: %v", err)
+	}
+	if got["email"] != "listed@example.com" || got["id"] != page.Items[0].ID {
+		t.Errorf("single read = %v; want the listed invite", got)
+	}
+	for _, secret := range []string{"accept_url", "token", "token_hash"} {
+		if _, present := got[secret]; present {
+			t.Errorf("single read carries %q; the accept link is create-response-only", secret)
+		}
+	}
+
+	// An invite id from another org, and a well-formed id that names nothing,
+	// are both 404 — the read is scoped to the same active set the list is.
+	if miss := doInviteReq(r, http.MethodGet, "/api/invites/11111111-1111-1111-1111-111111111111", sid, nil); miss.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown invite id = %d; want 404", miss.StatusCode)
 	}
 }
 
@@ -626,11 +662,18 @@ func TestInviteRevoke_RemovesFromList(t *testing.T) {
 	if revResp.StatusCode != http.StatusOK {
 		t.Fatalf("revoke status = %d; want 200 (body=%s)", revResp.StatusCode, readBody(revResp))
 	}
-	listResp := doInviteReq(r, http.MethodGet, "/api/invites", sid, nil)
-	var list []json.RawMessage
-	_ = json.Unmarshal([]byte(readBody(listResp)), &list)
-	if len(list) != 0 {
-		t.Errorf("active invites after revoke = %d; want 0", len(list))
+	listResp := doInviteReq(r, http.MethodPost, "/api/invites/list", sid, map[string]any{})
+	var page struct {
+		Items      []json.RawMessage `json:"items"`
+		TotalCount int               `json:"total_count"`
+	}
+	_ = json.Unmarshal([]byte(readBody(listResp)), &page)
+	if len(page.Items) != 0 || page.TotalCount != 0 {
+		t.Errorf("active invites after revoke = %d (total %d); want 0", len(page.Items), page.TotalCount)
+	}
+	// The single read drops it too: a revoked invite is not an active one.
+	if gone := doInviteReq(r, http.MethodGet, "/api/invites/"+created.ID, sid, nil); gone.StatusCode != http.StatusNotFound {
+		t.Errorf("single read of a revoked invite = %d; want 404", gone.StatusCode)
 	}
 }
 

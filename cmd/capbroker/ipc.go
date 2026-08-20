@@ -172,9 +172,9 @@ func (c *IPCClient) Ping(ctx context.Context) error {
 // the privileged operations below plus LaunchRun (brokerrun_linux.go).
 var _ sandbox.SandboxOps = (*IPCClient)(nil)
 
-func (c *IPCClient) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
+func (c *IPCClient) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error) {
 	var res setupNetworkResult
-	if err := c.call(ctx, methodSetupNetwork, setupNetworkArgs{RunID: runID, SubnetIdx: subnetIdx}, &res); err != nil {
+	if err := c.call(ctx, methodSetupNetwork, setupNetworkArgs{ConversationID: conversationID, SubnetIdx: subnetIdx}, &res); err != nil {
 		return sandbox.NetworkState{}, err
 	}
 	return res.State, nil
@@ -222,11 +222,11 @@ func captureSocketPath() (string, error) {
 	return filepath.Join(captureSocketDir, fmt.Sprintf("capture-%x.sock", raw)), nil
 }
 
-// CaptureRunDelta streams the capture child's stdout directly from the
+// CaptureRunDelta streams the capture child's small manifest directly from the
 // broker to this process over a per-capture unix socket — the fd-passthrough
 // pattern LaunchRun uses for the run's live stdio (brokerrun_linux.go),
-// applied here so the park-time git-delta capture's (potentially large)
-// result never enters the broker's address space either.
+// applied here so the broker still never parses child output. Large capture
+// members land in the parent-owned staging directory instead.
 //
 // It opens the listener the broker will dial, issues the RPC carrying the
 // socket path, and concurrently accepts + reads the stream while awaiting
@@ -236,7 +236,7 @@ func captureSocketPath() (string, error) {
 // authoritative outcome, e.g. it may yet report a child failure) are each
 // insufficient alone. captureTimeout bounds the whole round trip on both
 // sides: the RPC call, the accept, and the capped read.
-func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
 	sockPath, err := captureSocketPath()
 	if err != nil {
 		return nil, err
@@ -257,7 +257,7 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, sessionID str
 	// below — the accepted conn, or nil if Accept itself failed — kept
 	// separate from streamDone so an RPC failure can synchronously reach
 	// (and close) an already-accepted conn instead of leaving it to buffer
-	// toward CaptureMaxBytes, unread, for up to the full cap/deadline.
+	// toward CaptureManifestMaxBytes, unread, for up to the full deadline.
 	acceptedConn := make(chan net.Conn, 1)
 	type streamResult struct {
 		buf []byte
@@ -278,16 +278,16 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, sessionID str
 		acceptedConn <- conn
 		defer func() { _ = conn.Close() }()
 		_ = conn.SetDeadline(deadline)
-		buf, err := sandbox.ReadCapturedDelta(conn)
+		buf, err := sandbox.ReadCaptureManifest(conn)
 		streamDone <- streamResult{buf, err}
 	}()
 
 	var res captureRunDeltaResult
-	args := captureRunDeltaArgs{Worktree: worktree, StdoutSocketPath: sockPath, SessionID: sessionID}
+	args := captureRunDeltaArgs{Worktree: worktree, StagingDir: stagingDir, StdoutSocketPath: sockPath, SessionID: sessionID}
 	if err := c.callWithCap(ctx, methodCaptureRunDelta, args, &res, captureTimeout); err != nil {
 		// The RPC is authoritative on failure (dial failure, child failure) —
 		// discard whatever, if anything, crossed the stream, and stop it from
-		// continuing to read toward CaptureMaxBytes on a result nobody will
+		// continuing to read toward CaptureManifestMaxBytes on a result nobody will
 		// use. Closing the listener first fails a still-pending Accept
 		// immediately; the receive below then resolves at once either way
 		// (Accept had already succeeded, or just failed because we closed

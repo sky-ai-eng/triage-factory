@@ -107,6 +107,6 @@ func recordSandboxActuals(ctx context.Context, opts RunOptions, proc runProc) {
 	defer cancel()
 	if err := opts.RecordSandboxActuals(stampCtx, opts.OrgID, opts.ClaimID, actuals); err != nil {
 		agentprocLog.Warn("record sandbox actuals for claim failed",
-			"claim", opts.ClaimID, "run", opts.TraceID, "error", err)
+			"claim", opts.ClaimID, "conversation", opts.TraceID, "error", err)
 	}
 }

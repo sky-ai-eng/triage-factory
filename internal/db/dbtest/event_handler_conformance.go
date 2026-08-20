@@ -2,6 +2,8 @@ package dbtest
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 
 	"github.com/google/uuid"
@@ -34,19 +36,109 @@ type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 //     resolving each trigger's blueprint slug through the seeded map;
 //     re-seed is idempotent (ON CONFLICT on (org_id, team_id, system_slug)).
 //   - Create rejects mis-shaped writes per kind (rule with blueprint_id,
-//     trigger missing blueprint_id, etc.) — validateForCreate catches
+//     trigger missing blueprint_id, etc.) — ValidateEventHandlerForCreate catches
 //     before the CHECK constraint does.
 //   - List with kind filter returns only matching rows; kind="" returns
 //     both.
 //   - GetEnabledForEvent returns enabled rows of both kinds ordered
 //     rule-before-trigger.
-//   - SetEnabled toggles; Delete hard-removes; Update changes mutable
-//     fields per kind.
+//   - Delete hard-removes; Update changes mutable fields per kind via PATCH
 //   - Reorder updates sort_order on rules; silently skips trigger ids.
 //   - Promote atomically flips a rule to a trigger, clearing rule
 //     fields and populating trigger fields.
+//   - Every single-row write returns the row it persisted, and refuses an id
+//     no live handler answers to.
 func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFactory) {
 	t.Helper()
+
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift).
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		read := func(id string) func() (*domain.EventHandler, error) {
+			return func() (*domain.EventHandler, error) { return store.Get(ctx, orgID, id) }
+		}
+		bp := seedBlueprints(t, "system-ci-fix")["system-ci-fix"]
+
+		priority := 0.5
+		sortOrder := 1
+		ruleID := uuid.New().String()
+		created, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: ruleID, Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed, Enabled: true,
+			Name: "returned", DefaultPriority: &priority, SortOrder: &sortOrder,
+		})
+		if err != nil {
+			t.Fatalf("Create (rule): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create (rule)", created, read(ruleID))
+		// Source is forced to "user" by the statement, and the timestamps are
+		// server-stamped — three things the input struct never carried.
+		if created.Source != "user" || created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
+		}
+
+		next := created
+		next.Name = "returned v2"
+		next.Enabled = false
+		updated, err := store.Update(ctx, orgID, next)
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Update", updated, read(ruleID))
+
+		// Promote is the sharpest case for the standard: t describes the
+		// trigger half only, and the row is where the cleared rule-only
+		// columns show up.
+		breaker := 3
+		minAutonomy := 0.4
+		promoted, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+			Kind: domain.EventHandlerKindTrigger, BlueprintID: bp,
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		})
+		if err != nil {
+			t.Fatalf("Promote: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Promote", promoted, read(ruleID))
+		if promoted.Kind != domain.EventHandlerKindTrigger || promoted.Name != "" || promoted.DefaultPriority != nil {
+			t.Errorf("Promote returned %+v, want a trigger with the rule-only columns cleared", promoted)
+		}
+
+		other := seedBlueprints(t, "system-pr-review")["system-pr-review"]
+		retargeted, err := store.RetargetBlueprint(ctx, orgID, ruleID, other)
+		if err != nil {
+			t.Fatalf("RetargetBlueprint: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RetargetBlueprint", retargeted, read(ruleID))
+		if retargeted.BlueprintID != other {
+			t.Errorf("RetargetBlueprint returned blueprint %q, want %q", retargeted.BlueprintID, other)
+		}
+
+		// A miss is an error rather than a silent no-op, on every id-keyed
+		// write — that is what retires the rows-affected probes and the
+		// not-a-uuid early returns.
+		missing := uuid.New().String()
+		next.ID = missing
+		if _, err := store.Update(ctx, orgID, next); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
+		}
+		if _, err := store.RetargetBlueprint(ctx, orgID, missing, other); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("RetargetBlueprint on a missing id: got %v, want db.ErrNoSuchEventHandler", err)
+		}
+		// The row is a trigger now, so Promote's kind='rule' filter matches
+		// nothing — the same answer, because a caller holding only an id
+		// cannot tell "gone" from "wrong kind".
+		if _, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+			Kind: domain.EventHandlerKindTrigger, BlueprintID: bp,
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		}); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Promote on a row that is already a trigger: got %v, want db.ErrNoSuchEventHandler", err)
+		}
+	})
 
 	t.Run("Seed_InsertsBothKinds", func(t *testing.T) {
 		store, orgID, teamID, seedBlueprints := factory(t)
@@ -61,7 +153,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
 		}
-		all, err := store.List(context.Background(), orgID, "", "")
+		all, _, err := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -91,11 +183,11 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
 		}
-		first, _ := store.List(context.Background(), orgID, "", "")
+		first, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #2: %v", err)
 		}
-		second, _ := store.List(context.Background(), orgID, "", "")
+		second, _, _ := store.List(context.Background(), orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if len(first) != len(second) {
 			t.Errorf("re-seed changed row count: first=%d second=%d", len(first), len(second))
 		}
@@ -115,7 +207,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			DefaultPriority: &priority,
 			SortOrder:       &sortOrder,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -155,7 +247,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			SortOrder:        &sortOrder,
 			AppliesToUnowned: true,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -168,7 +260,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		// Update flips it off; the round-trip must reflect the new value.
 		got.AppliesToUnowned = false
-		if err := store.Update(ctx, orgID, *got); err != nil {
+		if _, err := store.Update(ctx, orgID, *got); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, h.ID)
@@ -196,7 +288,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			DefaultPriority: &priority,
 			SortOrder:       &sortOrder,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -224,7 +316,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -260,10 +352,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		if err := store.RetargetBlueprint(ctx, orgID, h.ID, to); err != nil {
+		if _, err := store.RetargetBlueprint(ctx, orgID, h.ID, to); err != nil {
 			t.Fatalf("RetargetBlueprint: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, h.ID)
@@ -294,7 +386,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			SortOrder:        &sortOrder,
 			BreakerThreshold: &breaker, // illegal: trigger-only field on a rule
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err == nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err == nil {
 			t.Error("Create accepted a rule with trigger-only fields populated; want error")
 		}
 	})
@@ -311,14 +403,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			MinAutonomySuitability: &minAutonomy,
 			// BlueprintID intentionally empty.
 		}
-		if err := store.Create(context.Background(), orgID, teamID, h); err == nil {
+		if _, err := store.Create(context.Background(), orgID, teamID, h); err == nil {
 			t.Error("Create accepted a trigger with empty blueprint_id; want error")
 		}
 	})
 
 	t.Run("Create_RejectsTriggerWithName", func(t *testing.T) {
 		// Defense-in-depth: the per-kind CHECK constraint forbids
-		// kind='trigger' with a non-NULL name. validateForCreate
+		// kind='trigger' with a non-NULL name. ValidateEventHandlerForCreate
 		// rejects the same shape earlier so the user gets a clearer
 		// error than the SQL integrity-violation surface.
 		store, orgID, teamID, seedBlueprints := factory(t)
@@ -334,7 +426,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			MinAutonomySuitability: &minAutonomy,
 			Name:                   "shouldn't be here", // illegal on a trigger
 		}
-		if err := store.Create(context.Background(), orgID, teamID, h); err == nil {
+		if _, err := store.Create(context.Background(), orgID, teamID, h); err == nil {
 			t.Error("Create accepted a trigger with a non-empty name; want error")
 		}
 	})
@@ -361,14 +453,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, teamID, rule); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, rule); err != nil {
 			t.Fatalf("Create rule: %v", err)
 		}
-		if err := store.Create(ctx, orgID, teamID, trig); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, trig); err != nil {
 			t.Fatalf("Create trig: %v", err)
 		}
 
-		rules, err := store.List(ctx, orgID, domain.EventHandlerKindRule, "")
+		rules, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindRule}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List(rule): %v", err)
 		}
@@ -377,7 +469,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=rule) returned a %q row", h.Kind)
 			}
 		}
-		triggers, err := store.List(ctx, orgID, domain.EventHandlerKindTrigger, "")
+		triggers, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List(trigger): %v", err)
 		}
@@ -386,7 +478,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 				t.Errorf("List(kind=trigger) returned a %q row", h.Kind)
 			}
 		}
-		all, _ := store.List(ctx, orgID, "", "")
+		all, allTotal, _ := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
+		if allTotal != len(all) {
+			t.Errorf("total = %d but the page held %d rows", allTotal, len(all))
+		}
 		if len(all) < len(rules)+len(triggers) {
 			t.Errorf("List(\"\") returned %d rows; expected at least %d", len(all), len(rules)+len(triggers))
 		}
@@ -415,8 +510,8 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BreakerThreshold:       &breaker,
 			MinAutonomySuitability: &minAutonomy, Enabled: true,
 		}
-		_ = store.Create(ctx, orgID, teamID, trig) // trigger first to prove ordering isn't insert-order
-		_ = store.Create(ctx, orgID, teamID, rule)
+		_, _ = store.Create(ctx, orgID, teamID, trig) // trigger first to prove ordering isn't insert-order
+		_, _ = store.Create(ctx, orgID, teamID, rule)
 
 		got, err := store.GetEnabledForEvent(ctx, orgID, eventType)
 		if err != nil {
@@ -443,27 +538,6 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	t.Run("SetEnabled_Toggles", func(t *testing.T) {
-		store, orgID, teamID, _ := factory(t)
-		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "toggle-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
-		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		if err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
-			t.Fatalf("SetEnabled false: %v", err)
-		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got.Enabled {
-			t.Error("SetEnabled(false) did not disable")
-		}
-	})
-
 	t.Run("Delete_RemovesRow", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
@@ -473,7 +547,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "delete-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		if err := store.Delete(ctx, orgID, h.ID); err != nil {
@@ -492,7 +566,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		priority, sortOrder := 0.5, 0
 		ruleID := uuid.New().String()
-		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID: ruleID, Kind: domain.EventHandlerKindRule,
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "promote-me", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
@@ -503,7 +577,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		breaker := 3
 		minAutonomy := 0.0
 		promoteTarget := ids["p-promote-target"]
-		err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+		_, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
 			Kind:                   domain.EventHandlerKindTrigger,
 			BlueprintID:            promoteTarget,
 			BreakerThreshold:       &breaker,
@@ -536,7 +610,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		breaker := 4
 		minAutonomy := 0.0
 		trigID := uuid.New().String()
-		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID:                     trigID,
 			Kind:                   domain.EventHandlerKindTrigger,
 			BlueprintID:            blueprintID,
@@ -546,7 +620,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
+		_, err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
 			Kind:             domain.EventHandlerKindTrigger,
 			BlueprintID:      blueprintID,
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
@@ -556,24 +630,39 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 	})
 
-	t.Run("SetEnabled_DoesNotStampUserModified", func(t *testing.T) {
+	t.Run("Reorder_AppliesPositions", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		priority, sortOrder := 0.5, 0
-		h := domain.EventHandler{
-			ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
-			EventType: domain.EventGitHubPRCICheckFailed,
-			Name:      "toggle-no-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		priority := 0.5
+		ids := make([]string, 3)
+		for i := range ids {
+			sortOrder := i
+			h := domain.EventHandler{
+				ID: uuid.New().String(), Kind: domain.EventHandlerKindRule,
+				EventType: domain.EventGitHubPRCICheckFailed,
+				Name:      "position-" + strconv.Itoa(i), DefaultPriority: &priority,
+				SortOrder: &sortOrder, Enabled: true,
+			}
+			if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
+				t.Fatalf("Create %d: %v", i, err)
+			}
+			ids[i] = h.ID
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
-			t.Fatalf("Create: %v", err)
+
+		// Reverse the list: each id's new sort_order is its index in what was
+		// submitted, so the whole order moves, not just the pair that swapped.
+		reversed := []string{ids[2], ids[1], ids[0]}
+		if err := store.Reorder(ctx, orgID, reversed); err != nil {
+			t.Fatalf("Reorder: %v", err)
 		}
-		if err := store.SetEnabled(ctx, orgID, h.ID, false); err != nil {
-			t.Fatalf("SetEnabled: %v", err)
-		}
-		got, _ := store.Get(ctx, orgID, h.ID)
-		if got == nil || got.UserModified {
-			t.Errorf("UserModified=%v after SetEnabled; want false (activation state is not content)", got != nil && got.UserModified)
+		for want, id := range reversed {
+			got, err := store.Get(ctx, orgID, id)
+			if err != nil {
+				t.Fatalf("Get %s: %v", id, err)
+			}
+			if got == nil || got.SortOrder == nil || *got.SortOrder != want {
+				t.Errorf("id=%s sort_order=%v, want %d", id, got.SortOrder, want)
+			}
 		}
 	})
 
@@ -592,10 +681,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "reorder-b", DefaultPriority: &priority, SortOrder: &s1, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, teamID, h1); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h1); err != nil {
 			t.Fatalf("Create h1: %v", err)
 		}
-		if err := store.Create(ctx, orgID, teamID, h2); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h2); err != nil {
 			t.Fatalf("Create h2: %v", err)
 		}
 		if err := store.Reorder(ctx, orgID, []string{h2.ID, h1.ID}); err != nil {
@@ -618,24 +707,29 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "update-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 
 		// Update carrying enabled alongside unchanged content: no stamp.
 		got, _ := store.Get(ctx, orgID, h.ID)
 		got.Enabled = false
-		if err := store.Update(ctx, orgID, *got); err != nil {
+		if _, err := store.Update(ctx, orgID, *got); err != nil {
 			t.Fatalf("Update (enabled-only): %v", err)
 		}
 		afterEnabledOnly, _ := store.Get(ctx, orgID, h.ID)
 		if afterEnabledOnly == nil || afterEnabledOnly.UserModified {
 			t.Fatalf("UserModified=%v after an enabled-only Update; want false", afterEnabledOnly != nil && afterEnabledOnly.UserModified)
 		}
+		// The bit has to have actually moved, or "no stamp" proves nothing:
+		// this is the write the rule and trigger switches perform.
+		if afterEnabledOnly.Enabled {
+			t.Error("Enabled=true after an Update carrying enabled=false")
+		}
 
 		// Update changing a content field: stamps.
 		afterEnabledOnly.Name = "update-stamp-renamed"
-		if err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
+		if _, err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
 			t.Fatalf("Update (content change): %v", err)
 		}
 		afterContent, _ := store.Get(ctx, orgID, h.ID)
@@ -650,7 +744,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ids := seedBlueprints(t, "p-promote-stamp")
 		priority, sortOrder := 0.5, 0
 		ruleID := uuid.New().String()
-		if err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
 			ID: ruleID, Kind: domain.EventHandlerKindRule,
 			EventType: domain.EventGitHubPRCICheckFailed,
 			Name:      "promote-stamp", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
@@ -659,7 +753,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		breaker := 3
 		minAutonomy := 0.0
-		if err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+		if _, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
 			Kind: domain.EventHandlerKindTrigger, BlueprintID: ids["p-promote-stamp"],
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
 		}); err != nil {
@@ -682,10 +776,10 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BlueprintID: ids["p-retarget-stamp-from"], EventType: domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
 		}
-		if err := store.Create(ctx, orgID, teamID, h); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		if err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
+		if _, err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
 			t.Fatalf("RetargetBlueprint: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, h.ID)
@@ -722,7 +816,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if got, err := store.GetBySystemSlug(ctx, orgID, teamID, slug); err != nil || got != nil {
 			t.Errorf("GetBySystemSlug after soft-delete = (%v, %v); want (nil, nil)", got, err)
 		}
-		all, err := store.List(ctx, orgID, "", "")
+		all, _, err := store.List(ctx, orgID, db.EventHandlerListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -787,7 +881,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			BlueprintID: blueprintID, EventType: domain.EventGitHubPRCICheckFailed,
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
 		}
-		if err := store.Create(ctx, orgID, teamID, replacement); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, replacement); err != nil {
 			t.Fatalf("Create replacement trigger on the freed blueprint: %v", err)
 		}
 	})

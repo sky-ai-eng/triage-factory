@@ -80,7 +80,7 @@ type Curator struct {
 	// BringUpCuratorSidecar, wired via SetTurnSidecar on a multi-mode executor
 	// pod only. nil on control/all/local keeps the in-process
 	// agenthost.Start path byte-identical. Defined as a curator-local func type
-	// (not a delegate import) to avoid a dependency cycle, exactly how admitTurn
+	// (not a delegate import) to avoid a dependency cycle, exactly how TurnSidecar
 	// avoids importing delegate.
 	bringUpTurnSidecar BringUpTurnSidecarFunc
 
@@ -132,7 +132,7 @@ type Curator struct {
 // stores carries the Tx runner (for SyntheticClaimsWithTx wraps), the
 // CuratorStore (per-turn message writes plus the admin-pool …System claim
 // doors), the ConversationStore (transcript inserts), the PromptStore (skill
-// materialization), and the RepoStore (pinned-repo materialization). Every
+// materialization), and the RepositoryStore (pinned-repo materialization). Every
 // row read/write the curator issues goes through a claims-bound tx or an
 // admin-pool door, so no raw *sql.DB handle is retained.
 func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
@@ -148,13 +148,13 @@ func New(stores db.Stores, wsHub *websocket.Hub, model string) *Curator {
 
 // DefaultTurnMaxAttempts is the failed-pickup budget a queued turn gets
 // before dispatch dead-letters it. Distinct from the delegation side's
-// TF_RUN_MAX_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
+// TF_MAX_CLAIM_ATTEMPTS: this caps repeated BeginTurn failures on one turn's
 // message, not executor-loss re-claims.
 const DefaultTurnMaxAttempts = 3
 
 // ParseTurnMaxAttempts parses TF_CURATOR_TURN_MAX_ATTEMPTS. Empty maps to
 // DefaultTurnMaxAttempts; anything else must parse as a positive integer.
-// Mirrors reaper.ParseMaxAttempts (TF_RUN_MAX_ATTEMPTS).
+// Mirrors reaper.ParseMaxAttempts (TF_MAX_CLAIM_ATTEMPTS).
 func ParseTurnMaxAttempts(raw string) (int, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -287,7 +287,7 @@ func (c *Curator) SetDoorbell(fn func(kind, orgID, projectID string)) {
 // later, from the coordinates below. Returned by the SetTurnSidecar seam (the
 // delegation spawner's BringUpCuratorSidecar); *delegate.runSidecar
 // satisfies it. Curator defines the interface rather than importing delegate to
-// avoid a dependency cycle, mirroring how admitTurn avoids it.
+// avoid a dependency cycle, mirroring how BringUpTurnSidecarFunc avoids it.
 type TurnSidecar interface {
 	// Network is the prebuilt run network agentproc launches the jail into
 	// (RunOptions.PrebuiltNetwork).
@@ -296,9 +296,9 @@ type TurnSidecar interface {
 	// (RunOptions.PrebuiltProxyEnv).
 	JailEnv() []string
 	// GHChannel is the real-gh channel params (RunOptions.GHChannel) when the
-	// turn's sidecar bound the injector; nil otherwise. runID is the
+	// turn's sidecar bound the injector; nil otherwise. conversationID is the
 	// conversation id (the cert path key).
-	GHChannel(runID string) *agentproc.GHChannelParams
+	GHChannel(conversationID string) *agentproc.GHChannelParams
 	// GitCloneAuth routes a host-side fetch of cloneURL through the turn's git
 	// proxy so the orchestrator holds no token (empty when the sidecar has no
 	// git proxy).
@@ -415,7 +415,7 @@ func (c *Curator) ringDoorbell(kind, orgID, projectID string) {
 
 // cloneTokenFor resolves the App installation token for a host-side fetch of
 // a pinned repo owned by owner, via the GitHub resolver. Multi-mode only, to
-// match the spawner (Spawner.resolveCloneToken) and keep local pinned-repo
+// match the spawner (runSidecar.GitCloneAuth) and keep local pinned-repo
 // refreshes on their existing path (operator SSH key / anonymous HTTPS) —
 // local behavior is unchanged by this ticket. Returns "" when local, when no
 // resolver is wired, or when resolution fails; the refresh then runs with no
@@ -473,7 +473,8 @@ func (c *Curator) getSecrets() agentproc.SecretsReader {
 // on a detached context and swallows the error, so a lost stamp costs this
 // turn's accounting and nothing else.
 func (c *Curator) recordSandboxActuals(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error {
-	return c.stores.Conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	_, err := c.stores.Conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	return err
 }
 
 // queueItem carries everything the per-project goroutine needs to
@@ -633,14 +634,14 @@ func (c *Curator) DriveClaimedTurn(orgID, projectID, conversationID, claimID str
 // exists — the typical race between user click and goroutine
 // scheduling means "nothing to cancel" is a routine outcome rather
 // than an error. Caller decides whether to surface it as 404 by
-// checking InFlightCuratorRequestForProject first.
+// checking CuratorStore.InFlightTurn first.
 //
 // Cross-pod (curator homing, spec §6.3): on a control pod the live session runs
 // on the home executor, not here, so the local cancelInFlight is usually a
 // no-op. The "curator_cancel" doorbell reaches the home executor's own Cancel
 // (broadcast + self-filter: only the pod holding the project's session has
 // something to kill), which SIGKILLs the subprocess promptly. The handler's
-// DB-level MarkRequestCancelledIfActive is the backstop if the doorbell is
+// DB-level ReleaseActiveTurnSystem is the backstop if the doorbell is
 // dropped — the turn then runs to completion and its terminal write is a no-op
 // (cancelled wins). A local session (role=all, or the control in-process
 // fallback) is cancelled directly, so both paths always fire.

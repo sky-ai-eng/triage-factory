@@ -19,6 +19,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TFAC-327: the review diff/submit, pending-PR submit, branches, and
@@ -78,14 +79,14 @@ func captureLog(t *testing.T) *bytes.Buffer {
 
 func seedDraftPRArtifact(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
-	// artifacts.run_id REFERENCES runs(id), so mint a full
+	// artifacts.conversation_id REFERENCES conversations(id), so mint a full
 	// entity→event→prompt→task→blueprint_run→run chain and hang the draft PR
 	// artifact off it. The owner/repo the resolver keys on are encoded in the
 	// artifact's target (owner/repo#number), independent of the entity's source.
-	runID := seedSteerRun(t, s.db, "ppr-"+uuid.New().String()[:8], "completed")
+	conversationID := seedSteerConversation(t, s.db, "ppr-"+uuid.New().String()[:8], "completed")
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, 42, "PR_node", "feature/x", "main",
 		"https://example.test/"+owner+"/"+repo+"/pull/42", "Add thing", "Body.", true)
-	a.ConversationID = runID
+	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
 	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
@@ -115,16 +116,22 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var out map[string]any
+	var out struct {
+		Kind    string         `json:"kind"`
+		Details map[string]any `json:"details"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Title/body come from the live PR (GetPR), not the artifact snapshot.
-	if out["title"] != "Live title" || out["body"] != "Live body" {
-		t.Errorf("title/body = %v/%v, want live values", out["title"], out["body"])
+	if out.Kind != domain.ArtifactKindPullRequest {
+		t.Errorf("kind = %q, want pull_request", out.Kind)
 	}
-	if out["number"] != float64(42) {
-		t.Errorf("number = %v, want 42", out["number"])
+	// Title/body come from the live PR (GetPR), not the artifact snapshot.
+	if out.Details["title"] != "Live title" || out.Details["body"] != "Live body" {
+		t.Errorf("title/body = %v/%v, want live values", out.Details["title"], out.Details["body"])
+	}
+	if out.Details["number"] != float64(42) {
+		t.Errorf("number = %v, want 42", out.Details["number"])
 	}
 	// The live read reached GitHub through the App installation token (App bot
 	// identity), not a PAT.
@@ -133,17 +140,21 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	}
 }
 
-func TestArtifactGet_NoCredentials_503(t *testing.T) {
+// TestArtifactGet_NoCredentials_NotConfigured: an artifact read on a workspace
+// with no GitHub credential is 409 NOT_CONFIGURED — server-side configuration
+// the caller must fix, not a transient upstream outage (the 503 it used to
+// answer read as "try again later").
+func TestArtifactGet_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
 
 	artID := seedDraftPRArtifact(t, srv, "acme", "api")
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("get = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("get = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertErrorBody(t, rec.Body.Bytes(), "GitHub credentials not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 
@@ -160,30 +171,39 @@ func TestRepoBranches_AppOnlyOrg_Success(t *testing.T) {
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("branches = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/"+repoID+"/branches/list", map[string]any{})
+	page := decodeList[branchJSON](t, rec)
+	// A proxy list cannot count its upstream, so total_count is null.
+	if page.TotalCount != nil {
+		t.Errorf("total_count = %d, want null on a proxy list", *page.TotalCount)
 	}
-	var names []string
-	if err := json.Unmarshal(rec.Body.Bytes(), &names); err != nil {
-		t.Fatalf("decode: %v", err)
+	names := make([]string, len(page.Items))
+	for i, b := range page.Items {
+		names[i] = b.Name
 	}
 	if strings.Join(names, ",") != "main,feature/x" {
 		t.Errorf("branches = %v, want [main feature/x]", names)
 	}
+	// Two rows against the default 50-row window is a short page, which is
+	// how GitHub says there is no more — so no next token.
+	if page.NextPageToken != "" {
+		t.Errorf("next_page_token = %q, want empty on a short upstream page", page.NextPageToken)
+	}
 }
 
-func TestRepoBranches_NoCredentials_400(t *testing.T) {
+func TestRepoBranches_NoCredentials_NotConfigured(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	logs := captureLog(t)
+	repoID := seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/repos/acme/api/branches", nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("branches = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, srv, http.MethodPost, "/api/repos/"+repoID+"/branches/list", map[string]any{})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("branches = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
-	assertErrorBody(t, rec.Body.Bytes(), "GitHub not configured")
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
 	assertLogged(t, logs, "github not configured")
 }
 
@@ -220,17 +240,6 @@ func TestProjectBundleProbe_NoCredentials_SurfacesError(t *testing.T) {
 	// that the no-credentials resolve surfaces rather than being swallowed.
 	if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 		t.Errorf("err = %v, want it to wrap ErrNoGitHubCredentials", err)
-	}
-}
-
-func assertErrorBody(t *testing.T, body []byte, want string) {
-	t.Helper()
-	var out map[string]string
-	if err := json.Unmarshal(body, &out); err != nil {
-		t.Fatalf("decode error body: %v; raw=%s", err, string(body))
-	}
-	if out["error"] != want {
-		t.Errorf("error = %q, want %q", out["error"], want)
 	}
 }
 

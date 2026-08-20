@@ -13,6 +13,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
@@ -37,13 +38,32 @@ type Manager struct {
 	// the per-org Tracker — the poller itself never touches the queue.
 	eventQueue   db.EventQueueStore
 	users        db.UsersStore            // source of the local user's host-scoped GitHub identity
-	repos        db.RepoStore             // configured-repo names for GitHub poller startup
+	repos        db.RepositoryStore       // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
-	apps         db.GitHubAppsStore       // per-org App installations + local-NAT backfill for per-installation polling
+	apps         db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
 	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+
+	// ReconcileGrant refreshes the org's App-installation mirror — which
+	// installations exist, how wide each grant is, and which repositories each
+	// reaches — from GitHub, before this cycle reads any of it. nil disables
+	// the pass (tests, and any embedder that hasn't wired it).
+	//
+	// It runs inside the poll cycle rather than off the poll-completion
+	// sentinel every other background pass hangs from, for a reason the
+	// sentinel cannot serve: a cycle that finds no installations reports
+	// degraded and returns WITHOUT emitting a completion, so a subscriber would
+	// never fire for exactly the org whose mirror is broken. Running here also
+	// means the installations this cycle is about to fan out over are the ones
+	// GitHub reports right now, not the ones it reported a cycle ago.
+	//
+	// Leader gating comes from the poller itself: in multi mode the scheduler
+	// runs only on the brain-lease holder, and in local mode it always runs.
+	// That is the same gate the tracker, the drain worker and the sweeper sit
+	// behind, so no second mechanism is introduced for this one pass.
+	ReconcileGrant func(ctx context.Context, orgID string) error
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -103,7 +123,7 @@ type Manager struct {
 	lastJiraSuccess   map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:     database,
 		pub:          pub,
@@ -460,7 +480,21 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
 
-	repos, err := m.repos.ListConfiguredNamesSystem(ctx, orgID)
+	// Refresh what the App can reach before reading any of it, and BEFORE the
+	// tracked-set gate below: an org that tracks nothing is precisely the org
+	// where "the App can reach repositories nobody asked for" is largest, so
+	// skipping the pass there would blind the finding in the case that needs it
+	// most. Best-effort — a mirror TF fails to refresh is one it refreshes next
+	// cycle, and never a reason to skip the poll the caller actually came for.
+	// The reconcile leaves the previous answer in place on any failure, so a
+	// stale mirror is the worst outcome here.
+	if m.ReconcileGrant != nil {
+		if err := m.ReconcileGrant(ctx, orgID); err != nil {
+			githubLog.WarnContext(ctx, "installation mirror reconcile failed", "org", orgID, "error", err)
+		}
+	}
+
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
 	if err != nil {
 		span.SetStatus(codes.Error, "load configured repos")
 		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
@@ -504,21 +538,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 
+	// Already reconciled against GET /app/installations at the top of this
+	// cycle, in BOTH modes. It used to be reconciled here and only when
+	// isLocal, on the reasoning that webhooks can't reach a laptop — which left
+	// multi mode converging on deliveries alone, and GitHub never re-sends one
+	// it failed to deliver. An org that missed its `created` delivery then read
+	// as installed on no accounts forever: degraded below, cycle skipped, repo
+	// picker blank, with nothing on a timer to correct it.
 	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		githubLog.Warn("list installations failed", "org", orgID, "error", err)
-	}
-
-	// Local-NAT bonus: webhooks don't reach a local instance, so the
-	// installation mirror can't be kept fresh by the webhook receiver. The App
-	// is active here (appActive gate above), so backfill from the API on the
-	// cycle and re-read.
-	if isLocal {
-		if berr := m.apps.BackfillInstallationsFromAPI(ctx, orgID); berr != nil {
-			githubLog.Warn("installation backfill failed", "org", orgID, "error", berr)
-		} else if installs, err = m.apps.ListInstallationsForOrgSystem(ctx, orgID); err != nil {
-			githubLog.Warn("re-list installations after backfill failed", "org", orgID, "error", err)
-		}
 	}
 
 	// Active App installed on no accounts. Under XOR there is no PAT to fall
@@ -571,10 +600,28 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			continue
 		}
 		anyFunctional = true
+		// Rename detection, before the intersection rather than after it: a
+		// renamed repository is precisely the one the intersection can no
+		// longer see, because TF still spells it the old way and GitHub
+		// answers with the new one. The grant carries every repo's id
+		// alongside its current name, so the condition — same id, different
+		// name — is readable here with no request of its own, and over the
+		// WHOLE grant rather than the tracked subset.
+		if renamed := m.applyRepoRenames(ctx, orgID, grant); renamed > 0 {
+			repos = m.reloadConfiguredRepos(ctx, orgID, repos)
+		}
 		scoped := intersectConfigured(repos, grant, covered)
 		if len(scoped) == 0 {
 			continue
 		}
+		// The grant response carries GitHub's repository id for every repo in
+		// it, so this is where a tracked repo's id is cheapest to learn: no
+		// request of its own, and it covers the whole tracked set rather than
+		// whatever the profiler reaches before its TTL. Only NULLs are filled,
+		// so it is a no-op on every cycle after the first. Best-effort — an
+		// id TF fails to record is one it records next cycle, and never a
+		// reason to skip the poll the caller actually came for.
+		m.recordRepoIDs(ctx, orgID, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
 		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
@@ -719,6 +766,12 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	// there is no caller (tests), which needs no guard.
 	span := trace.SpanFromContext(ctx)
 
+	// No target account, and none to give: the credential this path resolves is
+	// the org PAT, which is account-agnostic, and the cycle it feeds polls the
+	// whole configured set across every tracked owner. Should the org's App turn
+	// active between the caller's gate and this call, resolution answers as the
+	// App does — its one installation, or an ambiguity error past that, never a
+	// guessed account.
 	client, err := m.resolver.ClientFor(ctx, orgID, "")
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
@@ -771,25 +824,155 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	m.recordGitHubCursor(orgID, resumeFrom, rl)
 }
 
-// orgHasRegisteredApp reports whether the org has an active GitHub App
-// registration. Used to gate the local-NAT installation backfill so orgs
-// without an App don't pay a no-op API round-trip each cycle.
+// orgHasRegisteredApp reports whether the org's live GitHub credential is an
+// active App of its own. It is the poll cycle's App-vs-PAT dispatch gate (and,
+// downstream of that, what keeps a PAT org from paying a no-op installation
+// backfill round-trip each cycle).
+//
+// The first question is the org's credential CLASS, not whether an
+// org_github_apps row exists: "no row" is the shape of a PAT org and would
+// equally be the shape of an org riding a deployment-level shared App, whose
+// installations this probe would then never fan out over.
+//
+// False does NOT mean "poll with a PAT" — it means "don't fan out per
+// installation". The credential itself is chosen one layer down, by
+// resolver.ClientFor in pollGitHubPAT, which reads the class again and REFUSES
+// an unknown or unreadable one (ErrUnknownCredentialClass) instead of falling
+// to a PAT. That error isn't ErrNoGitHubCredentials, so the cycle reports
+// degraded health and polls nothing. So the error returns below are not a
+// fail-open toward PAT, even though a false is what they produce: no path from
+// here can poll an org under a credential system it isn't in. They are still
+// logged, because the cycle they cost is worth seeing.
 func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 	if m.apps == nil {
 		return false
 	}
-	app, err := m.apps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		githubLog.Warn("read app registration failed", "org", orgID, "error", err)
+	if m.orgs == nil {
+		// Wiring fault, not an org state: NewManager always supplies the store.
+		// Loud, because the consequence is a cycle that polls as a PAT.
+		githubLog.Error("orgs store not wired; cannot resolve credential class, polling as PAT", "org", orgID)
 		return false
 	}
-	return app != nil && app.Active
+	set, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		githubLog.Warn("read org settings failed; polling as PAT this cycle", "org", orgID, "error", err)
+		return false
+	}
+	switch set.GitHubCredentialClass {
+	case domain.GitHubCredentialClassPAT:
+		return false
+	case domain.GitHubCredentialClassBYOApp:
+		app, err := m.apps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			githubLog.Warn("read app registration failed", "org", orgID, "error", err)
+			return false
+		}
+		// A staged App (active=false, mid PAT→App switch) is a BYO-App org whose
+		// live credential is still the PAT — the class and the Active bit
+		// answering their two different questions.
+		return app != nil && app.Active
+	default:
+		githubLog.Warn("unknown github credential class; polling as PAT this cycle",
+			"org", orgID, "class", set.GitHubCredentialClass)
+		return false
+	}
 }
 
 // intersectConfigured returns the configured repos reachable through one
 // installation's grant, marking each in covered so the caller can report
 // configured repos that no installation grants. Matching is case-insensitive
 // on the "owner/repo" slug (GitHub logins are case-insensitive).
+// recordRepoIDs writes GitHub's repository id onto the tracked repos in
+// scoped, taking the ids from the grant listing this cycle already fetched.
+//
+// It is the poller's half of repository identity: a slug is what a repository
+// is called and the id is what it is, and rename detection can only key on the
+// half that a rename does not move. Filling ids only when a repository is
+// profiled would leave every repo undetectable for the length of the profile
+// TTL; filling them here closes that to one poll cycle at no request cost.
+//
+// Scoped to the intersection rather than the whole grant on purpose: a repo
+// nobody tracks has no row, so writing it would either no-op or (worse) invite
+// a create path in the poller.
+func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []string, grant []ghclient.UserRepo) {
+	if m.repos == nil {
+		return
+	}
+	byName := make(map[string]string, len(grant))
+	for _, g := range grant {
+		if id := g.ExternalID(); id != "" {
+			byName[strings.ToLower(g.FullName)] = id
+		}
+	}
+	refs := make([]domain.RepoRef, 0, len(scoped))
+	for _, slug := range scoped {
+		id := byName[strings.ToLower(slug)]
+		if id == "" {
+			continue
+		}
+		owner, repo, ok := strings.Cut(slug, "/")
+		if !ok {
+			continue
+		}
+		refs = append(refs, domain.RepoRef{
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		})
+	}
+	if len(refs) == 0 {
+		return
+	}
+	filled, err := m.repos.FillMissingExternalIDsSystem(ctx, orgID, refs)
+	if err != nil {
+		githubLog.WarnContext(ctx, "record repository ids failed", "org", orgID, "error", err)
+		return
+	}
+	if filled > 0 {
+		githubLog.InfoContext(ctx, "recorded repository ids", "org", orgID, "filled", filled)
+	}
+}
+
+// applyRepoRenames reconciles the tracked repositories' slugs against the
+// names GitHub used in this grant listing, returning how many moved.
+//
+// Scoped to the whole grant, unlike recordRepoIDs above: filling an id needs a
+// row to fill and so follows the tracked intersection, but detecting a rename
+// needs the observation the intersection has already dropped. A grant entry
+// for a repository TF does not track matches no stored identity and costs one
+// map lookup.
+func (m *Manager) applyRepoRenames(ctx context.Context, orgID string, grant []ghclient.UserRepo) int {
+	if m.repos == nil {
+		return 0
+	}
+	observed := make([]domain.RepoRef, 0, len(grant))
+	for _, g := range grant {
+		id := g.ExternalID()
+		if id == "" {
+			continue
+		}
+		owner, repo, ok := strings.Cut(g.FullName, "/")
+		if !ok {
+			continue
+		}
+		observed = append(observed, domain.RepoRef{
+			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+		})
+	}
+	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, observed)
+}
+
+// reloadConfiguredRepos re-reads the tracked set after a rename moved a slug
+// inside it, so this cycle's intersection matches the repository under its new
+// name instead of skipping it until the next one. Re-rotated to the same
+// cursor the first read was, so the round-robin position survives.
+func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID string, current []string) []string {
+	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
+	if err != nil {
+		githubLog.WarnContext(ctx, "re-read configured repos after a rename failed", "org", orgID, "error", err)
+		return current
+	}
+	return rotateFromCursor(refreshed, m.githubCursor(orgID))
+}
+
 func intersectConfigured(configured []string, grant []ghclient.UserRepo, covered map[string]bool) []string {
 	granted := make(map[string]bool, len(grant))
 	for _, g := range grant {

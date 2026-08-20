@@ -27,9 +27,9 @@ import "path/filepath"
 // directory it appears in.
 const TrustedToolHostSocketDirDestination = "/run/tf-tools"
 
-// TrustedToolHostSocketDir returns the host path of runID's own tool-host
+// TrustedToolHostSocketDir returns the host path of conversationID's own tool-host
 // socket directory — both what the orchestrator creates and what the broker
 // requires a TrustedToolHostSocketDirDestination mount's source to resolve to.
-func TrustedToolHostSocketDir(runID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-tools")
+func TrustedToolHostSocketDir(conversationID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+"-tools")
 }

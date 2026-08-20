@@ -116,7 +116,7 @@ func TestBootstrapLocalOrg_Idempotent(t *testing.T) {
 // it stays deleted) is a property of the *provision endpoint*, not of
 // BootstrapLocalOrg itself: the materializer is INSERT-OR-IGNORE keyed on
 // (org, team, system_slug), so calling the bare function again WOULD
-// re-create a deleted handler. The endpoint (handleSetupStart) no-ops
+// re-create a deleted handler. The endpoint (createLocalOrg) no-ops
 // once a tenant exists, which is what makes deletions durable — see
 // TestSetupStart_NonResurrection in internal/server.
 
@@ -164,7 +164,7 @@ func TestBootstrapLocalOrg_PreservesUserDisable(t *testing.T) {
 		t.Fatal("no agent after provision")
 	}
 	// User disables the bot.
-	if err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
+	if _, err := stores.TeamAgents.SetEnabled(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, agent.ID, false); err != nil {
 		t.Fatalf("SetEnabled false: %v", err)
 	}
 	// Re-provision.
@@ -586,7 +586,7 @@ func TestBootstrapLocalTenancy_ConstantsMatchRows(t *testing.T) {
 // which assume the org/team rows already exist.
 func openInMemorySQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -607,7 +607,7 @@ func openInMemorySQLite(t *testing.T) *sql.DB {
 // BootstrapSchemaForTest (which seeds the tenant as a convenience).
 func openTenantlessSQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

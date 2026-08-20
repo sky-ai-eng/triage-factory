@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import StatusRules from '../../ui/statusrules/StatusRules'
 import type { StatusMap } from '../../ui/statusrules/StatusRules'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
-import { fetchTeamSettings, teamConfigFromSettings, saveTeamSettings } from '../settings/teamConfig'
-import type { JiraProjectConfig, TeamConfigForm } from '../settings/teamConfig'
+import { apiJSON } from '../../lib/apiClient'
+import { fetchTeamSettings, saveTeamJiraProjects } from '../settings/teamConfig'
+import type { JiraProjectConfig } from '../settings/teamConfig'
 
 // Jira, as this team's event source.
 //
@@ -54,10 +55,6 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
 
-  // The rest of the team's settings, carried so a project removal writes back
-  // everything else unchanged — this endpoint takes the whole slice.
-  const form = useRef<TeamConfigForm | null>(null)
-
   useEffect(() => {
     if (!teamId) return
     let live = true
@@ -68,7 +65,6 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
           setError('Could not read this team’s Jira configuration.')
           return
         }
-        form.current = teamConfigFromSettings(data)
         setProjects(data.jira_projects ?? [])
       })
       .catch(() => {
@@ -88,8 +84,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
     if (!keys.length) return
     let live = true
     const query = keys.map((k) => 'project=' + encodeURIComponent(k)).join('&')
-    void fetch('/api/jira/statuses?' + query, { credentials: 'include' })
-      .then((r) => (r.ok ? (r.json() as Promise<JiraStatus[]>) : []))
+    void apiJSON<JiraStatus[]>('/api/jira/statuses?' + query)
       .then((list) => {
         if (live) setFetched(list.map((s) => s.name))
       })
@@ -159,13 +154,14 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
 
   const commit = useCallback(
     (actionId: string, ids: Array<string | number>) => {
-      if (actionId !== 'unwatch' || !form.current) return
+      // The write is a full replace-set, so a set we never read is not a set we
+      // may rewrite: committing against `null` would PUT [] and untrack every
+      // project the team has.
+      if (actionId !== 'unwatch' || projects === null) return
       const dropped = new Set(ids.map(String))
-      const next = (projects ?? []).filter((p) => !dropped.has(p.key))
-      const body: TeamConfigForm = { ...form.current, jira_projects: next }
-      form.current = body
+      const next = projects.filter((p) => !dropped.has(p.key))
       setProjects(next)
-      void saveTeamSettings(teamId, body).then((res) => {
+      void saveTeamJiraProjects(teamId, next).then((res) => {
         if (!res.ok) setError(res.error)
       })
     },

@@ -20,19 +20,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// lookupRun is the per-subcommand entry point for routing-sensitive
-// state access. The result carries OrgID / UserID / RunID + the
+// lookupConversation is the per-subcommand entry point for routing-sensitive
+// state access. The result carries OrgID / UserID / ConversationID + the
 // IsEventTriggered discriminator. Errors surface via the same
 // exitErr/os.Exit shape the rest of the file uses so the agent sees a
 // clear message and the subcommand exits non-zero.
 //
 // On the host CLI this resolves identity from TRIAGE_FACTORY_CONVERSATION_ID at
 // client-construction time; in the sandbox the daemon's per-socket map
-// determines identity and LookupRun just round-trips. Either way the
+// determines identity and LookupConversation just round-trips. Either way the
 // subcommand body reads the routing-relevant fields from a single
 // in-process value.
-func lookupRun(host agenthost.Client) agenthost.RunInfo {
-	info, err := host.LookupRun(context.Background())
+func lookupConversation(host agenthost.Client) agenthost.ConversationInfo {
+	info, err := host.LookupConversation(context.Background())
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -628,7 +628,7 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 // reset and falls through to a normal start.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	owner, repo, number := parseRepoAndNumber(args)
-	_ = lookupRun(host) // validates identity is present; routing happens inside host
+	_ = lookupConversation(host) // validates identity is present; routing happens inside host
 
 	if hasFlag(args, "--fresh") {
 		// Pure-local reset of this run's existing draft for the PR — no GitHub
@@ -742,7 +742,7 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	}
 
 	owner, repo := ownerRepo(args)
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 
 	// Resolve the anchor: the reviewed PR's worktree HEAD — the commit the
 	// agent's checkout is on, which is the frame it read the diff in. The host
@@ -750,12 +750,13 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	// pins the submitted comment to it. Empty when there's no checkout, in which
 	// case the host falls back to live-head validation + anchoring.
 	//
-	// Prefer the PR's worktree resolved from the run's (run, repo, ref) registry
-	// over cwd: in a multi-PR run cwd may sit in a DIFFERENT PR's checkout
-	// (TFAC-494/TFAC-502), which would anchor this comment to the wrong commit.
-	// Falls back to cwd HEAD when the registry has no unambiguous PR worktree for
-	// this repo (single-PR runs, or a path the CLI can't rev-parse), preserving
-	// prior behavior.
+	// Prefer the PR's worktree resolved from the conversation's
+	// (conversation, repo, ref) registry over cwd: in a multi-PR conversation
+	// cwd may sit in a DIFFERENT PR's checkout (TFAC-494/TFAC-502), which would
+	// anchor this comment to the wrong commit. Falls back to cwd HEAD when the
+	// registry has no unambiguous PR worktree for this repo (single-PR
+	// conversations, or a path the CLI can't rev-parse), preserving prior
+	// behavior.
 	cwd, err := os.Getwd()
 	if err != nil {
 		exitErr(fmt.Sprintf("resolve cwd: %v", err))
@@ -783,18 +784,19 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 }
 
 // reviewedPRWorktreePath returns the absolute worktree path of the PR being
-// reviewed in owner/repo, resolved from the run's (run, repo, ref) worktree
-// registry: the unique conversation_worktrees row whose repo matches and whose ref is a
-// PR ref ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT
-// PR's worktree HEAD in a multi-PR run instead of trusting cwd (TFAC-502).
+// reviewed in owner/repo, resolved from the conversation's
+// (conversation, repo, ref) worktree registry: the unique
+// conversation_worktrees row whose repo matches and whose ref is a PR ref
+// ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT PR's
+// worktree HEAD in a multi-PR conversation instead of trusting cwd (TFAC-502).
 //
 // Returns "" when there is no such row, or more than one (two PRs reviewed in
-// the SAME repo within one run is ambiguous without the PR number, so the
-// caller falls back to cwd — the agent is expected to have cd'd into the
-// reviewed PR's worktree). A list error is non-fatal: anchoring degrades to
-// cwd, never blocking the comment.
+// the SAME repo within one conversation is ambiguous without the PR number,
+// so the caller falls back to cwd — the agent is expected to have cd'd into
+// the reviewed PR's worktree). A list error is non-fatal: anchoring degrades
+// to cwd, never blocking the comment.
 func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
-	rows, err := host.ListRunWorktrees(context.Background())
+	rows, err := host.ListConversationWorktrees(context.Background())
 	if err != nil {
 		return ""
 	}
@@ -882,7 +884,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 		ghEvent = event
 	}
 
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 
 	// Snapshot the draft into the run's review artifact, set the ready sentinel,
 	// and — under a posting posture — submit it. The "meaningful review" check
@@ -1126,7 +1128,7 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 	if err != nil {
 		exitErr(err.Error())
 	}
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 	_, unbadged := domain.ParseSeverityBadge(body)
 	badgedBody := domain.SeverityBadgeMarkdown(severity) + unbadged
 	exitOnErr(host.UpdateStagedReviewComment(ctx, args[0], badgedBody))
@@ -1149,7 +1151,7 @@ func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, a
 		return
 	}
 
-	_ = lookupRun(host)
+	_ = lookupConversation(host)
 	exitOnErr(host.DeleteStagedReviewComment(ctx, args[0]))
 	printJSON(map[string]any{"ok": true})
 }

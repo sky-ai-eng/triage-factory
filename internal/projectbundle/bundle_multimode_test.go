@@ -50,12 +50,12 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	// on the exporter's conversation below.
 	var projectID string
 	if err := stores.Tx.WithTx(ctx, srcOrg, srcUser, func(tx db.TxStores) error {
-		var e error
-		projectID, e = tx.Projects.Create(ctx, srcOrg, srcTeam, domain.Project{
+		created, e := tx.Projects.Create(ctx, srcOrg, srcTeam, domain.Project{
 			Name:        "Multi source",
 			Description: "multi fixture",
 			PinnedRepos: []string{slug},
 		})
+		projectID = created.ID
 		return e
 	}); err != nil {
 		t.Fatalf("create source project: %v", err)
@@ -105,7 +105,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed curator turn: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "src-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "src-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != convID {
 		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, convID)
 	}
@@ -114,7 +114,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		if _, e := tx.Curator.BeginTurn(ctx, srcOrg, projectID, convID, msgID); e != nil {
 			return e
 		}
-		if e := tx.Curator.SetSDKSession(ctx, srcOrg, convID, sessionID); e != nil {
+		if _, e := tx.Curator.SetSDKSession(ctx, srcOrg, convID, sessionID); e != nil {
 			return e
 		}
 		_, e := tx.Conversations.InsertMessage(ctx, srcOrg, &domain.Message{
@@ -239,7 +239,7 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 		if len(claims) != 1 || claims[0].Outcome != "completed" {
 			t.Errorf("imported claims = %+v, want one completed engagement", claims)
 		}
-		msgs, e := tx.Curator.ListConversationMessages(ctx, dstOrg, importedConv.ID)
+		msgs, e := tx.Curator.ListConversationMessages(ctx, dstOrg, importedConv.ID, 0)
 		if e != nil {
 			return e
 		}
@@ -262,10 +262,12 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 
 	// The pinned repo is tracked for the destination team (the
 	// repo-selection-save semantic), and the clone URL got seeded into
-	// the destination org's repo_profiles.
+	// the destination org's repositories.
 	var tracked int
 	if err := h.AdminDB.QueryRow(`
-		SELECT COUNT(*) FROM team_github_repos WHERE team_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
+		SELECT COUNT(*) FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = $1 AND r.owner = 'sky-ai-eng' AND r.repo = 'triage-factory'
 	`, dstTeam).Scan(&tracked); err != nil {
 		t.Fatalf("count tracked: %v", err)
 	}
@@ -274,9 +276,9 @@ func TestImportExport_MultiMode_Postgres(t *testing.T) {
 	}
 	var cloneURL string
 	if err := h.AdminDB.QueryRow(`
-		SELECT COALESCE(clone_url, '') FROM repo_profiles WHERE org_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
+		SELECT COALESCE(clone_url, '') FROM repositories WHERE org_id = $1 AND owner = 'sky-ai-eng' AND repo = 'triage-factory'
 	`, dstOrg).Scan(&cloneURL); err != nil {
-		t.Fatalf("read repo profile: %v", err)
+		t.Fatalf("read repository: %v", err)
 	}
 	if cloneURL != "https://github.com/sky-ai-eng/triage-factory.git" {
 		t.Fatalf("clone_url = %q, not seeded from preflight", cloneURL)

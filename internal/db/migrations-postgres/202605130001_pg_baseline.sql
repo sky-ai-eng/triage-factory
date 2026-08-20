@@ -38,11 +38,11 @@
 --      / unique here is this category, not a divergence.
 --   3. Attribution refs (creator_user_id and the like — the "who authored
 --      this" columns). Postgres FK-constrains these with ON DELETE CASCADE;
---      SQLite leaves them bare TEXT (or NO-ACTION on runs). Deliberate: local
---      mode is N=1 and the sentinel user is never deleted. NARROW scope — this
---      does NOT cover identity/ownership user_id PKs (user_settings,
---      user_github/jira_identities, memberships, org_memberships),
---      which carry the users(id) FK in BOTH dialects.
+--      SQLite leaves them bare TEXT (or NO-ACTION on conversations).
+--      Deliberate: local mode is N=1 and the sentinel user is never deleted.
+--      NARROW scope — this does NOT cover identity/ownership user_id PKs
+--      (user_settings, user_github/jira_identities, memberships,
+--      org_memberships), which carry the users(id) FK in BOTH dialects.
 --   4. Tables that exist in one dialect only. instance_config is SQLite-only
 --      (host port lives in container env under multi mode). sessions and
 --      project_knowledge are Postgres-only (multi-mode auth + shared KB).
@@ -140,7 +140,7 @@ CREATE TYPE public.org_role AS ENUM (
 --
 
 -- +goose StatementBegin
-CREATE FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid DEFAULT NULL::uuid) RETURNS integer
+CREATE FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid DEFAULT NULL::uuid) RETURNS integer
     LANGUAGE plpgsql
     SET search_path TO 'pg_catalog', 'public'
     AS $$
@@ -153,13 +153,13 @@ BEGIN
       USING ERRCODE = '42501';
   END IF;
 
-  -- If a run is being attributed, it must be one the caller can see
+  -- If a conversation is being attributed, it must be one the caller can see
   -- through conversations RLS (their own, in their current org). A forged
-  -- p_updated_by_run from another user fails this check because the
+  -- p_updated_by_conversation from another user fails this check because the
   -- conversations SELECT policy gates on the caller's org + visibility arm.
-  IF p_updated_by_run IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_run) THEN
-    RAISE EXCEPTION 'run % not accessible to caller', p_updated_by_run
+  IF p_updated_by_conversation IS NOT NULL
+     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_conversation) THEN
+    RAISE EXCEPTION 'conversation % not accessible to caller', p_updated_by_conversation
       USING ERRCODE = '42501';
   END IF;
 
@@ -167,7 +167,7 @@ BEGIN
      SET content = p_content,
          version = version + 1,
          last_updated_by = v_user_id,
-         last_updated_by_run = p_updated_by_run,
+         last_updated_by_conversation = p_updated_by_conversation,
          updated_at = now()
    WHERE id = p_id
      AND version = p_expected_version
@@ -329,41 +329,6 @@ $$;
 
 
 --
--- Name: org_tracked_repos(uuid); Type: FUNCTION; Schema: tf; Owner: -
---
-
--- The cross-team union read behind team_github_repos -> repo_profiles
--- reconciliation. repo_profiles is the org-wide UNION of every
--- team's tracked repos, but the team_github_repos SELECT policy is
--- team-membership-scoped, so a team admin's app-pool tx can't see sibling
--- teams' rows. This SECURITY DEFINER helper bypasses that per-team SELECT
--- RLS — a within-org, non-security boundary — to return the full org
--- union, while preserving the ORG boundary: with request claims it
--- requires p_org_id to equal the caller's org; with no claims
--- (admin-pool / system / test) the guard is skipped — the same
--- claims-present-vs-trusted-args split every *System store method uses.
--- The pinned search_path blocks definer hijacking.
--- +goose StatementBegin
-CREATE FUNCTION tf.org_tracked_repos(p_org_id uuid) RETURNS TABLE(owner text, repo text)
-    LANGUAGE plpgsql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-BEGIN
-  IF tf.current_org_id() IS NOT NULL AND p_org_id <> tf.current_org_id() THEN
-    RAISE EXCEPTION 'org_tracked_repos: requested org % does not match caller org %', p_org_id, tf.current_org_id();
-  END IF;
-  RETURN QUERY
-    SELECT DISTINCT g.owner, g.repo
-    FROM team_github_repos g
-    JOIN teams t ON t.id = g.team_id
-    WHERE t.org_id = p_org_id
-    ORDER BY g.owner, g.repo;
-END;
-$$;
--- +goose StatementEnd
-
-
---
 -- Name: blueprint_run_is_running(uuid, uuid); Type: FUNCTION; Schema: tf; Owner: -
 --
 
@@ -379,7 +344,7 @@ $$;
 -- correlated subquery would find nothing for that teammate and the guard would
 -- fail OPEN — the one direction that reopens the failure. So this reads one
 -- blueprint's running-ness past the creator scope — a within-org, non-security
--- boundary, the same trade org_tracked_repos above makes — while preserving
+-- boundary — while preserving
 -- the ORG boundary: with request claims it requires p_org_id to equal the
 -- caller's org; with no claims (admin-pool / system / test) the guard is
 -- skipped. The pinned search_path blocks definer hijacking.
@@ -440,15 +405,16 @@ $$;
 --
 -- An archived team (teams.deleted_at IS NOT NULL) is write-blocked end-to-end
 -- (TFAC-448): the membership join to teams adds deleted_at IS NULL, so every
--- team-scoped write policy keyed on user_can_write_team (tasks, runs, prompts,
--- blueprints, event_handlers, projects, team_agents) — plus the
+-- team-scoped write policy keyed on user_can_write_team (tasks, conversations,
+-- prompts, blueprints, event_handlers, projects, team_agents) — plus the
 -- RequireTeamWrite / RequireTaskWrite handler gates that call it — reject the
 -- write at the row level. This is the DB backstop that covers the task-scoped
 -- mutations (swipe / snooze / requeue / advance) whose team is derived from the
 -- task, not the URL. The team-settings family gates on user_is_team_admin
 -- instead, so those handlers add the explicit authz.VerifyTeamNotArchived gate.
--- Archive itself stamps deleted_at via teams_update (org-admin) and reaps runs
--- on the admin pool (BYPASSRLS), so neither path is blocked by this filter.
+-- Archive itself stamps deleted_at via teams_update (org-admin) and reaps
+-- conversations on the admin pool (BYPASSRLS), so neither path is blocked by
+-- this filter.
 
 -- +goose StatementBegin
 CREATE FUNCTION tf.user_can_write_team(target_team uuid) RETURNS boolean
@@ -555,6 +521,7 @@ CREATE TABLE public.agents (
     default_autonomy_suitability real,
     github_pat_user_id uuid,
     github_org_login text,
+    github_org_email text,
     jira_service_account_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
@@ -573,7 +540,7 @@ CREATE TABLE public.agents (
 -- computed so org spend reconciles with the Anthropic bill and a "system
 -- overhead" line exists alongside conversation / claim spend rows.
 -- Org-level, no team_id by design: scorer batches mix teams, and
--- repo_profiles/entities carry no team. System-written (admin pool); the
+-- repositories/entities carry no team. System-written (admin pool); the
 -- app pool only reads, gated by the org-scoped RLS policy below. See TFAC-451.
 CREATE TABLE public.system_llm_runs (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -652,14 +619,19 @@ CREATE TABLE public.access_change_log (
 -- can't diverge from the action. action is a free-text discriminator (no CHECK —
 -- extensible, like access_change_log); credential names the org credential used
 -- (github_app | jira_org); from_state/to_state carry a transition's endpoints;
--- conversation_id is the producing run (the agent's, or the drafter's for an approval, FK
--- ON DELETE SET NULL so it outlives a run purge); actor_user_id is the human
--- authorizer/initiator (NULL for an autonomous system write). dedup_key is the
+-- conversation_id is the producing conversation (the agent's, or the drafter's
+-- for an approval, FK ON DELETE SET NULL so it outlives a conversation purge);
+-- actor_user_id is the human authorizer/initiator (NULL for an autonomous
+-- system write). dedup_key is the
 -- natural per-action key — a branch push (the one true double-capture case: the
 -- pre-push hook AND the git-proxy backstop both observe it) carries a
 -- deterministic key so the twin collapses under ON CONFLICT DO NOTHING; every
 -- other action gets a unique key, so DO NOTHING only ever collapses the twin.
--- See TFAC-483.
+-- One amendment to "immutable": the record of the act — target, action,
+-- detail_json, credential, occurred_at, url as captured — is frozen, while
+-- current_url, the POINTER to where the object lives now, is maintained (a
+-- repository rename fills it; reads serve COALESCE(current_url, url)). It is
+-- the only column an UPDATE may touch.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -669,6 +641,7 @@ CREATE TABLE public.external_actions (
     target text NOT NULL,
     external_id text,
     url text,
+    current_url text,
     from_state text,
     to_state text,
     conversation_id uuid,
@@ -871,23 +844,39 @@ CREATE TABLE public.team_github_groups (
 -- Name: team_github_repos; Type: TABLE; Schema: public; Owner: -
 --
 
--- One row per (team, owner, repo): a team declaring "I track this repo."
+-- One row per (team, repository): a team declaring "I track this repo."
 -- The GitHub *tracking-scope* twin of jira_project_status_rules and the
 -- source of truth for which repos a team cares about. NOT the same as
 -- team_github_groups above (CODEOWNERS review-routing teams) — this is
--- the tracking selection. repo_profiles is the org-shared UNION of every
--- team's rows here, a derived poll/profile/ETag cache reconciled on every
--- write and never user-written directly anymore. No org_id column: org
--- scope rides the teams FK, mirroring jira_project_status_rules. Local
--- mode (N=1) tracks every configured repo on the single default team, so
--- the router's team↔repo gate never drops anything there.
+-- the tracking selection. No org_id column: org scope rides the teams FK,
+-- mirroring jira_project_status_rules. Local mode (N=1) tracks every
+-- configured repo on the single default team, so the router's team↔repo gate
+-- never drops anything there.
+--
+-- The repository is referenced by the registry row's id, not by its slug. A
+-- rename therefore moves one column on one row in `repositories` and every
+-- tracking row here still resolves, untouched — which is the property the
+-- previous (team_id, owner, repo) key could not have, since the slug is a
+-- display handle GitHub lets you change.
+--
+-- The direction of the two lifetimes is the reason for the ON DELETE below.
+-- A tracking row is a statement ABOUT a repository, so it cannot outlive the
+-- registry row (CASCADE). The converse does not hold: untracking deletes a row
+-- HERE and leaves the registry row standing, because a worktree ledger entry,
+-- a pinned project or a task may still name that repository. Tracking is
+-- forward-only in both directions.
+--
+-- org_id is denormalized from the team so both references can be COMPOSITE
+-- foreign keys — see the constraints below. It is not a scoping convenience:
+-- it is what makes "the team and the repository belong to the same org" a
+-- thing the database checks rather than a thing each writer remembers. A
+-- cross-tenant row is invisible to every org-scoped read, so the failure it
+-- produces is a save that reports success and tracks nothing.
 CREATE TABLE public.team_github_repos (
     team_id uuid NOT NULL,
-    owner text NOT NULL,
-    repo text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT tgr_owner_populated CHECK (owner <> ''),
-    CONSTRAINT tgr_repo_populated CHECK (repo <> '')
+    repository_id uuid NOT NULL,
+    org_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -965,6 +954,40 @@ CREATE TABLE public.org_settings (
     -- "coming soon" in org settings until the TFAC-539 launch flip; UI +
     -- enforcement of this column are that ticket's concern, not this one's.
     marketplace_enabled boolean DEFAULT false NOT NULL,
+    -- Which credential system this org's GitHub access belongs to: 'pat' or
+    -- 'byo_app' today, 'managed_app' (the deployment's own shared App) reserved.
+    --
+    -- Stated rather than inferred, because "no org_github_apps row" cannot mean
+    -- one thing: that table holds one row per org keyed on a UNIQUE app_id, so
+    -- an org riding a deployment-level shared App has no row either, and every
+    -- site reading a missing row as PAT would hand such an org a credential it
+    -- does not have. The class names WHICH SYSTEM the org is in;
+    -- org_github_apps.active names WHICH CREDENTIAL IS LIVE — orthogonal, and
+    -- visibly so during the staged window of a PAT→App switch, where the class
+    -- is already byo_app while the PAT is still the live credential.
+    --
+    -- App-validated, not CHECK-constrained, matching max_llm_model_tier above:
+    -- admitting a new class must cost no DDL on either backend.
+    --
+    -- Not owned by the settings writer. OrgsStore.UpdateSettings deliberately
+    -- omits this column from both halves of its upsert so a bulk settings save
+    -- can never reset it; the credential transitions write it via
+    -- SetGitHubCredentialClass inside their own transaction.
+    github_credential_class text DEFAULT 'pat'::text NOT NULL,
+    -- Optimistic-concurrency token for the settings save. That save is a
+    -- read-modify-write over the whole row, so two admins editing different
+    -- sections of the same page would otherwise overwrite each other silently —
+    -- the later save carries the earlier's fields as its client last read them,
+    -- and the first admin's change is undone with a 200 and nothing to notice.
+    -- The read hands the client this token, the write requires it, and a write
+    -- against a stale token is refused (409) so the loser refetches and
+    -- re-applies. There is no server-side merge.
+    --
+    -- Owned by the settings writer alone: OrgsStore.UpdateSettings bumps it,
+    -- SetGitHubCredentialClass — the surgical single-column write the
+    -- credential transitions use — deliberately does not, so a credential
+    -- transition never invalidates an admin's in-flight settings edit.
+    version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
 );
@@ -1055,7 +1078,7 @@ CREATE TABLE public.project_knowledge (
     content text DEFAULT ''::text NOT NULL,
     version integer DEFAULT 1 NOT NULL,
     last_updated_by uuid,
-    last_updated_by_run uuid,
+    last_updated_by_conversation uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1074,7 +1097,6 @@ CREATE TABLE public.projects (
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     curator_session_id text,
-    pinned_repos jsonb DEFAULT '[]'::jsonb NOT NULL,
     jira_project_key text,
     linear_project_key text,
     spec_authorship_blueprint_id text,
@@ -1082,6 +1104,38 @@ CREATE TABLE public.projects (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT projects_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT projects_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
+);
+
+
+--
+-- Name: project_pinned_repos; Type: TABLE; Schema: public; Owner: -
+--
+
+-- The repositories a project pins, one row per (project, repository).
+--
+-- This was a jsonb array of "owner/repo" strings on projects. An array of
+-- strings cannot carry a foreign key at all, which made it the one repository
+-- reference in this schema that nothing could check: a pin naming a repository
+-- no row exists for was indistinguishable from a live one, and a rename had to
+-- rewrite the array element by element. A join table is what makes it
+-- checkable.
+--
+-- position preserves the order the pins were saved in. The API surfaces
+-- pinned_repos as an ordered list and a project round-trips through bundle
+-- export/import, so ordering by slug instead would silently reshuffle a list
+-- somebody arranged.
+--
+-- CASCADE on both sides: a pin is project configuration, not durable work, so
+-- it follows whichever end goes away. That is the opposite of
+-- conversation_worktrees, and deliberately so — a ledger entry is a record of
+-- something that happened, a pin is a preference.
+--
+-- No org_id column: org scope rides the projects FK, mirroring
+-- team_github_repos' teams FK.
+CREATE TABLE public.project_pinned_repos (
+    project_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    "position" integer NOT NULL
 );
 
 
@@ -1105,10 +1159,11 @@ CREATE TABLE public.prompts (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     model text DEFAULT ''::text NOT NULL,
     system_slug text,
-    -- deleted_at soft-deletes a prompt: the row + its runs stay (runs.prompt_id
-    -- is RESTRICT, so a hard DELETE on a prompt with run history would error);
-    -- request-facing reads filter deleted_at IS NULL, the ...System reads keep
-    -- resolving it for in-flight runs + past-run timelines. Load-bearing once
+    -- deleted_at soft-deletes a prompt: the row + its conversations stay
+    -- (conversations.prompt_id has no ON DELETE action, so a hard DELETE on a
+    -- prompt with conversation history would error); request-facing reads
+    -- filter deleted_at IS NULL, the ...System reads keep resolving it for
+    -- in-flight conversations + past-conversation timelines. Load-bearing once
     -- every new prompt is auto-wrapped as a 1-step blueprint (the step FK is
     -- RESTRICT), so hard-delete is impossible.
     deleted_at timestamp with time zone,
@@ -1120,14 +1175,42 @@ CREATE TABLE public.prompts (
 
 
 --
--- Name: repo_profiles; Type: TABLE; Schema: public; Owner: -
+-- Name: repositories; Type: TABLE; Schema: public; Owner: -
 --
 
-CREATE TABLE public.repo_profiles (
+-- The registry of the repositories TF works with, and the target every
+-- repository reference in this schema now points at: team_github_repos,
+-- conversation_worktrees and project_pinned_repos all carry this row's id. The
+-- slug survives only where it is genuinely something else's natural key
+-- (entities.source_id is a pull request's, "owner/repo#18") or where a human
+-- reads it (an API payload, a CLI argument, a directory name).
+--
+-- source + external_id are the half of a repository's identity a rename does
+-- not move. Without them a renamed repository is indistinguishable, under
+-- polling, from a 404 plus a brand-new one.
+--
+-- The row is durable. It is created when a repository is first tracked and it
+-- is NOT deleted when the last team untracks it, because a worktree ledger
+-- entry, a pinned project or a task may still name the repository. "Which
+-- repositories does TF poll and profile" is a question about tracking, and
+-- team_github_repos is what answers it.
+--
+-- source is app-validated, not CHECK-constrained — the convention this
+-- baseline states for the other source columns (prompts.source above), so a
+-- second provider costs a value rather than a schema change. external_id is
+-- deliberately not named github_repo_id for the same reason:
+-- (source, external_id) is the shape entities (source, source_id) already
+-- uses. It is nullable and NULL is a supported state rather than a gap to
+-- backfill — a row without an id behaves exactly as it does today,
+-- everywhere — and it fills in from GitHub payloads TF already fetches, never
+-- from a fetch added to obtain it.
+CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
+    source text DEFAULT 'github'::text NOT NULL,
+    external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
     has_claude_md boolean DEFAULT false NOT NULL,
@@ -1150,16 +1233,16 @@ CREATE TABLE public.repo_profiles (
 -- Name: artifacts; Type: TABLE; Schema: public; Owner: -
 --
 
--- artifacts (TFAC-455): the single durable, run-attributed, polymorphic
--- record of everything a run produces in an external system (a pushed
--- branch, a draft/open PR, a draft/submitted review, a Jira/Linear issue,
--- a comment). One row per external object; provider + kind discriminate
--- the shape. All capture writers UPSERT on (org_id, dedup_key) so the same
--- logical object is one row. Replaces the never-written run_artifacts
--- placeholder. team_id is denormalized from the run so reads scope by team
--- exactly like runs; conversation_id is nullable (ON DELETE SET NULL) so a row
--- survives a run purge for audit. state is per-kind lifecycle (domain
--- consts, no CHECK — extensible).
+-- artifacts (TFAC-455): the single durable, conversation-attributed,
+-- polymorphic record of everything a conversation produces in an external
+-- system (a pushed branch, a draft/open PR, a draft/submitted review, a
+-- Jira/Linear issue, a comment). One row per external object; provider +
+-- kind discriminate the shape. All capture writers UPSERT on
+-- (org_id, dedup_key) so the same logical object is one row. team_id is
+-- denormalized from the conversation so reads scope by team exactly like
+-- conversations; conversation_id is nullable (ON DELETE SET NULL) so a row
+-- survives a conversation purge for audit. state is per-kind lifecycle
+-- (domain consts, no CHECK — extensible).
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -1262,6 +1345,13 @@ CREATE TABLE public.messages (
     -- window. messages is the money/token ledger; conversations and claims
     -- carry no dollar or token caches.
     cost_usd real,
+    -- stop_reason is why the provider stopped generating THIS turn, in its
+    -- own spelling ('end_turn' / 'max_tokens' / 'tool_use' / 'refusal' / …).
+    -- Assistant rows only; NULL = not an assistant row, or a stream that
+    -- reported none. Both runtimes populate it — the SDK parser from the
+    -- assistant event, the native loop from the completion's finish reason.
+    -- Observability, never an assembly input.
+    stop_reason text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     -- reasoning is an array of reasoning-detail objects mirroring bifrost's
     -- ChatReasoningDetails shape ({index, type, text?, signature?, data?}) —
@@ -1336,10 +1426,22 @@ ALTER SEQUENCE public.messages_id_seq OWNED BY public.messages.id;
 -- Name: conversation_worktrees; Type: TABLE; Schema: public; Owner: -
 --
 
+-- One row per (conversation, repository, ref): a worktree a run materialized.
+--
+-- repository_id was a slug despite the column's old name. It references the
+-- registry row now, so a rename moves nothing here. The agent-facing surface is
+-- unchanged — `tfac exec workspace add owner/repo` still takes a slug from
+-- argv, and the store resolves it.
+--
+-- No ON DELETE action on the repository FK, so deleting a registry row a run
+-- still names is refused rather than followed. A ledger entry records that a
+-- checkout happened and outlives the tracking decision that created it;
+-- cascading would leave the ledger with a hole in it, which is exactly the rot
+-- the reference was made checkable to prevent.
 CREATE TABLE public.conversation_worktrees (
     conversation_id uuid NOT NULL,
     org_id uuid NOT NULL,
-    repo_id text NOT NULL,
+    repository_id uuid NOT NULL,
     path text NOT NULL,
     ref text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL
@@ -1415,8 +1517,8 @@ CREATE TABLE public.conversations (
     -- nothing else touches it.
     status text,
     model text,
-    -- sdk_session_id is the SDK-runtime resume handle — the union of the
-    -- former runs.session_id and projects.curator_session_id. Meaningless
+    -- sdk_session_id is the SDK-runtime resume handle, one column for every
+    -- conversation type (delegated and curator turns alike). Meaningless
     -- (and left NULL) under runtime='native', where the message rows are
     -- the resume state.
     sdk_session_id text,
@@ -1425,10 +1527,20 @@ CREATE TABLE public.conversations (
     outcome text,
     outcome_reason text,
     -- failure_kind is the machine-readable discriminator for WHY status
-    -- reached 'failed' (domain.RunFailureKind: memory_limit / crash /
-    -- no_result / agent_error). App-validated; NULL = no classification.
+    -- reached 'failed' — the domain.RunFailureKind vocabulary (memory_limit,
+    -- crash, executor_lost, …). App-validated; NULL = no classification.
     failure_kind text,
-    stop_reason text,
+    -- park_reason is WHY the conversation was parked `open` — the closed
+    -- domain.ParkReason vocabulary (idle, user_cancelled, blueprint_terminal,
+    -- …). App-validated; NULL = never parked, or resumed since. The MODEL's
+    -- stop reason is a per-turn fact and lives on messages.stop_reason.
+    --
+    -- Neither list above is exhaustive, deliberately: the Go set is the
+    -- authority and a comment is the one mirror no test can pin. Copying the
+    -- members here makes a second source that silently falls behind — which
+    -- is not hypothetical, it is what happened to failure_kind, which listed
+    -- four of its six values until this line was written.
+    park_reason text,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
     -- parked_at is stamped when a delegation conversation enters the `open`
@@ -1467,7 +1579,7 @@ CREATE TABLE public.conversations (
     CONSTRAINT conversations_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
     CONSTRAINT conversations_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text]))),
     -- A 'blueprint'-origin conversation carries its full parentage
-    -- (blueprint_run + task + prompt), preserving the runs-era invariant.
+    -- (blueprint_run + task + prompt).
     CONSTRAINT conversations_origin_requires_parents CHECK (((origin = 'blueprint'::text AND blueprint_run_id IS NOT NULL AND task_id IS NOT NULL AND prompt_id IS NOT NULL) OR (origin <> 'blueprint'::text)))
 );
 
@@ -1644,6 +1756,9 @@ CREATE TABLE public.team_settings (
     -- wanting review-before-run turn it off.
     default_model text DEFAULT 'sonnet'::text NOT NULL,
     auto_delegate_enabled boolean DEFAULT true NOT NULL,
+    -- Claude Code SDK permission posture. Multi-mode SDK runs always use auto;
+    -- local mode honors this team setting, and native runs ignore it.
+    auto_mode_enabled boolean DEFAULT true NOT NULL,
     -- Per-team daily LLM spend cap (TFAC-482, EE/governance-gated). NULL = no cap;
     -- the app layer also treats 0 as "no cap". When the team's spend for the
     -- current UTC calendar day (summed over its team_id rows ONLY — system
@@ -1716,7 +1831,7 @@ CREATE TABLE public.teams (
     -- Request-facing team reads filter deleted_at IS NULL (the team vanishes
     -- from selectors); the ...System reads omit the filter so the archive /
     -- restore / preview paths + in-flight reaping still resolve it. The team's
-    -- durable work (tasks, runs, memory) is never hard-deleted.
+    -- durable work (tasks, conversations, memory) is never hard-deleted.
     deleted_at timestamp with time zone,
     -- shipped_defaults_backfilled_at is the durable per-team marker that the
     -- one-time grandfather backfill preceding the boot-time shipped-defaults
@@ -1778,10 +1893,17 @@ CREATE TABLE public.users (
 -- without an authenticated round-trip to the host. Today's writers (pat,
 -- login_claim) always stamp it. An absent row is a durable, supported state
 -- (the NULL-degrades-gracefully contract).
+-- github_user_id is the account's numeric GitHub id, stored as text like every
+-- other GitHub-issued id in this schema. login is renameable; this is not, so
+-- the pair records who the user is as well as what they are currently called.
+-- Nullable: a row bound before this was captured keeps working off the login
+-- alone and fills the id in on the next capture.
 CREATE TABLE public.user_github_identities (
     user_id uuid NOT NULL,
     github_base_url text NOT NULL,
     login text NOT NULL,
+    github_user_id text,
+    email text,
     source text NOT NULL,
     verified_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -1988,7 +2110,7 @@ ALTER TABLE ONLY public.team_github_groups
 --
 
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_pkey PRIMARY KEY (team_id, owner, repo);
+    ADD CONSTRAINT team_github_repos_pkey PRIMARY KEY (team_id, repository_id);
 
 
 --
@@ -2117,19 +2239,31 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_org_id_owner_repo_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: project_pinned_repos project_pinned_repos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_org_id_owner_repo_key UNIQUE (org_id, owner, repo);
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_pkey PRIMARY KEY (project_id, repository_id);
 
 
 --
--- Name: repo_profiles repo_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: repositories repositories_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_pkey PRIMARY KEY (id);
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: repositories repositories_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Redundant on its own — id alone is already unique — and present so that
+-- team_github_repos can reference (repository_id, org_id) as a composite
+-- foreign key. Postgres requires a unique constraint over exactly the
+-- referenced columns; this is that requirement, not a second identity.
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_id_org_id_key UNIQUE (id, org_id);
 
 
 --
@@ -2173,11 +2307,11 @@ ALTER TABLE ONLY public.conversation_memory
 
 
 --
--- Name: conversation_memory conversation_memory_run_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_conversation_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory
-    ADD CONSTRAINT conversation_memory_run_id_key UNIQUE (conversation_id);
+    ADD CONSTRAINT conversation_memory_conversation_id_key UNIQUE (conversation_id);
 
 
 --
@@ -2201,7 +2335,7 @@ ALTER TABLE ONLY public.messages
 --
 
 ALTER TABLE ONLY public.conversation_worktrees
-    ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repo_id, ref);
+    ADD CONSTRAINT conversation_worktrees_pkey PRIMARY KEY (conversation_id, repository_id, ref);
 
 
 --
@@ -2301,6 +2435,22 @@ ALTER TABLE ONLY public.teams
 
 
 --
+-- Name: teams teams_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+-- Same rationale as repositories_id_org_id_key: a composite-FK target, not a
+-- second identity for a team. Two tables reference it — team_github_repos for
+-- the tracking row's team half, org_invites for an invite's target team — and
+-- it is declared here so it precedes both.
+--
+-- This is the schema's established shape for "these two rows must belong to
+-- the same tenant": agents, entities, conversations, tasks and blueprint_runs
+-- all pair an (id, org_id) unique constraint with a composite foreign key.
+ALTER TABLE ONLY public.teams
+    ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
+
+
+--
 -- Name: user_github_identities user_github_identities_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2356,6 +2506,17 @@ CREATE INDEX agents_org_idx ON public.agents USING btree (org_id);
 --
 
 CREATE INDEX idx_entities_closed_at ON public.entities USING btree (closed_at) WHERE (closed_at IS NOT NULL);
+
+
+--
+-- Name: idx_entities_github_author; Type: INDEX; Schema: public; Owner: -
+--
+-- Serves the dashboard PR list's author predicate. That read used to select
+-- every GitHub entity in the org and drop the non-matches in Go, so its cost
+-- scaled with the org's whole PR history rather than with the caller's own
+-- PRs. The index expression and the partial predicate both match the query's.
+
+CREATE INDEX idx_entities_github_author ON public.entities USING btree (org_id, ((snapshot_json ->> 'author'::text)), last_polled_at DESC) WHERE ((source = 'github'::text) AND (snapshot_json IS NOT NULL));
 
 
 --
@@ -2479,10 +2640,42 @@ CREATE INDEX idx_pending_firings_entity_pending ON public.pending_firings USING 
 
 
 --
--- Name: idx_repo_profiles_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_repo_profiles_org_owner_repo ON public.repo_profiles USING btree (org_id, owner, repo);
+-- The repository natural key. It includes source because two providers may
+-- issue the same owner/repo spelling and those are different repositories, and
+-- it folds case because GitHub identifiers are case-insensitive, so "one
+-- repository" has always meant one row per folded slug. A key that did not fold
+-- would leave that invariant to the writers, and a writer is exactly what
+-- fails: an INSERT guarded by a case-insensitive NOT EXISTS over a
+-- case-sensitive index admits two rows whenever two transactions race, because
+-- neither sees the other's uncommitted row and their keys then differ. Here the
+-- second writer conflicts instead — blocking on the first while it is in
+-- flight — so the create path needs no lock of its own.
+--
+-- An expression key has to be an index rather than a UNIQUE constraint; the
+-- store infers it by expression list in ON CONFLICT.
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
+
+
+--
+-- Name: idx_repositories_org_owner_repo; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Kept alongside the folded key: it serves the ordered org-wide list
+-- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
+CREATE INDEX idx_repositories_org_owner_repo ON public.repositories USING btree (org_id, owner, repo);
+
+
+--
+-- Name: project_pinned_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+-- The reverse lookup, "which projects pin this repository". The primary key
+-- leads with project_id and cannot serve it; the FK's own delete-time check
+-- reads it, as does any future "what would untracking break" report.
+CREATE INDEX project_pinned_repos_repository_idx ON public.project_pinned_repos USING btree (repository_id);
 
 
 --
@@ -2548,10 +2741,10 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 
 
 --
--- Name: idx_external_actions_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_external_actions_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_external_actions_run ON public.external_actions USING btree (conversation_id);
+CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
 --
@@ -2579,10 +2772,10 @@ CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, 
 
 
 --
--- Name: idx_artifacts_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_artifacts_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_artifacts_run ON public.artifacts USING btree (conversation_id);
+CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
 
 
 --
@@ -2600,10 +2793,10 @@ CREATE INDEX idx_conversation_memory_entity_blueprint ON public.conversation_mem
 
 
 --
--- Name: idx_conversation_memory_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_memory_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_conversation_memory_run ON public.conversation_memory USING btree (conversation_id);
+CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
 
 
 --
@@ -2640,10 +2833,10 @@ CREATE INDEX idx_messages_user ON public.messages USING btree (user_id) WHERE (u
 
 
 --
--- Name: idx_conversation_worktrees_run; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_conversation_worktrees_conversation; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_conversation_worktrees_run ON public.conversation_worktrees USING btree (conversation_id);
+CREATE INDEX idx_conversation_worktrees_conversation ON public.conversation_worktrees USING btree (conversation_id);
 
 
 --
@@ -2776,9 +2969,10 @@ CREATE INDEX idx_conversations_parent ON public.conversations USING btree (paren
 -- Name: conversations_event_trigger_fence; Type: INDEX; Schema: public; Owner: -
 --
 -- Fired-fence: one event firing one trigger materializes at most
--- one run. Partial WHERE triggering_event_id IS NOT NULL so manual and
--- blueprint-step runs (NULL) never participate — multiple manual runs of one
--- task stay allowed, and two distinct event instances still fire independently.
+-- one conversation. Partial WHERE triggering_event_id IS NOT NULL so manual
+-- and blueprint-step conversations (NULL) never participate — multiple
+-- manual conversations on one task stay allowed, and two distinct event
+-- instances still fire independently.
 
 CREATE UNIQUE INDEX conversations_event_trigger_fence ON public.conversations USING btree (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
 
@@ -2812,20 +3006,33 @@ CREATE INDEX team_agents_team_idx ON public.team_agents USING btree (team_id);
 
 
 --
--- Name: team_github_repos_lower_owner_repo_idx; Type: INDEX; Schema: public; Owner: -
+-- Name: team_github_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
 --
 
--- Functional index backing the factory belt's tracked-repo semi-join
--- (TFAC-516, factoryGitHubRepoTrackedExists). The belt matches a GitHub
--- entity's repo against the tracked set by lower(owner)/lower(repo) across
--- *all* of the viewer's teams, not a single team_id, so the (team_id, owner,
--- repo) primary key can't serve the lookup (team_id isn't pinned). Without
--- this index that EXISTS scans the org's tracked repos per entity row — fine
--- for the old ever-tasked population, but the belt is intentionally larger
--- now. owner/repo lead (equality-filtered); team_id trails so the teams
--- join + RLS membership check read it straight from the index. lower() on
--- both axes mirrors TracksRepoSystem's case-insensitive match.
-CREATE INDEX team_github_repos_lower_owner_repo_idx ON public.team_github_repos USING btree (lower(owner), lower(repo), team_id);
+-- The reverse lookup, "which teams track this repository", which is the
+-- direction every tracked-set semi-join reads: the factory belt
+-- (factoryGitHubRepoTrackedExists), the repo list's team scoping
+-- (repoProfileTrackedByViewerTeams), and the per-repo gates
+-- (TracksRepoViewerScoped / TracksRepoViewerAdminScoped). The primary key
+-- leads with team_id and cannot serve them — none of them pins a team. Those
+-- semi-joins reach a repository by id now, so this replaces the functional
+-- (lower(owner), lower(repo), team_id) index the slug columns needed: the
+-- case-folding moved to the registry's own identity index, where one
+-- repository is one row however it is spelled.
+CREATE INDEX team_github_repos_repository_idx ON public.team_github_repos USING btree (repository_id, team_id);
+
+
+--
+-- Name: user_github_identities_login_lookup_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+-- Serves the reverse (host, login) → user lookup the routing subscribers run.
+-- lower(login) because GitHub logins are case-insensitive while the writers
+-- persist them as captured, so a verbatim compare silently misses on
+-- capitalisation — the same reason user_identities_link_lookup_idx keys on
+-- lower(email). github_base_url leads: identity is host-scoped, so every
+-- lookup pins it.
+CREATE INDEX user_github_identities_login_lookup_idx ON public.user_github_identities USING btree (github_base_url, lower(login));
 
 
 --
@@ -2906,10 +3113,10 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.prompts FOR EACH ROW EXECU
 
 
 --
--- Name: repo_profiles set_updated_at; Type: TRIGGER; Schema: public; Owner: -
+-- Name: repositories set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.repo_profiles FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.repositories FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 --
@@ -3120,8 +3327,24 @@ ALTER TABLE ONLY public.team_github_groups
 -- Name: team_github_repos team_github_repos_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
+-- Both references carry org_id, so a tracking row cannot straddle two tenants:
+-- the team half and the repository half must agree on the org, or neither
+-- parent row exists to reference. This replaces a pair of single-column keys
+-- that checked existence and said nothing about tenancy.
+--
+-- No ON UPDATE clause on either: moving a team or a repository between orgs
+-- would drag its tracking rows across the tenant boundary, so refusing (the
+-- default) is the wanted behaviour. Nothing writes those columns.
 ALTER TABLE ONLY public.team_github_repos
-    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+    ADD CONSTRAINT team_github_repos_team_id_fkey FOREIGN KEY (team_id, org_id) REFERENCES public.teams(id, org_id) ON DELETE CASCADE;
+
+
+--
+-- Name: team_github_repos team_github_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.team_github_repos
+    ADD CONSTRAINT team_github_repos_repository_id_fkey FOREIGN KEY (repository_id, org_id) REFERENCES public.repositories(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3237,11 +3460,11 @@ ALTER TABLE ONLY public.project_knowledge
 
 
 --
--- Name: project_knowledge project_knowledge_last_updated_by_run_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: project_knowledge project_knowledge_last_updated_by_conversation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_last_updated_by_run_fkey FOREIGN KEY (last_updated_by_run, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
+    ADD CONSTRAINT project_knowledge_last_updated_by_conversation_fkey FOREIGN KEY (last_updated_by_conversation, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
 
 
 --
@@ -3315,11 +3538,27 @@ ALTER TABLE ONLY public.prompts
 
 
 --
--- Name: repo_profiles repo_profiles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: project_pinned_repos project_pinned_repos_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
-ALTER TABLE ONLY public.repo_profiles
-    ADD CONSTRAINT repo_profiles_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
+
+
+--
+-- Name: project_pinned_repos project_pinned_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.project_pinned_repos
+    ADD CONSTRAINT project_pinned_repos_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id) ON DELETE CASCADE;
+
+
+--
+-- Name: repositories repositories_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.repositories
+    ADD CONSTRAINT repositories_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
 
 --
@@ -3346,8 +3585,9 @@ ALTER TABLE ONLY public.access_change_log
 -- Name: external_actions external_actions_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
--- org_id CASCADE (drop an org's log with the org); conversation_id SET NULL (the action
--- outlives a purged run for the audit trail, like artifacts). team_id and
+-- org_id CASCADE (drop an org's log with the org); conversation_id SET NULL
+-- (the action outlives a purged conversation for the audit trail, like
+-- artifacts). team_id and
 -- actor_user_id are deliberately FK-free so the audit row outlives the team/user
 -- it references — an audit log must outlive its subjects (same rule as
 -- access_change_log).
@@ -3356,11 +3596,11 @@ ALTER TABLE ONLY public.external_actions
 
 
 --
--- Name: external_actions external_actions_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: external_actions external_actions_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.external_actions
-    ADD CONSTRAINT external_actions_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+    ADD CONSTRAINT external_actions_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3372,15 +3612,16 @@ ALTER TABLE ONLY public.artifacts
 
 
 --
--- Name: artifacts artifacts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: artifacts artifacts_conversation_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
--- Single-column ref to runs(id) with ON DELETE SET NULL: the artifact
--- outlives a purged run for the audit ledger. A composite (conversation_id, org_id)
--- ref like the other run children can't SET NULL here because org_id is
--- NOT NULL — and the artifact's own org_id_fkey already pins the org.
+-- Single-column ref to conversations(id) with ON DELETE SET NULL: the
+-- artifact outlives a purged conversation for the audit ledger. A composite
+-- (conversation_id, org_id) ref like the other conversation children can't
+-- SET NULL here because org_id is NOT NULL — and the artifact's own
+-- org_id_fkey already pins the org.
 ALTER TABLE ONLY public.artifacts
-    ADD CONSTRAINT artifacts_run_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
+    ADD CONSTRAINT artifacts_conversation_id_fkey FOREIGN KEY (conversation_id) REFERENCES public.conversations(id) ON DELETE SET NULL;
 
 
 --
@@ -3408,11 +3649,11 @@ ALTER TABLE ONLY public.conversation_memory
 
 
 --
--- Name: conversation_memory conversation_memory_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory conversation_memory_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory
-    ADD CONSTRAINT conversation_memory_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_memory_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3432,11 +3673,11 @@ ALTER TABLE ONLY public.conversation_memory_entities
 
 
 --
--- Name: conversation_memory_entities conversation_memory_entities_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_memory_entities conversation_memory_entities_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_memory_entities
-    ADD CONSTRAINT conversation_memory_entities_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_memory_entities_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3467,11 +3708,19 @@ ALTER TABLE ONLY public.conversation_worktrees
 
 
 --
--- Name: conversation_worktrees conversation_worktrees_run_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+-- Name: conversation_worktrees conversation_worktrees_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_worktrees
-    ADD CONSTRAINT conversation_worktrees_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_worktrees_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id);
+
+
+--
+-- Name: conversation_worktrees conversation_worktrees_conversation_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.conversation_worktrees
+    ADD CONSTRAINT conversation_worktrees_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
 
 --
@@ -3539,8 +3788,9 @@ ALTER TABLE ONLY public.conversations
 -- Name: conversations conversations_triggering_event_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 -- Composite FK mirrors pending_firings.triggering_event_id. NULL
--- triggering_event_id (manual / blueprint-step runs) skips the check under
--- MATCH SIMPLE, so only event-fired runs are tied to a real event row.
+-- triggering_event_id (manual / blueprint-step conversations) skips the
+-- check under MATCH SIMPLE, so only event-fired conversations are tied to a
+-- real event row.
 
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
@@ -4262,16 +4512,38 @@ CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.c
 
 
 --
--- Name: repo_profiles; Type: ROW SECURITY; Schema: public; Owner: -
+-- Name: project_pinned_repos; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
-ALTER TABLE public.repo_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.project_pinned_repos ENABLE ROW LEVEL SECURITY;
 
 --
--- Name: repo_profiles repo_profiles_all; Type: POLICY; Schema: public; Owner: -
+-- Name: project_pinned_repos project_pinned_repos_all; Type: POLICY; Schema: public; Owner: -
 --
 
-CREATE POLICY repo_profiles_all ON public.repo_profiles USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+-- Visibility rides the parent project, the same EXISTS shape
+-- conversation_worktrees_all uses for its parent conversation: the projects
+-- policies already encode private/team/org visibility per operation, so
+-- restating them here would be a second copy to keep in step. A pin is
+-- readable and writable exactly when the project it belongs to is.
+CREATE POLICY project_pinned_repos_all ON public.project_pinned_repos USING ((EXISTS ( SELECT 1
+   FROM public.projects p
+  WHERE (p.id = project_pinned_repos.project_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM public.projects p
+  WHERE (p.id = project_pinned_repos.project_id))));
+
+
+--
+-- Name: repositories; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.repositories ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: repositories repositories_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY repositories_all ON public.repositories USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
 
 
 --
@@ -4284,7 +4556,7 @@ ALTER TABLE public.system_llm_runs ENABLE ROW LEVEL SECURITY;
 -- Name: system_llm_runs system_llm_runs_all; Type: POLICY; Schema: public; Owner: -
 --
 
--- Mirrors repo_profiles_all: org-scoped read/write under the app pool.
+-- Mirrors repositories_all: org-scoped read/write under the app pool.
 -- The table is system-written via the admin pool (BYPASSRLS), so in
 -- practice only the org-scoped SELECT side is exercised by tf_app; the
 -- WITH CHECK is retained for symmetry with the rest of the schema.
@@ -4342,11 +4614,12 @@ CREATE POLICY external_actions_all ON public.external_actions USING (((org_id = 
 
 ALTER TABLE public.artifacts ENABLE ROW LEVEL SECURITY;
 
--- artifacts mirror the runs team-visibility branch: team-scoped read via
--- team_id, the same write pool/scope runs use. artifacts carry no
+-- artifacts mirror the conversations team-visibility branch: team-scoped read
+-- via team_id, the same write pool/scope conversations use. artifacts carry no
 -- private/org visibility (no visibility / creator_user_id columns), so the
--- policies are the team predicates from runs, swapped onto this table —
--- user_in_team for SELECT, user_can_write_team for INSERT/UPDATE/DELETE.
+-- policies are the team predicates from conversations, swapped onto this
+-- table — user_in_team for SELECT, user_can_write_team for
+-- INSERT/UPDATE/DELETE.
 
 --
 -- Name: artifacts artifacts_delete; Type: POLICY; Schema: public; Owner: -
@@ -4801,16 +5074,16 @@ GRANT USAGE ON SCHEMA tf TO tf_app;
 
 
 --
--- Name: FUNCTION update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid); Type: ACL; Schema: public; Owner: -
+-- Name: FUNCTION update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid); Type: ACL; Schema: public; Owner: -
 --
 
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM PUBLIC;
 -- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
 -- functions to anon/authenticated/service_role at CREATE time. Strip them —
 -- only tf_app should call this OCC helper.
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) TO postgres;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_run uuid) TO tf_app;
+REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM anon, authenticated, service_role;
+GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO postgres;
+GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO tf_app;
 
 
 --
@@ -4843,14 +5116,6 @@ GRANT ALL ON FUNCTION tf.team_in_current_org(target_team uuid) TO tf_app;
 
 REVOKE ALL ON FUNCTION tf.user_has_org_access(target_org uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION tf.user_has_org_access(target_org uuid) TO tf_app;
-
-
---
--- Name: FUNCTION org_tracked_repos(p_org_id uuid); Type: ACL; Schema: tf; Owner: -
---
-
-REVOKE ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) FROM PUBLIC;
-GRANT ALL ON FUNCTION tf.org_tracked_repos(p_org_id uuid) TO tf_app;
 
 
 --
@@ -5129,14 +5394,25 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.prompts TO tf_app;
 
 
 --
--- Name: TABLE repo_profiles; Type: ACL; Schema: public; Owner: -
+-- Name: TABLE project_pinned_repos; Type: ACL; Schema: public; Owner: -
 --
 
-GRANT ALL ON TABLE public.repo_profiles TO postgres;
-GRANT ALL ON TABLE public.repo_profiles TO anon;
-GRANT ALL ON TABLE public.repo_profiles TO authenticated;
-GRANT ALL ON TABLE public.repo_profiles TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repo_profiles TO tf_app;
+GRANT ALL ON TABLE public.project_pinned_repos TO postgres;
+GRANT ALL ON TABLE public.project_pinned_repos TO anon;
+GRANT ALL ON TABLE public.project_pinned_repos TO authenticated;
+GRANT ALL ON TABLE public.project_pinned_repos TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.project_pinned_repos TO tf_app;
+
+
+--
+-- Name: TABLE repositories; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.repositories TO postgres;
+GRANT ALL ON TABLE public.repositories TO anon;
+GRANT ALL ON TABLE public.repositories TO authenticated;
+GRANT ALL ON TABLE public.repositories TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.repositories TO tf_app;
 
 
 --
@@ -5489,8 +5765,8 @@ ALTER DEFAULT PRIVILEGES FOR ROLE supabase_admin IN SCHEMA public GRANT ALL ON T
 --
 -- blueprint_steps is the ordered step list; blueprint_runs is the in-flight
 -- instance for a multi-step blueprint (sharing one worktree, each step's
--- terminal runs.outcome driving advancement). Per-step runtime state stays
--- on runs (linked via runs.blueprint_run_id);
+-- terminal conversations.outcome driving advancement). Per-step runtime
+-- state stays on conversations (linked via conversations.blueprint_run_id);
 -- blueprint-wide abort/complete state lives on blueprint_runs.
 --
 -- Multi-tenant pattern matches the rest of the baseline: composite FKs
@@ -5588,23 +5864,24 @@ CREATE TABLE public.blueprint_runs (
     -- (system-emitted by the router via the admin pool); manual
     -- runs carry the human delegator. The matching
     -- blueprint_runs_creator_matches_trigger_type CHECK below pairs the
-    -- two so the seeder can't drift. Mirrors the runs table's
-    -- runs_creator_matches_trigger_type pattern.
+    -- two so the seeder can't drift. Mirrors the conversations table's
+    -- conversations_creator_matches_trigger_type pattern.
     creator_user_id uuid,
     blueprint_id text NOT NULL,
     task_id uuid NOT NULL,
     trigger_type text NOT NULL,
     trigger_id uuid,
     -- triggering_event_id is the event instance that auto-fired this blueprint
-    -- run (NULL for manual). The blueprint_run is the firing unit, so the replay
-    -- fence (blueprint_runs_event_trigger_fence below) lives here, relocated off
-    -- runs. Step runs are not separately fenced (orchestrator-internal).
+    -- run (NULL for manual). The blueprint_run is the firing unit, so the
+    -- replay fence (blueprint_runs_event_trigger_fence below) lives here —
+    -- step conversations are not separately fenced (orchestrator-internal).
     triggering_event_id uuid,
     -- actor_agent_id is the bot that executes this blueprint run, resolved once
     -- at the delegation entry point and frozen here at mint (alongside
-    -- creator_user_id / trigger_id — the "who/why" provenance axes). Every step
-    -- run inherits it onto runs.actor_agent_id, so the execution attribution is
-    -- stable across all steps and immune to a later task-claim change (a user
+    -- creator_user_id / trigger_id — the "who/why" provenance axes). Every
+    -- step conversation inherits it onto conversations.actor_agent_id, so the
+    -- execution attribution is stable across all steps and immune to a later
+    -- task-claim change (a user
     -- takeover clears tasks.claimed_by_agent_id but does not rewrite who ran the
     -- bot's steps). Nullable: a run minted before the org agent bootstrapped, or
     -- whose agent row was later deleted (ON DELETE SET NULL), carries no actor.
@@ -5635,12 +5912,6 @@ CREATE TABLE public.blueprint_runs (
     worktree_path text NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     completed_at timestamp with time zone,
-    -- entity_id denormalizes task_id's entity, backfilled from tasks at
-    -- insert time. It keys no constraint — it is the cheap entity lens for
-    -- reads that want "which PR was this run about" without joining back
-    -- through tasks. Nullable: manual runs (trigger_type='manual') never
-    -- populate it.
-    entity_id uuid,
     CONSTRAINT blueprint_runs_status_check CHECK ((status = ANY (ARRAY['running'::text, 'completed'::text, 'aborted'::text, 'failed'::text, 'cancelled'::text]))),
     CONSTRAINT blueprint_runs_creator_matches_trigger_type CHECK ((((trigger_type = 'manual'::text) AND (creator_user_id IS NOT NULL)) OR ((trigger_type = 'event'::text) AND (creator_user_id IS NULL))))
 );
@@ -5692,7 +5963,7 @@ CREATE INDEX idx_conversations_queued_preferred ON public.conversations (preferr
 -- idx_claims_one_active (partial on released_at IS NULL, bounded by fleet
 -- capacity) — there is no conversation-side status to index for it any more.
 -- idx_conversations_org_status still covers the org-scoped outcome reads.
--- Replay fence (relocated from runs): one event firing one trigger materializes
+-- Replay fence: one event firing one trigger materializes
 -- at most one blueprint_run. Partial WHERE triggering_event_id IS NOT NULL so
 -- manual blueprint runs (NULL) never participate.
 CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs (triggering_event_id, trigger_id) WHERE (triggering_event_id IS NOT NULL);
@@ -5718,9 +5989,6 @@ CREATE UNIQUE INDEX blueprint_runs_event_trigger_fence ON public.blueprint_runs 
 -- CreateRunIfNotFiredSystem translates it to db.ErrTaskBusyActiveAutoRun so
 -- the caller queues the intent instead of dropping it as a replay.
 CREATE UNIQUE INDEX blueprint_runs_one_active_auto_run_per_task ON public.blueprint_runs (org_id, task_id) WHERE (trigger_type = 'event'::text AND status = 'running'::text);
-
-ALTER TABLE ONLY public.blueprint_runs
-    ADD CONSTRAINT blueprint_runs_entity_id_org_id_fkey FOREIGN KEY (entity_id, org_id) REFERENCES public.entities(id, org_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.blueprint_steps
     ADD CONSTRAINT blueprint_steps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -5748,9 +6016,9 @@ ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_task_fkey            FOREIGN KEY (task_id, org_id)         REFERENCES public.tasks(id, org_id);
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_trigger_fkey         FOREIGN KEY (trigger_id, org_id)      REFERENCES public.event_handlers(id, org_id);
--- Composite FK mirrors runs.triggering_event_id. NULL triggering_event_id
--- (manual blueprint runs) skips the check; org_id is pinned so a cross-org
--- event reference is impossible.
+-- Composite FK mirrors conversations.triggering_event_id. NULL
+-- triggering_event_id (manual blueprint runs) skips the check; org_id is
+-- pinned so a cross-org event reference is impossible.
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_triggering_event_id_org_id_fkey FOREIGN KEY (triggering_event_id, org_id) REFERENCES public.events(id, org_id);
 -- Composite (id, org_id) FK like conversations_actor_agent_fkey: the actor must belong to
@@ -5759,10 +6027,10 @@ ALTER TABLE ONLY public.blueprint_runs
 ALTER TABLE ONLY public.blueprint_runs
     ADD CONSTRAINT blueprint_runs_actor_agent_fkey FOREIGN KEY (actor_agent_id, org_id) REFERENCES public.agents(id, org_id) ON DELETE SET NULL;
 
--- fired_run_id records the blueprint_run a firing produced (the firing unit is
--- the blueprint_run now), so it references blueprint_runs, not runs — the
--- spawner returns the blueprint_run id synchronously at fire time, before any
--- step run row exists. Must live after blueprint_runs is created.
+-- fired_run_id records the blueprint_run a firing produced (the firing unit
+-- is the blueprint_run), so it references blueprint_runs — the spawner
+-- returns the blueprint_run id synchronously at fire time, before any step
+-- conversation row exists. Must live after blueprint_runs is created.
 ALTER TABLE ONLY public.pending_firings
     ADD CONSTRAINT pending_firings_fired_run_id_org_id_fkey FOREIGN KEY (fired_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id);
 
@@ -5804,7 +6072,7 @@ CREATE POLICY blueprint_steps_all ON public.blueprint_steps FOR ALL
 -- event-triggered runs. The blueprint_runs_creator_matches_trigger_type CHECK
 -- pairs trigger_type with creator nullability: trigger_type='event' rows have
 -- creator_user_id NULL (system-emitted via the admin pool by the router /
--- spawner). Per-command split mirrors the runs table.
+-- spawner). Per-command split mirrors the conversations table.
 CREATE POLICY blueprint_runs_select ON public.blueprint_runs FOR SELECT
   USING ((org_id = tf.current_org_id())
          AND tf.user_has_org_access(org_id)
@@ -5913,17 +6181,92 @@ CREATE POLICY org_github_apps_delete ON public.org_github_apps FOR DELETE TO tf_
 -- GHES bases mean two orgs can sit on independent GitHub instances whose
 -- numeric installation IDs overlap, so the PK is composite (org_id,
 -- installation_id): a webhook/backfill for one org can never collide with
--- or rewrite another org's row.
+-- or rewrite another org's row. github_host below records WHICH GitHub each
+-- row came from, so that assumption is checkable from the row instead of
+-- through a join to the owning org's settings.
+-- account_id is GitHub's numeric id for the installed-on account, stored as
+-- text like every other GitHub-issued id in this schema (entities.source_id,
+-- installation_id above). It is the half of the account's identity a rename
+-- does not change, so credential resolution matches on it and account_login
+-- is left to be what it is good at: the handle the UI renders. Nullable —
+-- a row mirrored before this was captured carries NULL and resolves by login
+-- exactly as it did; the next reconcile or webhook that names the account
+-- fills it in.
 CREATE TABLE public.org_github_app_installations (
     installation_id text NOT NULL,
     org_id uuid NOT NULL,
     account_type text NOT NULL,
+    account_id text,
     account_login text NOT NULL,
+    -- The GitHub deployment this installation lives on, normalized the way
+    -- every other GitHub host key in this schema is (EffectiveGitHubHost, what
+    -- user_github_identities.github_base_url stores): trailing slashes
+    -- trimmed, an unconfigured base URL resolving to https://github.com, and
+    -- any path component KEPT — a bare-origin derivation would strip a GHES
+    -- mount path and key a different host than the identity rows for that same
+    -- GitHub. The DEFAULT is that rule rather than a placeholder: an org that
+    -- configured no base URL is on github.com. The CHECK keeps the column from
+    -- degrading into the empty string, which is not a host anything can be
+    -- compared against.
+    github_host text DEFAULT 'https://github.com'::text NOT NULL,
     installed_at timestamp with time zone DEFAULT now() NOT NULL,
     removed_at timestamp with time zone,
+    -- Suspension. An account owner can suspend an installation without
+    -- uninstalling it: the grant stays, every token minted from it is refused.
+    -- An installation is suspended iff suspended_at is non-NULL; suspended_by
+    -- is the suspending GitHub login (display provenance, never a join key).
+    -- Both are written by the installation webhook (suspend / unsuspend) and
+    -- by the /app/installations reconcile, which converges a deployment that
+    -- missed a delivery. Retained when the installation is later removed; a
+    -- re-install clears them alongside removed_at.
+    suspended_at timestamp with time zone,
+    suspended_by text,
+    -- Whether the grant is every repository on the account or an enumerated
+    -- selection. GitHub reports it on the installation object
+    -- (GET /app/installations and every installation webhook payload).
+    --
+    -- It is what says whether drift is even POSSIBLE for a given installation.
+    -- Without it the org page cannot distinguish "nothing is drifting" from
+    -- "drift is impossible here", and those need different copy: an 'all'
+    -- installation reaches everything the account owns, so a tracked repository
+    -- on that account can never sit outside the grant.
+    --
+    -- NULL means "not learned yet" — a row mirrored before the first reconcile
+    -- — never "no selection". The CHECK admits NULL for exactly that reason and
+    -- refuses anything outside GitHub's two values, so a typo cannot reach the
+    -- column and be read later as a third state.
+    repository_selection text,
     CONSTRAINT org_github_app_installations_account_type_check
-        CHECK ((account_type = ANY (ARRAY['Organization'::text, 'User'::text])))
+        CHECK ((account_type = ANY (ARRAY['Organization'::text, 'User'::text]))),
+    CONSTRAINT org_github_app_installations_github_host_check
+        CHECK ((github_host <> ''::text)),
+    CONSTRAINT org_github_app_installations_repository_selection_check
+        CHECK ((repository_selection IS NULL
+                OR repository_selection = ANY (ARRAY['all'::text, 'selected'::text])))
 );
+
+-- What github_host deliberately does NOT get is a
+-- UNIQUE (github_host, installation_id) index.
+--
+-- The policy it would enforce is real: an installation belongs to exactly one
+-- workspace per host. The grant is not divisible, `installation.deleted` fires
+-- once, the rate budget is shared, and the account owner cannot enumerate who
+-- rides their installation. What makes it unenforceable-by-index today is
+-- structural rather than caution — every workspace owns its own App key, so
+-- GET /app/installations under one org's key returns only that org's
+-- installations, and an upsert runs only for a delivery HMAC-verified against
+-- that org's own webhook secret. No write path exists by which one workspace
+-- claims another's installation id, and a row that somehow claimed one would
+-- be inert: the claiming org's App key cannot mint a token against an
+-- installation it does not own, so GitHub answers 404.
+--
+-- The index becomes load-bearing the moment a deployment-level App exists,
+-- because one PEM then lists every tenant's installations. It has to land
+-- there PAIRED with scoping that reconcile to installations the org actually
+-- bound — an advisory lock is not a substitute, because the failure to prevent
+-- is a background job attributing every tenant's installation to one org, and
+-- a lock orders writes rather than validating them.
+-- TODO(TFAC-802): ship the uniqueness index together with a scoped reconcile.
 
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, installation_id);
@@ -5975,6 +6318,325 @@ GRANT ALL ON TABLE public.org_github_app_installations TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_github_app_installations TO tf_app;
 
 
+-- The reachable-repo cache: one mirror of "which repositories can this org
+-- reach", populated by BOTH credential classes and read by every consumer —
+-- the repository picker, the team-repos write gate, and the two App-tier drift
+-- findings below.
+--
+-- The framing is the one the App-only grant mirror was built on and it is
+-- unchanged: the reachable set is a CACHE of an external fact, rebuilt in full
+-- per refresh, with no durable identity, surviving nothing. `repositories` is a
+-- REGISTRY of TF entities that worktrees, entities, clone state and a hand-set
+-- base_branch hang off. A reachable row is deliberately not a registry row —
+-- the cache contains repositories nobody tracks, and that is the entire content
+-- of the reach-without-purpose finding.
+--
+-- # Why the cache is not a column on repositories
+--
+-- The App-tier relationship really is 1:N — a repository belongs to one GitHub
+-- account, an account has at most one installation of a given App, and a
+-- workspace has exactly one App — so a nullable granted_installation_id on the
+-- repository row would be relationally correct. It is still wrong, for four
+-- reasons:
+--
+--  1. It changes what a repository row means. That table is the repositories TF
+--     works with; the cache deliberately contains repositories nobody tracks,
+--     which is the entire content of reach without purpose. Merging them makes
+--     an "all repositories" installation on a 3,000-repo org mint 3,000 rows
+--     that the profiler and every context loader then iterate.
+--  2. Two lifecycles, two owners, contradictory answers to "exists".
+--     Repository identity is TF-owned and durable — worktrees, entities, clone
+--     state and a hand-set base_branch hang off it. Reachability is
+--     GitHub-owned and ephemeral: revoked from a selective grant it must
+--     vanish, while the repository row must survive because a task may
+--     reference it.
+--  3. The never-empty invariant gets harder. As its own table that invariant is
+--     a scoped transaction over rows only the refresh writes. As a column it
+--     is a wide UPDATE nulling a field across a table five subsystems write.
+--  4. It re-introduces the provider-specific column the repository-identity
+--     work designed out: an installation id is a GitHub App concept, and GitLab
+--     has none.
+--
+-- # What both tiers being here buys
+--
+-- Two consumers were asking GitHub the same question live, differently, per
+-- credential class:
+--
+--   * the picker (POST /api/github/repos/list) proxied GET /user/repos on a PAT
+--     org and GET /installation/repositories on an App org. Because it was a
+--     proxy list it could not report a total — and it could not for two
+--     DIFFERENT reasons per tier, which is the tell that the shape was wrong.
+--     /user/repos returns a bare array with no count at all;
+--     /installation/repositories does return total_count, but one
+--     installation's, and the picker serves the union across all of them.
+--   * the team-repos write gate re-asked, and kept its own in-process,
+--     per-(org, user) map to avoid asking twice — a cache that died on restart
+--     and, in multi mode, lived on whichever pod happened to serve the picker
+--     rather than the one that later served the write.
+--
+-- A table answers both, identically on both tiers, and can COUNT(*).
+--
+-- The two App-tier findings this table was first built for are unchanged, and
+-- are still derivable from nothing else TF stores:
+--
+--   * reach without purpose — the App can reach a repository no team tracks,
+--     which means TF holds write access to code nobody asked it to touch;
+--   * scope drift — a team tracks a repository outside the grant, which means
+--     that repository is silently unpollable.
+--
+-- Both are security findings rather than cosmetics, and both read only the
+-- 'byo_app' rows: they are statements about an App's grant, and a PAT's reach
+-- is not a grant TF holds.
+CREATE TABLE public.reachable_repositories (
+    org_id uuid NOT NULL,
+    -- credential_class: which credential system observed this reach. It is part
+    -- of the key rather than a derived attribute because an org that switches
+    -- tiers has, for a moment, both answers on file, and serving the union of
+    -- them would be serving a reach the org no longer has. Every read filters on
+    -- the org's CURRENT class, so the other tier's rows are inert until their
+    -- next refresh replaces them.
+    credential_class text NOT NULL
+        CONSTRAINT reachable_repositories_class_check
+        CHECK (credential_class IN ('pat', 'byo_app')),
+    -- installation_id / host: the credential INSTANCE the reach was observed
+    -- through — the scope one refresh replaces atomically.
+    --
+    -- The App tier keeps the installation FK it always had, which is also how it
+    -- keeps inheriting host scoping (an installation id is unique per GitHub
+    -- deployment, and the installation row records which deployment that is) and
+    -- how an uninstall still takes the mirror with it.
+    --
+    -- The PAT tier has no installation row to hang off, so it carries the host
+    -- directly. That is not bookkeeping: an org that repoints GitHubBaseURL is
+    -- looking at a different deployment's repositories, and a mirror that did
+    -- not record which one it read would answer the new host with the old host's
+    -- set.
+    installation_id text,
+    host text,
+    -- source: the provider that issued this repository, carried so the join to
+    -- the registry is written against the same key the registry is keyed under
+    -- (org_id, source, lower(owner), lower(repo)) rather than against a literal.
+    -- Not part of this table's own key: every row here is reached through a
+    -- GitHub credential, so 'github' is the only value it can hold.
+    source text DEFAULT 'github'::text NOT NULL,
+    owner text NOT NULL,
+    repo text NOT NULL,
+    -- external_id: the provider's own repository id. It is what lets a cache
+    -- entry and a registry row be matched by id even when their slugs
+    -- momentarily disagree mid-rename. Nullable, and NULL is a supported state
+    -- rather than a gap to backfill: a row without an id is matched by slug
+    -- exactly as it would be anyway.
+    external_id text,
+    -- The picker's display fields, mirrored because the picker is now served
+    -- from here rather than proxied. Both enumerations return whole repository
+    -- objects, so recording them costs nothing beyond the width of the row, and
+    -- the alternative — a slug-only cache plus a live fetch to decorate it —
+    -- would put the upstream call back on the read this table exists to take it
+    -- off. Empty string rather than NULL throughout: these are display strings
+    -- with no meaningful absent state, and '' renders the same as a missing
+    -- field without every reader having to say so.
+    description text DEFAULT ''::text NOT NULL,
+    language text DEFAULT ''::text NOT NULL,
+    html_url text DEFAULT ''::text NOT NULL,
+    -- pushed_at: GitHub's own timestamp string, stored verbatim as text. It is
+    -- passed through to the client and never compared, sorted on, or arithmetic
+    -- done to here — parsing it into a real timestamp would be claiming a
+    -- precision this column does not need and inviting a NULL for the repos that
+    -- have never been pushed to.
+    pushed_at text DEFAULT ''::text NOT NULL,
+    private boolean DEFAULT false NOT NULL,
+    -- observed_at: when the refresh that wrote this row ran. Unlike the App-only
+    -- mirror this replaces, it IS a staleness gate here as well as display
+    -- provenance: the TTL that bounds how often a 3,000-repo account is
+    -- re-enumerated reads it, and so does the write gate deciding whether to
+    -- trust the cache or probe upstream. One refresh replaces a whole scope
+    -- atomically, so every row in one scope carries the same instant.
+    observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    -- Exactly one scope column per class, and it is the database that says so.
+    -- The two are alternatives, never both and never neither: a row with both
+    -- would have two answers to "what does one refresh replace", and a row with
+    -- neither could not be replaced at all.
+    CONSTRAINT reachable_repositories_scope_check
+        CHECK ((credential_class = 'byo_app' AND installation_id IS NOT NULL AND host IS NULL)
+            OR (credential_class = 'pat'     AND installation_id IS NULL     AND host IS NOT NULL))
+);
+
+ALTER TABLE ONLY public.reachable_repositories
+    ADD CONSTRAINT reachable_repositories_installation_fkey
+    FOREIGN KEY (org_id, installation_id)
+    REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
+
+-- The natural key, per class, folded. Folded for the reason repositories_identity
+-- states: GitHub identifiers are case-insensitive, so a case-sensitive index
+-- behind a case-insensitive guard admits duplicates whenever two writers race —
+-- neither sees the other's uncommitted row and their keys then differ. The
+-- database has to be the thing that refuses.
+--
+-- Two partial indexes rather than one over coalesce(installation_id, host): the
+-- scope columns are genuinely different columns with different nullability, and
+-- a coalesced key would silently collide an installation whose id equals another
+-- org's host string.
+CREATE UNIQUE INDEX reachable_repositories_app_identity
+    ON public.reachable_repositories USING btree (org_id, installation_id, lower(owner), lower(repo))
+    WHERE credential_class = 'byo_app';
+
+CREATE UNIQUE INDEX reachable_repositories_pat_identity
+    ON public.reachable_repositories USING btree (org_id, host, lower(owner), lower(repo))
+    WHERE credential_class = 'pat';
+
+-- The registry join, and the drift queries that run over it. Deliberately the
+-- same shape as repositories_identity — (org_id, source, lower(owner),
+-- lower(repo)) — so the two sides of "is this reachable repository tracked?" are
+-- keyed identically and either can drive the join.
+CREATE INDEX reachable_repositories_registry_join
+    ON public.reachable_repositories USING btree (org_id, source, lower(owner), lower(repo));
+
+-- The picker's own read: one org's current class, ordered by folded slug. The
+-- order is part of the index because offset paging over an unordered set drops
+-- and repeats rows, and the folded slug is a total order (the per-class unique
+-- index above proves no two rows tie on it).
+CREATE INDEX reachable_repositories_picker
+    ON public.reachable_repositories USING btree (org_id, credential_class, lower(owner), lower(repo));
+
+ALTER TABLE public.reachable_repositories ENABLE ROW LEVEL SECURITY;
+
+-- Same posture as the installation rows the App tier's half hangs off: the cache
+-- is GitHub-side state written exclusively by the refresh on the admin pool, so
+-- app-pool members read it and never write it. There is no user gesture that
+-- adds or removes a reachable entry — that happens on GitHub, and TF discovers
+-- it. The picker's force-refresh control is process control over the refresh
+-- pass, not a write to this table.
+CREATE POLICY reachable_repositories_select ON public.reachable_repositories FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY reachable_repositories_insert ON public.reachable_repositories FOR INSERT TO tf_app
+    WITH CHECK (false);
+
+CREATE POLICY reachable_repositories_update ON public.reachable_repositories FOR UPDATE TO tf_app
+    USING (false);
+
+CREATE POLICY reachable_repositories_delete ON public.reachable_repositories FOR DELETE TO tf_app
+    USING (false);
+
+GRANT ALL ON TABLE public.reachable_repositories TO postgres;
+GRANT ALL ON TABLE public.reachable_repositories TO anon;
+GRANT ALL ON TABLE public.reachable_repositories TO authenticated;
+GRANT ALL ON TABLE public.reachable_repositories TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_repositories TO tf_app;
+
+
+-- The refreshes themselves, one row per scope. Its whole job is to make "we have
+-- not looked yet" representable, because the repository rows cannot: a scope that
+-- genuinely reaches NOTHING writes zero of them, so row count alone reads a
+-- legitimately empty grant as an un-run refresh — the picker would say
+-- "discovering repositories…" forever and kick a refresh on every open, which is
+-- exactly the unbounded enumeration the TTL exists to prevent.
+--
+-- No FK, deliberately. The scope column holds an installation id for one class
+-- and a host for the other, so there is no single parent to point at; the two
+-- writers that retire an installation (the store's soft-removal, and the
+-- standalone clear) delete the matching row in the same transaction as the
+-- repository rows.
+--
+-- What it does NOT try to represent is a scope that has never been refreshed at
+-- all — a freshly-installed installation has no row here, so it does not drag the
+-- org's staleness back. That case is covered by the forced refresh every
+-- credential change fires, which is the mechanism for reach moving without a
+-- timestamp moving, and it is why nothing here has to enumerate the scopes it
+-- expects to see.
+--
+-- Same RLS posture as the repository rows it accompanies: app-pool members read
+-- it, every app-pool write is denied, because a refresh is not a user gesture.
+CREATE TABLE public.reachable_scopes (
+    org_id uuid NOT NULL,
+    credential_class text NOT NULL
+        CONSTRAINT reachable_scopes_class_check
+        CHECK (credential_class IN ('pat', 'byo_app')),
+    -- scope: the credential instance one refresh replaces — the installation id
+    -- for byo_app, the host for pat. Recorded as opaque text: this table records
+    -- THAT a scope was refreshed and when, and never joins on it.
+    scope text NOT NULL,
+    refreshed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+ALTER TABLE ONLY public.reachable_scopes
+    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, scope);
+
+ALTER TABLE public.reachable_scopes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY reachable_scopes_select ON public.reachable_scopes FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY reachable_scopes_insert ON public.reachable_scopes FOR INSERT TO tf_app
+    WITH CHECK (false);
+
+CREATE POLICY reachable_scopes_update ON public.reachable_scopes FOR UPDATE TO tf_app
+    USING (false);
+
+CREATE POLICY reachable_scopes_delete ON public.reachable_scopes FOR DELETE TO tf_app
+    USING (false);
+
+GRANT ALL ON TABLE public.reachable_scopes TO postgres;
+GRANT ALL ON TABLE public.reachable_scopes TO anon;
+GRANT ALL ON TABLE public.reachable_scopes TO authenticated;
+GRANT ALL ON TABLE public.reachable_scopes TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_scopes TO tf_app;
+
+
+-- GitHub webhook delivery dedup: github_webhook_deliveries. The receiver read
+-- X-GitHub-Delivery only to decorate the published event's metadata — never
+-- persisted, never checked — so a redelivered copy re-ran the installation
+-- upsert and re-published to the bus. GitHub does not auto-retry a failed
+-- delivery, but it does redeliver on demand (the Redeliver button; POST
+-- /app/hook/deliveries/{delivery_id}/attempts, 30-day window), which is exactly
+-- the recovery path an operator reaches for after an outage. A redelivery is
+-- ordinary traffic, not an anomaly.
+--
+-- Keyed (installation_id, delivery_id), NOT (org_id, delivery_id). The
+-- org-keyed form cannot be written before the tenant is known, and "before the
+-- tenant is known" is precisely the shape a shared-App receiver has — one
+-- static URL, one deployment secret, routing installation.id -> org_id and
+-- dropping an unmapped delivery before any side effect. The installation-keyed
+-- form costs nothing today and does not have to be re-keyed later. A delivery
+-- carrying no installation object (github_app_authorization, for one) keys on
+-- the delivery id alone and stores '' in this column: the empty string rather
+-- than NULL, because a NULL in a primary key defeats the uniqueness the table
+-- exists for.
+--
+-- Retention is 72h, pruned opportunistically on every insert — long past the
+-- burst of redeliveries that follows an outage, and deliberately short of
+-- GitHub's 30-day redelivery window. A copy redelivered a week later re-applies;
+-- that is an operator deliberately replaying one delivery, not the automatic
+-- retry this table absorbs.
+--
+-- Admin-pool-only / system table, same posture as slack_event_deliveries /
+-- poll_readiness: RLS enabled with NO policy (deny-by-default to non-BYPASSRLS
+-- roles) + REVOKE ALL from PUBLIC and the app roles. The receiver is pre-auth —
+-- it holds a trusted org_id from the URL path and no request claims for a
+-- policy to gate on — and there is no app-pool caller.
+CREATE TABLE public.github_webhook_deliveries (
+    installation_id text NOT NULL,
+    delivery_id     text NOT NULL,
+    received_at     timestamp with time zone NOT NULL DEFAULT now()
+);
+
+ALTER TABLE ONLY public.github_webhook_deliveries
+    ADD CONSTRAINT github_webhook_deliveries_pkey PRIMARY KEY (installation_id, delivery_id);
+
+-- The prune is the only query that doesn't go through the primary key. Unlike
+-- the Slack dedup table, this one sees every push / check_run / comment across
+-- every tracked repo, so a sequential scan per delivery is not a safe assumption
+-- to ship; with this index the usual "nothing to prune" case is a range probe
+-- that matches nothing.
+CREATE INDEX github_webhook_deliveries_received_at_idx
+    ON public.github_webhook_deliveries (received_at);
+
+ALTER TABLE public.github_webhook_deliveries ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.github_webhook_deliveries FROM PUBLIC;
+REVOKE ALL ON public.github_webhook_deliveries FROM anon, authenticated, service_role;
+
+
 --
 -- Durable router event queue. The in-memory bus drops events
 -- for slow subscribers under burst; the router — which persists event
@@ -6002,7 +6664,7 @@ CREATE TABLE public.event_queue (
     enqueued_at  timestamp with time zone NOT NULL DEFAULT now(),
     claimed_at   timestamp with time zone,
     processed_at timestamp with time zone,
-    -- executor_id / boot_epoch (TFAC-578) are runs.executor_id/boot_epoch's
+    -- executor_id / boot_epoch (TFAC-578) are claims.executor_id/boot_epoch's
     -- twins: stamped atomically at claim (pending -> processing) so
     -- ResetProcessing can self-sweep only its own instance's orphaned rows
     -- (executor_id = self AND boot_epoch < the current boot's epoch), never
@@ -6265,13 +6927,9 @@ ALTER TABLE public.team_settings ADD COLUMN permission_absent_autodeny_enabled b
 -- sha256(token) in token_hash. Redeem hashes the presented token and looks
 -- it up by that hash.
 
--- Tenant-scoped FK target for target_team_id below. teams.id is already the
--- PK, so (id, org_id) is trivially unique; declaring it lets org_invites FK
--- the *pair* and pin a target team to the invite's own org at the schema
--- level — the same (id, org_id)-unique + composite-FK pattern the rest of the
--- schema uses (agents, entities, runs, tasks, blueprint_runs, …). teams is
--- just the one parent that never needed it until now.
-ALTER TABLE public.teams ADD CONSTRAINT teams_id_org_id_key UNIQUE (id, org_id);
+-- The tenant-scoped FK target for target_team_id below is teams_id_org_id_key,
+-- declared with the teams table's other constraints because team_github_repos
+-- references it too and does so earlier in this file.
 
 CREATE TABLE public.org_invites (
     id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -6467,9 +7125,9 @@ CREATE UNIQUE INDEX sso_connections_provider_uniq ON public.sso_connections (pro
 -- (id, org_id) is trivially unique (id is already the PK), declared so
 -- sso_domains can FK the *pair* and pin a domain to its connection's own org
 -- at the schema level — the same (id, org_id)-unique + composite-FK pattern
--- the rest of the schema uses (agents, entities, runs, tasks, blueprint_runs,
--- teams). RLS gates the org_id *column* on write, but only this FK keeps a
--- domain's connection_id in the same org as its org_id.
+-- the rest of the schema uses (agents, entities, conversations, tasks,
+-- blueprint_runs, teams). RLS gates the org_id *column* on write, but only
+-- this FK keeps a domain's connection_id in the same org as its org_id.
 ALTER TABLE public.sso_connections ADD CONSTRAINT sso_connections_id_org_id_key UNIQUE (id, org_id);
 
 CREATE TABLE public.sso_domains (
@@ -7503,8 +8161,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.marketplace_installs TO tf_
 -- the objective social-proof metric votes/installs can't fake: how much real
 -- work listings' copies have actually done, and how well. Copy linkage is
 -- marketplace_installs.root_object_id (TFAC-535: no provenance columns on
--- prompts/blueprints), joined to runs.prompt_id for kind=prompt listings and
--- blueprint_runs.blueprint_id for kind=blueprint listings.
+-- prompts/blueprints), joined to conversations.prompt_id for kind=prompt
+-- listings and blueprint_runs.blueprint_id for kind=blueprint listings.
 --
 -- Written exclusively by MarketplaceStore.RecomputeStatsSystem (admin pool,
 -- bypasses RLS) — a cross-team, cross-run aggregate can't be computed at
@@ -7556,8 +8214,8 @@ GRANT SELECT ON TABLE public.marketplace_listing_stats TO tf_app;
 -- purpose — every TF process registers (control pods too, for
 -- deployment-wide visibility: versions, lease holder, health), not just
 -- executors; "executor" stays the *role* name everywhere else
--- (runs.executor_id keeps its shipped meaning: the id of the instance
--- acting as a run's executor).
+-- (claims.executor_id keeps its shipped meaning: the id of the instance
+-- driving a claimed engagement).
 --
 -- id is text, not uuid: it is minted OUTSIDE Postgres, by a file under
 -- <TF_STATE_ROOT>/instance-id (internal/instance) read/created once per
@@ -7602,7 +8260,7 @@ CREATE TABLE public.instances (
     -- restart on purpose, this one must NOT (an old-epoch key sealing a
     -- bundle nobody can decrypt anymore is exactly the crash window
     -- TFAC-614's epoch check exists to catch). NULL for a control/all row
-    -- that never provisions or claims runs.
+    -- that never provisions or claims conversations.
     pubkey             text
 );
 
@@ -7826,10 +8484,10 @@ REVOKE ALL ON public.instance_stats FROM anon, authenticated, service_role;
 
 -- sandbox_stats: the per-sandbox resource series — one row per live jail per
 -- sampler tick, appended by the executor's existing instance-stat sampler and
--- read by the per-run usage-over-time surface.
+-- read by the per-conversation usage-over-time surface.
 --
--- This is the SHAPE of a run's consumption while it runs, which the claim's
--- end-state actuals (claims.peak_mem_mb / claims.cpu_usec, read once at
+-- This is the SHAPE of an engagement's consumption while it runs, which the
+-- claim's end-state actuals (claims.peak_mem_mb / claims.cpu_usec, read once at
 -- teardown) cannot give. The two disagree slightly by design: a periodic
 -- sampler misses the sub-minute spikes the kernel high-watermark catches. The
 -- series is shape, the teardown snapshot is truth, and they are never
@@ -7998,10 +8656,11 @@ REVOKE ALL ON public.ws_presence FROM PUBLIC;
 REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 
 
--- conversation_signals (TFAC-585): the cross-pod run-control outbox — a control pod's
+-- conversation_signals (TFAC-585): the cross-pod conversation-control outbox
+-- — a control pod's
 -- delivery of cancel/interrupt/steer/permission/inject to the executor that
--- owns a run's live process (runs.executor_id), for the case where the
--- local process registry (Spawner.procs) misses. See
+-- owns the conversation's live process (claims.executor_id), for the case
+-- where the local process registry (Spawner.procs) misses. See
 -- docs/for-agents/specs/horizontal-scaling/README.md §5.2 for the full design
 -- (RunController's intended second implementation).
 --
@@ -8026,13 +8685,13 @@ REVOKE ALL ON public.ws_presence FROM anon, authenticated, service_role;
 -- body — riding the outbox row, not the NOTIFY payload, so there is no
 -- 8 KB size concern. `target` is the executor id (internal/instance,
 -- text — see instances.id above) the signal is delivered to; no FK, same
--- as runs.executor_id/event_queue.executor_id (a tombstoned/GC'd instance
+-- as claims.executor_id/event_queue.executor_id (a tombstoned/GC'd instance
 -- leaves a signal to expire harmlessly, never cascades).
 --
--- Acked rows are purged after 24h (TF_RUN_SIGNAL_PURGE_AFTER, audit
--- convenience window); unacked rows simply expire harmlessly if the owner
--- never returns — the fleet reaper (TFAC-586) owns a dead executor's runs,
--- not this table.
+-- Acked rows are purged after 24h (TF_CONVERSATION_SIGNAL_PURGE_AFTER,
+-- audit convenience window); unacked rows simply expire harmlessly if the
+-- owner never returns — the fleet reaper (TFAC-586) owns a dead executor's
+-- conversations, not this table.
 CREATE TABLE public.conversation_signals (
     id         bigint GENERATED BY DEFAULT AS IDENTITY,
     org_id     uuid NOT NULL,
@@ -8052,12 +8711,12 @@ ALTER TABLE ONLY public.conversation_signals
 ALTER TABLE ONLY public.conversation_signals
     ADD CONSTRAINT conversation_signals_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.conversation_signals
-    ADD CONSTRAINT conversation_signals_run_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
+    ADD CONSTRAINT conversation_signals_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
--- The owner's apply-loop scan: unacked rows targeting me, oldest id first
--- (§5.2's "apply signals per run in id order" — ascending id across the
--- whole target is a superset ordering that trivially preserves per-run
--- order too).
+-- The owner's apply-loop scan: unacked rows targeting me, oldest id first —
+-- signals apply per conversation in id order, and ascending id across the
+-- whole target is a superset ordering that trivially preserves
+-- per-conversation order too (§5.2).
 CREATE INDEX idx_conversation_signals_target_unacked ON public.conversation_signals USING btree (target, id) WHERE (acked_at IS NULL);
 -- The 24h purge sweep.
 CREATE INDEX idx_conversation_signals_acked ON public.conversation_signals USING btree (acked_at) WHERE (acked_at IS NOT NULL);
@@ -8183,11 +8842,11 @@ ALTER TABLE ONLY public.messages
     ADD CONSTRAINT messages_claim_id_fkey FOREIGN KEY (claim_id) REFERENCES public.claims(id) ON DELETE SET NULL;
 
 
--- claim_credentials: the sealed per-claim credential bundle channel — the
--- unification of the former run_credentials and curator_turn_credentials,
--- which were column-for-column identical because the system always sealed
--- per engagement. An executor claims a conversation and parks the claim in
--- phase='awaiting_credentials'; the brain resolves the engagement's
+-- claim_credentials: the sealed per-claim credential bundle channel — one
+-- channel for both surfaces (delegated engagements and curator turns), one
+-- sealed bundle per engagement. An executor claims a conversation and parks
+-- the claim in phase='awaiting_credentials'; the brain resolves the
+-- engagement's
 -- LLM/GitHub/Jira credentials, seals them (credseal, an X25519 sealed box)
 -- to the claim's published cred_pubkey, and writes exactly one row here.
 -- One row per claim (PK claim_id), replaced wholesale on every write —
@@ -8348,6 +9007,62 @@ GRANT ALL ON TABLE public.conversation_permissions TO service_role;
 GRANT SELECT ON TABLE public.conversation_permissions TO tf_app;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_permissions TO tf_system;
 
+-- workspace_snapshots: the durable lifecycle of one snapshot key's workspace
+-- blob — pending, written, or failed — and the engagement that owns the write.
+--
+-- The blob store answers "is there a blob" and nothing else, so its silence is
+-- four different situations wearing one face: a persist still in flight, a
+-- persist that failed, a conversation that never got far enough to have a
+-- workspace, and a snapshot the retention reaper collected. A resume that
+-- cannot tell them apart has to treat every one of them as gone forever. This
+-- row is what separates them: no row is the last two (nothing was ever owed),
+-- 'pending' names a write in flight and, through writer_claim_id, the
+-- engagement to ask about it, and 'failed' is the durable answer that stops a
+-- waiter waiting.
+--
+-- writer_claim_id is also the stale-write guard. A cross-pod stop parks the
+-- conversation and releases the claim immediately while the old executor's
+-- teardown snapshots afterwards, so an older engagement's Put can land after a
+-- successor has already written its own newer blob. A writer re-reads this
+-- column just before uploading and skips the upload when the key has moved on;
+-- the completion CAS keys on it too, so a displaced writer cannot close out a
+-- write it no longer owns. Keying on "does a successor claim exist" instead
+-- would be wrong — a successor on another executor may be waiting for exactly
+-- this blob.
+--
+-- The key is the snapshot key: (org_id, blueprint_run_id), because a
+-- blueprint's steps share one workspace tree and one blob. No claims FK on
+-- writer_claim_id: the column identifies a writer, and a claim row's fate must
+-- not decide whether the blob's state is knowable.
+CREATE TABLE public.workspace_snapshots (
+    org_id uuid NOT NULL,
+    blueprint_run_id uuid NOT NULL,
+    state text NOT NULL,
+    writer_claim_id uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_snapshots_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'written'::text, 'failed'::text])))
+);
+
+ALTER TABLE ONLY public.workspace_snapshots
+    ADD CONSTRAINT workspace_snapshots_pkey PRIMARY KEY (org_id, blueprint_run_id);
+
+ALTER TABLE ONLY public.workspace_snapshots
+    ADD CONSTRAINT workspace_snapshots_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE CASCADE;
+
+-- Admin-pool only, same posture as claim_credentials: every caller is an
+-- executor-side teardown goroutine or a system sweep, and no request handler
+-- reads it — so RLS is on with no policy at all and the app roles hold no
+-- grant.
+ALTER TABLE public.workspace_snapshots ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.workspace_snapshots FROM PUBLIC;
+REVOKE ALL ON public.workspace_snapshots FROM anon, authenticated, service_role;
+
+-- The executor writes the whole lifecycle (INSERT/UPDATE on begin and finish),
+-- reads it back for the pre-Put supersede check (SELECT), and drops it
+-- alongside the blob at terminal cleanup and in the retention reaper (DELETE).
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_system;
+
 
 --
 -- Name: llm_spend; Type: VIEW; Schema: public; Owner: -
@@ -8448,10 +9163,11 @@ GRANT SELECT ON TABLE public.llm_spend TO tf_app;
 
 GRANT USAGE ON SCHEMA public, tf TO tf_system;
 
--- Run lifecycle: claim CAS / requeue / complete / resume+executor stamps
--- (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
+-- Conversation lifecycle: claim CAS / requeue / complete / resume+executor
+-- stamps (SELECT, UPDATE) and the dispatcher's own queue inserts — both the
 -- initial blueprint-step enqueue and every subsequent step (SELECT,
--- INSERT). No DELETE — runs are never removed, only status-terminated.
+-- INSERT). No DELETE — conversations are never removed, only
+-- status-terminated.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;
@@ -8502,8 +9218,8 @@ GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;
 -- its twin, this one only ever has work to do where the jails are — the
 -- executor, which is also the only pod whose admin pool binds this role — so
 -- there is no other pod whose success could stand in for it. SELECT for the
--- per-run usage read, granted here for the instance_stats reason: the posture
--- matches regardless of which admin role a pod's pool binds.
+-- per-conversation usage read, granted here for the instance_stats reason:
+-- the posture matches regardless of which admin role a pod's pool binds.
 GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
 -- operators: the deployment-operator identity. The fleet gate + the operator
 -- CLI read/write it via the admin pool; granted to tf_system so the operator
@@ -8511,7 +9227,8 @@ GRANT SELECT, INSERT, DELETE ON TABLE public.sandbox_stats TO tf_system;
 GRANT SELECT, INSERT, DELETE ON TABLE public.operators TO tf_system;
 -- placement_overrides (TFAC-587): SELECT-only. The dispatcher's post-step
 -- reactor enqueues the next blueprint step on the executor, and the
--- placement stamp it computes reads any override for the run's key. Writes
+-- placement stamp it computes reads any override for the conversation's
+-- placement key. Writes
 -- (pin / replica count) are an operator action on a control pod, never the
 -- executor's path.
 GRANT SELECT ON TABLE public.placement_overrides TO tf_system;
@@ -8539,10 +9256,10 @@ GRANT SELECT ON TABLE public.users TO tf_system;
 -- not the users table itself.
 GRANT SELECT ON TABLE public.user_github_identities TO tf_system;
 GRANT SELECT ON TABLE public.team_github_repos TO tf_system;
--- repo_profiles: UpdateCloneStatusSystem is local-mode-only in the current
+-- repositories: UpdateCloneStatusSystem is local-mode-only in the current
 -- call graph, granted ahead of the multi-mode bare-clone-cache path it's
 -- designed for.
-GRANT SELECT, UPDATE ON TABLE public.repo_profiles TO tf_system;
+GRANT SELECT, UPDATE ON TABLE public.repositories TO tf_system;
 GRANT SELECT ON TABLE public.org_github_apps TO tf_system;
 GRANT SELECT ON TABLE public.org_github_app_installations TO tf_system;
 GRANT SELECT ON TABLE public.events TO tf_system;
@@ -8559,8 +9276,9 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- serves the sidecar's relayed `exec slack` calls against these, resolving an
 -- authorization decision or a workspace IDENTITY, never a bot token (that rides
 -- the sealed bundle). All read-only — the executor authorizes and selects, it
--- never mutates Slack config: team_slack_channels gates whether the run's team
--- tracks the channel (TracksChannelSystem), slack_channels maps a channel to its
+-- never mutates Slack config: team_slack_channels gates whether the
+-- conversation's team tracks the channel (TracksChannelSystem),
+-- slack_channels maps a channel to its
 -- workspace (Channels.GetSystem), org_slack_workspaces picks which connected app
 -- identity to act as (Workspaces.GetByWorkspaceAppSystem / ListAllSystem).
 GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;

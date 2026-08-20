@@ -29,7 +29,7 @@ func seedPRSnapshot(t *testing.T, s *Server, owner, repo string, number int, sna
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
 	}
-	if err := sqlitestore.New(s.db).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entity.ID, string(data)); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entity.ID, string(data)); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 	return sourceID
@@ -165,7 +165,7 @@ func TestPatchPRSnapshotDraft_MissingEntity_NoError(t *testing.T) {
 }
 
 func TestPatchPRSnapshotDraft_EmptySnapshot_NoError(t *testing.T) {
-	// Entity exists (e.g., FindOrCreateEntity ran but UpdateEntitySnapshot
+	// Entity exists (e.g., FindOrCreateEntity ran but UpdateSnapshot
 	// hasn't fired yet). Treat as missing — nothing to patch.
 	s := newTestServer(t)
 	if _, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "sky-ai-eng/triage-factory#100", "pr", "Pending", ""); err != nil {
@@ -187,7 +187,7 @@ func TestPatchPRSnapshotDraft_MalformedSnapshot_ReturnsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := sqlitestore.New(s.db).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entity.ID, "{not json"); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.UpdateSnapshot(context.Background(), runmode.LocalDefaultOrgID, entity.ID, "{not json"); err != nil {
 		t.Fatalf("seed malformed snapshot: %v", err)
 	}
 

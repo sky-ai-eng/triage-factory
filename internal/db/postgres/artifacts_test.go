@@ -15,20 +15,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestArtifactStore_Postgres_RoundTrip drives Upsert + ListByRun against
+// TestArtifactStore_Postgres_RoundTrip drives Upsert + ListByConversation against
 // the AdminDB-wired store (RLS bypassed — behavior, not auth). Pins that
 // every field round-trips and an empty id is server-generated. TFAC-455.
 func TestArtifactStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	in := domain.Artifact{
-		ConversationID: runID,
+		ConversationID: conversationID,
 		OrgID:          orgID,
 		TeamID:         teamID,
 		Provider:       domain.ArtifactProviderGitHub,
@@ -50,19 +50,19 @@ func TestArtifactStore_Postgres_RoundTrip(t *testing.T) {
 	if out.CreatedAt.IsZero() || out.UpdatedAt.IsZero() {
 		t.Error("expected timestamps populated")
 	}
-	if out.ConversationID != runID || out.TeamID != teamID || out.Provider != "github" ||
+	if out.ConversationID != conversationID || out.TeamID != teamID || out.Provider != "github" ||
 		out.Kind != "pull_request" || out.Target != "octo/repo#123" || out.ExternalID != "123" ||
 		out.URL != in.URL || out.State != "open" || out.DedupKey != in.DedupKey ||
 		out.DetailsJSON != `{"draft":false}` {
 		t.Errorf("round-trip mismatch: %+v", out)
 	}
 
-	got, err := stores.Artifacts.ListByRun(ctx, orgID, runID)
+	got, err := stores.Artifacts.ListByConversation(ctx, orgID, conversationID)
 	if err != nil {
-		t.Fatalf("ListByRun: %v", err)
+		t.Fatalf("ListByConversation: %v", err)
 	}
 	if len(got) != 1 || got[0].ID != out.ID {
-		t.Errorf("ListByRun = %+v, want the one upserted row", got)
+		t.Errorf("ListByConversation = %+v, want the one upserted row", got)
 	}
 }
 
@@ -72,13 +72,13 @@ func TestArtifactStore_Postgres_UpsertDedup(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	first, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRDraft, DedupKey: key,
 	})
@@ -86,7 +86,7 @@ func TestArtifactStore_Postgres_UpsertDedup(t *testing.T) {
 		t.Fatalf("first Upsert: %v", err)
 	}
 	second, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#7",
 		ExternalID: "7", URL: "https://github.com/octo/repo/pull/7",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -119,13 +119,13 @@ func TestArtifactStore_Postgres_InsertIfAbsent(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
 	base := domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
 		DedupKey: key,
 	}
@@ -174,13 +174,13 @@ func TestArtifactStore_Postgres_PendingToReal(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	pending, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRPending, DedupKey: key,
 	})
@@ -191,7 +191,7 @@ func TestArtifactStore_Postgres_PendingToReal(t *testing.T) {
 		t.Fatalf("pending row malformed: %+v", pending)
 	}
 	real, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "pull_request", Target: "octo/repo#42",
 		ExternalID: "42", URL: "https://github.com/octo/repo/pull/42",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
@@ -217,7 +217,7 @@ func TestArtifactStore_Postgres_PendingToReal(t *testing.T) {
 // TestArtifactStore_Postgres_RLS_TeamScoped pins the production RLS layer:
 // an artifact scoped to teamA is visible to teamA members (alice, bob) and
 // invisible to a same-org member of a different team (carol). Mirrors the
-// runs team-visibility scoping. TFAC-455.
+// conversations team-visibility scoping. TFAC-455.
 func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -229,12 +229,12 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
 
-	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	conversationID := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 	// Seed a teamA-scoped artifact via admin (bypass RLS for setup).
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 		VALUES ($1, $2, $3, 'github', 'pull_request', 'octo/repo', 'open', 'github:pull_request:octo/repo#1')
-	`, orgA, runID, teamA); err != nil {
+	`, orgA, conversationID, teamA); err != nil {
 		t.Fatalf("seed artifact: %v", err)
 	}
 	ctx := context.Background()
@@ -244,7 +244,7 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 		name, id string
 	}{{"alice", alice}, {"bob", bob}} {
 		err := h.WithUser(t, u.id, orgA, func(tx *sql.Tx) error {
-			rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
+			rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
 			if err != nil {
 				return err
 			}
@@ -261,7 +261,7 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	// Carol (teamB, same org, different team) sees zero — artifacts_select
 	// gates on user_in_team(team_id).
 	err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByTeam(ctx, orgA, teamA, db.ArtifactListOpts{})
 		if err != nil {
 			return err
 		}
@@ -292,7 +292,7 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates artifacts_insert, not the
-	// runs FK/RLS interplay.
+	// conversations FK/RLS interplay.
 	mkArtifact := func(key string) domain.Artifact {
 		return domain.Artifact{
 			OrgID: orgA, TeamID: teamA,
@@ -326,19 +326,20 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 }
 
 // TestArtifactStore_Postgres_ListByTeam_IncludesDetached pins the
-// audit-ledger invariant: an artifact whose run was purged (conversation_id NULL)
-// is still the team's and must come back from ListByTeam. Guards against a
-// future `AND conversation_id IS NOT NULL` creeping into the query. TFAC-455.
+// audit-ledger invariant: an artifact whose conversation was purged
+// (conversation_id NULL) is still the team's and must come back from
+// ListByTeam. Guards against a future `AND conversation_id IS NOT NULL`
+// creeping into the query. TFAC-455.
 func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	art, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "git", Kind: "branch", Target: "octo/repo",
 		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
 	})
@@ -346,20 +347,20 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	// Simulate a run purge: the FK is ON DELETE SET NULL, so deleting the
-	// run detaches the artifact rather than cascading it away.
-	if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, runID); err != nil {
-		t.Fatalf("purge run: %v", err)
+	// Simulate a conversation purge: the FK is ON DELETE SET NULL, so deleting
+	// the conversation detaches the artifact rather than cascading it away.
+	if _, err := h.AdminDB.Exec(`DELETE FROM conversations WHERE id = $1`, conversationID); err != nil {
+		t.Fatalf("purge conversation: %v", err)
 	}
-	var nullRun sql.NullString
-	if err := h.AdminDB.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullRun); err != nil {
+	var nullConversation sql.NullString
+	if err := h.AdminDB.QueryRow(`SELECT conversation_id FROM artifacts WHERE id = $1`, art.ID).Scan(&nullConversation); err != nil {
 		t.Fatalf("read back: %v", err)
 	}
-	if nullRun.Valid {
-		t.Fatalf("conversation_id should be NULL after run purge, got %q", nullRun.String)
+	if nullConversation.Valid {
+		t.Fatalf("conversation_id should be NULL after conversation purge, got %q", nullConversation.String)
 	}
 
-	rows, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
+	rows, _, err := stores.Artifacts.ListByTeam(ctx, orgID, teamID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByTeam: %v", err)
 	}
@@ -367,7 +368,7 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 		t.Errorf("ListByTeam dropped the detached artifact: %+v", rows)
 	}
 	if rows[0].ConversationID != "" {
-		t.Errorf("detached row RunID = %q, want empty", rows[0].ConversationID)
+		t.Errorf("detached row ConversationID = %q, want empty", rows[0].ConversationID)
 	}
 }
 
@@ -380,13 +381,13 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
 	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
 		State: domain.ArtifactStateIssueCreated, DedupKey: key,
@@ -395,7 +396,7 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	}
 
 	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
 	})
@@ -411,7 +412,7 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	// A non-empty value still overwrites.
 	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "jira", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
@@ -433,13 +434,13 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	key := domain.ArtifactDedupKey("github", "comment", "555", "")
 	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#7",
 		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
@@ -449,7 +450,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A comment-delete that only carries the id (empty target/url).
 	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "comment", ExternalID: "555",
 		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
 	})
@@ -465,7 +466,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 	// A non-empty target still overwrites (migration path).
 	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: "github", Kind: "comment", Target: "octo/repo#8",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
 	})
@@ -479,7 +480,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 
 // TestArtifactStore_Postgres_UpsertSystem_BypassesRLS pins the admin-pool
 // write path the event-triggered exec choke point depends on (TFAC-459): a
-// run with no creator user has no JWT-claims context, so its artifact insert
+// conversation with no creator user has no JWT-claims context, so its artifact insert
 // is unreachable through tf_app (artifacts_insert demands a team-writing
 // user). UpsertSystem routes to the admin pool and lands the row; the app-pool
 // Upsert on the same bare (claims-less) connection is rejected, proving the
@@ -495,7 +496,7 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	ctx := context.Background()
 
 	// conversation_id left empty (NULL) so this isolates the write-policy/pool routing
-	// from the runs FK.
+	// from the conversations FK.
 	art := domain.Artifact{
 		OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
@@ -603,76 +604,78 @@ func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_Postgres_CountByRun pins the batched per-run count
-// (TFAC-465) on the admin pool: counts keyed by run id across a multi-run
-// batch, a run with no artifacts absent from the map, and an empty runIDs a
-// no-op. Doubles as the proof that the []string→ANY($2) bind and GROUP BY work
-// against the uuid conversation_id column.
-func TestArtifactStore_Postgres_CountByRun(t *testing.T) {
+// TestArtifactStore_Postgres_CountByConversation pins the batched
+// per-conversation count (TFAC-465) on the admin pool: counts keyed by
+// conversation id across a multi-conversation batch, a conversation with no
+// artifacts absent from the map, and an empty conversationIDs a no-op. Doubles
+// as the proof that the []string→ANY($2) bind and GROUP BY work against the
+// uuid conversation_id column.
+func TestArtifactStore_Postgres_CountByConversation(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	convA := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	convB := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	convC := seedPgArtifactConversation(t, h, orgID, teamID, userID) // no artifacts
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	seed := func(runID, key string) {
+	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-			ConversationID: runID, OrgID: orgID, TeamID: teamID,
+			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	counts, err := stores.Artifacts.CountByRun(ctx, orgID, []string{runA, runB, runC})
+	counts, err := stores.Artifacts.CountByConversation(ctx, orgID, []string{convA, convB, convC})
 	if err != nil {
-		t.Fatalf("CountByRun: %v", err)
+		t.Fatalf("CountByConversation: %v", err)
 	}
-	if counts[runA] != 2 {
-		t.Errorf("runA count = %d, want 2", counts[runA])
+	if counts[convA] != 2 {
+		t.Errorf("convA count = %d, want 2", counts[convA])
 	}
-	if counts[runB] != 1 {
-		t.Errorf("runB count = %d, want 1", counts[runB])
+	if counts[convB] != 1 {
+		t.Errorf("convB count = %d, want 1", counts[convB])
 	}
-	if _, ok := counts[runC]; ok {
-		t.Errorf("runC (no artifacts) should be absent, got %d", counts[runC])
+	if _, ok := counts[convC]; ok {
+		t.Errorf("convC (no artifacts) should be absent, got %d", counts[convC])
 	}
 
-	empty, err := stores.Artifacts.CountByRun(ctx, orgID, nil)
+	empty, err := stores.Artifacts.CountByConversation(ctx, orgID, nil)
 	if err != nil {
-		t.Fatalf("CountByRun(nil): %v", err)
+		t.Fatalf("CountByConversation(nil): %v", err)
 	}
 	if empty == nil || len(empty) != 0 {
-		t.Errorf("CountByRun(nil) = %v, want empty non-nil map", empty)
+		t.Errorf("CountByConversation(nil) = %v, want empty non-nil map", empty)
 	}
 }
 
-// TestArtifactStore_Postgres_CountByRun_TeamScoped pins that CountByRun runs on
-// the RLS-active app pool: a same-org member of a different team counts zero for
-// a run whose artifacts belong to another team — the per-card count can't leak
-// across the tenancy boundary. Mirrors the ListByTeam RLS test. TFAC-465.
-func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
+// TestArtifactStore_Postgres_CountByConversation_TeamScoped pins that
+// CountByConversation runs on the RLS-active app pool: a same-org member of a
+// different team counts zero for a conversation whose artifacts belong to
+// another team — the per-card count can't leak across the tenancy boundary.
+// Mirrors the ListByTeam RLS test. TFAC-465.
+func TestArtifactStore_Postgres_CountByConversation_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	carol := pgtest.SeedUser(t, h, "carol")
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
-	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	conversationID := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 
-	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
+	// Two teamA-scoped artifacts on the conversation (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
 			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
-		`, orgA, runID, teamA, key); err != nil {
+		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
 		}
 	}
@@ -680,12 +683,12 @@ func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
 
 	// Alice (teamA) counts both.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByRun(ctx, orgA, []string{runID})
+		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByConversation(ctx, orgA, []string{conversationID})
 		if err != nil {
 			return err
 		}
-		if counts[runID] != 2 {
-			t.Errorf("alice counted %d, want 2", counts[runID])
+		if counts[conversationID] != 2 {
+			t.Errorf("alice counted %d, want 2", counts[conversationID])
 		}
 		return nil
 	}); err != nil {
@@ -695,12 +698,12 @@ func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
 	// Carol (teamB, same org, different team) counts zero — artifacts_select
 	// gates on user_in_team(team_id), so the rows are invisible to her.
 	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByRun(ctx, orgA, []string{runID})
+		counts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.CountByConversation(ctx, orgA, []string{conversationID})
 		if err != nil {
 			return err
 		}
-		if _, ok := counts[runID]; ok {
-			t.Errorf("carol (different team) counted %d — RLS leaked across teams", counts[runID])
+		if _, ok := counts[conversationID]; ok {
+			t.Errorf("carol (different team) counted %d — RLS leaked across teams", counts[conversationID])
 		}
 		return nil
 	}); err != nil {
@@ -708,83 +711,85 @@ func TestArtifactStore_Postgres_CountByRun_TeamScoped(t *testing.T) {
 	}
 }
 
-// TestArtifactStore_Postgres_ListByRuns pins the batched multi-run read on the
-// admin pool (TFAC-465): artifacts for the given runs come back in one slice,
-// each carrying its RunID for grouping; a run with no artifacts contributes
-// nothing and an empty runIDs is a no-op. Doubles as proof the []string→ANY
+// TestArtifactStore_Postgres_ListByConversations pins the batched
+// multi-conversation read on the admin pool (TFAC-465): artifacts for the given
+// conversations come back in one slice, each carrying its ConversationID for
+// grouping; a conversation with no artifacts contributes nothing and an empty
+// conversationIDs is a no-op. Doubles as proof the []string→ANY
 // uuid[] bind works for the list variant.
-func TestArtifactStore_Postgres_ListByRuns(t *testing.T) {
+func TestArtifactStore_Postgres_ListByConversations(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runA := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runB := seedPgArtifactRun(t, h, orgID, teamID, userID)
-	runC := seedPgArtifactRun(t, h, orgID, teamID, userID) // no artifacts
+	convA := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	convB := seedPgArtifactConversation(t, h, orgID, teamID, userID)
+	convC := seedPgArtifactConversation(t, h, orgID, teamID, userID) // no artifacts
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
-	seed := func(runID, key string) {
+	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-			ConversationID: runID, OrgID: orgID, TeamID: teamID,
+			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 			Provider: "github", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
 	}
-	seed(runA, "a1")
-	seed(runA, "a2")
-	seed(runB, "b1")
+	seed(convA, "a1")
+	seed(convA, "a2")
+	seed(convB, "b1")
 
-	arts, err := stores.Artifacts.ListByRuns(ctx, orgID, []string{runA, runB, runC})
+	arts, err := stores.Artifacts.ListByConversations(ctx, orgID, []string{convA, convB, convC})
 	if err != nil {
-		t.Fatalf("ListByRuns: %v", err)
+		t.Fatalf("ListByConversations: %v", err)
 	}
-	byRun := map[string]int{}
+	byConversation := map[string]int{}
 	for _, a := range arts {
 		if a.ConversationID == "" {
-			t.Errorf("artifact %s came back without its RunID", a.ID)
+			t.Errorf("artifact %s came back without its ConversationID", a.ID)
 		}
-		byRun[a.ConversationID]++
+		byConversation[a.ConversationID]++
 	}
-	if byRun[runA] != 2 || byRun[runB] != 1 {
-		t.Errorf("grouped counts = %v, want runA=2 runB=1", byRun)
+	if byConversation[convA] != 2 || byConversation[convB] != 1 {
+		t.Errorf("grouped counts = %v, want convA=2 convB=1", byConversation)
 	}
-	if _, ok := byRun[runC]; ok {
-		t.Errorf("runC (no artifacts) contributed %d rows, want 0", byRun[runC])
+	if _, ok := byConversation[convC]; ok {
+		t.Errorf("convC (no artifacts) contributed %d rows, want 0", byConversation[convC])
 	}
 
-	empty, err := stores.Artifacts.ListByRuns(ctx, orgID, nil)
+	empty, err := stores.Artifacts.ListByConversations(ctx, orgID, nil)
 	if err != nil {
-		t.Fatalf("ListByRuns(nil): %v", err)
+		t.Fatalf("ListByConversations(nil): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("ListByRuns(nil) = %v, want empty", empty)
+		t.Errorf("ListByConversations(nil) = %v, want empty", empty)
 	}
 }
 
-// TestArtifactStore_Postgres_ListByRuns_TeamScoped pins that ListByRuns runs on
-// the RLS-active app pool — symmetric to CountByRun_TeamScoped, the
-// defense-in-depth scoping guarantee at the store layer. A same-org member of a
-// different team sees no artifacts for a run whose artifacts belong to another
-// team, even passing the run id directly. ListByRuns feeds the pending_kind /
+// TestArtifactStore_Postgres_ListByConversations_TeamScoped pins that
+// ListByConversations runs on the RLS-active app pool — symmetric to
+// CountByConversation_TeamScoped, the defense-in-depth scoping guarantee at the
+// store layer. A same-org member of a different team sees no artifacts for a
+// conversation whose artifacts belong to another team, even passing the
+// conversation id directly. ListByConversations feeds the pending_kind /
 // pending_artifact_id overlay discriminator, so a leak here would mis-surface
 // another team's approval card. TFAC-465.
-func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
+func TestArtifactStore_Postgres_ListByConversations_TeamScoped(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	carol := pgtest.SeedUser(t, h, "carol")
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 	pgtest.AddOrgMember(t, h, carol, orgA, teamB, "member", "member")
-	runID := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	conversationID := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 
-	// Two teamA-scoped artifacts on the run (admin insert bypasses RLS for setup).
+	// Two teamA-scoped artifacts on the conversation (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
 			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
 			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
-		`, orgA, runID, teamA, key); err != nil {
+		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
 		}
 	}
@@ -792,7 +797,7 @@ func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
 
 	// Alice (teamA) sees both.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByRuns(ctx, orgA, []string{runID})
+		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByConversations(ctx, orgA, []string{conversationID})
 		if err != nil {
 			return err
 		}
@@ -807,7 +812,7 @@ func TestArtifactStore_Postgres_ListByRuns_TeamScoped(t *testing.T) {
 	// Carol (teamB, same org, different team) sees zero — artifacts_select gates
 	// on user_in_team(team_id), so the rows are invisible to her.
 	if err := h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
-		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByRuns(ctx, orgA, []string{runID})
+		arts, err := pgstore.NewForTx(tx, pgtest.SecretKey).Artifacts.ListByConversations(ctx, orgA, []string{conversationID})
 		if err != nil {
 			return err
 		}
@@ -853,7 +858,7 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	seedArt(orgB, teamBOther, domain.ArtifactProviderGitHub, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "other-org", "2026-06-06T00:00:00Z")
 
 	// No opts: every orgA row across both teams, terminal included, newest-first.
-	all, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{})
+	all, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -885,21 +890,21 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Filters.
-	gh, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
+	gh, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Provider: domain.ArtifactProviderGitHub})
 	if err != nil {
 		t.Fatalf("filter provider: %v", err)
 	}
 	if len(gh) != 3 {
 		t.Errorf("provider=github returned %d, want 3", len(gh))
 	}
-	prs, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
+	prs, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Kind: domain.ArtifactKindPullRequest})
 	if err != nil {
 		t.Fatalf("filter kind: %v", err)
 	}
 	if len(prs) != 2 {
 		t.Errorf("kind=pull_request returned %d, want 2", len(prs))
 	}
-	open, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{State: domain.ArtifactStatePROpen})
+	open, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{State: domain.ArtifactStatePROpen})
 	if err != nil {
 		t.Fatalf("filter state: %v", err)
 	}
@@ -908,7 +913,7 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Time window [06-03, 06-05): merged (06-03) + review (06-04), newest-first.
-	windowed, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{
+	windowed, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{
 		Since: time.Date(2026, 6, 3, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 6, 5, 0, 0, 0, 0, time.UTC),
 	})
@@ -920,11 +925,11 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 	}
 
 	// Paging: page 1 (limit 2) → comment + review; page 2 (offset 2) → merged + open.
-	page1, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2})
+	page1, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2})
 	if err != nil {
 		t.Fatalf("page 1: %v", err)
 	}
-	page2, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2, Offset: 2})
+	page2, _, err := stores.Artifacts.ListByOrgSystem(ctx, orgA, db.ArtifactListOpts{Limit: 2, Offset: 2})
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}
@@ -948,13 +953,13 @@ func TestArtifactStore_Postgres_ListPendingReviewsByTarget(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	mk := func(kind, state, target, dedup string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-			ConversationID: runID, OrgID: orgID, TeamID: teamID,
+			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 			Provider: domain.ArtifactProviderGitHub, Kind: kind, State: state,
 			Target: target, DedupKey: dedup,
 		}); err != nil {
@@ -989,12 +994,12 @@ func TestArtifactStore_Postgres_TransitionReviewState(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
@@ -1003,7 +1008,7 @@ func TestArtifactStore_Postgres_TransitionReviewState(t *testing.T) {
 		t.Fatalf("seed review: %v", err)
 	}
 	pr, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
 	})
@@ -1052,12 +1057,12 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 
 	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
-		ConversationID: runID, OrgID: orgID, TeamID: teamID,
+		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
 		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,
@@ -1089,17 +1094,18 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 	}
 }
 
-// seedPgArtifactRun mints a minimal run the artifacts.conversation_id FK can point
-// at. origin is non-'blueprint' so runs_origin_requires_parents doesn't
-// demand a parent chain; trigger_type='manual' needs a non-NULL creator.
-func seedPgArtifactRun(t *testing.T, h *pgtest.Harness, orgID, teamID, userID string) string {
+// seedPgArtifactConversation mints a minimal conversation the
+// artifacts.conversation_id FK can point at. origin is non-'blueprint' so
+// conversations_origin_requires_parents doesn't demand a parent chain;
+// trigger_type='manual' needs a non-NULL creator.
+func seedPgArtifactConversation(t *testing.T, h *pgtest.Harness, orgID, teamID, userID string) string {
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, status, visibility)
 		VALUES ($1, $2, $3, $4, 'manual', 'interactive', 'running', 'team')
 	`, id, orgID, teamID, userID); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
 }

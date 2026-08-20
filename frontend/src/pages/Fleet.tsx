@@ -4,7 +4,7 @@ import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'rec
 
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { FeatureFleet, useEntitlements } from '../hooks/useEntitlements'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { averageCores, coreMinutes, cpuRateSeries, memSeries } from '../lib/sandboxSeries'
 import type { SandboxPoint } from '../lib/sandboxSeries'
 import type {
@@ -16,9 +16,9 @@ import type {
   FleetSandboxes,
   FleetSandboxSeries,
   FleetTimeseries,
-  RunStatusValue,
+  ConversationStatusValue,
 } from '../types'
-import { isActiveStatus } from '../lib/runStatus'
+import { isActiveStatus } from '../lib/conversationStatus'
 
 // Fleet — the sandbox-fleet administration console (TFAC-589). Operator-gated,
 // EE-licensed (FeatureFleet). A DB-backed live view over the instances registry,
@@ -56,15 +56,13 @@ function useFleetFetch<T>(url: string | null): Fetch<T> {
       }
       // Hold last-good data across a refetch (no flash); only replace on success.
       try {
-        const res = await fetch(url, { credentials: 'include' })
-        if (!res.ok) throw new Error(await readError(res, 'Failed to load fleet data'))
-        const body = (await res.json()) as T
+        const body = await apiJSON<T>(url)
         if (!signal.cancelled) {
           setData(body)
           setError(null)
         }
       } catch (err) {
-        if (!signal.cancelled) setError(err instanceof Error ? err.message : String(err))
+        if (!signal.cancelled) setError(httpErrorMessage(err, 'Could not load the fleet data.'))
       }
     },
     [url],
@@ -72,6 +70,9 @@ function useFleetFetch<T>(url: string | null): Fetch<T> {
 
   useEffect(() => {
     const signal = { cancelled: false }
+    // Fetch-on-mount/url-change: load owns its own setState calls; the effect
+    // just kicks it. Same safe pattern AuthContext uses.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(signal)
     const poll = () => {
       if (document.visibilityState === 'visible') void load(signal)
@@ -675,7 +676,7 @@ function CopyId({ id, kind }: { id: string; kind: string }) {
 // declared conversation status rather than a status-keyed record: the record
 // carried two names the backend had already stopped emitting, and a record's
 // keys are invisible to the vocabulary lint — a `case` arm is not.
-function statusTone(status: RunStatusValue): ChipTone {
+function statusTone(status: ConversationStatusValue): ChipTone {
   if (isActiveStatus(status)) return 'rust'
   switch (status) {
     case 'completed':
@@ -951,13 +952,11 @@ export default function Fleet() {
   const onDrain = useCallback(async (id: string, draining: boolean) => {
     setDrainBusy(id)
     try {
-      const res = await fetch(`/api/fleet/instances/${encodeURIComponent(id)}/drain`, {
+      await apiFetch(`/api/fleet/instances/${encodeURIComponent(id)}/drain`, {
         method: 'POST',
-        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ draining }),
       })
-      if (!res.ok) throw new Error(await readError(res, 'drain failed'))
       setRev((r) => r + 1) // refetch instances to reflect the new state
     } catch {
       // Surface via the next poll's error state; keep the UI responsive.

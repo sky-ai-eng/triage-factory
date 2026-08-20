@@ -15,7 +15,8 @@ import (
 //   - the orgID to pass to every call,
 //   - a PendingFiringsSeeder for fixtures the store can't create itself
 //     (entity → task → event_handler → event chains, plus optional
-//     non-terminal runs for the HasActiveAutoRunForTask gate).
+//     non-terminal conversations for the HasActiveAutoConversationForTask
+//     gate).
 type PendingFiringsStoreFactory func(t *testing.T) (
 	store db.PendingFiringsStore,
 	orgID string,
@@ -56,11 +57,11 @@ type PendingFiringsSeeder struct {
 	// competing claim rather than a synthetic one.
 	ClaimTaskForUser func(t *testing.T, taskID string)
 
-	// RunForTask inserts a run against the taskID and returns the
-	// runID. Used by MarkFired tests to satisfy fired_run_id's FK to
-	// runs(id). Status / trigger_type aren't load-bearing here —
-	// the conformance suite only needs a real run row to point at;
-	// the per-task firing gate's runs-shaped half is owned by
+	// RunForTask inserts a blueprint_run against the taskID and returns
+	// its id. Used by MarkFired tests to satisfy fired_run_id's FK to
+	// blueprint_runs(id). Status / trigger_type aren't load-bearing here —
+	// the conformance suite only needs a real row to point at; the
+	// per-task firing gate's conversations-shaped half is owned by
 	// ConversationStore and tested there.
 	RunForTask func(t *testing.T, taskID string) string
 }
@@ -80,7 +81,7 @@ type PendingFiringsSeeder struct {
 //     sibling task's queue.
 //   - Release reverts a 'draining' row back to 'pending'; no-op against
 //     a row that's since reached a terminal state.
-//   - MarkFired flips 'draining' → 'fired' with run_id; idempotent
+//   - MarkFired flips 'draining' → 'fired' with fired_run_id; idempotent
 //     against already-terminal rows (guarded by status='draining').
 //   - MarkSkipped flips 'draining' → 'skipped_stale' with reason;
 //     same idempotency guard.
@@ -89,8 +90,8 @@ type PendingFiringsSeeder struct {
 //     at least one 'pending' row, scoped to the org.
 //   - ListForEntity orders by queued_at ASC then id ASC.
 //
-// The runs-shaped half of the per-task firing gate
-// (HasActiveAutoRunForTask) is owned by ConversationStore — its
+// The conversation-shaped half of the per-task firing gate
+// (HasActiveAutoConversationForTask) is owned by ConversationStore — its
 // behavior is covered by that store's own tests, not here.
 func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFactory) {
 	t.Helper()
@@ -373,20 +374,20 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		}
 		row, _ := s.PopForTask(ctx, orgID, tup.TaskID)
 
-		// MarkFired references a real run row in Postgres
+		// MarkFired references a real blueprint_run row in Postgres
 		// (fired_run_id has FK with ON DELETE on (fired_run_id, org_id)
-		// referencing runs(id, org_id)). The seeder's run-insert
-		// helpers produce valid run ids.
-		runID := seed.RunForTask(t, tup.TaskID)
-		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
+		// referencing blueprint_runs(id, org_id)). The seeder's
+		// run-insert helpers produce valid blueprint_run ids.
+		blueprintRunID := seed.RunForTask(t, tup.TaskID)
+		if err := s.MarkFired(ctx, orgID, row.ID, blueprintRunID); err != nil {
 			t.Fatalf("MarkFired: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)
 		if len(rows) != 1 || rows[0].Status != domain.PendingFiringStatusFired {
 			t.Errorf("expected one fired row, got %+v", rows)
 		}
-		if rows[0].FiredRunID == nil || *rows[0].FiredRunID != runID {
-			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredRunID, runID)
+		if rows[0].FiredBlueprintRunID == nil || *rows[0].FiredBlueprintRunID != blueprintRunID {
+			t.Errorf("fired_run_id = %v, want pointer to %q", rows[0].FiredBlueprintRunID, blueprintRunID)
 		}
 		if rows[0].DrainedAt == nil {
 			t.Errorf("drained_at should be set after MarkFired")
@@ -403,9 +404,9 @@ func RunPendingFiringsStoreConformance(t *testing.T, mk PendingFiringsStoreFacto
 		if err := s.MarkSkipped(ctx, orgID, row.ID, domain.PendingFiringSkipTaskClosed); err != nil {
 			t.Fatalf("MarkSkipped: %v", err)
 		}
-		runID := seed.RunForTask(t, tup.TaskID)
+		blueprintRunID := seed.RunForTask(t, tup.TaskID)
 		// Should silently no-op — guarded by WHERE status='pending'.
-		if err := s.MarkFired(ctx, orgID, row.ID, runID); err != nil {
+		if err := s.MarkFired(ctx, orgID, row.ID, blueprintRunID); err != nil {
 			t.Fatalf("MarkFired on terminal: %v", err)
 		}
 		rows, _ := s.ListForEntity(ctx, orgID, tup.EntityID)

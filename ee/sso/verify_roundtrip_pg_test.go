@@ -362,7 +362,7 @@ func TestSSOTestStart_AdminNotYetEnabled_RedirectsWithTestState(t *testing.T) {
 }
 
 // A non-admin member of the org → 404 (non-disclosure), and TF never calls GoTrue.
-func TestSSOTestStart_NonAdmin_404(t *testing.T) {
+func TestSSOTestStart_NonAdminForbidden(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	r := newAuthRig(t)
 
@@ -381,8 +381,8 @@ func TestSSOTestStart_NonAdmin_404(t *testing.T) {
 	sid := r.signInAs(member)
 
 	resp := r.requestWithSid("GET", "/api/sso/connection/test", sid)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status=%d, want 404 for a non-admin", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status=%d, want 403 for a non-admin", resp.StatusCode)
 	}
 	if r.fake.ssoCalls() != 0 {
 		t.Error("GoTrue /sso was called for a non-admin")

@@ -75,8 +75,8 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
       <div className="space-y-3">
         <p className="text-ui leading-relaxed text-ink-3">
           Triage Factory matches your pull requests and reviews to you by your GitHub username on{' '}
-          <span className="text-ink-2">{host}</span>. It only reads your username — it never stores
-          your token or gains access to your repositories.
+          <span className="text-ink-2">{host}</span>. It reads your username and verified primary
+          email — it never stores your token or gains access to your repositories.
         </p>
 
         {connected && !reentering ? (

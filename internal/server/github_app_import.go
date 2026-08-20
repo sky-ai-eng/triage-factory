@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Bring-your-own-App import. The second way into App mode, for orgs
@@ -56,15 +57,23 @@ type githubAppPermissionRow struct {
 	Feature    string `json:"feature,omitempty"`
 }
 
-// githubAppImportErrorResponse is the 422 body for a permission gap: the full
-// granted-vs-required table plus whether the gap is Blocking. Blocking=true is a
-// hard gap (a core permission is missing — accept_partial can't override it);
-// Blocking=false means only soft gaps remain, which the frontend resubmits past
-// with accept_partial=true after an acknowledgment.
+// githubAppImportErrorResponse is the 422 body for a permission gap: the
+// standard error envelope, plus the full granted-vs-required table and whether
+// the gap is Blocking. Blocking=true is a hard gap (a core permission is
+// missing — accept_partial can't override it); Blocking=false means only soft
+// gaps remain, which the frontend resubmits past with accept_partial=true after
+// an acknowledgment. The extra keys ride alongside `errors` because the table is
+// structured data no envelope field can hold; the message itself is in the
+// envelope like every other fault, so the shared client parser reads it.
 type githubAppImportErrorResponse struct {
-	Error       string                   `json:"error"`
+	Errors      []httpx.ErrorItem        `json:"errors"`
 	Permissions []githubAppPermissionRow `json:"permissions"`
 	Blocking    bool                     `json:"blocking"`
+}
+
+// permissionGapErrors wraps a preflight message in the standard envelope.
+func permissionGapErrors(msg string) []httpx.ErrorItem {
+	return []httpx.ErrorItem{{Reason: httpx.ReasonPermissionGap, Message: msg}}
 }
 
 // githubAppImportResponse is the success body: the same status payload the
@@ -94,15 +103,16 @@ type importRequiredPermission struct {
 // importRequiredPermissions is the bar an imported App is preflighted against —
 // the exact set buildManifestAndState requests (github_app_register.go).
 //
-//   - Hard (block): issues:write, pull_requests:write, contents:write,
-//     metadata:read — core function (open PRs, comment, push branches) breaks
-//     without them.
+//   - Hard (block): emails:read, issues:write, pull_requests:write,
+//     contents:write, metadata:read — core function (identity capture, open
+//     PRs, comment, push branches) breaks without them.
 //   - Soft (warn): checks:read / actions:read (CI check + workflow events),
 //     statuses:read (the open-PR statusCheckRollup CI query — its contexts union
 //     touches the commit-statuses resource), members:read (GitHub team import +
 //     team-based review-request detection) — specific features degrade, the rest
 //     works.
 var importRequiredPermissions = []importRequiredPermission{
+	{name: "emails", level: "read", hard: true},
 	{name: "issues", level: "write", hard: true},
 	{name: "pull_requests", level: "write", hard: true},
 	{name: "contents", level: "write", hard: true},
@@ -264,20 +274,16 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var req githubAppImportRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	appIDStr := strings.TrimSpace(req.AppID)
 	if appIDStr == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "An App ID is required.", "field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "An App ID is required.", Field: "app_id"})
 		return
 	}
 	if strings.TrimSpace(req.PEM) == "" {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "The App's private key (PEM) is required.", "field": "pem",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "The App's private key (PEM) is required.", Field: "pem"})
 		return
 	}
 
@@ -294,9 +300,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "org already has a GitHub App registered; remove it first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
 
@@ -318,19 +322,13 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// Parse the PEM (garbage → 422).
 	key, err := githubapp.ParsePrivateKey([]byte(req.PEM))
 	if err != nil {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.",
-			"field": "pem",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "That private key (PEM) couldn't be parsed. Paste the full contents of the App's .pem file, including the BEGIN/END lines.", Field: "pem"})
 		return
 	}
 
 	appID, err := strconv.ParseInt(appIDStr, 10, 64)
 	if err != nil || appID <= 0 {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "App ID must be a positive number (the numeric App ID, not the client ID).",
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "App ID must be a positive number (the numeric App ID, not the client ID).", Field: "app_id"})
 		return
 	}
 
@@ -348,10 +346,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// dominant cause. A transient GitHub outage would also land here — rare
 		// enough that the actionable message is the better default.
 		githubAppLog.Error("import: get app failed", "org", orgID, "error", err)
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "App ID and private key don't match, or the key was revoked. Double-check the App ID and re-download the private key from the App's GitHub settings.",
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "App ID and private key don't match, or the key was revoked. Double-check the App ID and re-download the private key from the App's GitHub settings.", Field: "app_id"})
 		return
 	}
 
@@ -360,10 +355,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// mechanism makes the cross-pair case 401 above, this is the cheap belt-and-
 	// suspenders that also pins the canonical id we persist under.
 	if app.ID != appID {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": fmt.Sprintf("That private key belongs to a different App (ID %d) than the App ID you entered (%d).", app.ID, appID),
-			"field": "app_id",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: fmt.Sprintf("That private key belongs to a different App (ID %d) than the App ID you entered (%d).", app.ID, appID), Field: "app_id"})
 		return
 	}
 
@@ -373,7 +365,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	rows, hardGaps, softGaps := preflightImportPermissions(app.Permissions)
 	if len(hardGaps) > 0 {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       hardGapMessage(hardGaps),
+			Errors:      permissionGapErrors(hardGapMessage(hardGaps)),
 			Permissions: rows,
 			Blocking:    true,
 		})
@@ -381,7 +373,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(softGaps) > 0 && !req.AcceptPartial {
 		writeJSON(w, http.StatusUnprocessableEntity, githubAppImportErrorResponse{
-			Error:       softGapMessage(softGaps),
+			Errors:      permissionGapErrors(softGapMessage(softGaps)),
 			Permissions: rows,
 			Blocking:    false,
 		})
@@ -396,10 +388,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	if hasClientSecret {
 		switch checkAppClientSecret(ctx, apiBase, app.ClientID, clientSecret) {
 		case clientSecretBad:
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "That client secret is not valid for this App. Generate a fresh client secret in the App's GitHub settings (Apps can hold two at once, so this won't disturb an existing consumer), then paste it here.",
-				"field": "client_secret",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That client secret is not valid for this App. Generate a fresh client secret in the App's GitHub settings (Apps can hold two at once, so this won't disturb an existing consumer), then paste it here.", Field: "client_secret"})
 			return
 		case clientSecretValid:
 			clientSecretValidated = true
@@ -467,13 +456,22 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// cutover); a fresh setup ⇒ active=true. integrations.Load reads the PAT
 	// inside the same tx so the decision and the write are consistent.
 	var staged bool
+	var created domain.OrgGitHubApp
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
+		// Same reasoning as the register callback: a failed credential read
+		// must not read as "no PAT" and activate the App beside a live one.
+		// The load runs before any write, so failing here leaves no App row
+		// and no vaulted secrets behind.
+		creds, lerr := integrations.Load(ctx, tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load org credentials: %w", lerr)
+		}
 		staged = creds.GitHubPAT != ""
 		if staged {
 			githubAppLog.Info("import: live pat present, staging app inactive until cutover", "org", orgID, "app_id", canonicalAppID)
 		}
-		if err := tx.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		var cerr error
+		created, cerr = tx.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              canonicalAppID,
 			Slug:               app.Slug,
@@ -485,8 +483,17 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 			RegisteredByUserID: userID,
 			Active:             !staged,
 			BotUserID:          botUserID,
-		}); err != nil {
-			return err
+		})
+		if cerr != nil {
+			return cerr
+		}
+		// The org is now in the BYO-App credential system — including when the
+		// App is STAGED behind a still-live PAT. Same reasoning as the manifest
+		// register path: the class names which system the org is in, Active
+		// names which credential is live, and this transaction is what keeps
+		// the two from disagreeing.
+		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		// Store the PEM verbatim (req.PEM, not a trimmed copy): a private key's
 		// internal newlines are load-bearing, ParsePrivateKey tolerates the
@@ -524,9 +531,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		}
 		var exists *db.ErrGitHubAppExists
 		if errors.As(err, &exists) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "org already has a GitHub App registered; remove it first",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 			return
 		}
 		internalError(w, "github-app", err)
@@ -536,6 +541,11 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	githubAppLog.Info("imported app",
 		"app_id", canonicalAppID, "slug", app.Slug, "owner_login", app.OwnerLogin, "owner_type", app.OwnerType, "org", orgID, "active", !staged)
 
+	// An imported App brings its own webhook secret, so the receiver's cached
+	// resolution for this org is out of date the moment the row lands. Same
+	// reasoning as the manifest register path.
+	s.invalidateWebhookSecret(orgID)
+
 	// Post-commit hooks, same as the cutover/credentials paths: a fresh import is
 	// immediately the live credential, so re-due polling + re-profile under it. A
 	// staged import doesn't change the live credential (the PAT stays live), but
@@ -544,15 +554,10 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		go s.onGitHubChanged(orgID)
 	}
 
-	// Build the response from the freshly-persisted row (system reads — the admin
-	// gate already authorized orgID). No installations yet (no backfill at import;
-	// the install step reconciles), so this carries an empty list the wizard's
-	// install step refreshes.
-	created, err := s.githubApps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-app", err)
-		return
-	}
+	// Build the response from the row CreateForOrg persisted, above — no
+	// follow-up read needed, the write already handed it back. No installations
+	// yet (no backfill at import; the install step reconciles), so this carries
+	// an empty list the wizard's install step refreshes.
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -560,8 +565,16 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, githubAppImportResponse{
-		githubAppStatusResponse: newGitHubAppStatusResponse(created, insts,
-			s.registrantDisplayName(ctx, orgID, userID, created), s.connectCallbackURLSafe(orgID)),
+		// The class the transaction above just committed for this org — passed
+		// as the literal rather than re-read, since the import IS what put the
+		// org in the BYO-App system.
+		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, &created, insts,
+			s.registrantDisplayName(ctx, orgID, userID, &created), s.connectCallbackURLSafe(orgID),
+			// No webhook health: nothing has probed this App yet, and the block
+			// is deliberately absent rather than optimistic. The panel's next
+			// status read runs the first probe — the import form's own copy is
+			// what names the cost of a blank webhook secret at this moment.
+			nil),
 		Permissions:           rows,
 		ClientSecretStored:    hasClientSecret,
 		ClientSecretValidated: clientSecretValidated,

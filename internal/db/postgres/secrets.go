@@ -298,7 +298,7 @@ func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (s
 
 // GetUserSystem reads a per-user secret on the supabase_admin pool — RLS
 // bypassed, args trusted. System door for code acting as a user (the
-// write-actor resolver building a JiraClientForUser on a background path).
+// write-actor resolver building a jira.Resolver.ForUser client on a background path).
 func (s *secretStore) GetUserSystem(ctx context.Context, orgID, userID, key string) (string, error) {
 	return s.getUser(ctx, s.admin, false, "secrets.GetUserSystem", orgID, userID, key)
 }

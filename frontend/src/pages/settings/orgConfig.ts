@@ -1,11 +1,11 @@
 // Shared types + persistence helpers for the org-level configuration
 // surface (GitHub + Jira access, poller timing, model cap). The same
 // helpers back the Settings workspace tab and the create-time setup wizard
-// (both modes) — every surface round-trips the identical org_settings
-// shape via the existing endpoints, so there is no parallel persistence path
-// to drift.
+// (both modes) — every surface saves through the one field-scoped settings
+// PATCH below, naming only the fields it edited, so there is no parallel
+// persistence path to drift and no save that round-trips a whole form.
 
-import { readError } from '../../lib/api'
+import { apiJSON, httpErrorMessage, HttpError } from '../../lib/apiClient'
 
 export type CloneProtocol = 'ssh' | 'https'
 
@@ -16,9 +16,14 @@ export type CloneProtocol = 'ssh' | 'https'
 export type BedrockAuthMethod = 'role' | 'bearer' | 'access_keys'
 
 // OrgConfigForm is the editable org-level field set the shared components
-// drive. Field names match the GET/POST /api/settings/org wire keys so a
-// container can spread component patches straight into its form state.
+// drive. Field names match the GET/PATCH /api/orgs/{org}/settings wire keys so
+// a container can spread component patches straight into its form state.
 export interface OrgConfigForm {
+  // The settings row's concurrency token, carried through the form so a save
+  // can assert the version it was editing. Seeded by the load, replaced by
+  // every successful save, and never touched by a field group — it is state
+  // about the row, not a value anyone types. 0 means "not loaded yet".
+  version: number
   github_url: string
   github_pat: string
   github_clone_protocol: CloneProtocol
@@ -36,21 +41,21 @@ export interface OrgConfigForm {
   // Org-wide daily LLM spend cap (TFAC-477), held as the raw text input. Empty =
   // "no cap"; a numeric string is the per-day USD ceiling. Stored as a string
   // (not a number) so the input can be cleared to "" cleanly and partial typing
-  // works; saveOrgConfig converts it to the wire number.
+  // works; patchOrgSettings converts it to the wire number.
   max_daily_cost_usd: string
   // Org-wide concurrent-run limit, held as the raw text input. Empty (or 0) =
   // "unlimited"; a positive integer string is the ceiling on runs executing at
   // once across the fleet. Held as a string for the same reasons as
-  // max_daily_cost_usd; saveOrgConfig converts it to the wire number.
+  // max_daily_cost_usd; patchOrgSettings converts it to the wire number.
   max_concurrent_runs: string
   // The org's Anthropic API key (BYOK). Blank on load — it's a secret that never
   // leaves the vault, like jira_pat. It is captured ONLY via the validated
-  // connectAnthropic endpoint and is deliberately NOT sent by saveOrgConfig, so
-  // the bulk settings POST can't be an unvalidated write path.
+  // connectAnthropic endpoint and is not part of OrgSettingsPatch, so the
+  // settings PATCH can't be an unvalidated write path.
   anthropic_api_key: string
   // ── Amazon Bedrock (alternative Claude provider) ── Captured ONLY via the
-  // validated connectBedrock endpoint, never sent by saveOrgConfig — same rule
-  // as anthropic_api_key. The secret fields (bearer token / key pair / session
+  // validated connectBedrock endpoint, never part of OrgSettingsPatch — same
+  // rule as anthropic_api_key. The secret fields (bearer token / key pair / session
   // token) stay blank on load; presence rides has_bedrock_credentials +
   // bedrock_auth_method. The non-secret config (method, region, model,
   // endpoint) round-trips so the form shows current values.
@@ -70,7 +75,7 @@ export interface OrgConfigForm {
   bedrock_base_url: string
 }
 
-// OrgSettingsData mirrors the GET /api/settings/org response. Token fields
+// OrgSettingsData mirrors the GET /api/orgs/{org}/settings response. Token fields
 // are presence booleans only — the secrets themselves never leave the
 // keychain/vault, so the form shows "leave blank to keep current".
 export interface OrgSettingsData {
@@ -119,9 +124,18 @@ export interface OrgSettingsData {
   bedrock_model_id?: string
   bedrock_base_url?: string
   member_count: number
+  // The row's concurrency token. patchOrgSettings sends it back and the server
+  // 409s a save whose token is stale, so two admins editing different sections
+  // can't silently undo each other.
+  version: number
+  // Advisory prose about a save that SUCCEEDED — today, that a newly-lowered
+  // model cap now clamps the default team's preference. Only ever present on
+  // the PATCH response; the GET omits it.
+  warning?: string
 }
 
 export const emptyOrgConfig = (): OrgConfigForm => ({
+  version: 0,
   github_url: '',
   github_pat: '',
   github_clone_protocol: 'ssh',
@@ -155,6 +169,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
 // leaves the stored secret untouched.
 export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
   return {
+    version: org.version,
     github_url: org.github_base_url || '',
     github_pat: '',
     github_clone_protocol: org.github_clone_protocol === 'https' ? 'https' : 'ssh',
@@ -197,9 +212,12 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
   }
 }
 
-export async function fetchOrgSettings(): Promise<OrgSettingsData | null> {
-  const res = await fetch('/api/settings/org')
-  return res.ok ? ((await res.json()) as OrgSettingsData) : null
+export async function fetchOrgSettings(orgId: string): Promise<OrgSettingsData | null> {
+  // Null on any failure: every caller renders a "couldn't load settings" state
+  // rather than a message, so there is nothing to carry out of the error.
+  return apiJSON<OrgSettingsData>(`/api/orgs/${encodeURIComponent(orgId)}/settings`).catch(
+    () => null,
+  )
 }
 
 // dailyCapError is the frontend input-layer validation for the daily spend cap.
@@ -219,102 +237,127 @@ export function dailyCapError(raw: string): string | null {
   return null
 }
 
-// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentRunsCeiling — a sanity
+// MAX_CONCURRENT_RUNS_CEILING mirrors domain.MaxConcurrentClaimsCeiling — a sanity
 // bound far beyond any real fleet that keeps a validated value inside the
 // backend's int4 column. Kept in sync with the Go constant by hand (there's no
 // shared source), like the `>= 0` guard below mirrors the handler.
 export const MAX_CONCURRENT_RUNS_CEILING = 1_000_000
 
 // concurrentRunsError is the frontend input-layer validation for the
-// concurrent-run limit. "Unlimited" is expressed by clearing the field (blank)
-// OR by an explicit 0 — the ticket's "blank or 0 = unlimited" — so both are
-// always valid. A typed value must parse to a non-negative, finite integer at
-// or below the ceiling: negatives are rejected (the claim reads <= 0 as
-// unlimited, so a negative would silently mean "no limit" and 400 at the API),
-// fractions are rejected since the column is an integer, and an oversized value
-// is rejected before it can 400 at the DB. Returns the user-facing message, or
-// null when the input is acceptable. Mirrors the backend's guard so Save blocks
-// before the round-trip instead of bouncing off a 400.
+// concurrent-run limit. "Unlimited" is expressed by clearing the field (blank),
+// which sends JSON null — the one clearing convention the whole settings PATCH
+// speaks — so blank is always valid. A typed value must parse to a positive,
+// finite integer at or below the ceiling: 0 and negatives are rejected (the
+// claim reads <= 0 as unlimited, so they would silently mean "no limit", which
+// blank already says, and the API 422s them), fractions are rejected since the
+// column is an integer, and an oversized value is rejected before it can 422 at
+// the DB. Returns the user-facing message, or null when the input is
+// acceptable. Mirrors the backend's guard so Save blocks before the round-trip.
 export function concurrentRunsError(raw: string): string | null {
   const trimmed = raw.trim()
   if (trimmed === '') return null
   const n = Number(trimmed)
   if (!Number.isFinite(n)) return 'Enter a whole number, or leave blank for unlimited.'
-  if (n < 0) return 'Enter 0 or more, or leave blank for unlimited.'
+  if (n <= 0) return 'Enter 1 or more, or leave blank for unlimited.'
   if (!Number.isInteger(n)) return 'Enter a whole number of runs.'
   if (n > MAX_CONCURRENT_RUNS_CEILING)
     return `Enter ${MAX_CONCURRENT_RUNS_CEILING.toLocaleString()} or fewer.`
   return null
 }
 
-// concurrentRunsToWire converts the concurrent-run text input to the wire value
-// for max_concurrent_runs. Validation happens upstream (concurrentRunsError
-// gates the Save button), so by the time this runs the input is either blank or
-// a non-negative integer:
-//   - blank        → 0 (an explicit "unlimited" clear)
-//   - valid number → passed straight through
-//   - unparseable  → undefined, which JSON.stringify drops, so the field is
-//     omitted and a previously-stored limit is left UNTOUCHED rather than
-//     silently cleared to 0. Effectively unreachable from a number input; the
-//     guard just makes the "never stomp the limit on garbage" property explicit.
-function concurrentRunsToWire(raw: string): number | undefined {
+// numericOrNull converts one of the two cap inputs to its wire value. Blank is
+// the "no cap" / "unlimited" spelling and becomes JSON null, the clearing
+// convention every field on this PATCH shares. A typed value passes through for
+// the backend to range-check; an unparseable one becomes undefined, which
+// JSON.stringify drops, so the field is omitted and the stored value is left
+// UNTOUCHED rather than silently cleared. Effectively unreachable from a number
+// input whose Save is gated on the validators above — the guard just makes the
+// "never stomp the cap on garbage" property explicit.
+function numericOrNull(raw: string): number | null | undefined {
   const trimmed = raw.trim()
-  if (trimmed === '') return 0
+  if (trimmed === '') return null
   const n = Number(trimmed)
   return Number.isFinite(n) ? n : undefined
 }
 
-// dailyCapToWire converts the daily-cap text input to the wire value for
-// max_daily_cost_usd. Validation happens upstream (dailyCapError gates the Save
-// button), so by the time this runs the input is either blank or a positive
-// number:
-//   - blank        → 0 (an explicit "no cap" clear)
-//   - valid number → passed straight through, fractions and all. A stray
-//     non-positive value is still left intact so the backend's `>= 0` check is
-//     the backstop for a direct API call (the UI never reaches here with one).
-//   - unparseable  → undefined, which JSON.stringify drops, so the field is
-//     omitted and a previously-stored cap is left UNTOUCHED rather than silently
-//     cleared to 0. Effectively unreachable from a number input; the guard just
-//     makes the "never stomp the cap on garbage" property explicit.
-function dailyCapToWire(raw: string): number | undefined {
-  const trimmed = raw.trim()
-  if (trimmed === '') return 0
-  const n = Number(trimmed)
-  return Number.isFinite(n) ? n : undefined
+// blankAsNull maps an empty text field to the wire's clear (JSON null). The
+// base URLs and the model cap are all "set it or don't have one", and an empty
+// string is not a spelling of either — the API rejects it, so the form's blank
+// has to become the explicit clear here.
+function blankAsNull(v: string): string | null {
+  return v.trim() === '' ? null : v
 }
 
-// saveOrgConfig persists the org-level CONFIG via POST /api/settings/org.
+// OrgSettingsPatch names the fields a caller may send to the settings PATCH,
+// in form shape (patchOrgSettings owns the conversion to wire values). A
+// caller passes exactly the fields it edited and the PATCH's absent-means-keep
+// contract does the rest, so one surface's save can never carry — or clobber —
+// a value its user wasn't looking at. Credentials aren't representable here at
+// all: the GitHub PAT, the Jira service credential and the LLM provider
+// material each bind through their own validated resource.
+export type OrgSettingsPatch = Partial<
+  Pick<
+    OrgConfigForm,
+    | 'github_url'
+    | 'github_poll_interval'
+    | 'github_clone_protocol'
+    | 'jira_url'
+    | 'jira_poll_interval'
+    | 'max_llm_model_tier'
+    | 'max_daily_cost_usd'
+    | 'max_concurrent_runs'
+  >
+>
+
+// patchOrgSettings persists org-level CONFIG via PATCH /api/orgs/{org}/settings,
+// sending ONLY the fields the caller names. Base URLs stay on this route —
+// they're host config the GitHub App path needs before any credential exists —
+// and clearing one no longer destroys the matching credential.
 //
-// It sends no secrets. The GitHub PAT and the Jira service credential each
-// have their own resource (connectGitHubPAT / connectJira and their
-// disconnects), so there is no "" -vs- undefined "leave blank to keep current"
-// dance on the wire any more: a credential you didn't retype simply isn't part
-// of this request. Base URLs stay here — they're host config the GitHub App
-// path needs before any credential exists — and clearing one no longer
-// destroys the matching credential.
+// `version` is the token the caller's copy of the row was loaded (or last
+// saved) at. A write that lost a race makes this a 409, reported as `conflict`
+// so the caller can re-read rather than telling the user to retry a write that
+// will keep failing.
 //
-// Returns a discriminated result; `warning` carries the backend's model-cap
-// clamp notice on an otherwise-successful save.
-export async function saveOrgConfig(
-  form: OrgConfigForm,
-): Promise<{ ok: true; warning?: string } | { ok: false; error: string }> {
-  const res = await fetch('/api/settings/org', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      github_base_url: form.github_url,
-      github_poll_interval: form.github_poll_interval,
-      github_clone_protocol: form.github_clone_protocol,
-      jira_base_url: form.jira_url,
-      jira_poll_interval: form.jira_poll_interval,
-      max_llm_model_tier: form.max_llm_model_tier,
-      max_daily_cost_usd: dailyCapToWire(form.max_daily_cost_usd),
-      max_concurrent_runs: concurrentRunsToWire(form.max_concurrent_runs),
-    }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save settings') }
+// Returns the post-save settings so the caller can refresh its baseline —
+// crucially including the new version, without which the next save would 409
+// against its own write.
+export async function patchOrgSettings(
+  orgId: string,
+  version: number,
+  fields: OrgSettingsPatch,
+): Promise<
+  { ok: true; settings: OrgSettingsData } | { ok: false; error: string; conflict: boolean }
+> {
+  const body: Record<string, unknown> = { version }
+  if (fields.github_url !== undefined) body.github_base_url = blankAsNull(fields.github_url)
+  if (fields.github_poll_interval !== undefined)
+    body.github_poll_interval = fields.github_poll_interval
+  if (fields.github_clone_protocol !== undefined)
+    body.github_clone_protocol = fields.github_clone_protocol
+  if (fields.jira_url !== undefined) body.jira_base_url = blankAsNull(fields.jira_url)
+  if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
+  if (fields.max_llm_model_tier !== undefined)
+    body.max_llm_model_tier = blankAsNull(fields.max_llm_model_tier)
+  if (fields.max_daily_cost_usd !== undefined)
+    body.max_daily_cost_usd = numericOrNull(fields.max_daily_cost_usd)
+  if (fields.max_concurrent_runs !== undefined)
+    body.max_concurrent_runs = numericOrNull(fields.max_concurrent_runs)
+  try {
+    const settings = await apiJSON<OrgSettingsData>(
+      `/api/orgs/${encodeURIComponent(orgId)}/settings`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    )
+    return { ok: true, settings }
+  } catch (e) {
+    return {
+      ok: false,
+      error: httpErrorMessage(e, 'Could not save the settings.'),
+      conflict: e instanceof HttpError && e.status === 409,
+    }
   }
-  const body = (await res.json().catch(() => null)) as { warning?: string } | null
-  return { ok: true, warning: body?.warning }
 }

@@ -14,18 +14,20 @@ import (
 // shared reconcile (internal/review, the same transform the agent finalize gate
 // uses), then counts how far the live head is ahead of the finalize-time head.
 //
-// Best-effort by contract: ANY failure (GitHub not configured, live-head fetch
-// error, a compare that won't load) degrades to "unknown" freshness and a nil
-// count rather than failing the overlay — a stale review must still render so the
-// human can read and act on it. Comments are left at the caller's pre-seeded
-// "unknown" default whenever their anchor can't be mapped.
+// Best-effort by contract, and deliberately exempt from the sweep that turned
+// swallowed store/vault errors into 500s: ANY failure (GitHub not configured,
+// live-head fetch error, a compare that won't load) degrades to "unknown"
+// freshness and a nil count rather than failing the overlay — this is a display
+// annotation on a review the caller can already read and act on, and "unknown"
+// is an honest value the wire shape carries. Comments are left at the caller's
+// pre-seeded "unknown" default whenever their anchor can't be mapped.
 //
 // Freshness joins each out-comment to its staged comment by stable TF-local id, so
 // it never depends on slice ordering.
-func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactJSON) {
+func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID string, art *domain.Artifact, details domain.ReviewArtifactDetails, out *reviewArtifactDetailsJSON) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
-		return // malformed target — leave everything "unknown" (reviewGet 500s a bad target before us)
+		return // malformed target — leave everything "unknown" (reviewArtifactDetails 500s a bad target before us)
 	}
 	// Resolve the per-repo client directly (not ghForArtifact, which writes an
 	// error response): a missing credential must degrade to "unknown", not 503 the

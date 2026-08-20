@@ -12,14 +12,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// putCapReq builds a PUT /api/usage/teams/{team_id}/cap carrying the session org,
+// putCapReq builds a PUT /api/teams/{team_id}/usage/cap carrying the session org,
 // caller claims, the team_id path value, and a JSON body — the state
 // withCSRF/withSession would normally seed. The handler is invoked directly (not
 // via the mux) so the test exercises the governance + role gates and the
 // admin-pool write without the cookie-session dance. Reuses the usageRig from
 // usage_handler_gates_test.go (same package, same four actors + seeded spend).
 func (r *usageRig) putCapReq(caller, teamID, body string) *http.Request {
-	req := httptest.NewRequest(http.MethodPut, "/api/usage/teams/"+teamID+"/cap", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/teams/"+teamID+"/usage/cap", strings.NewReader(body))
 	req.SetPathValue("team_id", teamID)
 	ctx := httpx.WithOrgID(req.Context(), r.orgID)
 	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: caller})
@@ -67,25 +67,27 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 			t.Errorf("echoed cap = %v, want 25", echo.MaxDailyCostUSD)
 		}
 
-		// The cap landed: the editor's source (/team-caps) reports it on teamA.
+		// The cap landed: the editor's source (team-caps/list) reports it on teamA.
 		capsRec := httptest.NewRecorder()
-		r.uh.handleUsageTeamCaps(capsRec, r.req(r.orgAdmin, ""))
-		if capsRec.Code != http.StatusOK {
-			t.Fatalf("/team-caps after cap set = %d, want 200; body=%s", capsRec.Code, capsRec.Body.String())
-		}
-		var caps usageTeamCapsResponse
-		mustDecode(t, capsRec, &caps)
+		r.uh.handleUsageTeamCaps(capsRec, r.activityReq(r.orgAdmin, "", ""))
+		caps := decodeList[usageTeamCapEntry](t, capsRec)
 		var sawTeamA bool
-		for _, e := range caps.Teams {
+		for _, e := range caps.Items {
 			if e.TeamID == r.teamA {
 				sawTeamA = true
 				if e.Cap == nil || !floatEq(*e.Cap, 25) {
-					t.Errorf("/team-caps teamA cap = %v, want 25", e.Cap)
+					t.Errorf("team-caps teamA cap = %v, want 25", e.Cap)
 				}
 			}
 		}
 		if !sawTeamA {
-			t.Errorf("teamA absent from /team-caps after setting its cap; teams=%+v", caps.Teams)
+			t.Errorf("teamA absent from team-caps after setting its cap; teams=%+v", caps.Items)
+		}
+		// Both seeded teams are listed, and the total counts every active team
+		// — not only the capped ones. The editor's whole reason to exist is
+		// pre-capping an idle team.
+		if caps.Total() != 2 || len(caps.Items) != 2 {
+			t.Errorf("team-caps = %d rows / total %d, want 2/2 (teamA + teamB)", len(caps.Items), caps.Total())
 		}
 	})
 
@@ -137,9 +139,9 @@ func TestUsageTeamCap_GovernanceAndRoleGates_Postgres(t *testing.T) {
 	})
 }
 
-// TestUsageTeamCaps_ListsEveryActiveTeam_Postgres pins the GET /team-caps editor
-// source (TFAC-482): it lists every ACTIVE team — including one with NO spend in
-// the window, which the spend rollup's by_team would hide — so an org admin can
+// TestUsageTeamCaps_ListsEveryActiveTeam_Postgres pins the team-caps editor
+// source: it lists every ACTIVE team — including one with NO spend in the
+// window, which the spend rollup's by_team would hide — so an org admin can
 // pre-cap an idle team. Same governance/role gates as the PUT.
 func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 	r := newUsageRig(t)
@@ -150,9 +152,9 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 		entitlements.Reset()
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamCaps(rec, r.req(r.orgAdmin, ""))
+		r.uh.handleUsageTeamCaps(rec, r.activityReq(r.orgAdmin, "", ""))
 		if rec.Code != http.StatusNotFound {
-			t.Fatalf("unlicensed /team-caps = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			t.Fatalf("unlicensed team-caps = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -160,9 +162,9 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 		entitlements.RegisterProvider(entitlements.Static(entitlements.FeatureGovernance))
 		t.Cleanup(entitlements.Reset)
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamCaps(rec, r.req(r.teamAdmin, ""))
+		r.uh.handleUsageTeamCaps(rec, r.activityReq(r.teamAdmin, "", ""))
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("team-admin /team-caps = %d, want 403; body=%s", rec.Code, rec.Body.String())
+			t.Errorf("team-admin team-caps = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
 	})
 
@@ -178,30 +180,29 @@ func TestUsageTeamCaps_ListsEveryActiveTeam_Postgres(t *testing.T) {
 		}
 
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageTeamCaps(rec, r.req(r.orgAdmin, ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("/team-caps = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		r.uh.handleUsageTeamCaps(rec, r.activityReq(r.orgAdmin, "", ""))
+		resp := decodeList[usageTeamCapEntry](t, rec)
+		if resp.Total() != 3 {
+			t.Errorf("team-caps total = %d, want 3 (every active team)", resp.Total())
 		}
-		var resp usageTeamCapsResponse
-		mustDecode(t, rec, &resp)
 
 		caps := map[string]*float64{}
-		for _, e := range resp.Teams {
+		for _, e := range resp.Items {
 			caps[e.TeamID] = e.Cap
 		}
 		// Every active team is present — including teamC, which has zero spend and
 		// would be absent from the spend rollup's by_team.
 		for _, id := range []string{r.teamA, r.teamB, teamC} {
 			if _, ok := caps[id]; !ok {
-				t.Errorf("/team-caps missing team %s; want every active team", id)
+				t.Errorf("team-caps missing team %s; want every active team", id)
 			}
 		}
 		// teamC's just-set cap is reflected; teamA (no cap) reads null.
 		if caps[teamC] == nil || !floatEq(*caps[teamC], 30) {
-			t.Errorf("/team-caps teamC cap = %v, want 30", caps[teamC])
+			t.Errorf("team-caps teamC cap = %v, want 30", caps[teamC])
 		}
 		if caps[r.teamA] != nil {
-			t.Errorf("/team-caps teamA cap = %v, want null (no cap set)", *caps[r.teamA])
+			t.Errorf("team-caps teamA cap = %v, want null (no cap set)", *caps[r.teamA])
 		}
 	})
 }

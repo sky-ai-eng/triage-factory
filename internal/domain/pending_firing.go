@@ -15,16 +15,16 @@ import "time"
 // via status transition rather than DELETE so the queue's history is
 // auditable alongside the events log.
 type PendingFiring struct {
-	ID                int64      `json:"id"`
-	EntityID          string     `json:"entity_id"`
-	TaskID            string     `json:"task_id"`
-	TriggerID         string     `json:"trigger_id"`
-	TriggeringEventID string     `json:"triggering_event_id"`
-	Status            string     `json:"status"`                // pending | draining | fired | skipped_stale
-	SkipReason        string     `json:"skip_reason,omitempty"` // task_closed | trigger_disabled | breaker_tripped
-	QueuedAt          time.Time  `json:"queued_at"`
-	DrainedAt         *time.Time `json:"drained_at,omitempty"`
-	FiredRunID        *string    `json:"fired_run_id,omitempty"`
+	ID                  int64      `json:"id"`
+	EntityID            string     `json:"entity_id"`
+	TaskID              string     `json:"task_id"`
+	TriggerID           string     `json:"trigger_id"`
+	TriggeringEventID   string     `json:"triggering_event_id"`
+	Status              string     `json:"status"`                // pending | draining | fired | skipped_stale
+	SkipReason          string     `json:"skip_reason,omitempty"` // task_closed | trigger_disabled | breaker_tripped
+	QueuedAt            time.Time  `json:"queued_at"`
+	DrainedAt           *time.Time `json:"drained_at,omitempty"`
+	FiredBlueprintRunID *string    `json:"fired_run_id,omitempty"`
 }
 
 // PendingFiring statuses.

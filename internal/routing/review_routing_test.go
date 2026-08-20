@@ -69,7 +69,7 @@ func seedUserOnTeam(t *testing.T, database *sql.DB, teamID, login string) string
 	if _, err := database.Exec(`INSERT INTO memberships (user_id, team_id, role) VALUES (?, ?, 'admin')`, uid, teamID); err != nil {
 		t.Fatalf("seed membership %s→%s: %v", login, teamID, err)
 	}
-	if err := sqlitestore.New(database).Users.UpsertGitHubIdentity(context.Background(), uid, reviewTestHost, login, "pat"); err != nil {
+	if err := sqlitestore.New(database).Users.UpsertGitHubIdentity(context.Background(), uid, reviewTestHost, login, "", "", "pat"); err != nil {
 		t.Fatalf("bind identity %s: %v", login, err)
 	}
 	return uid

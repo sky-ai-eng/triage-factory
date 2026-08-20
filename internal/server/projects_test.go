@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +13,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// faultyRepositoryStore and faultyTeamGitHubReposStore make one read fail
+// while everything else delegates to the real store. They exist for one
+// assertion, made twice: a store that cannot answer produces an ERROR, never a
+// rejection message — the two are different answers to the caller (500 vs 400)
+// and only the store itself knows which one this is.
+type faultyRepositoryStore struct {
+	db.RepositoryStore
+	getErr error
+}
+
+func (f faultyRepositoryStore) Get(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	return f.RepositoryStore.Get(ctx, orgID, id)
+}
+
+type faultyTeamGitHubReposStore struct {
+	db.TeamGitHubReposStore
+	listErr error
+}
+
+func (f faultyTeamGitHubReposStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.TeamGitHubReposStore.ListForTeam(ctx, teamID)
+}
 
 // doMultipartUpload posts files (one per map entry, all under the
 // "file" form key) to the given path and returns the recorded
@@ -75,16 +107,16 @@ func contains(items []string, want string) bool {
 
 func TestProjectCreate_Happy(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	repoID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
-		"name":         "Triage Factory",
-		"description":  "Local-first triage UI",
-		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+		"name":                  "Triage Factory",
+		"description":           "Local-first triage UI",
+		"pinned_repository_ids": []string{repoID},
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
-	var got domain.Project
+	var got projectJSON
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -94,8 +126,50 @@ func TestProjectCreate_Happy(t *testing.T) {
 	if got.Name != "Triage Factory" {
 		t.Errorf("name = %q", got.Name)
 	}
-	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "sky-ai-eng/triage-factory" {
-		t.Errorf("pinned_repos = %v", got.PinnedRepos)
+	if len(got.PinnedRepositoryIDs) != 1 || got.PinnedRepositoryIDs[0] != repoID {
+		t.Errorf("pinned_repository_ids = %v, want [%s]", got.PinnedRepositoryIDs, repoID)
+	}
+	// The old field name is gone from the wire, not merely renamed in Go:
+	// a client still reading it must see its absence, not a stale value.
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if _, present := raw["pinned_repos"]; present {
+		t.Error("response still carries pinned_repos; the field is the id-shaped one now")
+	}
+}
+
+// TestProjectCreate_RejectsOldPinnedReposField pins the loud-failure half of
+// the rename: an old-shaped body carrying names under the old key is rejected
+// by strict decoding rather than silently creating a project with no pins.
+func TestProjectCreate_RejectsOldPinnedReposField(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
+		"name":         "P",
+		"pinned_repos": []string{"sky-ai-eng/triage-factory"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProjectCreate_RejectsSlugInIDPosition is the other half: a well-formed
+// body whose ids are actually names. Nothing resolves them, and nothing tries
+// — the pin is rejected rather than helpfully looked up by name.
+func TestProjectCreate_RejectsSlugInIDPosition(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
+	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
+		"name":                  "P",
+		"pinned_repository_ids": []string{"sky-ai-eng/triage-factory"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "pinned_repository_ids") {
+		t.Errorf("error should be attributed to pinned_repository_ids, got %s", body)
 	}
 }
 
@@ -145,7 +219,7 @@ func TestProjectCreate_RejectsEmptyName(t *testing.T) {
 	}
 }
 
-func TestProjectCreate_RejectsBadPinnedRepoSlugs(t *testing.T) {
+func TestProjectCreate_RejectsBadPinnedRepoIDs(t *testing.T) {
 	s := newTestServer(t)
 	bad := [][]string{
 		{""},
@@ -157,8 +231,8 @@ func TestProjectCreate_RejectsBadPinnedRepoSlugs(t *testing.T) {
 	}
 	for _, repos := range bad {
 		rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
-			"name":         "P",
-			"pinned_repos": repos,
+			"name":                  "P",
+			"pinned_repository_ids": repos,
 		})
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("repos=%v status = %d, want 400", repos, rec.Code)
@@ -175,16 +249,16 @@ func TestProjectGet_404OnMissing(t *testing.T) {
 }
 
 func TestProjectList_EmptyReturnsArray(t *testing.T) {
-	// The handler must return `[]`, not `null` — a frontend that
-	// .map()s the response would crash on null.
+	// The envelope's items must be `[]`, not `null` — a frontend that .map()s
+	// the field would crash on null.
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/projects", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/list", map[string]any{})
+	page := decodeList[map[string]any](t, rec)
+	if len(page.Items) != 0 || page.Total() != 0 {
+		t.Errorf("page = %+v (total %d), want empty", page.Items, page.Total())
 	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("body = %q, want []", body)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
@@ -193,10 +267,11 @@ func TestProjectExportPreview_IncludesManifestAndKnowledge(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Export me"})
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Export me"})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	id := idRow.ID
 	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir kb: %v", err)
@@ -234,13 +309,14 @@ func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	source := newTestServer(t)
-	sourceID, err := source.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	sourceIDRow, err := source.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:        "HTTP Export Source",
 		Description: "from source",
 	})
 	if err != nil {
 		t.Fatalf("seed source project: %v", err)
 	}
+	sourceID := sourceIDRow.ID
 	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", sourceID, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir kb: %v", err)
@@ -263,7 +339,7 @@ func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
 		t.Fatalf("import status = %d, want 201; body=%s", importRec.Code, importRec.Body.String())
 	}
 	var body struct {
-		Project  domain.Project      `json:"project"`
+		Project  projectJSON         `json:"project"`
 		Warnings []map[string]string `json:"warnings"`
 	}
 	if err := json.Unmarshal(importRec.Body.Bytes(), &body); err != nil {
@@ -290,7 +366,8 @@ func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
 
 func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	repoID := seedConfiguredRepo(t, s, "a", "b")
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:        "Original",
 		Description: "Original description",
 		PinnedRepos: []string{"a/b"},
@@ -298,6 +375,7 @@ func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"description": "Updated description",
@@ -305,7 +383,7 @@ func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	var got domain.Project
+	var got projectJSON
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.Name != "Original" {
 		t.Errorf("name changed unexpectedly: %q", got.Name)
@@ -313,21 +391,23 @@ func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	if got.Description != "Updated description" {
 		t.Errorf("description = %q", got.Description)
 	}
-	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "a/b" {
-		t.Errorf("pinned_repos changed unexpectedly: %v", got.PinnedRepos)
+	if len(got.PinnedRepositoryIDs) != 1 || got.PinnedRepositoryIDs[0] != repoID {
+		t.Errorf("pinned_repository_ids changed unexpectedly: %v", got.PinnedRepositoryIDs)
 	}
 }
 
-// TestProjectPatch_PinnedReposExplicitEmptyClears confirms a client
-// can clear pinned_repos by sending []. The pointer-typed *[]string
-// distinguishes "absent (leave alone)" from "explicit empty (clear)";
-// without that distinction the handler couldn't tell the cases apart.
+// TestProjectPatch_PinnedReposExplicitEmptyClears confirms a client can clear
+// the pinned set by sending []. The pointer-typed *[]string distinguishes
+// "absent (leave alone)" from "explicit empty (clear)"; without that
+// distinction the handler couldn't tell the cases apart.
 func TestProjectPatch_PinnedReposExplicitEmptyClears(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"a/b"}})
+	seedConfiguredRepo(t, s, "a", "b")
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"a/b"}})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{},
+		"pinned_repository_ids": []string{},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -338,9 +418,83 @@ func TestProjectPatch_PinnedReposExplicitEmptyClears(t *testing.T) {
 	}
 }
 
+// TestProjectPatch_RejectsOldPinnedReposField is the PATCH-side half of the
+// rename guard: strict decoding rejects the old key rather than treating an
+// old-shaped body as "pins absent, leave them alone" — which would report
+// success for an update that changed nothing.
+func TestProjectPatch_RejectsOldPinnedReposField(t *testing.T) {
+	s := newTestServer(t)
+	seedConfiguredRepo(t, s, "a", "b")
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
+	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
+		"pinned_repos": []string{"a/b"},
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestProjectPins_SurviveRename is the pinned-set half of the invariant the
+// id-keyed wire exists for. A repository renamed between the page render and
+// the client's next call keeps its registry id, so the pin the client is
+// holding still names it: the read answers with the same id, and a PATCH
+// echoing that id back lands instead of 400-ing on a name nothing answers to.
+func TestProjectPins_SurviveRename(t *testing.T) {
+	s := newTestServer(t)
+	repoID := seedConfiguredRepo(t, s, "acme", "api")
+	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
+		"name":                  "P",
+		"pinned_repository_ids": []string{repoID},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var created projectJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// GitHub renames the repository. The registry row keeps its id, and the
+	// tracked set follows it (it references the row, not the name).
+	if _, err := s.db.ExecContext(t.Context(),
+		`UPDATE repositories SET repo = 'api-v2' WHERE id = ?`, repoID); err != nil {
+		t.Fatalf("rename repository: %v", err)
+	}
+
+	// The read still reports the same pin — the client's held id is not stale.
+	read := doJSON(t, s, http.MethodGet, "/api/projects/"+created.ID, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read after rename: status = %d, want 200; body=%s", read.Code, read.Body.String())
+	}
+	var got projectJSON
+	if err := json.Unmarshal(read.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode read: %v", err)
+	}
+	if len(got.PinnedRepositoryIDs) != 1 || got.PinnedRepositoryIDs[0] != repoID {
+		t.Fatalf("pinned_repository_ids = %v after rename, want [%s]", got.PinnedRepositoryIDs, repoID)
+	}
+
+	// And the id round-trips through a write, landing on the renamed row.
+	patch := doJSON(t, s, http.MethodPatch, "/api/projects/"+created.ID, map[string]any{
+		"pinned_repository_ids": got.PinnedRepositoryIDs,
+	})
+	if patch.Code != http.StatusOK {
+		t.Fatalf("patch after rename: status = %d, want 200; body=%s", patch.Code, patch.Body.String())
+	}
+	stored, err := s.projects.Get(t.Context(), runmode.LocalDefaultOrgID, created.ID)
+	if err != nil {
+		t.Fatalf("read stored project: %v", err)
+	}
+	if len(stored.PinnedRepos) != 1 || stored.PinnedRepos[0] != "acme/api-v2" {
+		t.Errorf("stored pins = %v, want the repository's new name", stored.PinnedRepos)
+	}
+}
+
 func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{"name": "  "})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
@@ -354,11 +508,12 @@ func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 // accepted.
 func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	if _, err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Blueprint{ID: "spec-ok", Name: "Spec", Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"spec_authorship_blueprint_id": "spec-ok",
@@ -366,7 +521,7 @@ func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
-	var got domain.Project
+	var got projectJSON
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
 	if got.SpecAuthorshipBlueprintID != "spec-ok" {
 		t.Errorf("spec_authorship_blueprint_id = %q, want %q", got.SpecAuthorshipBlueprintID, "spec-ok")
@@ -380,7 +535,8 @@ func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 // we pin the handler wiring and the 400 on the SQLite path.
 func TestProjectPatch_SpecBlueprintRejectsInvisible(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"spec_authorship_blueprint_id": "ghost-id-not-a-real-prompt",
@@ -400,7 +556,8 @@ func TestProjectPatch_404OnMissing(t *testing.T) {
 
 func TestProjectDelete_Happy(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "doomed"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "doomed"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
@@ -428,7 +585,8 @@ func TestProjectDelete_RemovesKnowledgeDir(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-files"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-files"})
+	id := idRow.ID
 
 	dir := filepath.Join(tempHome, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -454,7 +612,8 @@ func TestProjectDelete_RemovesKnowledgeDir(t *testing.T) {
 // on-disk artifacts must still 204, not 500.
 func TestProjectDelete_MissingKnowledgeDir_NoError(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-files"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-files"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", rec.Code)
@@ -473,7 +632,8 @@ func TestProjectDelete_PathResolutionFailure_StillWarns(t *testing.T) {
 	t.Setenv("LOGNAME", "")
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
@@ -502,7 +662,8 @@ func TestProjectDelete_CleanupWarningRedactsPath(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "padded"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "padded"})
+	id := idRow.ID
 
 	dir := filepath.Join(tempHome, ".triagefactory", "projects", id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -534,25 +695,28 @@ func TestProjectDelete_CleanupWarningRedactsPath(t *testing.T) {
 	}
 }
 
-func TestValidatePinnedRepoShape_Slugs(t *testing.T) {
+// TestValidatePinnedRepoShape_IDs pins what the shape check is and is not: an
+// id must be non-empty, and that is the whole rule. A registry id is opaque, so
+// anything more here would be a second, weaker copy of the answer the lookup in
+// validatePinnedRepos gives — including for a value that happens to look like a
+// name, which passes the shape check and then fails to resolve.
+func TestValidatePinnedRepoShape_IDs(t *testing.T) {
 	good := [][]string{
 		nil,
 		{},
-		{"a/b"},
-		{"sky-ai-eng/triage-factory", "owner/repo"},
+		{"7d9a1b2c-0000-4000-8000-000000000001"},
+		{"one-id", "another-id"},
+		{"looks/like-a-name"},
 	}
 	for _, repos := range good {
 		if _, errMsg := validatePinnedRepoShape(repos); errMsg != "" {
-			t.Errorf("repos=%v should pass, got %q", repos, errMsg)
+			t.Errorf("repos=%v should pass the shape check, got %q", repos, errMsg)
 		}
 	}
 	bad := [][]string{
 		{""},
 		{"  "},
-		{"justaword"},
-		{"a/b/c"},
-		{"/x"},
-		{"x/"},
+		{"an-id", ""},
 	}
 	for _, repos := range bad {
 		if _, errMsg := validatePinnedRepoShape(repos); errMsg == "" {
@@ -561,18 +725,17 @@ func TestValidatePinnedRepoShape_Slugs(t *testing.T) {
 	}
 }
 
-// TestValidatePinnedRepoShape_NormalizesWhitespace pins the
-// trim-and-persist contract: validation strips whitespace AND the
-// caller persists the trimmed slugs. Without normalization,
-// " owner/repo " would pass (validator trims) but get stored
-// padded, breaking later lookups by slug.
+// TestValidatePinnedRepoShape_NormalizesWhitespace pins the trim-then-resolve
+// contract: validation strips whitespace before the id reaches the lookup.
+// Without it, a padded id would miss and report "not a repository in this
+// workspace" for a repository that is one.
 func TestValidatePinnedRepoShape_NormalizesWhitespace(t *testing.T) {
-	in := []string{"  owner/repo  ", "\tother/repo\n"}
+	in := []string{"  repo-id-one  ", "\trepo-id-two\n"}
 	out, errMsg := validatePinnedRepoShape(in)
 	if errMsg != "" {
 		t.Fatalf("expected pass, got %q", errMsg)
 	}
-	want := []string{"owner/repo", "other/repo"}
+	want := []string{"repo-id-one", "repo-id-two"}
 	if len(out) != len(want) {
 		t.Fatalf("len = %d, want %d", len(out), len(want))
 	}
@@ -583,79 +746,148 @@ func TestValidatePinnedRepoShape_NormalizesWhitespace(t *testing.T) {
 	}
 }
 
-// TestValidatePinnedRepos_RejectsUnconfigured pins the existence-check
-// contract: a slug that's well-formed but isn't tracked by the project's
-// team (team_github_repos) is rejected at the API layer. This is what
-// stops a curl-crafted POST from pinning a repo the team has never set up
-// (no creds, no clone URL, nothing for the Curator to materialize).
+// TestValidatePinnedRepos_RejectsUnconfigured pins the two-part check: an id
+// must name a registry row, and that row must be tracked by the project's team
+// (team_github_repos). Together they stop a curl-crafted POST from pinning a
+// repo the team has never set up (no creds, no clone URL, nothing for the
+// Curator to materialize).
+//
+// It also pins what validation RETURNS: the names the store persists, resolved
+// from the ids the wire carries. That translation is the edge's job and lives
+// nowhere else.
 func TestValidatePinnedRepos_RejectsUnconfigured(t *testing.T) {
 	srv := newTestServer(t)
-	seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
+	trackedID := seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
+	// A registry row nobody tracks: it exists, so it gets past resolution and
+	// is rejected by the tracked-set check rather than by the lookup.
+	untrackedID := seedUntrackedRepo(t, srv, "stranger", "repo")
 
 	ctx := t.Context()
-	teamRepos := sqlitestore.New(srv.db).TeamGitHubRepos
-	teamID := runmode.LocalDefaultTeamID
+	stores := sqlitestore.New(srv.db)
+	repos, teamRepos := stores.Repos, stores.TeamGitHubRepos
+	orgID, teamID := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
-	// All-tracked passes.
-	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"sky-ai-eng/configured"}); errMsg != "" {
-		t.Errorf("tracked slug should pass, got %q", errMsg)
+	// A tracked id passes, and comes back as the name the store holds.
+	names, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, []string{trackedID})
+	switch {
+	case err != nil:
+		t.Errorf("tracked id should not fault the store: %v", err)
+	case errMsg != "":
+		t.Errorf("tracked id should pass, got %q", errMsg)
+	case len(names) != 1 || names[0] != "sky-ai-eng/configured":
+		t.Errorf("resolved names = %v, want [sky-ai-eng/configured]", names)
 	}
 
-	// Mix of tracked + untracked rejects on the untracked one.
-	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"sky-ai-eng/configured", "stranger/repo"}); errMsg == "" {
-		t.Error("untracked slug should reject")
-	} else if !strings.Contains(errMsg, "stranger/repo") {
-		t.Errorf("error should name the offending slug, got %q", errMsg)
+	// Every case below is a REJECTION, not a store fault: err stays nil, so the
+	// handler answers 400 and never 500.
+	for _, tc := range []struct {
+		name  string
+		ids   []string
+		names string // substring the rejection must carry
+	}{
+		// Mix of tracked + untracked rejects on the untracked one, naming it.
+		{"untracked", []string{trackedID, untrackedID}, "stranger/repo"},
+		// An id nothing answers to reports the id back, because an id is what
+		// the caller sent.
+		{"unknown id", []string{"not-an-id"}, "not-an-id"},
+		// A name where an id belongs resolves against ids, misses, and
+		// rejects. There is deliberately no fallback to a by-name lookup.
+		{"slug in id position", []string{"sky-ai-eng/configured"}, "sky-ai-eng/configured"},
+	} {
+		_, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, tc.ids)
+		if err != nil {
+			t.Errorf("%s: got a store fault %v; a bad id is a rejection, not a 500", tc.name, err)
+			continue
+		}
+		if errMsg == "" {
+			t.Errorf("%s: should reject", tc.name)
+			continue
+		}
+		if !strings.Contains(errMsg, tc.names) {
+			t.Errorf("%s: error should name %q, got %q", tc.name, tc.names, errMsg)
+		}
 	}
 
 	// Empty input still passes (nothing to check).
-	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, nil); errMsg != "" {
-		t.Errorf("nil input should pass, got %q", errMsg)
-	}
-
-	// Casing mismatch still passes: GitHub owner/repo names are
-	// case-insensitive and the rest of the codebase folds case, so a pin whose
-	// capitalization differs from the tracked row (e.g. after the repo was
-	// re-saved with different casing) is the same repo, not an untracked one.
-	if _, errMsg := validatePinnedRepos(ctx, teamRepos, teamID, []string{"Sky-AI-Eng/Configured"}); errMsg != "" {
-		t.Errorf("case-variant of a tracked slug should pass, got %q", errMsg)
+	if _, errMsg, err := validatePinnedRepos(ctx, repos, teamRepos, orgID, teamID, nil); err != nil || errMsg != "" {
+		t.Errorf("nil input should pass, got errMsg=%q err=%v", errMsg, err)
 	}
 }
 
-// TestProjectCreate_PaddedSlugsStoredTrimmed is the end-to-end
-// regression: padded input from a client must round-trip back as
-// trimmed. Without the normalization fix this test fails because
-// the original padded string gets persisted.
-func TestProjectCreate_PaddedSlugsStoredTrimmed(t *testing.T) {
+// TestValidatePinnedRepos_StoreFaultIsNotARejection pins the split between the
+// two failure kinds. A store that cannot answer says nothing about whether the
+// body was valid, so it must travel as an error — the handler 500s — rather
+// than as a rejection message that would tell the user their pins are wrong
+// and hand them a driver string to read.
+func TestValidatePinnedRepos_StoreFaultIsNotARejection(t *testing.T) {
+	srv := newTestServer(t)
+	trackedID := seedConfiguredRepo(t, srv, "sky-ai-eng", "configured")
+
+	ctx := t.Context()
+	stores := sqlitestore.New(srv.db)
+	orgID, teamID := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	boom := errors.New("connection reset by peer")
+
+	t.Run("repository read", func(t *testing.T) {
+		repos := faultyRepositoryStore{RepositoryStore: stores.Repos, getErr: boom}
+		names, errMsg, err := validatePinnedRepos(ctx, repos, stores.TeamGitHubRepos, orgID, teamID, []string{trackedID})
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want the store's own error wrapped", err)
+		}
+		if errMsg != "" {
+			t.Errorf("errMsg = %q; a store fault must not be reported as a bad body", errMsg)
+		}
+		if names != nil {
+			t.Errorf("names = %v, want nil on a fault", names)
+		}
+	})
+
+	t.Run("tracked-set read", func(t *testing.T) {
+		teamRepos := faultyTeamGitHubReposStore{TeamGitHubReposStore: stores.TeamGitHubRepos, listErr: boom}
+		_, errMsg, err := validatePinnedRepos(ctx, stores.Repos, teamRepos, orgID, teamID, []string{trackedID})
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want the store's own error wrapped", err)
+		}
+		if errMsg != "" {
+			t.Errorf("errMsg = %q; a store fault must not be reported as a bad body", errMsg)
+		}
+	})
+}
+
+// TestProjectCreate_PaddedIDsResolve is the end-to-end regression: padded
+// input from a client must still resolve. Without the trim, the id reaches
+// the lookup with its whitespace and is reported as no repository at all.
+func TestProjectCreate_PaddedIDsResolve(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "owner", "repo")
+	repoID := seedConfiguredRepo(t, s, "owner", "repo")
 	rec := doJSON(t, s, http.MethodPost, "/api/projects", map[string]any{
-		"name":         "P",
-		"pinned_repos": []string{"  owner/repo  "},
+		"name":                  "P",
+		"pinned_repository_ids": []string{"  " + repoID + "  "},
 	})
 	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201", rec.Code)
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
 	}
-	var got domain.Project
+	var got projectJSON
 	_ = json.Unmarshal(rec.Body.Bytes(), &got)
-	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "owner/repo" {
-		t.Errorf("pinned_repos = %v, want [\"owner/repo\"]", got.PinnedRepos)
+	if len(got.PinnedRepositoryIDs) != 1 || got.PinnedRepositoryIDs[0] != repoID {
+		t.Errorf("pinned_repository_ids = %v, want [%s]", got.PinnedRepositoryIDs, repoID)
 	}
 }
 
-func TestProjectPatch_PaddedSlugsStoredTrimmed(t *testing.T) {
+func TestProjectPatch_PaddedIDsResolve(t *testing.T) {
 	s := newTestServer(t)
-	seedConfiguredRepo(t, s, "only", "one")
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	repoID := seedConfiguredRepo(t, s, "only", "one")
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
-		"pinned_repos": []string{" \tonly/one  "},
+		"pinned_repository_ids": []string{" \t" + repoID + "  "},
 	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	got, _ := s.projects.Get(t.Context(), runmode.LocalDefaultOrgID, id)
 	if len(got.PinnedRepos) != 1 || got.PinnedRepos[0] != "only/one" {
-		t.Errorf("pinned_repos = %v, want [\"only/one\"]", got.PinnedRepos)
+		t.Errorf("stored pins = %v, want [\"only/one\"]", got.PinnedRepos)
 	}
 }
 
@@ -665,7 +897,7 @@ func TestProjectPatch_PaddedSlugsStoredTrimmed(t *testing.T) {
 // project from the Settings-curated list.
 func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}, {ProjectKey: "OPS"}}
-	jira, linear, errMsg := validateTrackerKeys(rules, "SKY", "")
+	jira, linear, _, errMsg := validateTrackerKeys(rules, "SKY", "")
 	if errMsg != "" {
 		t.Fatalf("expected no error, got %q", errMsg)
 	}
@@ -683,7 +915,7 @@ func TestValidateTrackerKeys_AcceptsConfigured(t *testing.T) {
 // config after pinning) and curl users both hit this path.
 func TestValidateTrackerKeys_RejectsUnconfigured(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}}
-	_, _, errMsg := validateTrackerKeys(rules, "OPS", "")
+	_, _, errField, errMsg := validateTrackerKeys(rules, "OPS", "")
 	if errMsg == "" {
 		t.Fatal("expected error for unconfigured Jira key")
 	}
@@ -693,13 +925,16 @@ func TestValidateTrackerKeys_RejectsUnconfigured(t *testing.T) {
 	if !strings.Contains(errMsg, "Settings") {
 		t.Errorf("error should point at Settings, got %q", errMsg)
 	}
+	if errField != "jira_project_key" {
+		t.Errorf("errField = %q, want jira_project_key — the field travels with the message now", errField)
+	}
 }
 
 // TestValidateTrackerKeys_RejectsLinear pins the "Linear is future
 // work" decision: any non-empty Linear key is rejected outright.
 // Once Linear integration ships this assertion will need to flip.
 func TestValidateTrackerKeys_RejectsLinear(t *testing.T) {
-	_, _, errMsg := validateTrackerKeys(nil, "", "TF")
+	_, _, _, errMsg := validateTrackerKeys(nil, "", "TF")
 	if errMsg == "" {
 		t.Fatal("expected error for non-empty Linear key")
 	}
@@ -712,7 +947,7 @@ func TestValidateTrackerKeys_RejectsLinear(t *testing.T) {
 // case — the user creates a project without picking either tracker.
 // Validation should pass with empty normalized values.
 func TestValidateTrackerKeys_EmptyAcceptsBoth(t *testing.T) {
-	jira, linear, errMsg := validateTrackerKeys(nil, "", "")
+	jira, linear, _, errMsg := validateTrackerKeys(nil, "", "")
 	if errMsg != "" {
 		t.Fatalf("empty input should pass, got %q", errMsg)
 	}
@@ -726,7 +961,7 @@ func TestValidateTrackerKeys_EmptyAcceptsBoth(t *testing.T) {
 // in normalized form rather than getting stored padded.
 func TestValidateTrackerKeys_TrimsWhitespace(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{{ProjectKey: "SKY"}}
-	jira, _, errMsg := validateTrackerKeys(rules, "  SKY  ", "")
+	jira, _, _, errMsg := validateTrackerKeys(rules, "  SKY  ", "")
 	if errMsg != "" {
 		t.Fatalf("padded input should validate, got %q", errMsg)
 	}
@@ -740,7 +975,7 @@ func TestValidateTrackerKeys_TrimsWhitespace(t *testing.T) {
 // "exists but no knowledge yet" empty-array path.
 func TestProjectKnowledge_404OnMissing(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/no-such-id/knowledge", nil)
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/no-such-id/knowledge/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", rec.Code)
 	}
@@ -754,14 +989,15 @@ func TestProjectKnowledge_404OnMissing(t *testing.T) {
 func TestProjectKnowledge_EmptyForFreshProject(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "fresh"})
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "fresh"})
+	id := idRow.ID
+	rec := doJSON(t, s, http.MethodPost, "/api/projects/"+id+"/knowledge/list", map[string]any{})
+	page := decodeList[knowledgeFile](t, rec)
+	if len(page.Items) != 0 || page.Total() != 0 {
+		t.Errorf("page = %+v (total %d), want empty", page.Items, page.Total())
 	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("body = %q, want []", body)
+	if !strings.Contains(rec.Body.String(), `"items":[]`) {
+		t.Errorf("body = %s, want an empty array (never null)", rec.Body.String())
 	}
 }
 
@@ -776,7 +1012,8 @@ func TestProjectKnowledge_ReturnsAllFileTypes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-knowledge"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-knowledge"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -796,14 +1033,7 @@ func TestProjectKnowledge_ReturnsAllFileTypes(t *testing.T) {
 		}
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	var got []knowledgeFile
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	got := listKnowledge(t, s, id)
 	if len(got) != 4 {
 		t.Fatalf("got %d files, want 4 (one per extension)", len(got))
 	}
@@ -845,7 +1075,8 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-big-file"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-big-file"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -856,12 +1087,7 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 		t.Fatalf("write big.md: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 {
 		t.Fatalf("got %d files", len(got))
 	}
@@ -881,10 +1107,11 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 func TestProjectDelete_404sDuringConcurrentPatch(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "racy"})
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "racy"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	id := idRow.ID
 
 	// Delete the project, then try a PATCH against it. The PATCH
 	// should 404, not 500. (We can't reliably exercise the actual
@@ -933,7 +1160,8 @@ func TestProjectKnowledge_HidesUnsanitizableNames(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "filter"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "filter"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -948,12 +1176,7 @@ func TestProjectKnowledge_HidesUnsanitizableNames(t *testing.T) {
 		t.Fatalf("write .cache.json: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 || got[0].Path != "ok.md" {
 		t.Errorf("expected only [ok.md], got %d entries: %v", len(got), got)
 	}
@@ -968,7 +1191,8 @@ func TestProjectKnowledge_SkipsSymlinks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-test"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-test"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -986,12 +1210,7 @@ func TestProjectKnowledge_SkipsSymlinks(t *testing.T) {
 		t.Skipf("symlink unsupported on this platform: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodGet, "/api/projects/"+id+"/knowledge", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d", rec.Code)
-	}
-	var got []knowledgeFile
-	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	got := listKnowledge(t, s, id)
 	if len(got) != 1 || got[0].Path != "real.md" {
 		t.Errorf("expected only [real.md], got %d entries", len(got))
 	}
@@ -1042,7 +1261,8 @@ func TestProjectKnowledgeUpload_Happy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "uploads"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "uploads"})
+	id := idRow.ID
 
 	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
 		"hello.md": []byte("# hello\n"),
@@ -1069,7 +1289,8 @@ func TestProjectKnowledgeUpload_RejectsConflict(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "conflicts"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "conflicts"})
+	id := idRow.ID
 
 	// Pre-seed an existing file.
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
@@ -1130,7 +1351,8 @@ func TestProjectKnowledgeUpload_SizeLimit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "sizecap"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "sizecap"})
+	id := idRow.ID
 
 	huge := bytes.Repeat([]byte("x"), knowledgeMaxUploadBytes+10)
 	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
@@ -1163,7 +1385,8 @@ func TestProjectKnowledgeFile_StreamsRaw(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "raw"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "raw"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1196,7 +1419,8 @@ func TestProjectKnowledgeFile_RejectsSymlink(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-fetch"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-fetch"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1226,7 +1450,8 @@ func TestProjectKnowledgeFile_RejectsTraversal(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "traversal"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "traversal"})
+	id := idRow.ID
 
 	// URL-encoded forms bypass net/http's path cleanup and reach the
 	// handler intact — that's where our resolveKnowledgePath defense
@@ -1253,7 +1478,8 @@ func TestProjectKnowledgeDelete_RemovesFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "delete"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "delete"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1330,13 +1556,14 @@ func TestProjectCreate_RejectsUnconfiguredJira(t *testing.T) {
 func TestProjectPatch_PartialTrackerUpdateValidatesOnlyChangedSide(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "Drifted",
 		JiraProjectKey: "STALE", // not in (empty) config — set directly via DB
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	id := idRow.ID
 
 	// PATCH only linear_project_key (clearing it). Should succeed
 	// despite the Jira side being out of sync with config.
@@ -1351,4 +1578,13 @@ func TestProjectPatch_PartialTrackerUpdateValidatesOnlyChangedSide(t *testing.T)
 	if got.JiraProjectKey != "STALE" {
 		t.Errorf("jira preserved = %q, want STALE", got.JiraProjectKey)
 	}
+}
+
+// listKnowledge reads a project's whole knowledge listing off the list route,
+// unwrapping the envelope. The knowledge base is small by construction (a
+// curator's working files), so one page holds it.
+func listKnowledge(t *testing.T, s *Server, projectID string) []knowledgeFile {
+	t.Helper()
+	return decodeList[knowledgeFile](t, doJSON(t, s, http.MethodPost,
+		"/api/projects/"+projectID+"/knowledge/list", map[string]any{})).Items
 }

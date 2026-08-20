@@ -15,7 +15,7 @@ import (
 // installs.
 type fakePrivilegedOps struct{ tag string }
 
-func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (NetworkState, error) {
+func (f fakePrivilegedOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (NetworkState, error) {
 	return NetworkState{}, nil
 }
 func (f fakePrivilegedOps) TeardownNetwork(ctx context.Context, state NetworkState) error {
@@ -42,7 +42,7 @@ func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath strin
 	return nil
 }
 func (f fakePrivilegedOps) RemoveRunTree(ctx context.Context, path string) error { return nil }
-func (f fakePrivilegedOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
+func (f fakePrivilegedOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
 	return nil, nil
 }
 

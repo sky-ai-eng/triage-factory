@@ -28,6 +28,7 @@ var approvedKeys = []string{
 	"agent.cost_usd",
 	"agent.duration_ms",
 	"attempt",
+	"blueprint_run.id",
 	"claim.attempt",
 	"conversation.id",
 	"count",
@@ -43,6 +44,11 @@ var approvedKeys = []string{
 	"queue.wait_ms",
 	"runtime",
 	"size_bytes",
+	"snapshot.bundle_bytes",
+	"snapshot.patch_bytes",
+	"snapshot.raw_bytes",
+	"snapshot.transcript_bytes",
+	"snapshot.waited_ms",
 	"source",
 	"task.id",
 	"team.id",
@@ -55,11 +61,13 @@ var approvedKeys = []string{
 func TestAttributeHelpersEmitOnlyApprovedKeys(t *testing.T) {
 	produced := []attribute.KeyValue{
 		OrgID("o"), TeamID("t"), EventID("e"), EventType("github:pr:opened"),
-		EntityID("en"), TaskID("ta"), ConversationID("c"), ClaimAttempt(1),
+		EntityID("en"), TaskID("ta"), ConversationID("c"), BlueprintRunID("bpr"), ClaimAttempt(1),
 		Source("github"), Disposition("routed"), Outcome("ok"), Runtime("sdk"),
 		Attempt(2), Count(3), Job("scorer"), Provider("anthropic"),
 		Transport("direct"), QueueWait(1500 * time.Millisecond),
 		Op("SetupNetwork"), Workspace("rehydrated"), SizeBytes(4096),
+		SnapshotBundleBytes(1024), SnapshotPatchBytes(512),
+		SnapshotTranscriptBytes(2048), SnapshotRawBytes(8192), SnapshotWaitedMs(250),
 		AgentCostUSD(0.42), AgentDuration(9000),
 	}
 	for _, kv := range produced {
@@ -93,11 +101,15 @@ func TestEveryAttributeHelperIsCovered(t *testing.T) {
 	exercised := map[string]bool{
 		"OrgID": true, "TeamID": true, "EventID": true, "EventType": true,
 		"EntityID": true, "TaskID": true, "ConversationID": true,
-		"ClaimAttempt": true, "Source": true, "Disposition": true,
+		"BlueprintRunID": true,
+		"ClaimAttempt":   true, "Source": true, "Disposition": true,
 		"Outcome": true, "Runtime": true, "Attempt": true, "Count": true,
 		"Job": true, "Provider": true, "Transport": true, "QueueWait": true,
 		"Op": true, "Workspace": true, "SizeBytes": true,
-		"AgentCostUSD": true, "AgentDuration": true,
+		"SnapshotBundleBytes": true, "SnapshotPatchBytes": true,
+		"SnapshotTranscriptBytes": true, "SnapshotRawBytes": true,
+		"SnapshotWaitedMs": true,
+		"AgentCostUSD":     true, "AgentDuration": true,
 	}
 	sort.Strings(declared)
 	for _, name := range declared {

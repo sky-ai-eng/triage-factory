@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Message, CuratorRequestStatus, CuratorRequestWithMessages, WSEvent } from '../types'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useWebSocket } from './useWebSocket'
 
 // useCuratorChat owns the per-project chat transcript: REST backfill on
@@ -57,13 +57,9 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
     fetchSeq.current += 1
     const mySeq = fetchSeq.current
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(myID)}/curator/messages`)
-      if (myID !== liveProjectRef.current || mySeq !== fetchSeq.current) return
-      if (!res.ok) {
-        setLoadError(await readError(res, 'Failed to load chat history'))
-        return
-      }
-      const data = (await res.json()) as CuratorRequestWithMessages[]
+      const data = await apiJSON<CuratorRequestWithMessages[]>(
+        `/api/projects/${encodeURIComponent(myID)}/curator/messages`,
+      )
       if (myID !== liveProjectRef.current || mySeq !== fetchSeq.current) return
       setLoadError(null)
       // Merge by request_id rather than user_input. Earlier versions
@@ -96,9 +92,7 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
       })
     } catch (err) {
       if (myID !== liveProjectRef.current || mySeq !== fetchSeq.current) return
-      setLoadError(
-        `Failed to load chat history: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      setLoadError(httpErrorMessage(err, 'Could not load the chat history.'))
     } finally {
       if (myID === liveProjectRef.current && mySeq === fetchSeq.current) {
         setLoading(false)
@@ -198,23 +192,18 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
       setRequests((prev) => [...prev, optimistic])
 
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/curator/messages`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: trimmed }),
-        })
-        if (!res.ok) {
-          const msg = await readError(res, 'Failed to send message')
-          setSendError(msg)
-          // Remove the optimistic bubble — the message never landed.
-          setRequests((prev) => prev.filter((r) => r.id !== optimisticID))
-          return
-        }
-        const { request_id } = (await res.json()) as { request_id: string }
+        const { request_id } = await apiJSON<{ request_id: string }>(
+          `/api/projects/${encodeURIComponent(projectId)}/curator/messages`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: trimmed }),
+          },
+        )
         setRequests((prev) => commitOptimisticID(prev, optimisticID, request_id))
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        setSendError(`Failed to send message: ${msg}`)
+        setSendError(httpErrorMessage(err, 'Could not send the message.'))
+        // Remove the optimistic bubble — the message never landed.
         setRequests((prev) => prev.filter((r) => r.id !== optimisticID))
       }
     },
@@ -234,18 +223,16 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
     // but the call no-ops until the real id lands.
     if (inFlight.id.startsWith('optimistic-')) return
     try {
-      const res = await fetch(
-        `/api/projects/${encodeURIComponent(projectId)}/curator/messages/in-flight`,
-        { method: 'DELETE' },
-      )
-      // 404 means the request finished between the user's click and
-      // the request landing — treat as success (the row is already
-      // terminal locally on the next WS update).
-      if (!res.ok && res.status !== 404 && res.status !== 204) {
-        setSendError(await readError(res, 'Failed to cancel'))
-      }
+      // 404 means the request finished between the user's click and the
+      // request landing — treat as success (the row is already terminal
+      // locally on the next WS update). The success case is a 204, which needs
+      // no body, so this is apiFetch rather than apiJSON.
+      await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/curator/messages/in-flight`, {
+        method: 'DELETE',
+        allow: [404],
+      })
     } catch (err) {
-      setSendError(`Failed to cancel: ${err instanceof Error ? err.message : String(err)}`)
+      setSendError(httpErrorMessage(err, 'Could not cancel the turn.'))
     }
   }, [projectId, inFlight])
 
@@ -263,10 +250,13 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
   const reset = useCallback(async () => {
     if (!projectId) return { ok: false, error: 'no project' as string }
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/curator/reset`, {
+      // A 409 is the in-flight-turn answer, not a failure — the caller shows
+      // its own hint rather than the server's message, so it resolves here and
+      // branches on the status. Success is a 204: no body to read.
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/curator/reset`, {
         method: 'POST',
+        allow: [409],
       })
-      if (res.status === 204) return { ok: true }
       if (res.status === 409) {
         return {
           ok: false,
@@ -274,12 +264,9 @@ export function useCuratorChat(projectId: string | undefined): UseCuratorChatRes
           error: 'A turn is in flight — cancel it before resetting.',
         }
       }
-      return { ok: false, error: await readError(res, 'Failed to reset chat') }
+      return { ok: true }
     } catch (err) {
-      return {
-        ok: false,
-        error: `Failed to reset chat: ${err instanceof Error ? err.message : String(err)}`,
-      }
+      return { ok: false, error: httpErrorMessage(err, 'Could not reset the chat.') }
     }
   }, [projectId])
 

@@ -17,7 +17,7 @@ func TestClassifyPath(t *testing.T) {
 
 		{"internal/routing/router_test.go", classTests},
 		{"frontend/src/components/AgentCard.test.tsx", classTests},
-		{"frontend/src/hooks/useRunDetail.spec.ts", classTests},
+		{"frontend/src/hooks/useConversationDetail.spec.ts", classTests},
 		{"internal/db/dbtest/conformance.go", classTests},
 		{"internal/db/pgtest/harness.go", classTests},
 		{"harness/tf-harness-tools/tests/parity.rs", classTests},

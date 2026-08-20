@@ -32,6 +32,19 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_RunWriteConformance runs the shared returned-row
+// suite for the blueprint_runs writes against the SQLite impl.
+func TestBlueprintStore_SQLite_RunWriteConformance(t *testing.T) {
+	dbtest.RunBlueprintRunWriteConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		blueprintID := "bp-run-" + uuid.New().String()[:8]
+		insertBlueprintForTest(t, conn, blueprintID, "Run fixture")
+		task := seedEntityEventTask(t, conn, "run-write")
+		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
+	})
+}
+
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the SQLite impl. User prompts seed
 // via the store; system prompts (source='system', creator NULL, a system_slug)
@@ -51,7 +64,7 @@ func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 			if p.ID == "" {
 				p.ID = uuid.New().String()
 			}
-			if err := stores.Prompts.Create(ctx, org, team, p); err != nil {
+			if _, err := stores.Prompts.Create(ctx, org, team, p); err != nil {
 				t.Fatalf("create prompt: %v", err)
 			}
 			return p.ID
@@ -106,7 +119,7 @@ func insertSystemPromptForTest(t *testing.T, conn *sql.DB, p domain.Prompt) stri
 // blueprint id is the supplied id (tests reference it directly).
 func insertBlueprintForTest(t *testing.T, conn *sql.DB, id, name string) {
 	t.Helper()
-	if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: id, Name: name, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint %s: %v", id, err)
@@ -139,9 +152,9 @@ func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task
 	return task
 }
 
-// TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip protects the 16-column
-// SELECT/Scan pair in RunsForBlueprint against silent column-order drift.
-func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
+// TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip protects the 16-column
+// SELECT/Scan pair in ConversationsForBlueprint against silent column-order drift.
+func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
@@ -152,11 +165,11 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "step-prompt-2", Name: "Step 2", Body: "do step 2", Source: "user"})
 	insertBlueprintForTest(t, conn, "blueprint-1", "My Blueprint")
 
-	if err := blueprints.ReplaceSteps(ctx, org, "blueprint-1", []string{"step-prompt-1", "step-prompt-2"}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, org, "blueprint-1", []string{"step-prompt-1", "step-prompt-2"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
-	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID:           "blueprint-run-rt",
 		BlueprintID:  "blueprint-1",
 		TaskID:       task.ID,
@@ -167,40 +180,41 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	blueprintRunID := blueprintRunIDRow.ID
 	if blueprintRunID != "blueprint-run-rt" {
 		t.Fatalf("unexpected blueprint run id: %s", blueprintRunID)
 	}
 
 	step0 := 0
 	step1 := 1
-	for _, run := range []domain.Conversation{
+	for _, conv := range []domain.Conversation{
 		{ID: "blueprint-step-run-0", TaskID: task.ID, PromptID: "step-prompt-1", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step0},
 		{ID: "blueprint-step-run-1", TaskID: task.ID, PromptID: "step-prompt-2", Status: "running", Model: "claude-sonnet-4-6", BlueprintRunID: "blueprint-run-rt", BlueprintStepIndex: &step1},
 	} {
-		insertConversationForTest(t, conn, run)
+		insertConversationForTest(t, conn, conv)
 	}
 
-	runs, err := blueprints.RunsForBlueprint(ctx, org, "blueprint-run-rt")
+	convs, err := blueprints.ConversationsForBlueprint(ctx, org, "blueprint-run-rt")
 	if err != nil {
-		t.Fatalf("RunsForBlueprint: %v", err)
+		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
-	if len(runs) != 2 {
-		t.Fatalf("expected 2 runs, got %d", len(runs))
+	if len(convs) != 2 {
+		t.Fatalf("expected 2 conversations, got %d", len(convs))
 	}
-	if runs[0].ID != "blueprint-step-run-0" || runs[1].ID != "blueprint-step-run-1" {
-		t.Errorf("unexpected order: %v", []string{runs[0].ID, runs[1].ID})
+	if convs[0].ID != "blueprint-step-run-0" || convs[1].ID != "blueprint-step-run-1" {
+		t.Errorf("unexpected order: %v", []string{convs[0].ID, convs[1].ID})
 	}
-	if runs[0].BlueprintStepIndex == nil || *runs[0].BlueprintStepIndex != 0 {
-		t.Errorf("run[0].BlueprintStepIndex = %v, want 0", runs[0].BlueprintStepIndex)
+	if convs[0].BlueprintStepIndex == nil || *convs[0].BlueprintStepIndex != 0 {
+		t.Errorf("convs[0].BlueprintStepIndex = %v, want 0", convs[0].BlueprintStepIndex)
 	}
-	if runs[1].BlueprintStepIndex == nil || *runs[1].BlueprintStepIndex != 1 {
-		t.Errorf("run[1].BlueprintStepIndex = %v, want 1", runs[1].BlueprintStepIndex)
+	if convs[1].BlueprintStepIndex == nil || *convs[1].BlueprintStepIndex != 1 {
+		t.Errorf("convs[1].BlueprintStepIndex = %v, want 1", convs[1].BlueprintStepIndex)
 	}
-	if runs[0].PromptID != "step-prompt-1" {
-		t.Errorf("run[0].PromptID = %q, want step-prompt-1", runs[0].PromptID)
+	if convs[0].PromptID != "step-prompt-1" {
+		t.Errorf("convs[0].PromptID = %q, want step-prompt-1", convs[0].PromptID)
 	}
-	if runs[0].Model != "claude-sonnet-4-6" {
-		t.Errorf("run[0].Model = %q, want claude-sonnet-4-6", runs[0].Model)
+	if convs[0].Model != "claude-sonnet-4-6" {
+		t.Errorf("convs[0].Model = %q, want claude-sonnet-4-6", convs[0].Model)
 	}
 }
 
@@ -261,8 +275,8 @@ func TestBlueprintStore_SQLite_StepPlanRoundTrip(t *testing.T) {
 
 // TestBlueprintStore_SQLite_ActorAgentRoundTrip pins that the executing-bot
 // actor freezes on the blueprint_run at CreateRun and reads back on GetRun (the
-// reactor relies on this to inherit it onto each step run). The fenced event
-// insert carries it too, and an empty actor round-trips as empty.
+// reactor relies on this to inherit it onto each step conversation). The
+// fenced event insert carries it too, and an empty actor round-trips as empty.
 func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -338,11 +352,12 @@ func TestBlueprintStore_SQLite_ActorAgentRoundTrip(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim pins the coupling
-// that makes "unclaimed with a live run" mean only what a user requeue
-// intends: the fenced insert is a delegation's commitment point, so the task's
-// agent claim commits in the same transaction as the run row. Three arms —
-// the stamp lands with the run, a refused stamp does NOT roll the run back,
-// and a fenced replay re-stamps nothing.
+// that makes "unclaimed with a live conversation" mean only what a user
+// requeue intends: the fenced insert is a delegation's commitment point, so
+// the task's agent claim commits in the same transaction as the blueprint_run
+// row. Three arms — the stamp lands with the blueprint run, a refused stamp
+// does NOT roll the blueprint run back, and a fenced replay re-stamps
+// nothing.
 func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -416,7 +431,7 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 		taskID, inserted, claimed := fire(t, "claim-race", db.AgentClaimStamp{AgentID: agentID}, func(taskID string) {
 			// The user claims the task in the window before the insert. They
 			// win the claim; the run must still be committed.
-			if err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
+			if _, err := stores.Tasks.SetClaimedByUser(ctx, org, taskID, runmode.LocalDefaultUserID); err != nil {
 				t.Fatalf("SetClaimedByUser: %v", err)
 			}
 		})
@@ -470,11 +485,12 @@ func TestBlueprintStore_SQLite_FencedInsertCarriesTaskClaim(t *testing.T) {
 	})
 }
 
-// TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome pins the channel
-// that replaced the old per-step verdict: a step run's terminal runs.outcome
-// (and outcome_reason) round-trips through RunsForBlueprint, which is what the
-// run-detail handler renders and what the orchestrator advances on.
-func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
+// TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome pins the
+// channel that replaced the old per-step verdict: a step conversation's
+// terminal conversations.outcome (and outcome_reason) round-trips through
+// ConversationsForBlueprint, which is what the conversation-detail handler
+// renders and what the orchestrator advances on.
+func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	blueprints := stores.Blueprints
@@ -484,7 +500,7 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "blueprint-outcome")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "op-step", Name: "OP Step", Body: "x", Source: "user"})
 	insertBlueprintForTest(t, conn, "op-blueprint", "OP Blueprint")
-	if err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
@@ -500,19 +516,19 @@ func TestBlueprintStore_SQLite_RunsForBlueprint_SurfacesOutcome(t *testing.T) {
 		Model: "claude-sonnet-4-6", BlueprintRunID: "op-blueprint-run", BlueprintStepIndex: &step0,
 	})
 	// Persist a terminal outcome the way processCompletion does.
-	if err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "", "did the thing", "continue", "", ""); err != nil {
-		t.Fatalf("complete step run: %v", err)
+	if _, err := stores.Conversations.CompleteSystem(ctx, org, "op-run", "completed", 0, 0, 0, "did the thing", "continue", "", ""); err != nil {
+		t.Fatalf("complete step conversation: %v", err)
 	}
 
-	runs, err := blueprints.RunsForBlueprint(ctx, org, "op-blueprint-run")
+	convs, err := blueprints.ConversationsForBlueprint(ctx, org, "op-blueprint-run")
 	if err != nil {
-		t.Fatalf("RunsForBlueprint: %v", err)
+		t.Fatalf("ConversationsForBlueprint: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("RunsForBlueprint returned %d runs, want 1", len(runs))
+	if len(convs) != 1 {
+		t.Fatalf("ConversationsForBlueprint returned %d conversations, want 1", len(convs))
 	}
-	if runs[0].Outcome != "continue" {
-		t.Errorf("step run outcome = %q, want continue (the orchestrator advances on this)", runs[0].Outcome)
+	if convs[0].Outcome != "continue" {
+		t.Errorf("step conversation outcome = %q, want continue (the orchestrator advances on this)", convs[0].Outcome)
 	}
 }
 
@@ -583,13 +599,14 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "blueprint-guard")
 	insertBlueprintForTest(t, conn, "guard-blueprint", "Guard Blueprint")
 
-	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "blueprint-run-guard", BlueprintID: "guard-blueprint", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	blueprintRunID := blueprintRunIDRow.ID
 
 	changed, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
 	if err != nil {
@@ -628,13 +645,14 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 
 	task := seedEntityEventTask(t, conn, "reopen")
 	insertBlueprintForTest(t, conn, "reopen-blueprint", "Reopen Blueprint")
-	brID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "reopen-run", BlueprintID: "reopen-blueprint", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := brIDRow.ID
 
 	// A running blueprint is not re-openable (the CAS guards on status='aborted').
 	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID); err != nil || reopened {

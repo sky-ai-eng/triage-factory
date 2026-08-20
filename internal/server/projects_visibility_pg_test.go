@@ -205,9 +205,9 @@ func TestProjectCreate_Viewer_TeamVisibility_Forbidden(t *testing.T) {
 func TestProjectCreate_NonTeamVisibility_RejectsPinnedRepos(t *testing.T) {
 	r := newProjectVisibilityRig(t)
 	rec, _ := r.create(t, r.teamless, map[string]any{
-		"name":         "private with repos",
-		"visibility":   "private",
-		"pinned_repos": []string{"owner/repo"},
+		"name":                  "private with repos",
+		"visibility":            "private",
+		"pinned_repository_ids": []string{"some-repository-id"},
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -314,7 +314,7 @@ func TestProjectPatch_TeamlessProject_TeamScopedFieldsCleanBadRequest(t *testing
 		name string
 		body map[string]any
 	}{
-		{"pinned_repos", map[string]any{"pinned_repos": []string{"owner/repo"}}},
+		{"pinned_repository_ids", map[string]any{"pinned_repository_ids": []string{"some-repository-id"}}},
 		{"jira_project_key", map[string]any{"jira_project_key": "SKY"}},
 		{"spec_authorship_blueprint_id", map[string]any{"spec_authorship_blueprint_id": "some-blueprint-id"}},
 	} {

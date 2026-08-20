@@ -37,9 +37,9 @@ func publishBlueprintAsTeamWriter(t *testing.T, h *Harness, orgID, userID, teamI
 }
 
 // seedMarketplaceStatsTask inserts the minimal entity+event+task chain a
-// runs/blueprint_runs row needs (both carry a NOT NULL task_id, and
+// conversations/blueprint_runs row needs (both carry a NOT NULL task_id, and
 // blueprint_runs additionally needs blueprint_id — see
-// internal/db/postgres/prompts_test.go's seedPgRunsForStats, which this
+// internal/db/postgres/prompts_test.go's seedPgConversationsForStats, which this
 // mirrors). Writes go through h.AdminDB — this is test fixture setup, not
 // the flow under test, so RLS doesn't need to be exercised here.
 func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID string) string {
@@ -63,12 +63,12 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 	return taskID
 }
 
-// seedPromptRun records one runs row against promptID, started at
+// seedPromptConversation records one conversations row against promptID, started at
 // startedAt, with the given terminal status ('completed' or 'failed').
-// runs.blueprint_run_id is NOT NULL, so this mints a throwaway
-// single-step blueprint_run to hang the run off, mirroring
-// seedPgRunsForStats.
-func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, promptID, status string, startedAt time.Time) {
+// conversations.blueprint_run_id is NOT NULL, so this mints a throwaway
+// single-step blueprint_run to hang the conversation off, mirroring
+// seedPgConversationsForStats.
+func seedPromptConversation(t *testing.T, h *Harness, orgID, userID, teamID, taskID, promptID, status string, startedAt time.Time) {
 	t.Helper()
 	bpID := uuid.New().String()
 	MustExec(t, h.AdminDB, `
@@ -97,7 +97,7 @@ func seedPromptRun(t *testing.T, h *Harness, orgID, userID, teamID, taskID, prom
 }
 
 // seedMarketplaceBlueprintRun records one blueprint_runs row directly
-// against blueprintID — the kind=blueprint mirror of seedPromptRun.
+// against blueprintID — the kind=blueprint mirror of seedPromptConversation.
 func seedMarketplaceBlueprintRun(t *testing.T, h *Harness, orgID, userID, taskID, blueprintID, status string, startedAt time.Time) {
 	t.Helper()
 	MustExec(t, h.AdminDB, `
@@ -154,16 +154,16 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 	// resolution, so a nanosecond-precision time.Now() would never compare
 	// equal after the round trip through the stats row.
 	base := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
-	seedPromptRun(t, h, orgA, bob, teamB, taskB, teamBPromptID, "completed", base)
-	seedPromptRun(t, h, orgA, bob, teamB, taskB, teamBPromptID, "failed", base.Add(time.Hour))
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, teamBPromptID, "completed", base)
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, teamBPromptID, "failed", base.Add(time.Hour))
 	latestRunAt := base.Add(2 * time.Hour)
-	seedPromptRun(t, h, orgA, carol, teamC, taskC, teamCPromptID, "completed", latestRunAt)
+	seedPromptConversation(t, h, orgA, carol, teamC, taskC, teamCPromptID, "completed", latestRunAt)
 	// A still-in-flight run, started AFTER every terminal run above. It must
 	// count toward neither total_runs nor success_rate (it hasn't resolved
 	// either way) nor last_run_at — if it leaked into the aggregate, both
 	// total_runs (4, not 3) and last_run_at (this run's time, not
 	// latestRunAt) would drift from the assertions below.
-	seedPromptRun(t, h, orgA, carol, teamC, taskC, teamCPromptID, "running", latestRunAt.Add(time.Hour))
+	seedPromptConversation(t, h, orgA, carol, teamC, taskC, teamCPromptID, "running", latestRunAt.Add(time.Hour))
 
 	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
 		t.Fatalf("RecomputeStatsSystem: %v", err)
@@ -212,7 +212,7 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 
 // TestMarketplaceStats_BlueprintAggregation pins that the kind=blueprint
 // path aggregates through blueprint_runs.blueprint_id rather than
-// runs.prompt_id, and that it applies the same terminal-only filter (a
+// conversations.prompt_id, and that it applies the same terminal-only filter (a
 // still-running blueprint_run must not count).
 func TestMarketplaceStats_BlueprintAggregation(t *testing.T) {
 	h := Shared(t)
@@ -322,7 +322,7 @@ func TestMarketplaceStats_Idempotent(t *testing.T) {
 		t.Fatalf("teamB install: %v", err)
 	}
 	taskB := seedMarketplaceStatsTask(t, h, orgA, bob, teamB)
-	seedPromptRun(t, h, orgA, bob, teamB, taskB, rootPromptID, "completed", time.Now().UTC())
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, "completed", time.Now().UTC())
 
 	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
 		t.Fatalf("first RecomputeStatsSystem: %v", err)

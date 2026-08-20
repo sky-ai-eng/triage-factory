@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -146,24 +147,45 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 
 // List ignores teamID: local mode is single-team, so the multi-team
 // narrowing the param expresses is a no-op here.
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, _ string) ([]domain.EventHandler, error) {
-	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers WHERE org_id = ? AND deleted_at IS NULL`
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHandlerListFilter, opts db.ListOpts) ([]domain.EventHandler, int, error) {
+	// f.TeamID is ignored — local mode is single-team.
+	where := ` WHERE org_id = ? AND deleted_at IS NULL`
 	args := []any{orgID}
-	if kind != "" {
-		q += ` AND kind = ?`
-		args = append(args, kind)
+	if f.Kind != "" {
+		where += ` AND kind = ?`
+		args = append(args, f.Kind)
 	}
-	q += `
+	if len(f.GatedEventTypes) > 0 {
+		placeholders := make([]string, len(f.GatedEventTypes))
+		for i, et := range f.GatedEventTypes {
+			placeholders[i] = "?"
+			args = append(args, et)
+		}
+		where += ` AND event_type NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers` + where + `
 	      ORDER BY kind ASC,
 	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
 	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
-	               created_at DESC`
-	rows, err := s.q.QueryContext(ctx, q, args...)
+	               created_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
-	return collectEventHandlersSQLite(rows)
+	out, err := collectEventHandlersSQLite(rows)
+	return out, total, err
 }
 
 func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
@@ -233,9 +255,9 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 	return collectEventHandlersSQLite(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	_ = teamID // local mode is single-team; rows pin LocalDefaultTeamID below
 	var pred any
@@ -249,9 +271,13 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	// is always that team — the teamID the handler threads is ignored
 	// here. creator_user_id is required for source='user' rows by the
 	// event_handlers_system_has_no_creator CHECK.
+	//
+	// RETURNING projects the point read's column list, so the row handed back
+	// carries the pinned team, the forced source and the stamped timestamps h
+	// never described.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.q.ExecContext(ctx, `
+		return scanEventHandlerRowSQLite(s.q.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -261,14 +287,14 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
+			RETURNING `+sqliteEventHandlerColumns,
+			h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
-			now, now)
-		return err
+			now, now))
 
 	case domain.EventHandlerKindTrigger:
-		_, err := s.q.ExecContext(ctx, `
+		return scanEventHandlerRowSQLite(s.q.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -278,18 +304,18 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
+			RETURNING `+sqliteEventHandlerColumns,
+			h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
-			now, now)
-		return err
+			now, now))
 	}
-	return fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
 }
 
-func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	var pred any
 	if h.ScopePredicateJSON != nil {
@@ -299,39 +325,51 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 
 	contentChanged, err := s.contentChanged(ctx, orgID, h)
 	if err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.q.ExecContext(ctx, `
+		return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = ?, enabled = ?, applies_to_unowned = ?,
 			    name = ?, default_priority = ?, sort_order = ?,
 			    user_modified = user_modified OR ?,
 			    updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'rule' AND deleted_at IS NULL
-		`, pred, h.Enabled, h.AppliesToUnowned,
+			RETURNING `+sqliteEventHandlerColumns,
+			pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			contentChanged,
-			now, orgID, h.ID)
-		return err
+			now, orgID, h.ID))
 
 	case domain.EventHandlerKindTrigger:
-		_, err := s.q.ExecContext(ctx, `
+		return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = ?, enabled = ?, applies_to_unowned = ?,
 			    breaker_threshold = ?, min_autonomy_suitability = ?,
 			    user_modified = user_modified OR ?,
 			    updated_at = ?
 			WHERE org_id = ? AND id = ? AND kind = 'trigger' AND deleted_at IS NULL
-		`, pred, h.Enabled, h.AppliesToUnowned,
+			RETURNING `+sqliteEventHandlerColumns,
+			pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			contentChanged,
-			now, orgID, h.ID)
-		return err
+			now, orgID, h.ID))
 	}
-	return fmt.Errorf("sqlite event_handlers Update: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("sqlite event_handlers Update: unknown kind %q", h.Kind)
+}
+
+// scanUpdatedEventHandlerSQLite decodes an id-keyed UPDATE … RETURNING. No row
+// scanned means no live handler answered the id under this statement's kind
+// filter, which is db.ErrNoSuchEventHandler — the answer these writes used to
+// give silently as zero rows affected.
+func scanUpdatedEventHandlerSQLite(row *sql.Row) (domain.EventHandler, error) {
+	h, err := scanEventHandlerRowSQLite(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
+	}
+	return h, err
 }
 
 // contentChanged reports whether h's content fields (scope_predicate_json,
@@ -374,13 +412,6 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	return false, nil
 }
 
-func (s *eventHandlerStore) SetEnabled(ctx context.Context, orgID, id string, enabled bool) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE event_handlers SET enabled = ?, updated_at = ? WHERE org_id = ? AND id = ? AND deleted_at IS NULL
-	`, enabled, time.Now().UTC(), orgID, id)
-	return err
-}
-
 // Delete removes a handler. A system_slug row (shipped copy) soft-deletes so
 // its (org_id, team_id, system_slug) slot stays occupied for the sync's
 // never-resurrect rule; a user-created row (no system_slug) hard-deletes.
@@ -404,12 +435,12 @@ func (s *eventHandlerStore) Delete(ctx context.Context, orgID, id string) error 
 	return err
 }
 
-func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error {
-	_, err := s.q.ExecContext(ctx, `
+func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) (domain.EventHandler, error) {
+	return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 		UPDATE event_handlers SET blueprint_id = ?, user_modified = 1, updated_at = ?
 		WHERE org_id = ? AND id = ? AND kind = 'trigger' AND deleted_at IS NULL
-	`, newBlueprintID, time.Now().UTC(), orgID, id)
-	return err
+		RETURNING `+sqliteEventHandlerColumns,
+		newBlueprintID, time.Now().UTC(), orgID, id))
 }
 
 func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []string) error {
@@ -427,12 +458,12 @@ func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []str
 	})
 }
 
-func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error {
+func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) (domain.EventHandler, error) {
 	if t.Kind != domain.EventHandlerKindTrigger {
-		return errors.New("sqlite event_handlers Promote: target kind must be 'trigger'")
+		return domain.EventHandler{}, errors.New("sqlite event_handlers Promote: target kind must be 'trigger'")
 	}
 	if t.BlueprintID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
-		return errors.New("sqlite event_handlers Promote: trigger fields required")
+		return domain.EventHandler{}, errors.New("sqlite event_handlers Promote: trigger fields required")
 	}
 	var pred any
 	if t.ScopePredicateJSON != nil {
@@ -441,7 +472,10 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 	// Single UPDATE flips kind, clears rule-only columns, populates
 	// trigger-only. The per-kind CHECK constraints validate atomically. A
 	// kind change is always a user modification — stamp unconditionally.
-	res, err := s.q.ExecContext(ctx, `
+	// The row is where a caller sees the cleared rule-only columns; t
+	// describes only the trigger half. No row scanned means the id named no
+	// live rule, which is what the rows-affected probe here used to report.
+	return scanUpdatedEventHandlerSQLite(s.q.QueryRowContext(ctx, `
 		UPDATE event_handlers
 		SET kind = 'trigger',
 		    blueprint_id = ?, breaker_threshold = ?, min_autonomy_suitability = ?,
@@ -450,20 +484,10 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 		    user_modified = 1,
 		    updated_at = ?
 		WHERE org_id = ? AND id = ? AND kind = 'rule' AND deleted_at IS NULL
-	`, t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
+		RETURNING `+sqliteEventHandlerColumns,
+		t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
 		pred, time.Now().UTC(),
-		orgID, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return errors.New("sqlite event_handlers Promote: row not found or not a rule")
-	}
-	return nil
+		orgID, id))
 }
 
 // Sync brings teamID's unmodified copies of db.ShippedEventHandlers up to

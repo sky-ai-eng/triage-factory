@@ -115,6 +115,37 @@ func TestFire_LevelsDistinct(t *testing.T) {
 	}
 }
 
+// TestFireUser_StampsUserID pins the per-user shape: the event carries
+// both scope fields so the hub narrows delivery to that user's
+// connections in that org, and the payload is otherwise identical to
+// Fire's.
+func TestFireUser_StampsUserID(t *testing.T) {
+	hub := &fakeHub{}
+	FireUser(hub, testOrgID, "user-1", LevelWarning, "", "Profiling failed for acme/api — rows saved without AI summary")
+
+	if len(hub.events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(hub.events))
+	}
+	evt := hub.events[0]
+	if evt.OrgID != testOrgID || evt.UserID != "user-1" {
+		t.Errorf("event scope = (org %q, user %q); want (%q, user-1)", evt.OrgID, evt.UserID, testOrgID)
+	}
+	if payload := evt.Data.(Payload); payload.Level != LevelWarning || payload.ID == "" {
+		t.Errorf("unexpected payload: %+v", payload)
+	}
+}
+
+// TestFireUser_EmptyUser_NoOp — an empty userID on the per-user variant
+// would silently widen delivery back to the whole org (the hub treats
+// empty UserID as "not user-specific"), so it must drop instead.
+func TestFireUser_EmptyUser_NoOp(t *testing.T) {
+	hub := &fakeHub{}
+	FireUser(hub, testOrgID, "", LevelWarning, "", "anything")
+	if len(hub.events) != 0 {
+		t.Errorf("expected 0 events for empty userID, got %d", len(hub.events))
+	}
+}
+
 // TestFire_EmptyOrg_Passthrough — the empty-OrgID case is the system-wide
 // broadcast contract. The Fire helper accepts it without complaint; the
 // hub's per-connection filter delivers empty-OrgID events to every client.

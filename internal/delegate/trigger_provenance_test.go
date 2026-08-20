@@ -9,12 +9,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestDelegate_EventPath_StampsTriggerIDOnStepRun pins the write half of the
-// usage by-rule fix: an event-fired delegation denormalizes the firing
-// trigger onto the step-0 runs row (runs.trigger_id), and the JOIN-free
-// llm_spend view therefore categorizes that run 'autonomous' WITH a rule to
-// attribute it to. A NULL trigger_id here is exactly the "Automated cost with
-// an empty by-rule breakdown" bug on the usage page.
+// TestDelegate_EventPath_StampsTriggerIDOnStepRun pins the write half of
+// the usage by-rule fix: an event-fired delegation denormalizes the firing
+// trigger onto the step-0 conversations row (conversations.trigger_id), and
+// the JOIN-free llm_spend view therefore categorizes that run 'autonomous'
+// WITH a rule to attribute it to. A NULL trigger_id here is exactly the
+// "Automated cost with an empty by-rule breakdown" bug on the usage page.
 func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	database := newDelegateTestDB(t)
 	org := runmode.LocalDefaultOrgID
@@ -25,7 +25,7 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	// blueprint_run insert requires both).
 	breaker, minSuit := 3, 0.5
 	trigID := "trigprov-handler"
-	if err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
+	if _, err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
 		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
 		BlueprintID: bpID, BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit, Enabled: true,
 	}); err != nil {
@@ -48,10 +48,10 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	}
 
 	// The queued step-0 run carries the event shape AND the firing trigger.
-	var runID, gotType, gotTrig string
+	var conversationID, gotType, gotTrig string
 	if err := database.QueryRow(
 		`SELECT id, trigger_type, COALESCE(trigger_id, '') FROM conversations WHERE blueprint_run_id = ?`, brID,
-	).Scan(&runID, &gotType, &gotTrig); err != nil {
+	).Scan(&conversationID, &gotType, &gotTrig); err != nil {
 		t.Fatalf("read step-0 run: %v", err)
 	}
 	if gotType != "event" || gotTrig != trigID {
@@ -65,14 +65,14 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	if _, err := database.Exec(`
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content)
 		VALUES (?, ?, 'assistant', '', 'work')
-	`, org, runID); err != nil {
+	`, org, conversationID); err != nil {
 		t.Fatalf("seed ledger row: %v", err)
 	}
 	var cat string
 	var viewTrig sql.NullString
 	if err := database.QueryRow(
 		`SELECT category, trigger_id FROM llm_spend
-		 WHERE source = 'run' AND source_id = (SELECT id FROM messages WHERE conversation_id = ?)`, runID,
+		 WHERE source = 'run' AND source_id = (SELECT id FROM messages WHERE conversation_id = ?)`, conversationID,
 	).Scan(&cat, &viewTrig); err != nil {
 		t.Fatalf("read llm_spend row: %v", err)
 	}

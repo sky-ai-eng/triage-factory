@@ -266,9 +266,9 @@ func TestHandleList_EntitlementGate(t *testing.T) {
 	}
 }
 
-// TestHandleConnect_NonAdmin_404: a plain member can't connect a workspace —
-// 404 (non-disclosure), no row written.
-func TestHandleConnect_NonAdmin_404(t *testing.T) {
+// TestHandleConnect_NonAdminIsForbidden: a plain member can't connect a workspace —
+// 403 (the org is visible to them), no row written.
+func TestHandleConnect_NonAdminIsForbidden(t *testing.T) {
 	r := newSlackWorkspaceRig(t, "https://tf.example")
 	orgID, _, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-nonadmin")
 	member := pgtest.SeedUser(t, r.h, "slack-nonadmin-member")
@@ -278,8 +278,8 @@ func TestHandleConnect_NonAdmin_404(t *testing.T) {
 	rec := httptest.NewRecorder()
 	body := map[string]string{"bot_token": "xoxb-nonadmin", "app_token": "xapp-1"}
 	r.hdl.handleConnect(rec, r.req(http.MethodPost, "/api/slack/workspaces", member, orgID, "", body))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-admin); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-admin); body=%s", rec.Code, rec.Body.String())
 	}
 	if r.fake.authTestHits != 0 {
 		t.Errorf("auth.test called %d times; want 0 (gated before any Slack call)", r.fake.authTestHits)

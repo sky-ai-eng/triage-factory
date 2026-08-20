@@ -67,7 +67,7 @@ func setTeamReviewPosture(t *testing.T, stores db.Stores, teamID, posture string
 		t.Fatalf("GetSettingsSystem: %v", err)
 	}
 	set.ReviewPosture = posture
-	if err := stores.Teams.UpdateSettings(context.Background(), teamID, set); err != nil {
+	if _, err := stores.Teams.UpdateSettings(context.Background(), teamID, set); err != nil {
 		t.Fatalf("UpdateSettings: %v", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestFinalizeReviewDraft_PostureDecidesPosting(t *testing.T) {
 				t.Fatalf("a staged review must reach GitHub zero times, saw %d", len(submits))
 			}
 
-			arts := listRunArtifacts(t, stores, info.RunID)
+			arts := listConversationArtifacts(t, stores, info.ConversationID)
 			if len(arts) != 1 {
 				t.Fatalf("want 1 artifact, got %d", len(arts))
 			}
@@ -296,7 +296,7 @@ func TestFinalizeReviewDraft_AutoPost_SubmitFailureStaysStaged(t *testing.T) {
 		t.Error("Posted = true after a failed submit — the response must report what actually happened")
 	}
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
 		t.Fatalf("want 1 artifact, got %d", len(arts))
 	}
@@ -342,7 +342,7 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listRunArtifacts(t, stores, info.RunID)[0]
+	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
 
 	// The human approve lands first, taking the claim the handler takes.
 	won, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
@@ -364,7 +364,7 @@ func TestPostFinalizedReview_LosesClaimToConcurrentApprove(t *testing.T) {
 	}
 	// The winner's claim is intact: the loser must not have released it, which
 	// would put an already-approved review back in the queue.
-	after := listRunArtifacts(t, stores, info.RunID)[0]
+	after := listConversationArtifacts(t, stores, info.ConversationID)[0]
 	if after.State != domain.ArtifactStateReviewSubmitted {
 		t.Errorf("state = %q, want the approver's claim left untouched (submitted)", after.State)
 	}
@@ -397,7 +397,7 @@ func TestPostFinalizedReview_ClaimsBeforePosting(t *testing.T) {
 
 	// A human approve arriving now takes the same CAS the handler takes — and
 	// loses, so the handler 409s instead of posting the review a second time.
-	art := listRunArtifacts(t, stores, info.RunID)[0]
+	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
 	claimed, err := stores.Artifacts.TransitionReviewStateSystem(ctx, info.OrgID, art.ID,
 		domain.ArtifactStateReviewPending, domain.ArtifactStateReviewSubmitted, "", "", "")
 	if err != nil {
@@ -431,7 +431,7 @@ func TestPostFinalizedReview_PostsThePostClaimContent(t *testing.T) {
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## agent body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listRunArtifacts(t, stores, info.RunID)[0]
+	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
 
 	// A human edits the staged body while the draft is still pending — the
 	// PATCH the overlay makes, guarded on pending exactly like this one.
@@ -485,7 +485,7 @@ func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testin
 	if _, err := client.FinalizeReviewDraft(ctx, handle, "COMMENT", "## body"); err != nil {
 		t.Fatalf("FinalizeReviewDraft: %v", err)
 	}
-	art := listRunArtifacts(t, stores, info.RunID)[0]
+	art := listConversationArtifacts(t, stores, info.ConversationID)[0]
 
 	// The human escalates the verdict while it's still pending.
 	escalated, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -510,7 +510,7 @@ func TestPostFinalizedReview_ReEvaluatesPostureAgainstPostClaimContent(t *testin
 		t.Errorf("GitHub saw %d submits, want 0", n)
 	}
 	// The claim is released, so the escalated review is back in the queue.
-	after := listRunArtifacts(t, stores, info.RunID)[0]
+	after := listConversationArtifacts(t, stores, info.ConversationID)[0]
 	if after.State != domain.ArtifactStateReviewPending {
 		t.Errorf("state = %q, want pending — the claim must be released when the run declines to post", after.State)
 	}

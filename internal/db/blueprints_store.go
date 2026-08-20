@@ -24,6 +24,16 @@ var (
 	// than the acting team — the endpoint is third-party-callable, so a mixed-
 	// scope id set is rejected rather than trusted.
 	ErrDuplicateCrossTeam = errors.New("db: duplicate prompt set spans more than the acting team")
+	// ErrNoSuchBlueprint means an id-keyed write named no live blueprint —
+	// either no row carries the id or the row is soft-deleted, which a caller
+	// holding only an id cannot tell apart and does not need to. Only the
+	// writes return it; Get and GetBySystemSlug keep answering a miss with
+	// (nil, nil).
+	ErrNoSuchBlueprint = errors.New("db: no live blueprint with that id")
+	// ErrNoSuchBlueprintRun means an id-keyed blueprint_runs write named no
+	// row. Same split as ErrNoSuchBlueprint: the writes refuse, GetRun answers
+	// (nil, nil).
+	ErrNoSuchBlueprintRun = errors.New("db: no blueprint run with that id")
 	// ErrBlueprintRunFenceRequiresEventAndTrigger is returned by
 	// CreateRunIfNotFiredSystem when TriggeringEventID or TriggerID is empty.
 	// Both bind to SQL NULL, which the partial unique fence index treats as
@@ -152,12 +162,14 @@ func DedupPreserveOrder(ids []string) []string {
 //   - blueprints          — the triggerable, team-scoped header (header CRUD
 //     modeled on PromptStore: Create / Get / List / GetBySystemSlug).
 //   - blueprint_steps      — ordered membership list for a blueprint.
-//   - blueprint_runs       — one row per multi-step delegateBlueprint instance,
+//   - blueprint_runs       — one row per multi-step blueprint run,
 //     owning the worktree shared across every step.
-//   - runs                — read-only here (per-step state lives on runs;
-//     RunsForBlueprint returns the slice of step rows linked to a blueprint_run).
-//     Step advancement reads each step run's terminal runs.outcome (see
-//     delegate.decideBlueprintStep); there is no separate verdict channel.
+//   - conversations       — read-only here (per-step state lives on
+//     conversations; ConversationsForBlueprint returns the slice of step rows
+//     linked to a blueprint_run).
+//     Step advancement reads each step conversation's terminal
+//     conversations.outcome (see delegate.blueprintDecisionForStepConversation);
+//     there is no separate verdict channel.
 //
 // Audiences:
 //
@@ -203,13 +215,80 @@ func DedupPreserveOrder(ids []string) []string {
 // ShippedDefaultsStore.SeedShippedIntoTeam, likewise inserts them unflagged).
 // Delete, IncrementUsage/IncrementUsageSystem, and DuplicatePrompts (fresh
 // user-source copies; originals untouched) never touch the flag.
+// BlueprintListFilter is the blueprint list's filter set.
+type BlueprintListFilter struct {
+	// TeamID narrows to one team's blueprints (the multi-team page scoped to
+	// a team). Empty means every blueprint the caller may see. The SQLite
+	// impl ignores it — local mode is single-team.
+	TeamID string
+
+	// GatedEventTypes are the event types this org is NOT entitled to. A
+	// blueprint is hidden when it has at least one attached trigger and every
+	// one of those triggers fires on a gated type — it has no live behavior
+	// the org can use. A blueprint with no triggers at all is never hidden by
+	// this (that is the orphaned state, unrelated to entitlements).
+	//
+	// The gate lives here rather than as a post-read filter in the handler
+	// because a filter applied after the window makes the page short and the
+	// total wrong: the rows a caller cannot see must not be counted, and the
+	// only place that can be true is the query that counts them.
+	GatedEventTypes []string
+}
+
+// BlueprintStepListFilter is the step list's filter set.
+type BlueprintStepListFilter struct {
+	// TeamID narrows to one team's blueprints, like BlueprintListFilter's.
+	TeamID string
+	// BlueprintIDs narrows to specific blueprints. Empty means every
+	// blueprint in scope — the canvas's bulk read. A non-empty set is the
+	// per-blueprint read, which is why there is no second route for it.
+	BlueprintIDs []string
+}
+
+// BlueprintRunListFilter is the blueprint-run list's filter set.
+type BlueprintRunListFilter struct {
+	// BlueprintID narrows to the runs of one blueprint. Empty means every
+	// run in the org.
+	BlueprintID string
+	// Statuses narrows by run status. Empty means every status.
+	Statuses []string
+}
+
+// # Every single-row write returns the row it persisted
+//
+// Create, Rename, ReplaceSteps, CreateRun, SetRunWorktreePathSystem and
+// SetRunCurrentStepSystem hand back the stored row, read off RETURNING on the
+// write statement itself rather than from a follow-up SELECT, projecting the
+// point read's column list and scanner. ReplaceSteps is in that list because
+// its set write also stamps the parent blueprint (user_modified, updated_at),
+// and that stamp is a single-row write whose result the caller needs — the
+// step rows themselves are the set, and the parent row is what a caller
+// renders after replacing them.
+//
+// Exempt, each said so at the method:
+//
+//   - Delete (a delete) and IncrementUsage / IncrementUsageSystem
+//     (fire-and-forget bookkeeping on a sort heuristic).
+//   - DuplicatePrompts (bulk — it copies a set and answers with the new ids).
+//   - MergeInto, SplitAt and DeleteStep — compositions that rewrite two
+//     blueprints and their step sets in one transaction, so no single row is
+//     the outcome; the two that mint a blueprint already answer with its id.
+//   - CreateRunIfNotFiredSystem — its insert is fenced ON CONFLICT DO NOTHING,
+//     which returns zero rows exactly when the fence engages, so RETURNING
+//     cannot answer the question the method exists to ask.
+//   - MarkRunStatus / MarkRunStatusSystem, ReopenRunForResume and
+//     RequestRunCancelSystem — compare-and-swap guards whose `changed` bool is
+//     already the write's own answer about whether it landed, which is what
+//     every caller branches on. There is no miss error to retire here and no
+//     caller renders the row, so returning it would be signature churn rather
+//     than a workaround removed.
 type BlueprintStore interface {
 	// --- Blueprint header CRUD (modeled on PromptStore) ----------------
 
-	// List returns non-hidden blueprints ordered by updated_at DESC, scoped
-	// to teamID when non-empty (the multi-team page narrowed to one team).
-	// The SQLite impl ignores teamID (local mode is single-team).
-	List(ctx context.Context, orgID string, teamID string) ([]domain.Blueprint, error)
+	// List returns one page of non-hidden blueprints plus the unpaged total,
+	// ordered by updated_at DESC with an id tiebreaker so the pages partition
+	// a total order.
+	List(ctx context.Context, orgID string, f BlueprintListFilter, opts ListOpts) ([]domain.Blueprint, int, error)
 
 	// Get returns one blueprint by id or (nil, nil) if not found.
 	// Request-facing, so it filters deleted_at IS NULL — a soft-deleted
@@ -229,14 +308,21 @@ type BlueprintStore interface {
 	// teamID. Caller-provided ID. The Postgres impl binds teamID directly
 	// (it satisfies the team-membership RLS); the SQLite impl ignores it.
 	// user_modified stays false — a fresh row hasn't diverged from anything.
-	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) error
+	//
+	// Returns the persisted row, which carries the defaulted source, the
+	// resolved team and creator, and the server-stamped timestamps b never
+	// described.
+	Create(ctx context.Context, orgID, teamID string, b domain.Blueprint) (domain.Blueprint, error)
 
 	// Rename updates a blueprint's name (its only mutable header field — steps
 	// are managed via ReplaceSteps, composition via merge/split). Lets a
-	// blueprint carry a name independent of its entry prompt's. No-op on a
-	// missing / soft-deleted row; the handler 404s by re-reading. Stamps
+	// blueprint carry a name independent of its entry prompt's. Stamps
 	// user_modified true on the renamed row (see the stamping contract above).
-	Rename(ctx context.Context, orgID, id, name string) error
+	//
+	// Returns the renamed row, or ErrNoSuchBlueprint — which is what a missing
+	// or soft-deleted row now gets, in place of the silent no-op the handler
+	// had to detect by re-reading.
+	Rename(ctx context.Context, orgID, id, name string) (domain.Blueprint, error)
 
 	// Delete soft-deletes a blueprint (stamps deleted_at). The row + its
 	// blueprint_steps stay as the durable audit trail (a blueprint a trigger
@@ -245,6 +331,9 @@ type BlueprintStore interface {
 	// it so in-flight runs + past-run timelines still render the name. Called by
 	// the prompt-delete handler's delete-pairing when a prompt that solely
 	// constitutes a 1-step blueprint is deleted.
+	//
+	// Exempt from the returned-row rule: it is a delete. The stamp is how the
+	// row survives its RESTRICT FKs, not a state anyone renders.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// StepPromptOwner returns the id of the blueprint that holds promptID as a
@@ -261,6 +350,9 @@ type BlueprintStore interface {
 	GetSystem(ctx context.Context, orgID string, id string) (*domain.Blueprint, error)
 
 	// IncrementUsage bumps usage_count by 1.
+	// IncrementUsage / IncrementUsageSystem are exempt from the returned-row
+	// rule: fire-and-forget bookkeeping. The counter is bumped on the way past
+	// and spent by the next list read; nothing reads the answer here.
 	IncrementUsage(ctx context.Context, orgID string, id string) error
 	IncrementUsageSystem(ctx context.Context, orgID string, id string) error
 
@@ -270,12 +362,14 @@ type BlueprintStore interface {
 	// (not error) when the blueprint has no steps configured.
 	ListSteps(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 
-	// ListAllSteps returns every step of teamID's non-deleted blueprints in one
-	// read, ordered by (blueprint_id, step_index) — the binding canvas's bulk
-	// alternative to ListSteps-per-blueprint (avoids an N+1 over the blueprint
-	// list). Soft-deleted blueprints' steps are excluded (the canvas only renders
-	// listed blueprints). Caller groups by blueprint_id.
-	ListAllSteps(ctx context.Context, orgID, teamID string) ([]domain.BlueprintStep, error)
+	// ListAllSteps returns one page of blueprint steps plus the unpaged total,
+	// ordered by (blueprint_id, step_index) — a total order, since a step's
+	// index is unique within its blueprint. It is the binding canvas's bulk
+	// read, and with f.BlueprintIDs it is also the per-blueprint read, so the
+	// two GETs it replaced are one route. Soft-deleted and hidden blueprints'
+	// steps are excluded (the canvas only renders listed blueprints). Caller
+	// groups by blueprint_id.
+	ListAllSteps(ctx context.Context, orgID string, f BlueprintStepListFilter, opts ListOpts) ([]domain.BlueprintStep, int, error)
 
 	// CountStepReferences returns the number of distinct non-deleted blueprints
 	// that reference the given prompt as a step. Request-facing, so it filters
@@ -287,7 +381,13 @@ type BlueprintStore interface {
 	// transaction. step_index is densely packed 0..N-1 by the writer; briefs
 	// are taken positionally and may be empty. Stamps user_modified true on
 	// blueprintID (see the stamping contract above).
-	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) error
+	//
+	// Returns the stamped parent blueprint, or ErrNoSuchBlueprint. The steps
+	// are a set and have no single row to name, but the stamp on the parent is
+	// a single-row write — and it is the row the caller renders after
+	// replacing the steps, carrying a user_modified and an updated_at that
+	// only this statement knows.
+	ReplaceSteps(ctx context.Context, orgID string, blueprintID string, stepPromptIDs []string, briefs []string) (domain.Blueprint, error)
 
 	// MergeInto absorbs the source blueprint's steps onto the tail of the host
 	// blueprint and soft-deletes the now-empty source, atomically. The host
@@ -311,6 +411,10 @@ type BlueprintStore interface {
 	//
 	// Stamps user_modified true on the host (see the stamping contract
 	// above); the source is retired, not stamped.
+	//
+	// Exempt from the returned-row rule: it is a composition, not a single-row
+	// write — it moves a step set between two blueprints and retires one of
+	// them, so no one row is the outcome.
 	MergeInto(ctx context.Context, orgID string, hostID, sourceID string) error
 
 	// SplitAt partitions a blueprint at atIndex into two, atomically: steps
@@ -404,11 +508,15 @@ type BlueprintStore interface {
 
 	// --- Runs -----------------------------------------------------------
 
-	// CreateRun inserts a new blueprint instance row. TriggerType is required.
-	// Manual delegations use this path (no triggering_event_id, so the replay
-	// fence never engages). Event-triggered delegations use
-	// CreateRunIfNotFiredSystem instead.
-	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (string, error)
+	// CreateRun inserts a new blueprint instance row and returns it.
+	// TriggerType is required. Manual delegations use this path (no
+	// triggering_event_id, so the replay fence never engages). Event-triggered
+	// delegations use CreateRunIfNotFiredSystem instead.
+	//
+	// br is an input: it carries no started_at, and the id and status are
+	// defaulted here when it leaves them empty. The returned row is where a
+	// caller learns the id it did not supply.
+	CreateRun(ctx context.Context, orgID string, br domain.BlueprintRun) (domain.BlueprintRun, error)
 
 	// CreateRunIfNotFiredSystem is the event-path fenced insert: it writes
 	// triggering_event_id and relies on the blueprint_runs_event_trigger_fence
@@ -427,13 +535,19 @@ type BlueprintStore interface {
 	// partial index treats as distinct, silently skipping the fence). Impls
 	// reject that with ErrBlueprintRunFenceRequiresEventAndTrigger.
 	//
-	// claim rides the same transaction as the run row: this insert IS the
+	// claim rides the same transaction as the blueprint run row: this insert IS the
 	// commitment point of a delegation, so the task's agent claim is written
 	// with it or not at all (see AgentClaimStamp). Skipped on the fenced
 	// no-op — a replay must not re-stamp a claim the original firing already
 	// settled, and may not steal one the user has since taken. Returns
 	// claimed=true only when the stamp actually moved the claim; a refusal
 	// still commits the run.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape: the
+	// insert is ON CONFLICT DO NOTHING, which returns zero rows in exactly the
+	// case this method exists to detect. A RETURNING row could not tell a
+	// fenced no-op from a failure, and `inserted` is the answer the caller
+	// needs.
 	CreateRunIfNotFiredSystem(ctx context.Context, orgID string, br domain.BlueprintRun, claim AgentClaimStamp) (inserted, claimed bool, err error)
 
 	// SetRunWorktreePathSystem fills in a blueprint_run's worktree_path after
@@ -441,7 +555,9 @@ type BlueprintStore interface {
 	// so the replay fence commits before expensive work) with an empty path;
 	// this stamps the resolved path so the resume/cancel cleanup machinery can
 	// reconstruct the worktree later.
-	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) error
+	//
+	// Returns the stamped run, or ErrNoSuchBlueprintRun.
+	SetRunWorktreePathSystem(ctx context.Context, orgID, id, worktreePath string) (domain.BlueprintRun, error)
 
 	// ActiveRunForTaskSystem returns the most recent still-running blueprint_run
 	// for a task, or (nil, nil) when none is active. The board-column aggregate
@@ -451,10 +567,19 @@ type BlueprintStore interface {
 	// GetRun returns a blueprint run by id, or (nil, nil) when not found.
 	GetRun(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
 
-	// GetRunForRun returns the blueprint run that owns a step run, plus the
-	// step index. Returns (nil, nil, nil) when the supplied run is not part of
-	// a multi-step blueprint (single-run delegation).
-	GetRunForRun(ctx context.Context, orgID string, runID string) (*domain.BlueprintRun, *int, error)
+	// ListRuns returns one page of the org's blueprint runs plus the unpaged
+	// total, newest first (started_at DESC) with an id tiebreaker. Before it
+	// the collection was unenumerable: a run could only be read by an id a
+	// caller already held, so a run whose id was lost was invisible forever.
+	ListRuns(ctx context.Context, orgID string, f BlueprintRunListFilter, opts ListOpts) ([]domain.BlueprintRun, int, error)
+
+	// GetRunForConversation returns the blueprint run that owns a step
+	// conversation, plus the step index. stepConversationID identifies a
+	// conversations row; the returned value is a blueprint_runs row, so the name
+	// states which end is which. Returns
+	// (nil, nil, nil) when the supplied conversation is not part of a multi-step
+	// blueprint (single-conversation delegation).
+	GetRunForConversation(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
 
 	// MarkRunStatus transitions a blueprint run to a terminal status and
 	// records optional abort metadata. Returns (true, nil) when the row was
@@ -469,15 +594,17 @@ type BlueprintStore interface {
 	// find a terminal blueprint and never advance/close it. Returns (true, nil)
 	// when it re-opened the row, (false, nil) when the blueprint was not aborted
 	// (already running for an `open` resume, or finalized by a racing
-	// path). Runs inside the same tx as MarkResuming so the run flip and
-	// the blueprint re-open commit atomically.
+	// path). Runs inside the same tx as ConversationStore.MarkQueuedForResume
+	// so the run flip and the blueprint re-open commit atomically.
 	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
 
 	// SetRunCurrentStepSystem stamps the blueprint_run's durable
 	// current_step_index — the queue-driven reactor's sequencing pointer,
 	// bumped as it enqueues each next step so a mid-flight blueprint resumes by
 	// re-enqueuing this step at boot. Admin pool (reactor has no JWT claims).
-	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) error
+	//
+	// Returns the stamped run, or ErrNoSuchBlueprintRun.
+	SetRunCurrentStepSystem(ctx context.Context, orgID, id string, stepIndex int) (domain.BlueprintRun, error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim
@@ -489,13 +616,13 @@ type BlueprintStore interface {
 	// terminal write through their own pool.
 	RequestRunCancelSystem(ctx context.Context, orgID, id string) (changed bool, err error)
 
-	// RunsForBlueprint returns every step run linked to a blueprint instance,
-	// ordered by blueprint_step_index ASC, started_at ASC.
-	RunsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
+	// ConversationsForBlueprint returns every step conversation linked to a
+	// blueprint instance, ordered by blueprint_step_index ASC, started_at ASC.
+	ConversationsForBlueprint(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
 
-	// ActiveStepRunIDs returns the IDs of step runs on a blueprint that have
-	// not reached a terminal state.
-	ActiveStepRunIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
+	// ActiveStepConversationIDs returns the IDs of step conversations on a
+	// blueprint that have not reached a terminal state.
+	ActiveStepConversationIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 
 	// StepPlanLengths returns how many steps each named blueprint run's frozen
 	// plan holds, keyed by blueprint_run id. A run whose row is absent — not
@@ -524,8 +651,8 @@ type BlueprintStore interface {
 	// supplied BlueprintRun.TriggerType.
 	ListStepsSystem(ctx context.Context, orgID string, blueprintID string) ([]domain.BlueprintStep, error)
 	GetRunSystem(ctx context.Context, orgID string, id string) (*domain.BlueprintRun, error)
-	GetRunForRunSystem(ctx context.Context, orgID string, runID string) (*domain.BlueprintRun, *int, error)
+	GetRunForConversationSystem(ctx context.Context, orgID string, stepConversationID string) (*domain.BlueprintRun, *int, error)
 	MarkRunStatusSystem(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
-	RunsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
-	ActiveStepRunIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
+	ConversationsForBlueprintSystem(ctx context.Context, orgID string, blueprintRunID string) ([]domain.Conversation, error)
+	ActiveStepConversationIDsSystem(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 }

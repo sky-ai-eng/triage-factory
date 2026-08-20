@@ -28,7 +28,7 @@ import (
 )
 
 // liveProc is the slice of *agentproc.LiveRun the driver loop needs. Pulled
-// out as an interface so driveLiveRun is unit-testable with a fake process
+// out as an interface so driveLiveConversation is unit-testable with a fake process
 // (no subprocess) — the real *agentproc.LiveRun satisfies it. Send delivers a
 // follow-up message into the same warm process (used by the invalid-envelope
 // re-prompt-to-fix).
@@ -45,13 +45,13 @@ type liveProc interface {
 // liveParkContext carries the identity an idle hibernation needs to snapshot
 // the workspace and park the run to open.
 type liveParkContext struct {
-	orgID         string
-	runID         string
-	taskID        string
-	namespace     string // blueprint_run_id — the snapshot/worktree key
-	claudeCwd     string
-	triggerType   string
-	creatorUserID string
+	orgID          string
+	conversationID string
+	taskID         string
+	namespace      string // blueprint_run_id — the snapshot/worktree key
+	claudeCwd      string
+	triggerType    string
+	creatorUserID  string
 	// claimID names the engagement writing the park, routing it through the
 	// claim fence. Every park a dispatched run writes carries one — the idle
 	// turn-end as much as the cancel, since a zombie's idle park would flip a
@@ -61,6 +61,11 @@ type liveParkContext struct {
 	// reason is why: db.ParkIdle() for a turn that simply ended,
 	// db.ParkStopped(...) for a cancel. See ConversationStore.ParkOpen.
 	reason db.Park
+	// runtime is the conversation's engine, for the workspace-snapshot span
+	// family (see snapshotWorkspace). Each construction site states it from
+	// what it structurally is — the SDK and native drivers each build their
+	// own park — rather than re-reading the row.
+	runtime string
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -79,8 +84,8 @@ type liveParkContext struct {
 //     all and leaves the workspace where it is.
 //   - err set, no result → the process errored / was cancelled before any
 //     terminal result, or the agent never corrected an invalid conclusion
-//     envelope within the bound; the caller routes through parkRunOpen /
-//     failRun.
+//     envelope within the bound; the caller routes through parkConversationOpen /
+//     failConversation.
 type liveOutcome struct {
 	result     *agentproc.Result
 	sessionID  string
@@ -145,13 +150,13 @@ func (s *Spawner) runLiveAndDrive(ctx context.Context, spec liveRunSpec) liveOut
 	if err != nil {
 		return liveOutcome{err: err}
 	}
-	s.registerProc(spec.park.orgID, spec.park.runID, lr)
-	defer s.deregisterProc(spec.park.runID)
+	s.registerProc(spec.park.orgID, spec.park.conversationID, lr)
+	defer s.deregisterProc(spec.park.conversationID)
 	// Stamp run→executor ownership now the process is live (N=1 instance id;
 	// the lease layer horizontal scaling adds builds on this column).
-	s.stampExecutor(spec.park.orgID, spec.park.runID, spec.park.claimID)
+	s.stampExecutor(spec.park.orgID, spec.park.conversationID, spec.park.claimID)
 
-	out := s.driveLiveRun(ctx, spec.park, lr, results, activity, spec.idleTimeout)
+	out := s.driveLiveConversation(ctx, spec.park, lr, results, activity, spec.idleTimeout)
 	// Capture the final session id / stderr off the (now-closed) process for
 	// the caller's completion + failure paths.
 	out.sessionID = lr.SessionID()
@@ -184,7 +189,7 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 	return &r
 }
 
-// driveLiveRun is the select loop that resolves a live process into a
+// driveLiveConversation is the select loop that resolves a live process into a
 // disposition by classifying each turn-end into one of three buckets:
 //
 //   - valid conclusion → close the process and hand the result back for
@@ -212,7 +217,7 @@ func foldAccounting(classified, merged *agentproc.Result) *agentproc.Result {
 //
 // Pulled out from runLiveAndDrive so it can be driven with a fake proc +
 // hand-fed channels in tests, without spawning a subprocess.
-func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, activity <-chan struct{}, idleTimeout time.Duration) liveOutcome {
+func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContext, proc liveProc, results <-chan *agentproc.Result, activity <-chan struct{}, idleTimeout time.Duration) liveOutcome {
 	idle, idleC := newIdleTimer(idleTimeout)
 	if idle != nil {
 		defer idle.Stop()
@@ -250,7 +255,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 					// Bounded resume: no idle timer will ever close the warm
 					// process — close it and park to a durable resume.
 					_ = proc.Close()
-					if s.parkRunOpen(ctx, park, proc.SessionID()) {
+					if s.parkConversationOpen(ctx, park, proc.SessionID()) {
 						return liveOutcome{fenced: true}
 					}
 					return liveOutcome{hibernated: true}
@@ -258,7 +263,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// A refused park means a successor is driving this conversation.
 				// Looping would keep a zombie agent producing turns against it,
 				// so close and hand the refusal back instead.
-				if s.markRunOpen(ctx, park) {
+				if s.markConversationOpen(ctx, park) {
 					_ = proc.Close()
 					return liveOutcome{fenced: true}
 				}
@@ -318,7 +323,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 				// Unless the fence refuses it — then this engagement lost the
 				// conversation mid-turn, and the next loop would be a zombie
 				// taking another turn on a run somebody else is driving.
-				if s.markRunOpen(ctx, park) {
+				if s.markConversationOpen(ctx, park) {
 					_ = proc.Close()
 					return liveOutcome{fenced: true}
 				}
@@ -333,7 +338,7 @@ func (s *Spawner) driveLiveRun(ctx context.Context, park liveParkContext, proc l
 			// to a durable resume. The status flips to open here; whether a process
 			// was warm was never a status.
 			_ = proc.Close()
-			if s.parkRunOpen(ctx, park, proc.SessionID()) {
+			if s.parkConversationOpen(ctx, park, proc.SessionID()) {
 				return liveOutcome{fenced: true}
 			}
 			return liveOutcome{hibernated: true}
@@ -357,15 +362,15 @@ func invalidEnvelopeCorrection() string {
 		"(on finish/continue) or a \"reason\" (on abort), and no other text."
 }
 
-// markRunOpen flips a run's status to `open` under a race guard, then nudges
-// the board + UI. The shared flip for every park: the warm path (the live
-// driver's no-conclusion turn, where the process stays warm in s.procs and
-// there's nothing to snapshot yet), parkRunOpen (process gone — snapshots
-// first), and a cancel (park.reason names the stop). Flipping on the
-// no-conclusion turn, rather than only at idle, is what makes a crash in the
-// warm window recover correctly: the boot reconcile leaves `open` runs alone,
-// since a restart provides no input to resume them. Nil-safe so the no-DB
-// driver tests can exercise the loop.
+// markConversationOpen flips a conversation's status to `open` under a race
+// guard, then nudges the board + UI. The shared flip for every park: the warm
+// path (the live driver's no-conclusion turn, where the process stays warm in
+// s.procs and there's nothing to snapshot yet), parkConversationOpen (process
+// gone — snapshots first), and a cancel (park.reason names the stop). Flipping
+// on the no-conclusion turn, rather than only at idle, is what makes a crash in
+// the warm window recover correctly: the boot reconcile leaves `open` runs
+// alone, since a restart provides no input to resume them. Nil-safe so the
+// no-DB driver tests can exercise the loop.
 //
 // Routing has three arms, and which one a park takes says who is speaking. An
 // engagement parking its own run (claimID set) goes through the claim fence,
@@ -380,8 +385,8 @@ func invalidEnvelopeCorrection() string {
 // engagement's claim was released. Nothing was recorded or broadcast, and the
 // caller must not act on the run's state either — it belongs to whoever holds
 // the claim now. Always false on the two unfenced arms.
-func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced bool) {
-	if s.agentRuns == nil {
+func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext) (fenced bool) {
+	if s.conversations == nil {
 		return false // test fixture with no DB wired
 	}
 	// The same detachment this always had — a park must land even when the
@@ -393,15 +398,15 @@ func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced
 	var err error
 	switch {
 	case park.claimID != "":
-		flipped, err = s.agentRuns.ParkOpenForClaimSystem(bgCtx, park.orgID, park.runID, park.claimID, park.reason)
+		flipped, err = s.conversations.ParkOpenForClaimSystem(bgCtx, park.orgID, park.conversationID, park.claimID, park.reason)
 	case park.triggerType == "manual":
 		err = s.tx.SyntheticClaimsWithTx(bgCtx, park.orgID, park.creatorUserID, func(ts db.TxStores) error {
-			f, e := ts.Conversations.ParkOpen(bgCtx, park.orgID, park.runID, park.reason)
+			f, e := ts.Conversations.ParkOpen(bgCtx, park.orgID, park.conversationID, park.reason)
 			flipped = f
 			return e
 		})
 	default:
-		flipped, err = s.agentRuns.ParkOpenSystem(bgCtx, park.orgID, park.runID, park.reason)
+		flipped, err = s.conversations.ParkOpenSystem(bgCtx, park.orgID, park.conversationID, park.reason)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		// Whoever holds the claim now owns the conversation, so this park is
@@ -418,17 +423,17 @@ func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced
 		// An idle park has no such outside actor, so a refusal there means a
 		// successor really did take the conversation out from under a live
 		// engagement. That keeps ERROR.
-		if park.reason.Deliberate() {
+		if park.reason.Deliberate {
 			delegateLog.Info("claim fence refused the park after a deliberate stop — the stopping actor already parked this conversation; recording nothing further",
-				"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID)
+				"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID)
 			return true
 		}
 		delegateLog.Error("claim fence refused the park — a successor owns this conversation; recording nothing",
-			"run", park.runID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
 		return true
 	}
 	if err != nil {
-		delegateLog.Warn("mark run open failed", "run", park.runID, "error", err)
+		delegateLog.Warn("mark conversation open failed", "conversation", park.conversationID, "error", err)
 		return false
 	}
 	if !flipped {
@@ -436,72 +441,75 @@ func (s *Spawner) markRunOpen(ctx context.Context, park liveParkContext) (fenced
 		// already `open` — leave its status and say nothing.
 		return false
 	}
-	s.broadcastRunUpdate(park.orgID, park.runID, "open")
+	s.broadcastConversationUpdate(park.orgID, park.conversationID, "open")
 	s.recomputeTaskBoardColumn(park.orgID, park.taskID)
 	return false
 }
 
-// parkRunOpen records a run as `open` when its process is gone — the live
+// parkConversationOpen records a run as `open` when its process is gone — the live
 // driver idle-closed it, a one-shot/resume turn ended without a conclusion, or
-// someone cancelled it. It snapshots the workspace (the cold-resume backstop)
-// BEFORE the flip so a resume that lands without the warm worktree can rebuild
-// it, then flips the status via markRunOpen. markRunOpen is the warm-process
-// sibling (no snapshot — the process is still alive to take the next message).
-// "open" makes no claim about why the run stopped or who continues it; any
-// later input resumes it on the same ResumeWithMessage path.
+// someone cancelled it. It flips the status via markConversationOpen and then
+// snapshots the workspace (the cold-resume backstop) so a resume that lands
+// without the warm worktree can rebuild it. markConversationOpen is the
+// warm-process sibling (no snapshot — the process is still alive to take the
+// next message). "open" makes no claim about why the run stopped or who
+// continues it; any later input resumes it on the same ResumeWithMessage path.
 //
 // The cancel path is this same function, and that is the point: the old
 // cancel handler wrote its own terminal and removed the worktree on its way
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
-func (s *Spawner) parkRunOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
-	// Snapshot BEFORE the flip: once dormant the run can resume on a host
-	// without the warm worktree, so the blob must exist by the time the
-	// status commits. Best-effort — the kept warm worktree is the fast path.
-	// Skipped when there is no workspace yet (a cancel during setup), which
-	// snapshotWorkspace would reject anyway.
+func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
+	// The flip does not wait on the capture, and the durable state record is
+	// what makes that safe. It is opened FIRST — before the flip, never after —
+	// so no observer can see a row that says resumable with neither a blob nor
+	// an account of one: the record names a persist in flight and who owes it,
+	// which the wake gate reads as recoverable (see workspaceRecoverable).
+	// Reversed, the window between flip and record would answer "expired" for a
+	// workspace that is being written.
 	//
-	// The ordering carries a second load in the control/executor split, and
-	// it is the whole reason a cross-pod stop stays resumable. There the row
-	// is already parked and the claim already released — by control, on the
-	// user's behalf (see Spawner.stop) — so this engagement's flip below is
-	// refused by the fence. The unfenced snapshot is then the only thing this
-	// teardown still has to contribute, and it is the thing the follow-up
-	// needs. Flipping first and snapshotting after would leave a
-	// deliberately-stopped run with no workspace at all.
-	snapshotted := false
-	if park.claudeCwd != "" && park.namespace != "" {
-		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.runID, park.namespace, park.claudeCwd, sessionID); err != nil {
-			delegateLog.Warn("snapshot workspace before parking open failed", "run", park.runID, "error", err)
-		} else {
-			snapshotted = true
+	// Everything the snapshot costs — a git capture, a tar, a blob PUT —
+	// therefore falls after the status a person is watching. Best-effort as
+	// ever, and skipped entirely with no workspace to capture (a cancel during
+	// setup), which the persist would reject anyway. A record that could not be
+	// opened does not hold up the park either: the flip goes ahead and the
+	// persist below retries the open on its own way through.
+	snapCtx := context.WithoutCancel(ctx)
+	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
+	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+
+	fenced = s.markConversationOpen(ctx, park)
+	if fenced && leaseHeld && park.reason.Deliberate {
+		// The one refusal whose `open` is real: control parked this row on the
+		// user's behalf and released the claim before this teardown arrived
+		// (see Spawner.stop), announcing that park while no persist was yet
+		// owed — so a watcher reading the run then saw no workspace anywhere
+		// and disabled its composer. The record opened above is what changes
+		// that answer, so this is the moment to say so, not when the blob
+		// lands.
+		//
+		// Gated on the record having landed, without which there is nothing to
+		// announce. And on a DELIBERATE park: the other refusal — a successor
+		// taking the conversation out from under a live engagement — leaves it
+		// running under someone else, and repeating a parked status there would
+		// be this teardown reporting a state that isn't the row's.
+		s.broadcastConversationResumable(park.orgID, park.conversationID)
+	}
+
+	if willSnapshot {
+		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {
+			delegateLog.Warn("snapshot workspace after parking open failed", "conversation", park.conversationID, "error", err)
 		}
 	}
-	if fenced := s.markRunOpen(ctx, park); fenced {
-		// The fenced teardown's one contribution just landed, and it is the one
-		// a follow-up needs. The actor who stopped this run parked the row and
-		// announced `open` before the blob existed, so every watcher read it as
-		// unresumable and stopped asking — this says the workspace is here now.
-		//
-		// Two conditions, and both are about not announcing something untrue.
-		// A snapshot that actually succeeded, because there is otherwise
-		// nothing to announce. And a DELIBERATE park, because that is the
-		// refusal whose `open` is real: control recorded it on the user's
-		// behalf. The other refusal — a successor taking the conversation out
-		// from under a live engagement — leaves it running under someone else,
-		// and repeating a parked status there would be this teardown reporting
-		// a state that isn't the row's.
-		if snapshotted && park.reason.Deliberate() {
-			s.broadcastRunResumable(park.orgID, park.runID)
-		}
+	if fenced {
 		return true
 	}
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
 	// behind it, so "resumes on the next message" would be a promise this
 	// build cannot keep — the claim gate refuses a parked step under a
 	// finished blueprint until the resume work lands.
-	if !park.reason.Deliberate() {
-		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortRunID(park.runID)))
+	if !park.reason.Deliberate {
+		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 	return false
 }

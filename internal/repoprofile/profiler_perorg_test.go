@@ -17,7 +17,7 @@ import (
 // needing a real github client.
 func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 
 	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err != nil {
@@ -30,7 +30,7 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != len(orgs.ids) {
-		t.Fatalf("ListConfiguredNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
+		t.Fatalf("ListTrackedNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
 	}
 	for i, got := range repos.visited {
 		if got != orgs.ids[i] {
@@ -47,7 +47,7 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 // the run is fundamentally unable to proceed.
 func TestProfiler_Run_OrgsStoreErrorBubbles(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 
 	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
 	if err := p.Run(context.Background(), false); err == nil {
@@ -56,7 +56,7 @@ func TestProfiler_Run_OrgsStoreErrorBubbles(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != 0 {
-		t.Errorf("ListConfiguredNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
+		t.Errorf("ListTrackedNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
 	}
 }
 
@@ -77,17 +77,17 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 	return append([]string(nil), f.ids...), nil
 }
 
-// recordingRepoStore embeds db.RepoStore as nil and overrides only
-// ListConfiguredNamesSystem. Returning empty short-circuits Run
+// recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only
+// ListTrackedNamesSystem. Returning empty short-circuits Run
 // before any GitHub API call, so the test isolates the per-org loop
 // behavior from the inner profiling body.
-type recordingRepoStore struct {
-	db.RepoStore
+type recordingRepositoryStore struct {
+	db.RepositoryStore
 	mu      sync.Mutex
 	visited []string
 }
 
-func (r *recordingRepoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
@@ -102,6 +102,6 @@ var errOrgsDown = stubErr("simulated orgs-store outage")
 
 var (
 	_ db.OrgsStore       = (*fakeOrgsStore)(nil)
-	_ db.RepoStore       = (*recordingRepoStore)(nil)
-	_ domain.RepoProfile // keep domain import live for parity with siblings
+	_ db.RepositoryStore = (*recordingRepositoryStore)(nil)
+	_ domain.Repository  // keep domain import live for parity with siblings
 )

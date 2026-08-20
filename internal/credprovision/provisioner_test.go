@@ -97,19 +97,19 @@ func (f *fakeTasks) GetSystem(context.Context, string, string) (*domain.Task, er
 	return f.task, nil
 }
 
-type fakeRunWorktrees struct {
-	db.RunWorktreeStore
-	rows []domain.RunWorktree
+type fakeConversationWorktrees struct {
+	db.ConversationWorktreeStore
+	rows []domain.ConversationWorktree
 }
 
-func (f *fakeRunWorktrees) ListSystem(context.Context, string, string) ([]domain.RunWorktree, error) {
+func (f *fakeConversationWorktrees) ListSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
 	return f.rows, nil
 }
 
 // TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos is the
 // brain-side half of "the App private key lives on control; executors hold
 // only minted, hour-lived, scoped tokens": the provisioner mints one
-// repo-scoped installation token per repo in the run's authorized set (the
+// repo-scoped installation token per repo in the conversation's authorized set (the
 // task's own repo plus its conversation_worktrees, intersected with what the team
 // tracks) and seals nothing outside it. An untracked worktree repo is never
 // minted for — minting there would be pointless (the git proxy would 403 it
@@ -130,14 +130,14 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 		stores: db.Stores{
 			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			// A repo the run touched but the team does NOT track — must be
+			// A repo the conversation touched but the team does NOT track — must be
 			// filtered out of the mint set.
-			RunWorktrees: &fakeRunWorktrees{rows: []domain.RunWorktree{{RepoID: "acme/secret"}}},
+			ConversationWorktrees: &fakeConversationWorktrees{rows: []domain.ConversationWorktree{{RepoID: "acme/secret"}}},
 		},
 		ghResolver: res,
 	}
 
-	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 	if err != nil {
 		t.Fatalf("resolveGitHub: %v", err)
 	}
@@ -168,6 +168,8 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	}
 	if c := res.calls[0]; c.owner != "acme" || c.repo != "widgets" {
 		t.Errorf("minted for %s/%s, want acme/widgets", c.owner, c.repo)
+	} else if c.perms != nil {
+		t.Errorf("managed Git permissions = %v, want nil to inherit the installation grant", c.perms)
 	}
 
 	// The gh-channel single team-set token is minted for the primary owner
@@ -232,14 +234,14 @@ func TestManager_resolveGitHub_PATFallback(t *testing.T) {
 	}
 	m := &Manager{
 		stores: db.Stores{
-			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
-			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			RunWorktrees:    &fakeRunWorktrees{},
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			ConversationWorktrees: &fakeConversationWorktrees{},
 		},
 		ghResolver: res,
 	}
 
-	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 	if err != nil {
 		t.Fatalf("resolveGitHub: %v", err)
 	}
@@ -273,14 +275,14 @@ func TestManager_resolveGitHub_SkipsUnmintableRepoInAuthorizedSet(t *testing.T) 
 	}
 	m := &Manager{
 		stores: db.Stores{
-			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "globex/gadgets": true}},
-			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			RunWorktrees:    &fakeRunWorktrees{rows: []domain.RunWorktree{{RepoID: "globex/gadgets"}}},
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "globex/gadgets": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			ConversationWorktrees: &fakeConversationWorktrees{rows: []domain.ConversationWorktree{{RepoID: "globex/gadgets"}}},
 		},
 		ghResolver: res,
 	}
 
-	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 	if err != nil {
 		t.Fatalf("resolveGitHub: %v (an unmintable repo in the set must be skipped, not fatal)", err)
 	}
@@ -306,7 +308,7 @@ func TestManager_resolveGitHub_SkipsUnmintableRepoInAuthorizedSet(t *testing.T) 
 // TestManager_resolveGitHub_HardMintErrorFailsBundle pins the other arm of the
 // per-repo mint: an error that is NOT ErrNoGitHubCredentials (a real backend
 // failure — a mint 5xx, a transient outage) is fatal for the whole bundle,
-// never silently skipped. Sealing a partial bundle missing a repo the run
+// never silently skipped. Sealing a partial bundle missing a repo the conversation
 // needs — because of a transient failure a retry would fix — would strand that
 // repo's git ops behind a confusing in-sandbox error; failing the provision
 // lets the sweep re-provision cleanly once the backend recovers.
@@ -320,14 +322,14 @@ func TestManager_resolveGitHub_HardMintErrorFailsBundle(t *testing.T) {
 	}
 	m := &Manager{
 		stores: db.Stores{
-			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
-			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-			RunWorktrees:    &fakeRunWorktrees{},
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			ConversationWorktrees: &fakeConversationWorktrees{},
 		},
 		ghResolver: res,
 	}
 
-	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want it to wrap the backend mint failure (a hard error must fail the bundle, not skip the repo)", err)
 	}
@@ -337,13 +339,13 @@ func TestManager_resolveGitHub_HardMintErrorFailsBundle(t *testing.T) {
 }
 
 // TestManager_resolveGitHub_NoCredentialIsNotAnError pins the Jira-only org
-// case: no usable GitHub credential yields a nil GitHubCreds (its runs do no
+// case: no usable GitHub credential yields a nil GitHubCreds (its conversations do no
 // git), never an error that would strand the whole bundle.
 func TestManager_resolveGitHub_NoCredentialIsNotAnError(t *testing.T) {
 	res := &fakeScopedResolver{hasCred: false}
 	m := &Manager{stores: db.Stores{}, ghResolver: res}
 
-	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 	if err != nil {
 		t.Fatalf("resolveGitHub: %v", err)
 	}
@@ -357,10 +359,10 @@ func TestManager_resolveGitHub_NoCredentialIsNotAnError(t *testing.T) {
 
 // TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal pins the deliberate
 // asymmetry against the per-repo loop: the gh-channel token is ADDITIVE, so a
-// mint failure must degrade the gh channel, never abort provisioning. The run
+// mint failure must degrade the gh channel, never abort provisioning. The conversation
 // still gets its per-repo RepoTokens, which is what the exec-verb channel and
 // the git proxy actually consume. Hard-failing here would turn "gh unavailable"
-// into "run cannot start" — and this failure is reachable in normal operation,
+// into "conversation cannot start" — and this failure is reachable in normal operation,
 // not just on a blip: a "selected repositories" App install 422s a mint naming a
 // repo outside its grant.
 func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
@@ -382,25 +384,25 @@ func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
 			}
 			m := &Manager{
 				stores: db.Stores{
-					TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
-					Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
-					RunWorktrees:    &fakeRunWorktrees{},
+					TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+					Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+					ConversationWorktrees: &fakeConversationWorktrees{},
 				},
 				ghResolver: res,
 			}
 
-			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "run-1")
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
 			if err != nil {
 				t.Fatalf("resolveGitHub failed on a gh-channel mint error: %v (it must be non-fatal)", err)
 			}
 			if gh == nil {
-				t.Fatal("resolveGitHub returned nil; the run must still get its per-repo credentials")
+				t.Fatal("resolveGitHub returned nil; the conversation must still get its per-repo credentials")
 			}
 			if gh.CLIToken != nil {
 				t.Errorf("CLIToken = %+v, want nil when the gh-channel mint failed", gh.CLIToken)
 			}
 			// The load-bearing part: the channels that don't depend on the gh
-			// token are untouched, so the run is fully operable.
+			// token are untouched, so the conversation is fully operable.
 			if _, ok := gh.RepoTokens["acme/widgets"]; !ok {
 				t.Errorf("RepoTokens lost the authorized repo; got %v", gh.RepoTokens)
 			}

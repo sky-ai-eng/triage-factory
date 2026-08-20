@@ -13,7 +13,7 @@ import (
 // ensureToolHostFixtures points the broker's trusted tool-host binary path at
 // a stub a non-root `go test` user can create, and materializes the run's
 // socket directory. Both are restored on cleanup.
-func ensureToolHostFixtures(t *testing.T, runID string) (binPath, sockDir string) {
+func ensureToolHostFixtures(t *testing.T, conversationID string) (binPath, sockDir string) {
 	t.Helper()
 
 	origBin := trustedToolHostBinaryPath
@@ -28,7 +28,7 @@ func ensureToolHostFixtures(t *testing.T, runID string) (binPath, sockDir string
 	trustedAgentHostSocketRoot = t.TempDir()
 	t.Cleanup(func() { trustedAgentHostSocketRoot = origRoot })
 
-	sockDir = TrustedToolHostSocketDir(runID)
+	sockDir = TrustedToolHostSocketDir(conversationID)
 	if err := os.MkdirAll(sockDir, 0o770); err != nil {
 		t.Fatalf("mkdir tool host socket dir: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestValidateLaunchParams_AcceptsToolHostMountSet(t *testing.T) {
 		t.Fatalf("resolve trusted TF binary path: %v", err)
 	}
 	p := validParams()
-	binPath, sockDir := ensureToolHostFixtures(t, p.RunID)
+	binPath, sockDir := ensureToolHostFixtures(t, p.ConversationID)
 	p.Args = toolHostArgv()
 	p.Mounts = []Mount{
 		{Source: binPath, Destination: TrustedToolHostBinaryDestination, Options: []string{"ro"}},
@@ -101,7 +101,7 @@ func TestValidateLaunchParams_AcceptsToolHostMountSet(t *testing.T) {
 // but the broker's own derivation — including a sibling run's directory.
 func TestValidateLaunchParams_RejectsForeignToolHostSources(t *testing.T) {
 	p := validParams()
-	_, sockDir := ensureToolHostFixtures(t, p.RunID)
+	_, sockDir := ensureToolHostFixtures(t, p.ConversationID)
 	p.Args = toolHostArgv()
 
 	attackerBin := filepath.Join(t.TempDir(), "attacker-tools")

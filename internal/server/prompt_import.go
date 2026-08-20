@@ -1,0 +1,172 @@
+package server
+
+import (
+	"database/sql"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
+	"github.com/sky-ai-eng/triage-factory/internal/skills"
+)
+
+// promptImportHandler serves the two prompt-import routes: the local-mode
+// filesystem scan of the process's ~/.claude/skills (db + prompts, the raw
+// handles the importer still takes) and the mode-agnostic paste/upload flow
+// (tx + az, the same claims-bound path handlePromptCreate uses).
+//
+// They live under /api/prompts because that is what they write. A skill is a
+// SKILL.md file — a format an import reads — not a second kind of row: both
+// routes land a prompts row with source='imported'.
+type promptImportHandler struct {
+	db      *sql.DB
+	prompts db.PromptStore
+	tx      db.TxRunner
+	az      *authz.Checker
+}
+
+// handlePromptImportFromDisk scans the TF process's own ~/.claude/skills and
+// imports each SKILL.md it finds as a prompt. Local-mode only, and the path
+// says why: what it reads is a directory on this machine's disk, which only
+// exists as a per-tenant thing when the tenant IS the machine.
+//
+// POST /api/prompts/from-disk
+func (sk *promptImportHandler) handlePromptImportFromDisk(w http.ResponseWriter, r *http.Request) {
+	// The filesystem scan reads the TF process's own ~/.claude/skills —
+	// meaningful only in local mode where the process runs on the single
+	// trusted user's machine. In multi mode there is no per-tenant
+	// filesystem to scan (and the importer's raw SQLite SQL + sentinel
+	// org would fail against Postgres anyway — previously as a 200 with
+	// a swallowed errors array). Multi-mode skill import is the
+	// paste/upload flow (POST /api/prompts/upload), which writes a prompts
+	// row scoped to the requesting org/team.
+	if runmode.Current() != runmode.ModeLocal {
+		// A route that doesn't exist in this deployment mode is a 404, not a
+		// 501 — the marketplace's mode gate already answered that way, and one
+		// condition must not have two statuses.
+		notFound(w, "route")
+		return
+	}
+	result := skills.ImportAll(r.Context(), sk.db, sk.prompts)
+	writeJSON(w, http.StatusOK, result)
+}
+
+// promptUploadRequest is the paste/upload wire shape: the raw SKILL.md
+// markdown (frontmatter + body), an optional display-name override, and
+// the multi-team caller's acting-team pick.
+type promptUploadRequest struct {
+	Content string `json:"content"`
+	Name    string `json:"name,omitempty"`
+	TeamID  string `json:"team_id,omitempty"`
+}
+
+// maxPromptUploadBytes bounds a pasted SKILL.md. Real ones are a few KB;
+// 256KiB is generous without letting a paste balloon a prompt row.
+const maxPromptUploadBytes = 256 << 10
+
+// handlePromptUpload imports one prompt from pasted/uploaded SKILL.md
+// content — the counterpart of the filesystem scan. Mode-agnostic on
+// purpose: in multi there is no per-tenant filesystem to scan, and in local
+// a paste is just another way to add a prompt. The row is created through
+// the exact WithTx + Prompts.Create path handlePromptCreate uses, scoped to
+// the requesting org and acting team, with source='imported' so the library
+// renders it alongside scan-imported rows.
+//
+// POST /api/prompts/upload
+func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	// Bound the body BEFORE decoding — the content cap below is checked
+	// post-decode, so without this an oversized upload would still be
+	// allocated in full by the JSON decoder before rejection. 4x the
+	// content cap leaves room for JSON string escaping (worst-case
+	// \uXXXX inflation) plus the envelope fields.
+	var req promptUploadRequest
+	if !httpx.DecodeJSONStrictLimit(w, r, &req, int64(maxPromptUploadBytes)*4) {
+		return
+	}
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "content is required (the SKILL.md markdown)", Field: "content",
+		})
+		return
+	}
+	if len(content) > maxPromptUploadBytes {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonOutOfRange, Message: "skill content exceeds the 256KiB limit", Field: "content",
+		})
+		return
+	}
+
+	// ParseSkillMeta's path argument only seeds the default name (the
+	// skill's directory on disk); a paste has no directory, so the
+	// fallback chain is: explicit request name → frontmatter name: →
+	// 400.
+	meta := skills.ParseSkillMeta(content, "")
+	name := strings.TrimSpace(req.Name)
+	if name == "" && meta.Name != "" && meta.Name != "." {
+		name = meta.Name
+	}
+	if name == "" || name == "." {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "skill needs a name — set frontmatter `name:` or pass name explicitly",
+			Field:   "name",
+		})
+		return
+	}
+
+	userID := ClaimsFrom(r.Context()).Subject
+
+	// Same viewer gate as handlePromptCreate: resolve read-only first
+	// so a viewer gets a clean 403 instead of an RLS 500.
+	var actingTeam string
+	if err := sk.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		return e
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "prompts/import", err)
+		return
+	}
+	if !sk.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
+		return
+	}
+
+	id := uuid.New().String()
+	prompt := domain.Prompt{
+		ID:           id,
+		Name:         name,
+		Body:         meta.Body,
+		Source:       "imported",
+		AllowedTools: meta.AllowedTools,
+	}
+
+	var created domain.Prompt
+	if err := sk.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		if e != nil {
+			return e
+		}
+		created, e = tx.Prompts.Create(r.Context(), orgID, teamID, prompt)
+		return e
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "prompts/import", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}

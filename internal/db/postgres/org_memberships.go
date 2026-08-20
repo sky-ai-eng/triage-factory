@@ -39,30 +39,47 @@ func newOrgMembershipsStore(app, admin queryer) db.OrgMembershipsStore {
 
 var _ db.OrgMembershipsStore = (*orgMembershipsStore)(nil)
 
-func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string) ([]domain.OrgMember, error) {
+func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.OrgMember, int, error) {
 	// 1. Core roster on the app pool (RLS-gated). display_name is nullable —
 	//    COALESCE renders the empty string, matching GetDisplayName's "".
-	rows, err := s.app.QueryContext(ctx, `
+	//    The count runs on the same pool and predicate as the page, so
+	//    "showing 50 of 213" cannot be assembled from two different snapshots.
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM org_memberships om
+		JOIN users u ON u.id = om.user_id
+		WHERE om.org_id = $1
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count org members: %w", err)
+	}
+	query := `
 		SELECT om.user_id::text, COALESCE(u.display_name, ''), om.role::text
 		FROM org_memberships om
 		JOIN users u ON u.id = om.user_id
 		WHERE om.org_id = $1
-		ORDER BY COALESCE(u.display_name, ''), om.user_id
-	`, orgID)
+		ORDER BY COALESCE(u.display_name, ''), om.user_id`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list org members: %w", err)
+		return nil, 0, fmt.Errorf("list org members: %w", err)
 	}
 	defer rows.Close()
 	out := []domain.OrgMember{}
 	for rows.Next() {
 		var m domain.OrgMember
 		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.Role); err != nil {
-			return nil, fmt.Errorf("scan org member: %w", err)
+			return nil, 0, fmt.Errorf("scan org member: %w", err)
 		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate org members: %w", err)
+		return nil, 0, fmt.Errorf("iterate org members: %w", err)
 	}
 
 	// 2. Identity enrichment on the admin pool, scoped to this org's members.
@@ -81,7 +98,7 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		WHERE gh.github_base_url = $2
 	`, orgID, db.EffectiveGitHubHost(githubBaseURL))
 	if err != nil {
-		return nil, fmt.Errorf("list org member github identities: %w", err)
+		return nil, 0, fmt.Errorf("list org member github identities: %w", err)
 	}
 	jiraMap, err := s.identityMap(ctx, `
 		SELECT j.user_id::text, j.account_id
@@ -90,7 +107,7 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		WHERE j.jira_base_url = $2
 	`, orgID, db.NormalizeJiraHost(jiraBaseURL))
 	if err != nil {
-		return nil, fmt.Errorf("list org member jira identities: %w", err)
+		return nil, 0, fmt.Errorf("list org member jira identities: %w", err)
 	}
 
 	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
@@ -103,7 +120,7 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 			out[i].JiraAccountID = &acct
 		}
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // identityMap runs a (user_id, value) admin-pool query and returns the
@@ -126,6 +143,20 @@ func (s *orgMembershipsStore) identityMap(ctx context.Context, query string, arg
 		}
 	}
 	return m, rows.Err()
+}
+
+func (s *orgMembershipsStore) RoleFor(ctx context.Context, orgID, userID string) (string, error) {
+	var role string
+	err := s.app.QueryRowContext(ctx, `
+		SELECT role::text FROM org_memberships WHERE org_id = $1 AND user_id = $2
+	`, orgID, userID).Scan(&role)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read org member role: %w", err)
+	}
+	return role, nil
 }
 
 func (s *orgMembershipsStore) UpdateRole(ctx context.Context, orgID, userID, role string) (string, error) {

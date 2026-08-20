@@ -27,7 +27,7 @@ type Task struct {
 	// `in_review` were added as real lifecycle stages so the
 	// board can show work moving through stages independently of who
 	// (user or bot) is doing it. Bot-claimed tasks auto-transition
-	// based on run state; user-claimed tasks transition manually.
+	// based on conversation state; user-claimed tasks transition manually.
 	Status         string     `json:"status"`           // queued | in_progress | in_review | done | dismissed | snoozed
 	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (write-once, by the migration that merged two entity rows for one Jira issue: this card duplicated one already on the surviving entity)
 	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
@@ -56,7 +56,7 @@ type Task struct {
 	CreatedAt time.Time `json:"created_at"`
 
 	// Join-populated display fields — from entities, NOT stored on tasks row.
-	// Populated by GetTask / QueuedTasks / TasksByStatus via entity JOIN.
+	// Populated by Tasks.Get / Tasks.List via entity JOIN.
 	Title          string `json:"title"`
 	SourceURL      string `json:"source_url"`
 	EntitySourceID string `json:"entity_source_id"` // e.g. "owner/repo#42", a Jira issue key
@@ -73,7 +73,7 @@ type Task struct {
 	// the same entity join. Zero for non-Slack tasks. A Slack thread carries
 	// one long-lived task whose generic title names only the channel, so the
 	// card surfaces this count to say how much of the conversation is
-	// waiting — it rises as follow-ups land while a run is in flight.
+	// waiting — it rises as follow-ups land while a conversation is in flight.
 	SlackMessageCount int `json:"slack_message_count,omitempty"`
 }
 

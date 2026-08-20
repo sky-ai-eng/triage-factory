@@ -9,7 +9,7 @@ import (
 // SystemLLMRunStore owns the system_llm_runs table — the per-call cost +
 // token accounting for headless LLM invocations made by background system
 // jobs (scorer, repo-profiler, project-classifier). The table is
-// system-written and org-scoped, the same shape as repo_profiles: every
+// system-written and org-scoped, the same shape as repositories: every
 // write routes through the admin pool in Postgres (the writers are
 // boot-launched goroutines with no JWT-claims context), and the
 // org-scoped RLS policy gates the app-pool reads a future spend view will
@@ -30,5 +30,8 @@ type SystemLLMRunStore interface {
 	// than double-counting spend, enforced by a partial unique index on
 	// trace_id in both backends. Empty TraceID never collides with itself
 	// (the index excludes NULL/empty) — every insert with no id just lands.
+	//
+	// Exempt from the returned-row rule: fire-and-forget telemetry. The row is
+	// written on the way past and spent by a later aggregate read.
 	Record(ctx context.Context, row domain.SystemLLMRun) error
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -67,8 +68,10 @@ type orgMemberRow struct {
 	IsCurrentUser  bool    `json:"is_current_user"`
 }
 
-type orgMembersResponse struct {
-	Members []orgMemberRow `json:"members"`
+// orgMemberListRequest is the body of POST /api/orgs/{org_id}/members/list.
+// The resource is the org's roster, which has no filters of its own.
+type orgMemberListRequest struct {
+	httpx.PageRequest
 }
 
 // orgRoles is the closed set of org_role enum values the PATCH handler
@@ -77,14 +80,16 @@ type orgMembersResponse struct {
 // vocabulary the frontend adapter mirrors.
 var orgRoles = map[string]bool{"owner": true, "admin": true, "member": true}
 
-// handleOrgMembersList returns every member of the org with their role and
-// identity readiness. Any org member may read (org_memberships_select RLS),
-// so it gates on membership, not admin.
+// handleOrgMembersList returns the org's members with their role and identity
+// readiness. Any org member may read (org_memberships_select RLS), so it gates
+// on membership, not admin.
 //
-// GET /api/orgs/{org_id}/members
+// POST /api/orgs/{org_id}/members/list
 func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The org-membership surface is multi-mode only; a route absent in
+		// this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := h.az.RequireOrgMember(w, r)
@@ -92,7 +97,20 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		return
 	}
 
-	var members []domain.OrgMember
+	var req orgMemberListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		members []domain.OrgMember
+		total   int
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Identity is host-scoped: resolve the org's GitHub/Jira hosts from
 		// org_settings, then look up each member's login on those hosts —
@@ -101,7 +119,8 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		if e != nil {
 			return e
 		}
-		members, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL)
+		members, total, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID,
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "org-members", err)
@@ -119,7 +138,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			IsCurrentUser:  m.UserID == userID,
 		}
 	}
-	writeJSON(w, http.StatusOK, orgMembersResponse{Members: out})
+	httpx.WriteList(w, page, out, total)
 }
 
 // handleOrgMemberRoleChange changes a member's org role. Org-admin only
@@ -130,7 +149,9 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 // PATCH /api/orgs/{org_id}/members/{user_id}  body: { "role": "<org_role>" }
 func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The org-membership surface is multi-mode only; a route absent in
+		// this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
@@ -145,12 +166,14 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 	var body struct {
 		Role string `json:"role"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	role := strings.TrimSpace(body.Role)
 	if !orgRoles[role] {
-		badRequest(w, "role must be one of owner, admin, member")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "role must be one of owner, admin, member", Field: "role",
+		})
 		return
 	}
 
@@ -182,7 +205,9 @@ func (h *orgMembersHandler) handleOrgMemberRoleChange(w http.ResponseWriter, r *
 // DELETE /api/orgs/{org_id}/members/{user_id}
 func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The org-membership surface is multi-mode only; a route absent in
+		// this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	// Membership is the floor: a non-member 404s (RequireOrgMember). Removing
@@ -202,8 +227,10 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 			return
 		}
 		if !isAdmin {
-			// 404-not-403: a non-admin doesn't learn the target exists.
-			http.NotFound(w, r)
+			// The caller is a member of this org (RequireOrgMember is the
+			// floor above), so the org is visible to them: name the missing
+			// role rather than denying the org exists.
+			forbidden(w, "org admin role required to remove another member")
 			return
 		}
 	}
@@ -287,7 +314,9 @@ type transferOwnershipRequest struct {
 // POST /api/orgs/{org_id}/transfer-ownership  body: { "new_owner_user_id": "<uuid>" }
 func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		// The org-membership surface is multi-mode only; a route absent in
+		// this deployment mode is a 404.
+		notFound(w, "route")
 		return
 	}
 	// Floor: a non-member 404s (no existence leak). Membership is checked
@@ -304,25 +333,27 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 		return
 	}
 	if !owns {
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "only the current owner can transfer ownership",
-		})
+		forbidden(w, "only the current owner can transfer ownership")
 		return
 	}
 
 	var body transferOwnershipRequest
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
 	newOwner := strings.TrimSpace(body.NewOwnerUserID)
 	if _, err := uuid.Parse(newOwner); err != nil {
-		badRequest(w, "new_owner_user_id must be a valid user id")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "new_owner_user_id must be a valid user id", Field: "new_owner_user_id",
+		})
 		return
 	}
 	if newOwner == userID {
 		// Without this guard a self-transfer would promote-then-demote the same
 		// row and trip guard_org_owners (a confusing 409). Reject it plainly.
-		badRequest(w, "you already own this org")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "you already own this org", Field: "new_owner_user_id",
+		})
 		return
 	}
 
@@ -336,8 +367,8 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 		return
 	}
 	if !isMember {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "the new owner must be a member of this org",
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonCrossTeamRef, Message: "the new owner must be a member of this org", Field: "new_owner_user_id",
 		})
 		return
 	}
@@ -362,17 +393,13 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 	case errors.Is(err, db.ErrNotOrgOwner):
 		// The front gate caught the common case; this is the trigger's 42501
 		// surfacing through a between-check-and-write ownership race.
-		writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "only the current owner can transfer ownership",
-		})
+		forbidden(w, "only the current owner can transfer ownership")
 	case errors.Is(err, db.ErrLastOwnerGuard):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "transfer would leave the org without an owner",
-		})
+		conflict(w, "transfer would leave the org without an owner")
 	case errors.Is(err, db.ErrOrgMemberNotFound):
 		// Raced: the target left the org between the pre-check and the tx.
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "the new owner must be a member of this org",
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonCrossTeamRef, Message: "the new owner must be a member of this org", Field: "new_owner_user_id",
 		})
 	default:
 		internalError(w, "org-transfer", err)
@@ -383,12 +410,7 @@ func (h *orgMembersHandler) handleOrgOwnershipTransfer(w http.ResponseWriter, r 
 // malformed UUID is a 404 (same response as "no such member") so a bad path
 // can't surface as a 500 from the uuid cast in the store query.
 func orgMemberPathID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	raw := r.PathValue("user_id")
-	if _, err := uuid.Parse(raw); err != nil {
-		http.NotFound(w, r)
-		return "", false
-	}
-	return raw, true
+	return uuidPathOr404(w, r, "user_id", "member")
 }
 
 // writeOrgMemberMutationResult renders the shared error mapping for the
@@ -401,9 +423,7 @@ func writeOrgMemberMutationResult(w http.ResponseWriter, scope string, err error
 	case err == nil:
 		return true
 	case errors.Is(err, db.ErrLastOwnerGuard):
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "can't remove or demote the last owner — assign another owner first",
-		})
+		conflict(w, "can't remove or demote the last owner — assign another owner first")
 	case errors.Is(err, db.ErrOrgMemberNotFound):
 		notFound(w, "member")
 	default:

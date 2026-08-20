@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { ExternalLink, RotateCw } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
 
@@ -24,8 +24,22 @@ interface StockTicket {
 
 interface StockResponse {
   status: 'polling' | 'ready'
-  assigned?: StockTicket[]
-  available?: StockTicket[]
+  assigned: StockTicket[]
+  available: StockTicket[]
+}
+
+/** One row of a carry-over batch's per-item accounting. Every submitted key
+ *  comes back exactly once, ok either way, so applied + failed = submitted. */
+interface StockItemResult {
+  issue_key: string
+  ok: boolean
+  errors?: { reason: string; message: string; field?: string }[]
+}
+
+interface StockBatchResponse {
+  applied: number
+  failed: number
+  results: StockItemResult[]
 }
 
 interface Props {
@@ -83,17 +97,9 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   const fetchStock = useCallback(async () => {
     try {
       const tf = teamRef.current
-      const res = await fetch('/api/jira/stock' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''))
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        console.error('carry-over fetch failed:', data.error || `HTTP ${res.status}`)
-        if (mountedRef.current) {
-          setError('Failed to load tickets')
-          setPolling(false)
-        }
-        return
-      }
-      const data: StockResponse = await res.json()
+      const data = await apiJSON<StockResponse>(
+        '/api/jira/stock' + (tf ? `?team_id=${encodeURIComponent(tf)}` : ''),
+      )
       if (!mountedRef.current) return
       if (data.status === 'polling') {
         setPolling(true)
@@ -106,8 +112,8 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         }, POLL_INTERVAL_MS)
         return
       }
-      const assignedFetched = data.assigned ?? []
-      const availableFetched = data.available ?? []
+      const assignedFetched = data.assigned
+      const availableFetched = data.available
       setAssigned(assignedFetched)
       setAvailable(availableFetched)
 
@@ -129,7 +135,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     } catch (err) {
       console.error('carry-over fetch failed:', err)
       if (mountedRef.current) {
-        setError('Failed to load tickets')
+        setError(httpErrorMessage(err, 'Could not load the tickets.'))
         setPolling(false)
       }
     }
@@ -182,26 +188,43 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
     if (selectionCount === 0) return
     setSaving(true)
     try {
-      const actions = Object.entries(selections).map(([issue_key, action]) => ({
-        issue_key,
-        action,
-      }))
-      const res = await fetch('/api/jira/stock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ actions, team_id: team }),
-      })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to save carry-over selections'))
-        return
+      // One request per action, because each is its own route now. They run
+      // in sequence rather than concurrently: claim and done each make Jira
+      // writes, and a user who picked all three should not have three bursts
+      // of upstream calls racing each other.
+      const byAction = new Map<Action, string[]>()
+      for (const [issueKey, action] of Object.entries(selections)) {
+        byAction.set(action, [...(byAction.get(action) ?? []), issueKey])
+      }
+      let applied = 0
+      const failures: StockItemResult[] = []
+      for (const [action, issueKeys] of byAction) {
+        try {
+          const body = await apiJSON<StockBatchResponse>(`/api/jira/stock/${action}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issue_keys: issueKeys, team_id: team }),
+          })
+          applied += body.applied
+          failures.push(...body.results.filter((row) => !row.ok))
+        } catch (err) {
+          // A request-level failure on one action must not discard the
+          // accounting for the actions that already landed — the deck below
+          // reconciles off this list, and throwing here would leave applied
+          // rows on screen with no record of what happened. Fold the whole
+          // batch into per-row failures instead.
+          const message = httpErrorMessage(err, `Could not ${action} these tickets.`)
+          failures.push(
+            ...issueKeys.map((issue_key) => ({
+              issue_key,
+              ok: false,
+              errors: [{ reason: 'INTERNAL', message }],
+            })),
+          )
+        }
       }
       if (team) noteWrittenTeam(team)
-      const body = (await res.json()) as {
-        applied: number
-        failed?: { issue_key: string; action: string; error: string }[]
-      }
-      const failedList = body.failed ?? []
-      if (failedList.length === 0) {
+      if (failures.length === 0) {
         onSave()
         return
       }
@@ -211,9 +234,9 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       // retry, or skip to continue. Surface a summary toast so the partial
       // nature is obvious even if the failing rows scroll off.
       toast.warning(
-        `Applied ${body.applied} ticket${body.applied === 1 ? '' : 's'}; ${failedList.length} failed — see inline errors`,
+        `Applied ${applied} ticket${applied === 1 ? '' : 's'}; ${failures.length} failed — see inline errors`,
       )
-      const failedKeys = new Set(failedList.map((f) => f.issue_key))
+      const failedKeys = new Set(failures.map((f) => f.issue_key))
       const appliedKeys = new Set(Object.keys(selections).filter((k) => !failedKeys.has(k)))
       setAssigned((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
       setAvailable((prev) => (prev ?? []).filter((t) => !appliedKeys.has(t.issue_key)))
@@ -225,13 +248,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         return next
       })
       setFailures(
-        failedList.reduce<Record<string, string>>((acc, f) => {
-          acc[f.issue_key] = f.error
+        failures.reduce<Record<string, string>>((acc, f) => {
+          acc[f.issue_key] = f.errors?.[0]?.message ?? 'Could not apply this ticket.'
           return acc
         }, {}),
       )
     } catch (err) {
-      toast.error(`Failed to save carry-over: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not save the carry-over selections.'))
     } finally {
       if (mountedRef.current) setSaving(false)
     }

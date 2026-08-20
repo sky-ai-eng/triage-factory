@@ -33,19 +33,36 @@ var _ db.PromptStore = (*promptStore)(nil)
 
 // --- CRUD ----------------------------------------------------------
 
+// sqlitePromptColumns is the canonical projection of a prompts row, in the
+// order scanPromptRowSQLite reads them. Every point read SELECTs it and every
+// single-row write RETURNs it, so the write shape cannot drift from the read
+// shape as columns are added.
+const sqlitePromptColumns = `id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at`
+
 // List ignores teamID: local mode is single-team, so every prompt
 // already belongs to the sole team and the multi-team narrowing the
 // param expresses is a no-op here.
-func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domain.Prompt, error) {
+func (s *promptStore) List(ctx context.Context, orgID string, _ string, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC
-	`)
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM prompts WHERE hidden = 0 AND deleted_at IS NULL
+	`).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
+		SELECT ` + sqlitePromptColumns + `
+		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC, id`
+	args := []any{}
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -53,11 +70,11 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string) ([]domai
 	for rows.Next() {
 		p, err := scanPromptRowSQLite(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		prompts = append(prompts, p)
 	}
-	return prompts, rows.Err()
+	return prompts, total, rows.Err()
 }
 
 // Get is request-facing: it filters deleted_at IS NULL so a soft-deleted prompt
@@ -68,7 +85,7 @@ func (s *promptStore) Get(ctx context.Context, orgID string, id string) (*domain
 		return nil, err
 	}
 	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT `+sqlitePromptColumns+`
 		FROM prompts WHERE id = ? AND deleted_at IS NULL
 	`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -103,7 +120,7 @@ func (s *promptStore) GetSystem(ctx context.Context, orgID string, id string) (*
 		return nil, err
 	}
 	p, err := scanPromptRowSQLite(s.q.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT `+sqlitePromptColumns+`
 		FROM prompts WHERE id = ?
 	`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -125,7 +142,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 		return nil, err
 	}
 	q := `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT ` + sqlitePromptColumns + `
 		FROM prompts WHERE org_id = ? AND system_slug = ? AND deleted_at IS NULL`
 	args := []any{orgID, systemSlug}
 	if teamID != "" {
@@ -162,9 +179,12 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 // those three call paths converging on a single Create rather than
 // adding a per-source variant or forcing the handler to wire team_id
 // from outside. Every prompt is team-owned (no visibility column).
-func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
+// Create returns the inserted row rather than p: the row carries the
+// usage_count, the timestamps and the team_id this method pins, none of which
+// the caller supplied.
+func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) (domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Prompt{}, err
 	}
 	_ = teamID // local mode is single-team; the row pins LocalDefaultTeamID below
 	now := time.Now().UTC()
@@ -172,36 +192,52 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	if p.Source == "system" {
 		creatorUserID = nil
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanPromptRowSQLite(s.q.QueryRowContext(ctx, `
 		INSERT INTO prompts (id, name, body, source, allowed_tools, model, usage_count, team_id, creator_user_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-	`, p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, now, now)
-	return err
+		RETURNING `+sqlitePromptColumns,
+		p.ID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model, runmode.LocalDefaultTeamID, creatorUserID, now, now,
+	).Scan)
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) (domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Prompt{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanUpdatedPrompt(s.q.QueryRowContext(ctx, `
 		UPDATE prompts SET name = ?, body = ?, model = ?, user_modified = 1, updated_at = ? WHERE id = ?
-	`, name, body, model, time.Now().UTC(), id)
-	return err
+		RETURNING `+sqlitePromptColumns,
+		name, body, model, time.Now().UTC(), id,
+	))
 }
 
-func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error {
+func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) (domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Prompt{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanUpdatedPrompt(s.q.QueryRowContext(ctx, `
 		UPDATE prompts SET name = ?, body = ?, allowed_tools = ?, updated_at = ? WHERE id = ?
-	`, name, body, allowedTools, time.Now().UTC(), id)
-	return err
+		RETURNING `+sqlitePromptColumns,
+		name, body, allowedTools, time.Now().UTC(), id,
+	))
 }
 
-// Delete soft-deletes: it stamps deleted_at rather than removing the row, so
-// runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
-// never fire and historical runs keep resolving the prompt via GetSystem.
+// scanUpdatedPrompt decodes an id-keyed UPDATE … RETURNING. No row scanned
+// means the id matched nothing, which is db.ErrNoSuchPrompt — the same answer
+// the rows-affected probes these writes used to skip would have had to
+// synthesize, now reported by the statement that knows it.
+func scanUpdatedPrompt(row *sql.Row) (domain.Prompt, error) {
+	p, err := scanPromptRowSQLite(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Prompt{}, db.ErrNoSuchPrompt
+	}
+	return p, err
+}
+
+// Delete soft-deletes: it stamps deleted_at rather than removing the row,
+// so conversations.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id
+// (RESTRICT) FKs never fire and historical runs keep resolving the prompt
+// via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -220,30 +256,30 @@ func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error
 	return nil
 }
 
-func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {
+func (s *promptStore) Hide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Prompt{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE prompts SET hidden = 1 WHERE id = ?`, id)
-	return err
+	return scanUpdatedPrompt(s.q.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = 1 WHERE id = ? RETURNING `+sqlitePromptColumns, id))
 }
 
-func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error {
+func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Prompt{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE prompts SET hidden = 0 WHERE id = ?`, id)
-	return err
+	return scanUpdatedPrompt(s.q.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = 0 WHERE id = ? RETURNING `+sqlitePromptColumns, id))
 }
 
-func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
 	var n int
 	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversations WHERE prompt_id = ?`, id).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
+		return 0, fmt.Errorf("count conversation references: %w", err)
 	}
 	return n, nil
 }
@@ -262,12 +298,12 @@ func (s *promptStore) IncrementUsageSystem(ctx context.Context, orgID string, id
 
 // --- Stats ---------------------------------------------------------
 
-// Stats reads three separate views from the runs table. Kept as
+// Stats reads three separate views from the conversations table. Kept as
 // three statements rather than one CTE because the legacy free-
 // function shape was three statements and the conformance harness
 // covers both backends with identical assertions — a CTE optimization
 // is a future patch, not a port. Stats lives on PromptStore (vs
-// RunStore) because the queries key on prompt_id and the prompts
+// ConversationStore) because the queries key on prompt_id and the prompts
 // handler is the only consumer.
 func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) (*domain.PromptStats, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -328,7 +364,13 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	// Runs per day (last 30 days). Build the 30-day skeleton so
 	// the sparkline always renders 30 buckets even when several
 	// days have zero runs.
-	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	//
+	// UTC days on both sides. SQLite's DATE() resolves started_at to a UTC
+	// day whatever offset the stored value carries, so a skeleton built in
+	// the process's local zone names a different day for every run within
+	// the offset of midnight — and every one of those lookups misses,
+	// dropping real runs out of the sparkline.
+	cutoff := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT DATE(started_at) AS day, COUNT(*) AS cnt
 		FROM conversations
@@ -358,7 +400,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	}
 
 	for i := 29; i >= 0; i-- {
-		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -i).Format("2006-01-02")
 		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil

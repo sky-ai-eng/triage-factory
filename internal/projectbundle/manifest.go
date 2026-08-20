@@ -124,10 +124,17 @@ func (m *Manifest) Validate() error {
 func decodeManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("decode manifest: %w", err)
+		// Both wrapped: the parse error stays inspectable (it names the line
+		// and column the uploader has to fix), and ErrBadBundle classifies it.
+		return nil, fmt.Errorf("decode manifest: %w: %w", err, ErrBadBundle)
 	}
 	if err := m.Validate(); err != nil {
-		return nil, err
+		// A manifest that fails its own invariants is a property of the
+		// uploaded file, so it classifies as a client fault. Validate is
+		// shared with the export path, where the same failure would be a
+		// server-side bug — hence the marking happens here, on decode, not
+		// inside Validate.
+		return nil, fmt.Errorf("%w: %w", err, ErrBadBundle)
 	}
 	return &m, nil
 }

@@ -16,14 +16,14 @@ import (
 // via OrgsStore.ListActiveSystem and dispatches per-org work.
 //
 // To keep the test free of GitHub network round-trips, every fake
-// org's RepoStore returns an empty configured-names list — that path
+// org's RepositoryStore returns an empty configured-names list — that path
 // short-circuits before the tracker is invoked, so the assertion is
 // strictly "per-org loop visited every active org," not "tracker did
 // the right thing." Tracker behavior is covered by the tracker
 // package's own per-org tests.
 func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	users := &emptyUsersStore{} // GetGitHubLoginSystem unused — repo path exits first
 
 	m := &Manager{orgs: orgs, repos: repos, users: users}
@@ -35,7 +35,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != len(orgs.ids) {
-		t.Fatalf("ListConfiguredNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
+		t.Fatalf("ListTrackedNamesSystem visited %d orgs (%v); want %d (%v)", len(repos.visited), repos.visited, len(orgs.ids), orgs.ids)
 	}
 	for i, got := range repos.visited {
 		if got != orgs.ids[i] {
@@ -50,7 +50,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 // holder has been torn down.
 func TestManager_RunGitHubCycle_StopHaltsMidCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	users := &emptyUsersStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: users}
 
@@ -65,7 +65,7 @@ func TestManager_RunGitHubCycle_StopHaltsMidCycle(t *testing.T) {
 	}
 }
 
-// TestManager_RunJiraCycle_IteratesActiveOrgs mirrors the GitHub-side
+// TestManager_RunJiraCycle_OrgsStoreError mirrors the GitHub-side
 // test for the Jira path. The Jira loop is thinner than GitHub
 // (no per-org repo gate), so we record orgIDs via a tracker
 // substitute — but tracker.Tracker is a concrete type, so instead we
@@ -96,14 +96,14 @@ func TestManager_RunJiraCycle_OrgsStoreError(t *testing.T) {
 // behavior.
 func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos}
 	m.runGitHubCycle(nil)
 
 	repos.mu.Lock()
 	defer repos.mu.Unlock()
 	if len(repos.visited) != 0 {
-		t.Errorf("ListConfiguredNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
+		t.Errorf("ListTrackedNamesSystem called %d times despite ListActiveSystem error; want 0", len(repos.visited))
 	}
 }
 
@@ -177,7 +177,7 @@ func TestManager_RestartAll_StartsBothInLocalMode(t *testing.T) {
 func TestManager_RunGitHubCycle_SkipsOrgNotYetDue(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // org-a due → polled, scheduled ~5m out
@@ -197,7 +197,7 @@ func TestManager_RunGitHubCycle_SkipsOrgNotYetDue(t *testing.T) {
 func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil)
@@ -220,7 +220,7 @@ func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
 func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // both due → polled once each, both scheduled ~5m out
@@ -249,7 +249,7 @@ func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
 func TestManager_StartGitHub_DoesNotRepollScheduledOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // org-a polled, scheduled ~5m out
@@ -274,7 +274,7 @@ func TestManager_StartGitHub_DoesNotRepollScheduledOrg(t *testing.T) {
 func TestManager_PollSoon_AppliesConfigChangeImmediately(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	orgs := &fakeOrgsStore{ids: []string{runmode.LocalDefaultOrgID}}
-	repos := &recordingRepoStore{}
+	repos := &recordingRepositoryStore{}
 	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // polled, scheduled ~5m out
@@ -327,19 +327,19 @@ func (f *fakeOrgsStore) GetSettingsSystem(ctx context.Context, orgID string) (do
 	return domain.DefaultOrgSettings(), nil
 }
 
-// recordingRepoStore embeds db.RepoStore as nil and overrides only the
+// recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only the
 // methods the per-org loop reaches before exiting. Returning an empty
 // configured-names list short-circuits the loop body so no real
-// GitHub client work happens; any other RepoStore call would panic via
+// GitHub client work happens; any other RepositoryStore call would panic via
 // the nil embedded interface, which is the loud-failure-on-regression
 // posture we want.
-type recordingRepoStore struct {
-	db.RepoStore
+type recordingRepositoryStore struct {
+	db.RepositoryStore
 	mu      sync.Mutex
 	visited []string
 }
 
-func (r *recordingRepoStore) ListConfiguredNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
@@ -359,8 +359,8 @@ func (e stubErr) Error() string { return string(e) }
 var errOrgsDown = stubErr("simulated orgs-store outage")
 
 var (
-	_ db.OrgsStore   = (*fakeOrgsStore)(nil)
-	_ db.RepoStore   = (*recordingRepoStore)(nil)
-	_ db.UsersStore  = emptyUsersStore{}
-	_ domain.Project // keep domain import live for parity with sibling per-org tests
+	_ db.OrgsStore       = (*fakeOrgsStore)(nil)
+	_ db.RepositoryStore = (*recordingRepositoryStore)(nil)
+	_ db.UsersStore      = emptyUsersStore{}
+	_ domain.Project     // keep domain import live for parity with sibling per-org tests
 )

@@ -4,8 +4,18 @@
 // flow) — see startGitHubAppRegistration. The endpoints are org-scoped
 // under /api/orgs/{org_id}/github/app.
 
-import { readError } from './api'
+import { apiErrors, apiFetch, apiJSON, HttpError, httpErrorMessage } from './apiClient'
 import { isHttpUrl } from './reachability'
+
+// asError turns any failed call into an Error carrying the clean user-facing
+// string — the server's `{ error }` verbatim (e.g. cutover's 409 "install the
+// App before switching"), else the caller's fallback. Every function here is
+// consumed by a panel that renders `err.message` straight into the UI, so a
+// raw HttpError — whose message embeds the whole response body — must not
+// escape this module.
+function asError(e: unknown, fallback: string): Error {
+  return new Error(httpErrorMessage(e, fallback))
+}
 
 // Local mode runs single-org against the synthetic sentinel org. Mirrors
 // runmode.LocalDefaultOrgID on the backend; the org-scoped App endpoints
@@ -17,6 +27,12 @@ export interface GitHubAppInstallation {
   account_type: string
   account_login: string
   installed_at: string
+  // RFC3339 when the account owner has suspended the installation, '' when it
+  // is live: the grant survives a suspension, but GitHub refuses every token
+  // minted from it. suspended_by is the login that suspended it ('' when
+  // unsuspended, or when GitHub named no one). Nothing renders these yet.
+  suspended_at: string
+  suspended_by: string
 }
 
 export interface GitHubAppInfo {
@@ -36,10 +52,55 @@ export interface GitHubAppInfo {
   active: boolean
 }
 
+// GitHubAppWebhookState is the backend's answer to "is GitHub actually
+// delivering this App's webhooks here?", probed against the App's own webhook
+// configuration and delivery history (never inferred from a stored secret,
+// which is true in neither direction).
+//
+//   - not_configured: no webhook, or the inert placeholder a deployment GitHub
+//     can't reach registers. The NORMAL state in local mode — not a fault.
+//   - pointing_elsewhere: the App has a webhook, and it isn't this deployment.
+//   - delivering_rejected: GitHub is delivering here and the receiver refuses.
+//   - no_deliveries: configured for this deployment, nothing in GitHub's
+//     30-day window. Ordinary for a new or quiet App.
+//   - healthy: the most recent delivery was accepted.
+//   - unavailable: this GitHub host doesn't expose the App-webhook endpoints
+//     (GHES below 3.2), so the question can't be answered.
+export type GitHubAppWebhookState =
+  | 'not_configured'
+  | 'pointing_elsewhere'
+  | 'delivering_rejected'
+  | 'no_deliveries'
+  | 'healthy'
+  | 'unavailable'
+
+// GitHubAppWebhookHealth is the probe's answer as facts, not copy — the panel
+// composes the message, because the likely cause of a rejection depends on the
+// status code (a 401 reads differently from a failure to connect).
+//
+// secret_configured is GitHub's masked presence bit for the App's own webhook
+// secret. It never carries the value, and TF never compares one: the delivery
+// status codes are what prove a secret matches.
+export interface GitHubAppWebhookHealth {
+  state: GitHubAppWebhookState
+  // Origin (scheme://host) the App delivers to, '' when nothing is configured.
+  hook_host: string
+  secret_configured: boolean
+  // RFC3339 of the most recent delivery, '' when there is none.
+  last_delivery_at: string
+  // What the receiving endpoint answered on that delivery; 0 when GitHub could
+  // not connect at all.
+  last_delivery_status_code: number
+  checked_at: string
+}
+
 export interface GitHubAppStatus {
   app: GitHubAppInfo | null
   installations: GitHubAppInstallation[]
   using_hosted_default: boolean
+  // null when there's no App, no deployment identity to compare a hook URL
+  // against, or no probe answer yet. Absent means NOT KNOWN — never "fine".
+  webhook_health: GitHubAppWebhookHealth | null
   // The absolute redirect_uri the App owner must register on the App for per-user
   // "Connect GitHub" OAuth to work. Same URL a manifest-created App already has
   // registered (harmless there); load-bearing for a bring-your-own App whose
@@ -48,9 +109,11 @@ export interface GitHubAppStatus {
 }
 
 export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load GitHub App status'))
-  return (await res.json()) as GitHubAppStatus
+  try {
+    return await apiJSON<GitHubAppStatus>(`/api/orgs/${encodeURIComponent(orgId)}/github/app`)
+  } catch (e) {
+    throw asError(e, 'Could not load GitHub App status.')
+  }
 }
 
 // refreshGitHubAppInstallations reconciles the org's App installation mirror
@@ -60,18 +123,55 @@ export async function getGitHubAppStatus(orgId: string): Promise<GitHubAppStatus
 // reads a mirror a brand-new install hasn't touched yet, so the wizard's install
 // step and Settings' "Check installation" action POST here to actually find it.
 export async function refreshGitHubAppInstallations(orgId: string): Promise<GitHubAppStatus> {
-  const res = await fetch(
-    `/api/orgs/${encodeURIComponent(orgId)}/github/app/installations/refresh`,
-    { method: 'POST' },
-  )
-  if (!res.ok) throw new Error(await readError(res, 'Failed to refresh GitHub App installations'))
-  return (await res.json()) as GitHubAppStatus
+  try {
+    return await apiJSON<GitHubAppStatus>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/installations/refresh`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not refresh the GitHub App installations.')
+  }
+}
+
+// GitHubWebhookReplayResult reports what the repair did. candidates is how many
+// failed installation deliveries GitHub still holds in its 30-day window, which
+// is what makes `replayed: 0` legible — nothing to replay reads very differently
+// from nothing accepted.
+export interface GitHubWebhookReplayResult {
+  candidates: number
+  replayed: number
+  failed: number
+}
+
+// replayGitHubWebhookDeliveries asks GitHub to redeliver the App's failed
+// installation deliveries, healing an installation mirror that went stale while
+// the receiver was rejecting them (a missing or mismatched webhook secret). Only
+// failed deliveries are replayed, and the receiver dedups on the delivery GUID a
+// redelivery shares with its original, so this cannot double-apply anything.
+//
+// POST /api/orgs/{org_id}/github/app/webhook/replay
+export async function replayGitHubWebhookDeliveries(
+  orgId: string,
+): Promise<GitHubWebhookReplayResult> {
+  try {
+    return await apiJSON<GitHubWebhookReplayResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/webhook/replay`,
+      { method: 'POST' },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not replay the missed webhook deliveries.')
+  }
 }
 
 export async function getGitHubAppInstallURL(orgId: string): Promise<string> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/install-url`)
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load install URL'))
-  const body = (await res.json()) as { url: string }
+  let body: { url: string }
+  try {
+    body = await apiJSON<{ url: string }>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/install-url`,
+    )
+  } catch (e) {
+    throw asError(e, 'Could not load the install URL.')
+  }
   // The URL is backend-derived from the org's GitHub base URL. Reject any
   // non-http(s) scheme here, at the single source, so neither an <a href>
   // (RepoPickerModal) nor window.open (Settings) can ever be handed a
@@ -144,30 +244,45 @@ export async function importGitHubApp(
   orgId: string,
   input: GitHubAppImportInput,
 ): Promise<GitHubAppImportOutcome> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/import`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(input),
-  })
-  if (res.ok) {
-    return { ok: true, result: (await res.json()) as GitHubAppImportResult }
-  }
+  const fallback = 'Could not import the GitHub App.'
   try {
-    const body = (await res.json()) as {
-      error?: string
-      permissions?: GitHubAppPermissionRow[]
-      blocking?: boolean
-      field?: string
+    const result = await apiJSON<GitHubAppImportResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/import`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+    )
+    return { ok: true, result }
+  } catch (e) {
+    // Every rejection carries its message in the standard envelope, read
+    // through the shared parser so the field attribution comes with it. A
+    // permission gap adds to that rather than replacing it: alongside `errors`
+    // its body carries the granted-vs-required table the form renders, which no
+    // envelope field can hold (see githubAppImportErrorResponse). So check for
+    // the table first — the message is the same one either way.
+    const item = apiErrors(e)[0]
+    if (e instanceof HttpError) {
+      try {
+        const body = JSON.parse(e.body) as {
+          permissions?: GitHubAppPermissionRow[]
+          blocking?: boolean
+        }
+        if (body.permissions) {
+          return {
+            ok: false,
+            error: item?.message || fallback,
+            permissions: body.permissions,
+            blocking: body.blocking,
+          }
+        }
+      } catch {
+        // Body wasn't JSON — fall through.
+      }
     }
-    return {
-      ok: false,
-      error: body.error || 'Failed to import the GitHub App.',
-      permissions: body.permissions,
-      blocking: body.blocking,
-      field: body.field,
-    }
-  } catch {
-    return { ok: false, error: 'Failed to import the GitHub App.' }
+    if (item) return { ok: false, error: item.message || fallback, field: item.field }
+    return { ok: false, error: httpErrorMessage(e, fallback) }
   }
 }
 
@@ -231,20 +346,6 @@ export interface SwitchToPatResult {
   github_app_settings_url: string
 }
 
-// switchError returns the backend's clean user-facing `error` message (no
-// fallback prefix), so an inline error reads as the server wrote it (e.g.
-// cutover's 409 "install the App before switching"). Falls back to a generic
-// line when the body carries no error field.
-async function switchError(res: Response, fallback: string): Promise<string> {
-  try {
-    const body = (await res.clone().json()) as { error?: string }
-    if (body && typeof body.error === 'string' && body.error) return body.error
-  } catch {
-    // Non-JSON body — use the fallback.
-  }
-  return fallback
-}
-
 // cutoverToApp commits a staged PAT→App switch: the backend reconciles
 // installations, verifies ≥1, then activates the App and deletes the PAT
 // atomically. Rejects with the backend's message — notably the 409 "install
@@ -252,10 +353,13 @@ async function switchError(res: Response, fallback: string): Promise<string> {
 //
 // POST /api/orgs/{org_id}/github/app/cutover
 export async function cutoverToApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover`, {
-    method: 'POST',
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to switch to the GitHub App.'))
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover`, {
+      method: 'POST',
+    })
+  } catch (e) {
+    throw asError(e, 'Could not switch to the GitHub App.')
+  }
 }
 
 // cutoverPreflight returns the inform-only reachability diff for a PAT→App
@@ -265,40 +369,53 @@ export async function cutoverToApp(orgId: string): Promise<void> {
 //
 // GET /api/orgs/{org_id}/github/app/cutover-preflight
 export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover-preflight`)
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to check repository reachability.'))
-  return (await res.json()) as AccessDiff
+  try {
+    return await apiJSON<AccessDiff>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/app/cutover-preflight`,
+    )
+  } catch (e) {
+    throw asError(e, 'Could not check repository reachability.')
+  }
 }
 
 // switchToPat performs the App→PAT switch — a full App teardown. The backend
 // validates the PAT, stores it, and deletes the App registration + secrets in
 // one transaction; the App still exists on GitHub (the result flags that).
 //
-// POST /api/orgs/{org_id}/github/access/switch-to-pat
+// POST /api/orgs/{org_id}/github/pat/switch-to
 export async function switchToPat(orgId: string, pat: string): Promise<SwitchToPatResult> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/switch-to-pat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pat }),
-  })
-  if (!res.ok)
-    throw new Error(await switchError(res, 'Failed to switch to a personal access token.'))
-  return (await res.json()) as SwitchToPatResult
+  try {
+    return await apiJSON<SwitchToPatResult>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/pat/switch-to`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat }),
+      },
+    )
+  } catch (e) {
+    throw asError(e, 'Could not switch to a personal access token.')
+  }
 }
 
 // patPreflight validates a candidate PAT and returns the inform-only
 // reachability diff for an App→PAT switch plus the login it authenticates as.
 // Stores nothing — switchToPat re-validates on commit.
 //
-// POST /api/orgs/{org_id}/github/access/pat-preflight
+// POST /api/orgs/{org_id}/github/pat/preflight
 export async function patPreflight(orgId: string, pat: string): Promise<PatPreflight> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/access/pat-preflight`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pat }),
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'That token could not be validated.'))
-  return (await res.json()) as PatPreflight
+  try {
+    return await apiJSON<PatPreflight>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/pat/preflight`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat }),
+      },
+    )
+  } catch (e) {
+    throw asError(e, 'That token could not be validated.')
+  }
 }
 
 // discardStagedApp tears down a STAGED App registration — the exit for an
@@ -307,8 +424,9 @@ export async function patPreflight(orgId: string, pat: string): Promise<PatPrefl
 //
 // DELETE /api/orgs/{org_id}/github/app
 export async function discardStagedApp(orgId: string): Promise<void> {
-  const res = await fetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, {
-    method: 'DELETE',
-  })
-  if (!res.ok) throw new Error(await switchError(res, 'Failed to discard the staged GitHub App.'))
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/github/app`, { method: 'DELETE' })
+  } catch (e) {
+    throw asError(e, 'Could not discard the staged GitHub App.')
+  }
 }

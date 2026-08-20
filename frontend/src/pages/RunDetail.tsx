@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import type { BlueprintStep, Conversation } from '../types'
 import { setPresenceView } from '../hooks/useWebSocket'
-import { useRunDetail } from '../hooks/useRunDetail'
+import { useConversationDetail } from '../hooks/useConversationDetail'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { isActiveRun } from '../lib/runStatus'
+import { isActiveConversation } from '../lib/conversationStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
 import RunStation, {
   type ChainStepLabel,
@@ -15,18 +15,18 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import { GlassBackdrop } from './setup/glass'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 // RunDetail — the data shell for the full-screen run station. It loads the run +
-// task + messages (live over websocket via useRunDetail), wires the real
+// task + messages (live over websocket via useConversationDetail), wires the real
 // actions (message/interrupt steering, cancel, requeue, review/PR approval),
 // and hands it all to <RunStation>, which owns every pixel.
 export default function RunDetail() {
-  const { runID } = useParams<{ runID: string }>()
+  const { conversationID } = useParams<{ conversationID: string }>()
   const navigate = useNavigate()
   const orgHref = useOrgHref()
   const {
-    run,
+    conversation,
     task,
     messages,
     loading,
@@ -35,21 +35,25 @@ export default function RunDetail() {
     pendingPermissions,
     resolvePermission,
     softRefresh,
-  } = useRunDetail(runID)
+    hasOlderMessages,
+    loadingOlderMessages,
+    loadOlderMessages,
+  } = useConversationDetail(conversationID)
 
   const [chainSteps, setChainSteps] = useState<Conversation[] | null>(null)
   // Per-step labels for the chain track, index-aligned with chainSteps. Kept
-  // beside them rather than folded in because the track's segments are runs,
-  // and a not-yet-spawned step has a name but no run.
+  // beside them rather than folded in because the track's segments are
+  // conversations, and a not-yet-spawned step has a name but no conversation.
   const [chainStepLabels, setChainStepLabels] = useState<ChainStepLabel[] | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [stopPending, setStopPending] = useState(false)
-  // Approval is derived now, not a stored run status: the run's unresolved
-  // artifact set (draft PRs + ready reviews) surfaces at the top of the
-  // station's artifact lists (the dock popover + the telemetry rail).
-  // `activeArtifact` is the one per-item editor currently open (you edit one at
-  // a time — ReviewOverlay / PendingPROverlay key off a single artifact id);
-  // `confirmRequeueOpen` gates the destructive resolve-all on Return-to-queue.
+  // Approval is derived now, not a stored conversation status: the
+  // conversation's unresolved artifact set (draft PRs + ready reviews) surfaces
+  // at the top of the station's artifact lists (the dock popover + the
+  // telemetry rail). `activeArtifact` is the one per-item editor currently open
+  // (you edit one at a time — ReviewOverlay / PendingPROverlay key off a single
+  // artifact id); `confirmRequeueOpen` gates the destructive resolve-all on
+  // Return-to-queue.
   const [activeArtifact, setActiveArtifact] = useState<{
     kind: 'review' | 'pr'
     id: string
@@ -59,134 +63,126 @@ export default function RunDetail() {
 
   // Presence (TFAC-392): this run's detail page is an answer-capable surface for
   // ITS run's permission prompts. Report run:<id> while mounted (re-firing if the
-  // runID changes) and fall back to 'other' on unmount.
+  // conversationID changes) and fall back to 'other' on unmount.
   useEffect(() => {
-    if (!runID) return
-    setPresenceView(`run:${runID}`)
+    if (!conversationID) return
+    setPresenceView(`run:${conversationID}`)
     return () => setPresenceView('other')
-  }, [runID])
+  }, [conversationID])
 
   // Tick while live so elapsed + the vent-heat flare stay current.
   useEffect(() => {
-    if (!run || !isActiveRun(run)) return
+    if (!conversation || !isActiveConversation(conversation)) return
     const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [run])
+  }, [conversation])
 
   // Load blueprint chain steps, padding not-yet-spawned steps with synthetic
   // placeholders so the chain track renders its full length.
   useEffect(() => {
-    if (!run?.blueprint_run_id) {
+    if (!conversation?.blueprint_run_id) {
       setChainSteps(null)
       setChainStepLabels(null)
       return
     }
     let cancelled = false
-    fetch(`/api/blueprint-runs/${run.blueprint_run_id}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then(
-        (
-          data: {
-            steps?: Array<{ step: BlueprintStep; run?: Conversation | null }>
-          } | null,
-        ) => {
-          if (cancelled || !data?.steps) return
-          setChainStepLabels(
-            data.steps.map((s) => ({ name: s.step?.name ?? '', brief: s.step?.brief ?? '' })),
-          )
-          const padded: Conversation[] = data.steps.map((s, i) => {
-            if (s.run) return s.run
-            // Synthetic row for a step that hasn't been spawned; its status is
-            // empty because it has no run, not a name outside the vocabulary.
-            return {
-              ID: `__pending-${run.blueprint_run_id}-${i}`,
-              TaskID: run.TaskID,
-              Status: '',
-              Model: '',
-              StartedAt: '',
-              ResultSummary: '',
-              blueprint_run_id: run.blueprint_run_id,
-              blueprint_step_index: i,
-            } as unknown as Conversation
-          })
-          setChainSteps(padded)
-        },
-      )
+    apiJSON<{ steps?: Array<{ step: BlueprintStep; run?: Conversation | null }> }>(
+      `/api/blueprint-runs/${conversation.blueprint_run_id}`,
+    )
+      .then((data) => {
+        if (cancelled || !data?.steps) return
+        setChainStepLabels(
+          data.steps.map((s) => ({ name: s.step?.name ?? '', brief: s.step?.brief ?? '' })),
+        )
+        const padded: Conversation[] = data.steps.map((s, i) => {
+          if (s.run) return s.run
+          // Synthetic row for a step that hasn't been spawned; its status is
+          // empty because it has no conversation, not a name outside the
+          // vocabulary.
+          return {
+            ID: `__pending-${conversation.blueprint_run_id}-${i}`,
+            TaskID: conversation.TaskID,
+            Status: '',
+            Model: '',
+            StartedAt: '',
+            ResultSummary: '',
+            blueprint_run_id: conversation.blueprint_run_id,
+            blueprint_step_index: i,
+          } as unknown as Conversation
+        })
+        setChainSteps(padded)
+      })
       .catch((err) => console.warn('Failed to load blueprint chain steps:', err))
     return () => {
       cancelled = true
     }
-  }, [run?.blueprint_run_id, run?.TaskID])
+  }, [conversation?.blueprint_run_id, conversation?.TaskID])
 
-  // Stop the run: the agent stops, the conversation parks `open`, and its
+  // Stop the conversation: the agent stops, it parks `open`, and its
   // blueprint and task stay exactly where they were — so the composer's offer
   // to pick the work back up is true. stopPending disables the controls while
   // the POST is in flight so rapid clicks can't stack requests ahead of the WS
   // status flip.
   const handleStop = useCallback(async () => {
-    if (!run || stopPending) return
+    if (!conversation || stopPending) return
     setStopPending(true)
     try {
-      const res = await fetch(`/api/agent/conversations/${run.ID}/stop`, { method: 'POST' })
-      if (!res.ok) toast.error(await readError(res, 'Failed to stop run'))
+      await apiFetch(`/api/agent/conversations/${conversation.ID}/stop`, { method: 'POST' })
     } catch (err) {
-      toast.error(`Failed to stop run: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not stop the run.'))
     } finally {
       setStopPending(false)
     }
-  }, [run, stopPending])
+  }, [conversation, stopPending])
 
-  // Steer a run: a free-form message lands on the live process (or wakes an
-  // `open` run via resume). The backend records + broadcasts it as an
-  // `message` event, so useRunDetail's append renders it — no optimistic insert.
+  // Steer a conversation: a free-form message lands on the live process (or
+  // wakes an `open` conversation via resume). The backend records +
+  // broadcasts it as a `message` event, so useConversationDetail's append
+  // renders it — no optimistic insert.
   const handleMessage = useCallback(
     async (text: string) => {
-      if (!run) return
+      if (!conversation) return
       try {
-        const res = await fetch(`/api/agent/conversations/${run.ID}/message`, {
+        await apiFetch(`/api/agent/conversations/${conversation.ID}/message`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text }),
         })
-        if (!res.ok) toast.error(await readError(res, 'Failed to send message'))
       } catch (err) {
-        toast.error(`Failed to send message: ${(err as Error).message}`)
+        toast.error(httpErrorMessage(err, 'Could not send the message.'))
       }
     },
-    [run],
+    [conversation],
   )
 
   // doRequeue fires the actual requeue. Return-to-queue is a task-level
   // force-resolve-all: the backend tears down every unresolved artifact (closes
-  // draft PRs, discards pending reviews — branches kept) and cancels a live run.
+  // draft PRs, discards pending reviews — branches kept) and cancels a live
+  // conversation.
   const doRequeue = useCallback(async () => {
-    if (!run?.TaskID) return
+    if (!conversation?.TaskID) return
     setRequeueBusy(true)
     try {
-      const res = await fetch(`/api/tasks/${run.TaskID}/requeue`, { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to return to queue'))
-        return
-      }
+      await apiFetch(`/api/tasks/${conversation.TaskID}/requeue`, { method: 'POST' })
       navigate(orgHref('/board'))
     } catch (err) {
-      toast.error(`Failed to return to queue: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
     } finally {
       setRequeueBusy(false)
     }
-  }, [navigate, orgHref, run?.TaskID])
+  }, [navigate, orgHref, conversation?.TaskID])
 
   // handleRequeue gates the destructive teardown behind the confirmation modal
-  // whenever the run still has unresolved artifacts; otherwise it requeues
-  // straight away (nothing to resolve).
+  // whenever the conversation still has unresolved artifacts; otherwise it
+  // requeues straight away (nothing to resolve).
   const handleRequeue = useCallback(() => {
-    if (!run) return
-    if (hasUnresolvedArtifacts(run)) {
+    if (!conversation) return
+    if (hasUnresolvedArtifacts(conversation)) {
       setConfirmRequeueOpen(true)
       return
     }
     void doRequeue()
-  }, [run, doRequeue])
+  }, [conversation, doRequeue])
 
   // Open one artifact's editor overlay by id — from the dock's approval
   // popover, or from the rail's Artifacts list. The per-item editors
@@ -214,7 +210,7 @@ export default function RunDetail() {
 
   if (loading) return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
 
-  // Order matters: a 5xx leaves `run` null AND sets `error`; checking notFound
+  // Order matters: a 5xx leaves `conversation` null AND sets `error`; checking notFound
   // first would mask the real failure behind a misleading "not found".
   if (error)
     return (
@@ -222,7 +218,7 @@ export default function RunDetail() {
         Failed to load: {error}
       </FloorMessage>
     )
-  if (notFound || !run)
+  if (notFound || !conversation)
     return (
       <FloorMessage tone="text-ink-3" back={orgHref('/board')}>
         Run not found.
@@ -241,7 +237,7 @@ export default function RunDetail() {
     onResolvePermission: resolvePermission,
   }
 
-  const counts = approvalCounts(run)
+  const counts = approvalCounts(conversation)
 
   return (
     <div className="relative h-screen p-3">
@@ -271,7 +267,7 @@ export default function RunDetail() {
         open={confirmRequeueOpen}
         prCount={counts.pr}
         reviewCount={counts.review}
-        isLive={isActiveRun(run)}
+        isLive={isActiveConversation(conversation)}
         actionLabel="Return to queue"
         busy={requeueBusy}
         onConfirm={() => void doRequeue()}
@@ -279,7 +275,7 @@ export default function RunDetail() {
       />
 
       <RunStation
-        run={run}
+        conversation={conversation}
         task={task}
         messages={messages}
         now={now}
@@ -287,6 +283,9 @@ export default function RunDetail() {
         chainStepLabels={chainStepLabels}
         actions={actions}
         pendingPermissions={pendingPermissions}
+        hasOlderMessages={hasOlderMessages}
+        loadingOlderMessages={loadingOlderMessages}
+        onLoadOlderMessages={loadOlderMessages}
       />
     </div>
   )

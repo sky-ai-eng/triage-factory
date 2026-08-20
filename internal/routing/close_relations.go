@@ -434,9 +434,9 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 
 // --- shared close helpers (used by the driver) ------------------------------
 
-// stopRunsOnClosedTask asks the spawner to stop the runs the close just ended
+// stopConversationsOnClosedTask asks the spawner to stop the conversations the close just ended
 // and cancel the blueprints behind them: the stop note on the transcript, the
-// kill signal, and the park. runIDs is the then-active set the close
+// kill signal, and the park. conversationIDs is the then-active set the close
 // transaction read and stamped, so this acts on exactly what closed rather
 // than on a second, later read.
 //
@@ -450,52 +450,54 @@ func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
 //
 // Errors are logged and swallowed, and this is the best-effort HALF of a split
 // the close transaction owns the other side of. The intent is durable before
-// this runs, so a kill that never lands no longer forgets the run: the claim
-// gate refuses to drive a cancel-requested blueprint, and the reaper's cancel
-// arm finalizes it once its executor is gone. What is lost is only promptness
-// — a live agent may finish the turn it is on. "no active run" from the
-// spawner is expected when a run races us to natural completion; the run ends
-// up terminal either way.
+// this runs, so a kill that never lands no longer forgets the conversation:
+// the claim gate refuses to drive a cancel-requested blueprint, and the
+// reaper's cancel arm finalizes it once its executor is gone. What is lost is
+// only promptness — a live agent may finish the turn it is on. "no active
+// conversation" from the spawner is expected when a conversation races us to
+// natural completion; the conversation ends up terminal either way.
 //
 // So this stays OUT of the close phase's routing obligation, but for a
 // narrower reason than before: a replay could not repair it anyway (a replayed
 // close finds no active task and never walks back here), and now there is
 // nothing left for it to repair.
-func (r *Router) stopRunsOnClosedTask(orgID, taskID string, runIDs []string) {
+func (r *Router) stopConversationsOnClosedTask(orgID, taskID string, conversationIDs []string) {
 	if r.spawner == nil {
 		return
 	}
-	for _, id := range runIDs {
-		if err := r.spawner.StopAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
-			routerLog.Error("stop run on task close failed", "run_id", id, "task_id", taskID, "error", err)
+	for _, id := range conversationIDs {
+		if err := r.spawner.StopConversationAndCancelBlueprint(orgID, id, "", delegate.StopCauseTaskClosed); err != nil {
+			routerLog.Error("stop conversation on task close failed", "conversation", id, "task_id", taskID, "error", err)
 		}
 	}
 }
 
 // closeTaskWithAudit closes a task, records the closing event in task_events,
-// and stops the runs working on it. Every close goes through here (including
-// the entity-wide terminating close), so cancellation + audit are uniform.
+// and stops the conversations working on it. Every close goes through here
+// (including the entity-wide terminating close), so cancellation + audit are
+// uniform.
 //
 // The first three writes — the task's terminal flip, the audit row, and
-// `cancel_requested` on the blueprints behind the task's then-active runs —
-// are one transaction. Task state is the authoritative invalidation surface,
-// and the intent to stop what it invalidates has to be as durable as the
-// invalidation itself: the kill below is reachable exactly once, so a close
-// that committed without the intent could leave a run the system has forgotten
-// it meant to stop, with no replay able to reach it.
+// `cancel_requested` on the blueprints behind the task's then-active
+// conversations — are one transaction. Task state is the authoritative
+// invalidation surface, and the intent to stop what it invalidates has to be as
+// durable as the invalidation itself: the kill below is reachable exactly once,
+// so a close that committed without the intent could leave a conversation the
+// system has forgotten it meant to stop, with no replay able to reach it.
 //
 // The kill then follows, post-commit and best-effort. Only a close this call
-// actually performed cascades: an already-terminal task returns no run ids, so
-// a replayed close neither stamps nor stops — the run under it may be one a
-// user resumed after the close, which the resume ladder deliberately allows.
+// actually performed cascades: an already-terminal task returns no conversation
+// ids, so a replayed close neither stamps nor stops — the conversation under it
+// may be one a user resumed after the close, which the resume ladder
+// deliberately allows.
 func (r *Router) closeTaskWithAudit(ctx context.Context, orgID, taskID, closingEventID, closeReason, closeEventType string) error {
-	closed, activeRunIDs, err := r.tasks.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	closed, activeConversationIDs, err := r.tasks.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 	if err != nil {
 		return err
 	}
 	if !closed {
 		return nil
 	}
-	r.stopRunsOnClosedTask(orgID, taskID, activeRunIDs)
+	r.stopConversationsOnClosedTask(orgID, taskID, activeConversationIDs)
 	return nil
 }

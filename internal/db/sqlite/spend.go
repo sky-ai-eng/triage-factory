@@ -12,13 +12,13 @@ import (
 )
 
 // spendStore is the SQLite impl of db.SpendStore — a read-only aggregation over
-// the llm_spend view (TFAC-472), the UNION-ALL of runs + curator_requests +
+// the llm_spend view (TFAC-472), the UNION-ALL of conversation messages +
 // system_llm_runs on the category axis. SQLite is N=1 (local mode) with no RLS,
 // so unlike the Postgres impl there is no app/admin pool split — the single
 // connection serves the read. assertLocalOrg pins orgID to the local sentinel.
 //
 // Datetime filters wrap both sides in datetime() (the codebase idiom, see
-// agentrun.go) so a bound time.Time compares correctly against occurred_at
+// conversation.go) so a bound time.Time compares correctly against occurred_at
 // regardless of whether the underlying started_at/created_at was written by a
 // Go time.Time bind or a SQL CURRENT_TIMESTAMP default.
 type spendStore struct{ q queryer }

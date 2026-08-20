@@ -25,7 +25,7 @@ type queryer interface {
 //
 // Mirrors the SQLite-side helper of the same name. Used by store
 // methods that must apply a multi-statement operation atomically —
-// e.g. RepoStore.SetConfigured deletes dropped repos and upserts
+// e.g. RepositoryStore.SetConfigured deletes dropped repos and upserts
 // skeleton rows for new ones inside one tx so the table can't
 // observe a partial mid-sync state.
 //

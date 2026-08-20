@@ -116,7 +116,7 @@ const repoCreateRefusal = "This command was not run, and the same call made anot
 // by re-issuing. Nothing but the three matched shapes is looked at, so a run
 // that attempts none of them sees no evidence this exists — and only a matched
 // merge pays for the transcript read.
-func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domain.ToolCall) string {
+func (s *Spawner) ghCommandGate(orgID, conversationID string) func(context.Context, domain.ToolCall) string {
 	return func(ctx context.Context, call domain.ToolCall) string {
 		switch classifyGHCommand(bashCommand(call)) {
 		case ghActionReview:
@@ -124,7 +124,7 @@ func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domai
 		case ghActionRepoCreate:
 			return repoCreateRefusal
 		case ghActionMerge:
-			if s.mergeAlreadyQuestioned(ctx, orgID, runID) {
+			if s.mergeAlreadyQuestioned(ctx, orgID, conversationID) {
 				return ""
 			}
 			return mergeGateQuestion
@@ -139,10 +139,10 @@ func (s *Spawner) ghCommandGate(orgID, runID string) func(context.Context, domai
 // answers a question it has already answered and re-issues, costing one turn.
 // Staying quiet would instead let the one call this exists for through on the
 // strength of a failed read.
-func (s *Spawner) mergeAlreadyQuestioned(ctx context.Context, orgID, runID string) bool {
-	rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
+func (s *Spawner) mergeAlreadyQuestioned(ctx context.Context, orgID, conversationID string) bool {
+	rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("read transcript for the merge question failed; asking again", "run", runID, "error", err)
+		delegateLog.Warn("read transcript for the merge question failed; asking again", "conversation", conversationID, "error", err)
 		return false
 	}
 	return askedAboutMergeAlready(rows)

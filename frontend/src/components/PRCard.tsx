@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { PRSummary } from '../pages/PRDashboard'
+import { apiJSON } from '../lib/apiClient'
 
 interface PRStatusData {
   mergeable: boolean | null
@@ -30,8 +31,7 @@ export default function PRCard({ pr }: { pr: PRSummary }) {
   useEffect(() => {
     if (!expanded) return
     let cancelled = false
-    fetch(`/api/dashboard/prs/${pr.number}/status?repo=${pr.repo}`)
-      .then((r) => r.json())
+    apiJSON<PRStatusData>(`/api/dashboard/prs/${pr.repo}/${pr.number}/status`)
       .then((d) => {
         if (!cancelled) {
           setStatus(d)

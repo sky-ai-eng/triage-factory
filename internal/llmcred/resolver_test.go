@@ -101,7 +101,7 @@ func TestRoleMint_EnvShapeAndExpiry(t *testing.T) {
 	r := NewResolver(sec, m, time.Hour, NetworkBinding{})
 	r.now = func() time.Time { return now }
 
-	mat, err := r.ResolveForBundle(ctx, "org-1", "run-42")
+	mat, err := r.ResolveForBundle(ctx, "org-1", "conv-42")
 	if err != nil {
 		t.Fatalf("ResolveForBundle: %v", err)
 	}
@@ -120,8 +120,8 @@ func TestRoleMint_EnvShapeAndExpiry(t *testing.T) {
 	if !mat.Expiry.Equal(now.Add(time.Hour)) {
 		t.Errorf("expiry=%v want %v", mat.Expiry, now.Add(time.Hour))
 	}
-	if m.lastInput.RoleSessionName != "tf-run-42" {
-		t.Errorf("session name=%q want tf-run-42", m.lastInput.RoleSessionName)
+	if m.lastInput.RoleSessionName != "tf-conv-42" {
+		t.Errorf("session name=%q want tf-conv-42", m.lastInput.RoleSessionName)
 	}
 	if m.lastInput.ExternalID != "ext-abc" {
 		t.Errorf("external id=%q want ext-abc", m.lastInput.ExternalID)
@@ -153,7 +153,7 @@ func TestBrainBoundMint_NoNetworkCondition(t *testing.T) {
 	// Executor-bound (bundle): condition IS present.
 	mExec := &fakeMinter{creds: mintedAt(now, time.Hour)}
 	rExec := NewResolver(sec, mExec, time.Hour, egress)
-	if _, err := rExec.ResolveForBundle(ctx, "org", "run-1"); err != nil {
+	if _, err := rExec.ResolveForBundle(ctx, "org", "conv-1"); err != nil {
 		t.Fatalf("bundle mint: %v", err)
 	}
 	if !hasNetworkCondition(t, mExec.lastInput.Policy) {
@@ -198,9 +198,10 @@ func TestMintCache_UntilHalfLife(t *testing.T) {
 	}
 }
 
-// TestPerRunMintKeying: two different runs of the same org mint separately
-// (per-run RoleSessionName), so CloudTrail attribution stays per-run.
-func TestPerRunMintKeying(t *testing.T) {
+// TestPerConversationMintKeying: two different conversations of the same org
+// mint separately (per-conversation RoleSessionName), so CloudTrail attribution
+// stays per-conversation.
+func TestPerConversationMintKeying(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	sec := fakeSecrets{integrations.KeyAWSRoleARN: "arn:aws:iam::1:role/r", integrations.KeyAWSExternalID: "ext"}
@@ -208,14 +209,14 @@ func TestPerRunMintKeying(t *testing.T) {
 	r := NewResolver(sec, m, time.Hour, NetworkBinding{})
 	r.now = func() time.Time { return now }
 
-	if _, err := r.ResolveForBundle(ctx, "org", "run-a"); err != nil {
+	if _, err := r.ResolveForBundle(ctx, "org", "conv-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.ResolveForBundle(ctx, "org", "run-b"); err != nil {
+	if _, err := r.ResolveForBundle(ctx, "org", "conv-b"); err != nil {
 		t.Fatal(err)
 	}
 	if m.calls != 2 {
-		t.Fatalf("distinct runs: calls=%d want 2", m.calls)
+		t.Fatalf("distinct conversations: calls=%d want 2", m.calls)
 	}
 }
 
@@ -236,7 +237,7 @@ func TestRoleMint_DeniedPropagates(t *testing.T) {
 	sec := fakeSecrets{integrations.KeyAWSRoleARN: "arn:aws:iam::1:role/r", integrations.KeyAWSExternalID: "ext"}
 	m := &fakeMinter{err: ErrAssumeRoleDenied}
 	r := NewResolver(sec, m, time.Hour, NetworkBinding{})
-	_, err := r.ResolveForBundle(ctx, "org", "run-1")
+	_, err := r.ResolveForBundle(ctx, "org", "conv-1")
 	if !errors.Is(err, ErrAssumeRoleDenied) {
 		t.Fatalf("err=%v want ErrAssumeRoleDenied", err)
 	}
@@ -261,12 +262,12 @@ func TestSessionPolicy_ResourceScoping(t *testing.T) {
 	}
 }
 
-func TestSessionNameForRun_Sanitizes(t *testing.T) {
-	if got := sessionNameForRun("abc/def ghi"); got != "tf-abc-def-ghi" {
+func TestSessionNameForConversation_Sanitizes(t *testing.T) {
+	if got := sessionNameForConversation("abc/def ghi"); got != "tf-abc-def-ghi" {
 		t.Errorf("got %q", got)
 	}
 	long := strings.Repeat("x", 100)
-	if got := sessionNameForRun(long); len(got) != 64 {
+	if got := sessionNameForConversation(long); len(got) != 64 {
 		t.Errorf("session name not clamped to 64: len=%d", len(got))
 	}
 }

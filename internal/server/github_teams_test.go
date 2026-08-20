@@ -53,7 +53,7 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -64,7 +64,7 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups?include_membership=true", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups?include_membership=true", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -102,7 +102,7 @@ func TestGitHubGroupCandidates_CredentialsMissing(t *testing.T) {
 	// no GitHub credential — the org PAT is absent and there's no App.
 	seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -140,7 +140,7 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -151,7 +151,7 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -175,7 +175,7 @@ func TestGitHubGroupCandidates_NoReposNotMissing(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	rec := doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups", nil)
+	rec := doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET github-groups = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -228,7 +228,7 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 
 	// Org base URL + PAT both point at the stub so ghResolver.ClientFor
 	// resolves a tier-3 PAT-borrow client aimed at our GraphQL endpoint.
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
@@ -243,7 +243,7 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	if !ok {
 		t.Fatalf("resolveGitHubHost(%q) failed", ts.URL)
 	}
-	if err := srv.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "connect_oauth"); err != nil {
+	if err := srv.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "connect_oauth"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 	// A configured repo under owner "acme" is the org the fan-out queries.
@@ -274,7 +274,7 @@ func TestUserTeamsMulti_NoLoginIsEmpty(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	ctx := context.Background()
-	if err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"}); err != nil {
+	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"}); err != nil {
 		t.Fatalf("set org github base: %v", err)
 	}
 	seedConfiguredRepo(t, srv, "acme", "api")
@@ -298,7 +298,7 @@ func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 	srv := newTestServer(t)
 
 	// The wizard sends the checked teams as github-groups via PUT (replace-set).
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/github-groups", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{
 		"groups": []map[string]string{
 			{"org_login": "acme", "team_slug": "platform"},
 			{"org_login": "acme", "team_slug": "security"},
@@ -309,7 +309,7 @@ func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 	}
 
 	// Read-back: the stored mappings round-trip.
-	rec = doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups", nil)
+	rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("github-groups GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -325,13 +325,13 @@ func TestUserTeams_WizardWriteReadBack(t *testing.T) {
 
 	// Idempotent re-run with a subset replaces the set (replace-within-team
 	// semantics), proving Skip-then-configure-later and re-onboarding are safe.
-	rec = doJSON(t, srv, http.MethodPut, "/api/settings/team/default/github-groups", map[string]any{
+	rec = doJSON(t, srv, http.MethodPut, "/api/teams/default/github-groups", map[string]any{
 		"groups": []map[string]string{{"org_login": "acme", "team_slug": "platform"}},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("github-groups replace PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	rec = doJSON(t, srv, http.MethodGet, "/api/settings/team/default/github-groups", nil)
+	rec = doJSON(t, srv, http.MethodGet, "/api/teams/default/github-groups", nil)
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode groups after replace: %v", err)
 	}

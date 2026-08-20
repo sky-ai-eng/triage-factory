@@ -28,10 +28,11 @@ func curatorTestSetup(t *testing.T) (*Server, *curator.Curator, string) {
 	srv.SetCurator(c)
 	t.Cleanup(c.Shutdown)
 
-	projectID, err := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Curator HTTP test"})
+	created, err := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Curator HTTP test"})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	projectID := created.ID
 	return srv, c, projectID
 }
 
@@ -254,7 +255,7 @@ func TestHandleCuratorCancel_DeletesQueuedTurn(t *testing.T) {
 
 	var msgs []domain.Message
 	if err := srv.tx.SyntheticClaimsWithTx(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(ts db.TxStores) error {
-		ms, err := ts.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, convID)
+		ms, err := ts.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, convID, 0)
 		msgs = ms
 		return err
 	}); err != nil {
@@ -310,17 +311,19 @@ func TestHandleCuratorReset_409OnRunningTurn(t *testing.T) {
 	}
 }
 
-func TestHandleCuratorSend_503WhenRuntimeUnset(t *testing.T) {
-	// SetCurator never called → handler returns 503 rather than nil-
-	// dereferencing. Real binaries always wire it via main.go, but
+func TestHandleCuratorSend_NotConfiguredWhenRuntimeUnset(t *testing.T) {
+	// SetCurator never called → handler answers 409 NOT_CONFIGURED rather than
+	// nil-dereferencing: a deployment that runs no curator is configuration,
+	// not a transient outage. Real binaries always wire it via main.go, but
 	// we keep the guard so a future test or a partial init can't
 	// crash the server.
 	srv := newTestServer(t)
-	projectID, _ := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-curator"})
+	created, _ := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-curator"})
+	projectID := created.ID
 
 	rr := doJSON(t, srv, http.MethodPost, "/api/projects/"+projectID+"/curator/messages", map[string]string{"content": "hi"})
-	if rr.Code != http.StatusServiceUnavailable {
-		t.Errorf("status = %d, want 503", rr.Code)
+	if rr.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rr.Code)
 	}
 }
 
@@ -331,9 +334,9 @@ func TestHandleCuratorSend_503WhenRuntimeUnset(t *testing.T) {
 // asserts the identity rather than let a mis-claim pass silently.
 func claimCuratorTurn(t *testing.T, srv *Server, convID string) string {
 	t.Helper()
-	got, err := srv.allStores.RunQueue.ClaimNextRun(t.Context(), "test-exec", 1, db.ClaimPlacement{})
+	got, err := srv.allStores.ConversationQueue.ClaimNextConversation(t.Context(), "test-exec", 1, db.ClaimPlacement{})
 	if err != nil || got == nil || got.ID != convID {
-		t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+		t.Fatalf("ClaimNextConversation = (%+v, %v), want a claim on conversation %s", got, err, convID)
 	}
 	return got.ClaimID
 }

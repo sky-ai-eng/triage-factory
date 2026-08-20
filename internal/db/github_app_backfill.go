@@ -45,9 +45,10 @@ func githubAPIBase(base string) string {
 // DiscoverAppInstallations reads the org's App PEM via SecretStore.GetSystem
 // (claims-free, for the system/background backfill caller), mints an
 // app-level JWT, and lists the App's installations through
-// GET {apiBase}/app/installations. The returned rows carry orgID and are
-// ready to hand to GitHubAppsStore.UpsertInstallation — the per-org App
-// owns every installation it reports (v1 is per-org Apps only).
+// GET {apiBase}/app/installations. The returned rows carry orgID and the
+// normalized baseURL they were listed from, and are ready to hand to
+// GitHubAppsStore.UpsertInstallation — the per-org App owns every installation
+// it reports (v1 is per-org Apps only).
 //
 // Shared by both store backends so the JWT-mint + HTTP-list + secret-read
 // logic lives in one place; each backend supplies the DB read of
@@ -84,14 +85,42 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 		return nil, err
 	}
 
+	// One host for the whole listing: these installations were just enumerated
+	// through this org's App key against this base URL, so the deployment they
+	// live on is the one we asked, resolved to the same string the identity
+	// rows for that GitHub are keyed under.
+	host := EffectiveGitHubHost(baseURL)
+
 	out := make([]domain.OrgGitHubAppInstallation, 0, len(raw))
 	for _, in := range raw {
+		// A zero account id means GitHub's payload omitted it; it maps to ""
+		// (and then to a SQL NULL), so the row keeps whatever id it already
+		// had rather than being blanked by a partial answer.
+		var accountID string
+		if in.AccountID != 0 {
+			accountID = strconv.FormatInt(in.AccountID, 10)
+		}
 		out = append(out, domain.OrgGitHubAppInstallation{
 			InstallationID: strconv.FormatInt(in.ID, 10),
 			OrgID:          orgID,
 			AccountType:    in.AccountType,
+			AccountID:      accountID,
 			AccountLogin:   in.AccountLogin,
+			GitHubHost:     host,
 			InstalledAt:    in.CreatedAt,
+			// Suspension rides in from the listing, so the reconcile converges a
+			// suspend (or unsuspend) whose webhook this deployment never saw —
+			// GitHub does not re-deliver one, and local mode has no delivery path
+			// at all. A GitHub that reports no suspension is asserting there is
+			// none, which is why the upsert writes these verbatim instead of
+			// preserving what the row already had.
+			SuspendedAt: in.SuspendedAt,
+			SuspendedBy: in.SuspendedBy,
+			// The listing is the only source that reports the grant's width on
+			// every pass. A narrowing fires installation_repositories, which
+			// GitHub never re-delivers and local mode never receives, so
+			// "selected" learned here is how the mirror converges at all.
+			RepositorySelection: in.RepositorySelection,
 		})
 	}
 	return out, nil

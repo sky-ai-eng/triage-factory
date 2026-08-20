@@ -90,7 +90,7 @@ func TestEntityStore_SQLite_ListActiveJiraTeamScoped(t *testing.T) {
 
 func newSQLiteForEntityTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -107,13 +107,14 @@ func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 	return dbtest.EntitySeeder{
 		Project: func(t *testing.T, name string) string {
 			t.Helper()
-			pid, err := sqlitestore.New(conn).Projects.Create(
+			created, err := sqlitestore.New(conn).Projects.Create(
 				t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 				domain.Project{Name: name},
 			)
 			if err != nil {
 				t.Fatalf("seed project %s: %v", name, err)
 			}
+			pid := created.ID
 			return pid
 		},
 		Team: func(t *testing.T, name string) string {

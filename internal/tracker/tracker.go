@@ -65,9 +65,9 @@ const (
 type Tracker struct {
 	database *sql.DB
 	pub      Publisher
-	tasks    db.TaskStore   // tracker creates review_requested tasks during discovery + reconciles stale ones
-	entities db.EntityStore // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
-	repos    db.RepoStore   // per-repo conditional-request (ETag) state for GitHub open-PR discovery
+	tasks    db.TaskStore       // tracker creates review_requested tasks during discovery + reconciles stale ones
+	entities db.EntityStore     // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
+	repos    db.RepositoryStore // per-repo conditional-request (ETag) state for GitHub open-PR discovery
 	// queue is the durable outbox, held directly rather than reached
 	// through pub because the diff arms need the ONE write that carries
 	// both halves of a cycle's result: the snapshot advance and the
@@ -92,7 +92,7 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepoStore, queue db.EventQueueStore, orgID string) *Tracker {
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, queue db.EventQueueStore, orgID string) *Tracker {
 	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, queue: queue, orgID: orgID}
 }
 
@@ -287,7 +287,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
 			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					trackerLog.Error("mark entity closed on discovery failed", "source_id", sid, "error", err)
 				}
 			} else if snap.Author != username {
@@ -298,7 +298,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				// that existed before we started watching — the reviewer would
 				// only see them if someone re-requested. Synthesizing here lands
 				// existing review-requests in the queue on first connect.
-				// Mirrors the Jira carry-over queue path in handleJiraStockPost.
+				// Mirrors the Jira carry-over queue path in handleJiraStockQueue.
 				//
 				// Self-authored PRs are skipped: GitHub forbids self-requests,
 				// so the only way a match fires here is via a team the user is
@@ -318,7 +318,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		} else {
 			// Update title if changed.
 			if entity.Title != snap.Title {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
 			}
 			// Reactivate if a previously-closed entity reappears as open
 			// (e.g., reopened PR).
@@ -457,7 +457,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 						EntityID:     &eid,
 						DedupKey:     task.DedupKey,
 						MetadataJSON: string(meta),
-						OccurredAt:   time.Now(),
+						OccurredAt:   time.Now().UTC(),
 					})
 					trackerLog.Info("reconciled: emitting review_request_removed for skipped entity", "dedup_key", task.DedupKey, "entity", e.ID)
 				}
@@ -547,10 +547,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				trackerLog.WarnContext(ctx, "seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
 			}
 			if item.entity.Title != newSnap.Title {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 			}
 			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
 					trackerLog.ErrorContext(ctx, "mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
 				}
 			}
@@ -587,7 +587,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// mirroring, so a failure here costs a stale string until the next
 		// cycle, never an event.
 		if item.entity.Title != newSnap.Title {
-			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 		}
 	}
 
@@ -757,7 +757,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 
 			etag := ""
 			if t.repos != nil {
-				if stored, _, err := t.repos.GetPullsPollStateSystem(ctx, t.orgID, repoFull); err != nil {
+				if stored, _, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Owner: owner, Repo: name}); err != nil {
 					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
 				} else {
 					etag = stored
@@ -913,7 +913,9 @@ func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
 	if t.repos == nil {
 		return
 	}
-	if err := t.repos.SetPullsPollStateSystem(ctx, t.orgID, repoFull, etag, time.Now()); err != nil {
+	// Ref-keyed: repoFull is one of the names ListTrackedNamesSystem handed
+	// this cycle, the same one that just went into the request path.
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(repoFull), etag, time.Now().UTC()); err != nil {
 		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
 	}
 }
@@ -1080,6 +1082,7 @@ func (r JiraRules) doneMembersForKey(issueKey string) []string {
 func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
+	discoveryEventsEmitted := 0
 	terminal := func(snap domain.JiraSnapshot) bool {
 		rule := projects.ForKey(extractProject(snap.Key))
 		if rule == nil {
@@ -1107,27 +1110,41 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		}
 		if created {
 			snapJSON, _ := json.Marshal(snap)
-			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			if state.DiscoveredAssignedToCurrentUser {
+				// An issue assigned to someone else is outside both
+				// discovery queries, so appearing in the assigned-to-current-user
+				// result can itself be the assignment transition. Commit that initial
+				// event with the first snapshot; seeding first would make Phase 3
+				// diff current-against-current and retire the transition unseen.
+				events := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, projects.doneMembersForKey(snap.Key))
+				if ok, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, events); err != nil {
+					trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
+				} else if !ok {
+					trackerLog.Warn("seed assigned jira snapshot CAS lost race, skipping", "source_id", snap.Key)
+				} else {
+					discoveryEventsEmitted += len(events)
+				}
+			} else if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 				trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
 			} else if !ok {
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
 			}
 			if state.Description != "" {
-				if err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
+				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
 					trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
 				}
 			}
 			if terminal(snap) {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					trackerLog.Error("mark entity closed on discovery failed", "source_id", snap.Key, "error", err)
 				}
 			}
 		} else {
 			if entity.Title != snap.Summary {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
 			}
 			if entity.Description != state.Description {
-				_ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
+				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
 			if !terminal(snap) && entity.State == "closed" {
@@ -1165,7 +1182,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	// Phase 3: Diff + emit events. Network-free, like the GitHub twin.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
-	eventsEmitted := 0
+	diffEventsEmitted := 0
 	staleReads := 0
 	for _, e := range entities {
 		newState, ok := refreshed[e.SourceID]
@@ -1192,10 +1209,10 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 				trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
 			}
 			if e.Title != newSnap.Summary {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 			}
 			if terminal(newSnap) {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
 					trackerLog.Error("mark jira stub closed failed", "source_id", e.SourceID, "error", err)
 				}
 			}
@@ -1252,12 +1269,12 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 			trackerLog.Warn("jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
 			continue
 		}
-		eventsEmitted += len(events)
+		diffEventsEmitted += len(events)
 
 		// Best-effort, outside the transaction: display-only mirroring, so
 		// a failure costs a stale title until the next cycle, never an event.
 		if e.Title != newSnap.Summary {
-			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 		}
 		// Description intentionally not updated here — batchFetchJira
 		// excludes the description field to save bandwidth, so newState's
@@ -1267,7 +1284,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// only place that actually carries the field in the response.
 	}
 
-	diffSpan.SetAttributes(telemetry.Count(eventsEmitted))
+	diffSpan.SetAttributes(telemetry.Count(diffEventsEmitted))
 	if staleReads > 0 {
 		// A disposition rather than an error status: the cycle worked, it
 		// declined to act on part of its input. Without it a cycle that
@@ -1275,6 +1292,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		diffSpan.SetAttributes(telemetry.Disposition("stale_read_suppressed"))
 	}
 	diffSpan.End()
+	eventsEmitted := discoveryEventsEmitted + diffEventsEmitted
 
 	// Phase 4: confirm the long-unanswered keys against the issue endpoint.
 	// Emits unreachable events, which the router turns into entity/task
@@ -1378,6 +1396,9 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 	defer span.End()
 
 	emitted := 0
+	confirmedWithoutSearch := 0
+	rekeyed := 0
+	merged := 0
 	for i, e := range candidates {
 		if i >= jiraUnreachableProbeBudget {
 			span.SetAttributes(telemetry.Outcome("partial"))
@@ -1389,17 +1410,39 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 			return emitted
 		}
 
-		_, err := client.GetIssue(ctx, e.SourceID)
+		issue, err := client.GetIssue(ctx, e.SourceID)
 		switch {
 		case err == nil:
+			if issue.Key != "" && issue.Key != e.SourceID {
+				survivorID, wasMerged, rekeyErr := t.entities.RekeyOrMergeSystem(ctx, orgID, e.ID, issue.Key)
+				if rekeyErr != nil {
+					trackerLog.WarnContext(ctx, "repairing moved jira issue key failed; entity stays a confirmation candidate",
+						"old_source_id", e.SourceID, "new_source_id", issue.Key, "entity_id", e.ID, "error", rekeyErr)
+					continue
+				}
+				if wasMerged {
+					merged++
+				} else {
+					rekeyed++
+				}
+				// Deliberately silent in the event stream: Jira changed the
+				// issue's address, not its work state. A plain re-key also clears
+				// project classification in the store, since a cross-project move
+				// invalidates the old classification. We follow the current key
+				// even when its destination project is not configured; entities
+				// are durable and leaving the discovery set is not retirement.
+				trackerLog.InfoContext(ctx, "followed moved jira issue to its current key",
+					"old_source_id", e.SourceID, "new_source_id", issue.Key,
+					"entity_id", e.ID, "survivor_entity_id", survivorID, "merged", wasMerged)
+				continue
+			}
 			// Confirmed present, and yet the refresh didn't return it. The
 			// entity is being skipped every cycle by something other than
 			// the key being unresolvable — an unindexed or archived issue, or one
 			// the credential can no longer see through search. Nothing here
 			// can repair that, but an entity silently frozen is exactly what
 			// this pass exists to stop being invisible.
-			trackerLog.WarnContext(ctx, "jira issue resolves but no search returned it; entity is tracked and not being diffed",
-				"source_id", e.SourceID, "entity_id", e.ID)
+			confirmedWithoutSearch++
 			// Stamp the read. Candidates are selected by how stale this
 			// column is and drawn oldest-first against a per-cycle budget,
 			// so an entity that will confirm present on every future pass
@@ -1420,6 +1463,13 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 			trackerLog.WarnContext(ctx, "jira reachability confirmation failed; entity left tracked",
 				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
 		}
+	}
+	if confirmedWithoutSearch > 0 {
+		trackerLog.WarnContext(ctx, "jira issues resolve but no search returned them; entities remain tracked and undiffed",
+			"count", confirmedWithoutSearch)
+	}
+	if rekeyed+merged > 0 {
+		span.SetAttributes(telemetry.Disposition("issue_keys_repaired"), telemetry.Attempt(rekeyed+merged))
 	}
 	if emitted > 0 {
 		// A disposition rather than a second Count — Count is one key, and the
@@ -1532,8 +1582,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	defer span.End()
 
 	type queryWithDone struct {
-		jql         string
-		doneMembers []string // for subtask classification on issues returned by this query
+		jql                   string
+		doneMembers           []string // for subtask classification on issues returned by this query
+		assignedToCurrentUser bool     // this query's arrival is itself an assignment signal
 	}
 	var queries []queryWithDone
 
@@ -1571,7 +1622,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
 		}
-		queries = append(queries, queryWithDone{jql: assignedJQL, doneMembers: allDone})
+		queries = append(queries, queryWithDone{
+			jql: assignedJQL, doneMembers: allDone, assignedToCurrentUser: true,
+		})
 	}
 
 	seen := map[string]bool{}
@@ -1598,7 +1651,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		for _, issue := range issues {
 			if !seen[issue.Key] {
 				seen[issue.Key] = true
-				all = append(all, issueToState(issue, baseURL, q.doneMembers))
+				state := issueToState(issue, baseURL, q.doneMembers)
+				state.DiscoveredAssignedToCurrentUser = q.assignedToCurrentUser
+				all = append(all, state)
 			}
 		}
 	}
@@ -1696,8 +1751,9 @@ func missingJiraKeys(keys []string, results map[string]jiraIssueState) []string 
 // the persisted snapshot_json stays small — diff reads don't drag multi-KB
 // issue bodies through every poll.
 type jiraIssueState struct {
-	Snap        domain.JiraSnapshot
-	Description string
+	Snap                            domain.JiraSnapshot
+	Description                     string
+	DiscoveredAssignedToCurrentUser bool
 }
 
 // issueToState converts a Jira API Issue into the diff-scope snapshot plus

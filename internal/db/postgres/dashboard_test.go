@@ -38,13 +38,13 @@ func TestDashboardStore_Postgres(t *testing.T) {
 }
 
 // TestDashboardStore_Postgres_OnlyCountsRequestingUser is the org-wide
-// regression guard: the dashboard query reads every GitHub
-// snapshot in the org (entities are org-wide, no team column), and the
-// per-user filtering happens in Go on snap.Author / review author. Once
-// org-wide polling lands, many other users' PRs share the org; this pins
-// that another user's PRs and reviews never bleed into the requesting
-// user's stats or PR list. If a refactor ever drops the username filter
-// (e.g. pushing it into SQL incorrectly, or removing it), this fails.
+// regression guard: entities are org-wide (no team column), so both dashboard
+// reads see every other user's PRs — PRs filters the author in SQL, Stats
+// filters in Go because its review-given half genuinely has to read other
+// people's PRs. Once org-wide polling lands, many users' PRs share the org;
+// this pins that another user's PRs and reviews never bleed into the
+// requesting user's stats or PR list. If a refactor ever drops the username
+// filter (e.g. pushing it into SQL incorrectly, or removing it), this fails.
 func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -67,7 +67,7 @@ func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 	seedPgPRSnapshot(t, h.AdminDB, orgID, domain.PRSnapshot{Number: 4, Author: "other-user", State: "OPEN", Repo: "owner/repo"})
 	seedPgPRSnapshot(t, h.AdminDB, orgID, domain.PRSnapshot{Number: 5, Author: "third-user", State: "MERGED", Merged: true, MergedAt: now, Repo: "owner/repo"})
 
-	stats, err := stores.Dashboard.Stats(ctx, orgID, me, 30)
+	stats, err := stores.Dashboard.Stats(ctx, orgID, me, time.Now().AddDate(0, 0, -30))
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -81,12 +81,12 @@ func TestDashboardStore_Postgres_OnlyCountsRequestingUser(t *testing.T) {
 		t.Errorf("ReviewsGiven = %d, want 1 (my review on other-user's PR)", stats.ReviewsGiven)
 	}
 
-	prs, err := stores.Dashboard.PRs(ctx, orgID, me)
+	prs, total, err := stores.Dashboard.PRs(ctx, orgID, me, db.ListOpts{})
 	if err != nil {
 		t.Fatalf("PRs: %v", err)
 	}
-	if len(prs) != 2 {
-		t.Fatalf("len(prs) = %d, want 2 (only my PRs, even with 3 other users' PRs in the org)", len(prs))
+	if len(prs) != 2 || total != 2 {
+		t.Fatalf("len(prs) = %d, total = %d, want 2/2 (only my PRs, even with 3 other users' PRs in the org)", len(prs), total)
 	}
 	for _, p := range prs {
 		if p.Author != me {

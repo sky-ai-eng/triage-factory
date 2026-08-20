@@ -58,11 +58,12 @@ func (b *zipExtractionBudget) reserve(zf *zip.File) (int64, error) {
 	}
 	if declared > b.remaining {
 		return 0, fmt.Errorf(
-			"bundle extraction exceeds %d-byte total limit (next entry %s is %d bytes, %d bytes remain)",
+			"bundle extraction exceeds %d-byte total limit (next entry %s is %d bytes, %d bytes remain): %w",
 			b.totalLimit,
 			zf.Name,
 			declared,
 			b.remaining,
+			ErrBadBundle,
 		)
 	}
 	b.remaining -= declared
@@ -106,11 +107,11 @@ func Import(
 	probe GitHubProbe,
 ) (*domain.Project, []ImportWarning, error) {
 	if size <= 0 {
-		return nil, nil, errors.New("bundle is empty")
+		return nil, nil, fmt.Errorf("bundle is empty: %w", ErrBadBundle)
 	}
 	zr, err := zip.NewReader(readerAt, size)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open bundle zip: %w", err)
+		return nil, nil, fmt.Errorf("open bundle zip (%v): %w", err, ErrBadBundle)
 	}
 	entries, err := indexZipEntries(zr.File)
 	if err != nil {
@@ -148,13 +149,13 @@ func Import(
 	hasSession := len(sessionEntries) > 0
 	if hasSession {
 		if _, ok := entries[sessionTranscriptPath]; !ok {
-			return nil, nil, fmt.Errorf("bundle session is missing %s", sessionTranscriptPath)
+			return nil, nil, fmt.Errorf("bundle session is missing %s: %w", sessionTranscriptPath, ErrBadBundle)
 		}
 		if manifest.Session == nil {
-			return nil, nil, errors.New("bundle session exists but manifest.session is missing")
+			return nil, nil, fmt.Errorf("bundle session exists but manifest.session is missing: %w", ErrBadBundle)
 		}
 		if strings.TrimSpace(manifest.Session.CuratorSessionID) == "" || strings.TrimSpace(manifest.Session.ResolvedCwd) == "" {
-			return nil, nil, errors.New("manifest.session requires curator_session_id and resolved_cwd")
+			return nil, nil, fmt.Errorf("manifest.session requires curator_session_id and resolved_cwd: %w", ErrBadBundle)
 		}
 	}
 
@@ -256,7 +257,7 @@ func Import(
 	// any partial conversation state) so the import stays all-or-nothing
 	// from the caller's perspective.
 	if bundleConv != nil {
-		if err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
+		if _, err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
 			if delErr := txr.WithTx(context.WithoutCancel(ctx), orgID, userID, func(tx db.TxStores) error {
 				return tx.Projects.Delete(ctx, orgID, newProjectID)
 			}); delErr != nil {
@@ -322,14 +323,17 @@ func readZipFileLimited(zf *zip.File, maxBytes int64) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", zf.Name, err)
 	}
 	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("%s exceeds %d-byte limit", zf.Name, maxBytes)
+		return nil, fmt.Errorf("%s exceeds %d-byte limit: %w", zf.Name, maxBytes, ErrBadBundle)
 	}
 	return body, nil
 }
 
 func ensureUniqueProjectName(ctx context.Context, projects db.ProjectStore, orgID, incoming string) error {
 	incoming = strings.TrimSpace(incoming)
-	rows, err := projects.List(ctx, orgID)
+	// Unwindowed (ListOpts zero Limit): a uniqueness check must see every
+	// project, not a page of them — a duplicate on page two is still a
+	// duplicate.
+	rows, _, err := projects.List(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return fmt.Errorf("list projects: %w", err)
 	}
@@ -459,10 +463,10 @@ func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, u
 //     (TracksRepoSystem) drops the importing team's handlers for the
 //     repo, so polled events from it never create tasks until the user
 //     re-saves the repo selection. Written via ReplaceForTeam (current
-//     set ∪ pinned), which also reconciles the org-shared repo_profiles
+//     set ∪ pinned), which also reconciles the org-shared repositories
 //     cache — skeleton rows for newly-tracked repos — atomically inside
 //     the caller's WithTx.
-//   - repo_profiles.clone_url — pre-seeded with the URL discovered
+//   - repositories.clone_url — pre-seeded with the URL discovered
 //     during preflight (SeedCloneURL never clobbers an existing value),
 //     so the first poll doesn't have to re-resolve it.
 //
@@ -488,7 +492,7 @@ func trackImportedRepos(ctx context.Context, tx db.TxStores, orgID, teamID strin
 	for _, slug := range pinned {
 		owner, repo, ok := splitOwnerRepo(slug)
 		if !ok {
-			return fmt.Errorf("invalid pinned repo slug %q", slug)
+			return fmt.Errorf("invalid pinned repo slug %q: %w", slug, ErrBadBundle)
 		}
 		key := strings.ToLower(owner) + "/" + strings.ToLower(repo)
 		if _, dup := seen[key]; dup {
@@ -500,15 +504,38 @@ func trackImportedRepos(ctx context.Context, tx db.TxStores, orgID, teamID strin
 	}
 	if added {
 		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, merged); err != nil {
-			return fmt.Errorf("track imported repos (requires team-admin in multi mode): %w", err)
+			// The tracked set is org-wide state, so adding to it is an admin
+			// write (CLAUDE.md's write-scoping rule). A non-admin importer is
+			// refused by RLS — the caller's authorization, not a server fault.
+			if isPermissionDenial(err) {
+				return fmt.Errorf("tracking the bundle's pinned repos requires team-admin on this team: %w", ErrPermissionDenied)
+			}
+			return fmt.Errorf("track imported repos: %w", err)
 		}
 	}
+	// The bundle names its repos by slug, so this is the edge that resolves
+	// one: ReplaceForTeam above has just brought a registry row into being for
+	// every pinned entry, and the seed is keyed on that row's id. A name with
+	// no row is a repo the caller was refused tracking on, or one dropped
+	// between the two statements — either way there is nothing to warm, and
+	// the import carries on rather than failing over a cache hint.
 	for _, slug := range pinned {
 		cloneURL := cloneURLs[slug]
 		if cloneURL == "" {
 			continue
 		}
-		if err := tx.Repos.SeedCloneURL(ctx, orgID, slug, cloneURL); err != nil {
+		owner, repo, _ := splitOwnerRepo(slug) // validated in the loop above
+		row, err := tx.Repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		if err != nil {
+			return fmt.Errorf("resolve pinned repo %s: %w", slug, err)
+		}
+		if row == nil {
+			continue
+		}
+		// The seeded row is not spent here: the import's answer is the project
+		// it created, and whether this warm-cache hint landed or was outranked
+		// by a URL already on file changes nothing the caller can see.
+		if _, err := tx.Repos.SeedCloneURL(ctx, orgID, row.ID, cloneURL); err != nil {
 			return fmt.Errorf("seed clone url for %s: %w", slug, err)
 		}
 	}
@@ -714,14 +741,14 @@ func indexZipEntries(files []*zip.File) (map[string]*zip.File, error) {
 		}
 		name := strings.TrimPrefix(zf.Name, "/")
 		if strings.Contains(name, "\\") {
-			return nil, fmt.Errorf("invalid bundle path %q", zf.Name)
+			return nil, fmt.Errorf("invalid bundle path %q: %w", zf.Name, ErrBadBundle)
 		}
 		clean := path.Clean(name)
 		if clean == "." || strings.HasPrefix(clean, "../") {
-			return nil, fmt.Errorf("invalid bundle path %q", zf.Name)
+			return nil, fmt.Errorf("invalid bundle path %q: %w", zf.Name, ErrBadBundle)
 		}
 		if _, exists := out[clean]; exists {
-			return nil, fmt.Errorf("duplicate bundle path %q", clean)
+			return nil, fmt.Errorf("duplicate bundle path %q: %w", clean, ErrBadBundle)
 		}
 		out[clean] = zf
 	}
@@ -745,15 +772,15 @@ func listEntriesWithPrefix(entries map[string]*zip.File, prefix string) ([]named
 
 func safeBundleRel(name, prefix string) (string, error) {
 	if !strings.HasPrefix(name, prefix) {
-		return "", fmt.Errorf("bundle path %q does not start with %q", name, prefix)
+		return "", fmt.Errorf("bundle path %q does not start with %q: %w", name, prefix, ErrBadBundle)
 	}
 	rel := strings.TrimPrefix(name, prefix)
 	rel = path.Clean(rel)
 	if rel == "." || rel == "" {
-		return "", fmt.Errorf("bundle path %q has no relative component", name)
+		return "", fmt.Errorf("bundle path %q has no relative component: %w", name, ErrBadBundle)
 	}
 	if strings.HasPrefix(rel, "../") {
-		return "", fmt.Errorf("bundle path %q escapes its prefix", name)
+		return "", fmt.Errorf("bundle path %q escapes its prefix: %w", name, ErrBadBundle)
 	}
 	return rel, nil
 }
@@ -862,7 +889,7 @@ func decodeZipJSONLines[T any](
 		}
 		rows++
 		if maxRows > 0 && rows > maxRows {
-			return fmt.Errorf("%s exceeds %d-row limit", zf.Name, maxRows)
+			return fmt.Errorf("%s exceeds %d-row limit: %w", zf.Name, maxRows, ErrBadBundle)
 		}
 		if onRow != nil {
 			if err := onRow(item); err != nil {
@@ -876,10 +903,10 @@ func decodeZipJSONLines[T any](
 func zipEntryDeclaredSize(zf *zip.File, maxBytes int64) (int64, error) {
 	declared := zf.UncompressedSize64
 	if maxBytes > 0 && declared > uint64(maxBytes) {
-		return 0, fmt.Errorf("%s exceeds %d-byte limit", zf.Name, maxBytes)
+		return 0, fmt.Errorf("%s exceeds %d-byte limit: %w", zf.Name, maxBytes, ErrBadBundle)
 	}
 	if declared > uint64(math.MaxInt64-1) {
-		return 0, fmt.Errorf("%s declared uncompressed size is too large", zf.Name)
+		return 0, fmt.Errorf("%s declared uncompressed size is too large: %w", zf.Name, ErrBadBundle)
 	}
 	return int64(declared), nil
 }

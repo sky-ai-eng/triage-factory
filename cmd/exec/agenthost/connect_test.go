@@ -18,7 +18,7 @@ func serveSocket(t *testing.T, stores db.Stores, path string) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := NewServer(stores, RunInfo{OrgID: runmode.LocalDefaultOrgID, RunID: "run-connect"}, nil)
+	srv := NewServer(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-connect"}, nil)
 	go func() { _ = srv.Serve(listener) }()
 	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 }
@@ -57,7 +57,7 @@ func TestDialSandbox(t *testing.T) {
 
 	t.Run("live socket → IPC", func(t *testing.T) {
 		stores, conn := newTestDB(t)
-		seedConversation(t, stores, conn, "run-connect", runmode.LocalDefaultUserID, "manual")
+		seedConversation(t, stores, conn, "conv-connect", runmode.LocalDefaultUserID, "manual")
 		sock := tempSocket(t)
 		serveSocket(t, stores, sock)
 		c, err := dialSandbox(context.Background(), sock)
@@ -88,8 +88,8 @@ func TestDialSandbox(t *testing.T) {
 // client serves calls in-process.
 func TestNewLocalFromEnv(t *testing.T) {
 	stores, conn := newTestDB(t)
-	seedConversation(t, stores, conn, "run-local-env", runmode.LocalDefaultUserID, "manual")
-	t.Setenv("TRIAGE_FACTORY_CONVERSATION_ID", "run-local-env")
+	seedConversation(t, stores, conn, "conv-local-env", runmode.LocalDefaultUserID, "manual")
+	t.Setenv("TRIAGE_FACTORY_CONVERSATION_ID", "conv-local-env")
 
 	c, err := NewLocalFromEnv(context.Background(), stores)
 	if err != nil {
@@ -99,12 +99,12 @@ func TestNewLocalFromEnv(t *testing.T) {
 	if _, ok := c.(*LocalClient); !ok {
 		t.Fatalf("got %T, want *LocalClient", c)
 	}
-	got, err := c.LookupRun(context.Background())
+	got, err := c.LookupConversation(context.Background())
 	if err != nil {
-		t.Fatalf("LookupRun: %v", err)
+		t.Fatalf("LookupConversation: %v", err)
 	}
-	if got.RunID != "run-local-env" {
-		t.Errorf("RunID: got %q, want run-local-env", got.RunID)
+	if got.ConversationID != "conv-local-env" {
+		t.Errorf("ConversationID: got %q, want conv-local-env", got.ConversationID)
 	}
 }
 

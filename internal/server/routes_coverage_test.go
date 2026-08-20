@@ -24,7 +24,7 @@ var preAuthAllowlist = []string{
 	"POST /api/auth/logout",              // reads sid cookie directly so stale-session logout works
 	"GET /api/config",                    // AuthGate reads deployment_mode pre-login
 	"GET /api/health",                    // liveness probe for platform healthchecks (Fly, compose, k8s)
-	"POST /api/webhooks/github/{org_id}", // GitHub App webhook receiver; pre-auth, verified by HMAC signature in-handler
+	"POST /api/webhooks/github/{org_id}", // GitHub App webhook receiver; pre-auth, verified by HMAC signature in-handler, IP-rate-limited at the signed-webhook tier
 	"GET /api/invites/preview",           // invite-token preview; recipient not yet authenticated, admin-pool, token is the bearer secret
 	// POST /api/sso/discover is now an ee/sso route (mounted via the extension
 	// seam, pre-auth + IP-rate-limited there), so it's no longer a core routes()

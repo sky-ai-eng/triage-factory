@@ -90,8 +90,8 @@ const TrustedGHInjectorCertDestination = "/run/tf-gh-injector.crt"
 // WriteInjectorCert → CertPathFor) before the launch RPC — so the broker
 // VALIDATES a launch's mount source against this derivation. A drift test
 // cross-checks it agrees with agenthost.CertPathFor.
-func TrustedGHInjectorCertPath(runID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+"-gh-injector.crt")
+func TrustedGHInjectorCertPath(conversationID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+"-gh-injector.crt")
 }
 
 // TrustedToolHostBinaryDestination is the fixed in-sandbox path the
@@ -130,8 +130,8 @@ const TrustedAgentHostSocketDestination = "/run/tf.sock"
 // file — cmd/exec/agenthost.Start does, host-side, before the launch RPC —
 // so the broker VALIDATES a launch's mount source against this derivation
 // rather than resolving/overriding it.
-func TrustedAgentHostSocketPath(runID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeRunIDForSocket(runID)+".sock")
+func TrustedAgentHostSocketPath(conversationID string) string {
+	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+".sock")
 }
 
 // This file is the load-bearing narrowing of the broker's attack surface:
@@ -422,11 +422,12 @@ func cidrsOverlap(a, b *net.IPNet) bool {
 
 // --- id / netns / argv validation ---
 
-// validateRunID rejects an id (run id or container id) that is empty,
-// over-long, or carries path structure. These ids seed the bundle dir
-// prefix, the netns name, and the cgroup name; a path-shaped id must never
-// be able to redirect any of those.
-func validateRunID(kind, id string) error {
+// validateOpaqueID rejects an id that is empty, over-long, or carries path
+// structure. It takes no view on which id it is handed — callers pass a
+// conversation id, a container id, or a memory namespace, and name it in
+// kind. These ids seed the bundle dir prefix, the netns name, and the cgroup
+// name; a path-shaped id must never be able to redirect any of those.
+func validateOpaqueID(kind, id string) error {
 	if id == "" {
 		return fmt.Errorf("sandbox: %s is required", kind)
 	}
@@ -446,7 +447,7 @@ func validateRunID(kind, id string) error {
 //     tf-<hex>-<idx> naming — this alone stops the primary escalation, a
 //     compromised orchestrator pointing the sandbox at the host netns (or any
 //     non-sandbox namespace) to bypass the per-run egress allowlist.
-//   - Ownership: its name must equal NetnsNameForRun(runID, idx) — the name
+//   - Ownership: its name must equal NetnsNameForRun(conversationID, idx) — the name
 //     derived from THIS launch's run id. That binds the namespace to the run
 //     and rejects a sibling run's (still broker-created, so shape-valid)
 //     netns, which shape-only validation would wave through.
@@ -458,7 +459,7 @@ func validateRunID(kind, id string) error {
 // network state" evolution the launch params anticipate); it is bounded even
 // so, because such an orchestrator already holds every host-side credential a
 // reachable sibling gateway's proxy would mediate.
-func validateNetnsPath(runID, p string) error {
+func validateNetnsPath(conversationID, p string) error {
 	if p == "" {
 		return fmt.Errorf("sandbox: netns path is required")
 	}
@@ -470,7 +471,7 @@ func validateNetnsPath(runID, p string) error {
 	if !ok {
 		return fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
 	}
-	if name != NetnsNameForRun(runID, idx) {
+	if name != NetnsNameForRun(conversationID, idx) {
 		return fmt.Errorf("sandbox: netns %q is not the namespace created for this run", name)
 	}
 	return nil
@@ -512,11 +513,11 @@ func validateArgv(argv []string) error {
 // worktree/mount source outside this run's own scope, a forged netns, or a
 // denylisted egress CIDR.
 func ValidateLaunchParams(p LaunchParams) error {
-	if err := validateRunID("container id", p.ContainerID); err != nil {
+	if err := validateOpaqueID("container id", p.ContainerID); err != nil {
 		return err
 	}
-	if p.RunID != "" {
-		if err := validateRunID("run id", p.RunID); err != nil {
+	if p.ConversationID != "" {
+		if err := validateOpaqueID("run id", p.ConversationID); err != nil {
 			return err
 		}
 	}
@@ -524,7 +525,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// run-tree key — see worktreeScope. Optional, but path-shape it when present
 	// so it can't smuggle a traversal into the RunTreeRoot join.
 	if p.MemoryNamespace != "" {
-		if err := validateRunID("memory namespace", p.MemoryNamespace); err != nil {
+		if err := validateOpaqueID("memory namespace", p.MemoryNamespace); err != nil {
 			return err
 		}
 	}
@@ -557,10 +558,10 @@ func ValidateLaunchParams(p LaunchParams) error {
 	// own agenthost socket, or the same org scope as the worktree — see
 	// worktreeScope's doc for the internal-consistency ceiling this enforces
 	// (and does not: a credential-free broker cannot authenticate an org).
-	if err := validateWorktreeAndMounts(p.RunID, p.MemoryNamespace, p.Worktree, p.Mounts); err != nil {
+	if err := validateWorktreeAndMounts(p.ConversationID, p.MemoryNamespace, p.Worktree, p.Mounts); err != nil {
 		return err
 	}
-	if err := validateNetnsPath(p.RunID, p.NetnsPath); err != nil {
+	if err := validateNetnsPath(p.ConversationID, p.NetnsPath); err != nil {
 		return err
 	}
 	if err := validateEgressCIDR(p.ExtraEgressCIDR); err != nil {
@@ -594,7 +595,7 @@ func ValidateLaunchParams(p LaunchParams) error {
 // bounded even so: such an orchestrator already holds every host-side
 // credential a reachable sibling sidecar would mediate.
 func ValidateSidecarLaunchParams(p SidecarLaunchParams) error {
-	if err := validateRunID("sidecar container id", p.ContainerID); err != nil {
+	if err := validateOpaqueID("sidecar container id", p.ContainerID); err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.ContainerID, SidecarContainerIDSuffix) {
@@ -698,7 +699,7 @@ func realPath(p string) (string, error) {
 //   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
 //     runs materialize (or park) their whole working tree under
 //     os.TempDir()/triagefactory-runs/<key>. The key is one of the run's OWN
-//     two lifetime keys: its run id on the first launch (MakeRunRoot(runID)),
+//     two lifetime keys: its run id on the first launch (MakeRunRoot(conversationID)),
 //     or its memory namespace — the blueprint run id — after a cold rehydrate
 //     rebuilds the tree at RunRoot(namespace) (internal/delegate's snapshot
 //     restore). Either of this run's keys is accepted; a THIRD run's tree is
@@ -713,7 +714,7 @@ func realPath(p string) (string, error) {
 // Anything else — an arbitrary host path, a worktree one level too
 // shallow to name an org, a symlink-clean but out-of-tree path — is
 // rejected outright.
-func worktreeScope(runID, memoryNamespace, worktree string) (orgPrefix string, hasScope bool, err error) {
+func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix string, hasScope bool, err error) {
 	realWorktree, err := realPath(worktree)
 	if err != nil {
 		return "", false, fmt.Errorf("sandbox: worktree %q: %w", worktree, err)
@@ -722,7 +723,7 @@ func worktreeScope(runID, memoryNamespace, worktree string) (orgPrefix string, h
 	// its run id (first launch) or its memory namespace / blueprint run id (a
 	// tree rebuilt by a cold rehydrate). Matching either short-circuits with
 	// hasScope=false — no org scope for an org-blind tree.
-	for _, key := range [2]string{runID, memoryNamespace} {
+	for _, key := range [2]string{conversationID, memoryNamespace} {
 		if key == "" {
 			continue
 		}
@@ -772,7 +773,7 @@ func worktreeScope(runID, memoryNamespace, worktree string) (orgPrefix string, h
 //     (TrustedTFBinaryPath / TrustedGitHooksDir) — a caller's source for
 //     one of these destinations is never trusted.
 //   - TrustedAgentHostSocketDestination (per-run, fixed): the Source MUST
-//     equal TrustedAgentHostSocketPath(runID) — the broker didn't create
+//     equal TrustedAgentHostSocketPath(conversationID) — the broker didn't create
 //     this file (cmd/exec/agenthost did, host-side, before the launch
 //     RPC), so it validates rather than overrides.
 //   - Everything else (today: the curator's shared read-only repo
@@ -780,8 +781,8 @@ func worktreeScope(runID, memoryNamespace, worktree string) (orgPrefix string, h
 //     worktreeScope derived from Worktree. If Worktree carried no org
 //     scope (the delegated-task-run shape), NO mount may fall in this
 //     bucket at all — there is no legitimate one for that shape.
-func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts []Mount) error {
-	orgPrefix, hasScope, err := worktreeScope(runID, memoryNamespace, worktree)
+func validateWorktreeAndMounts(conversationID, memoryNamespace, worktree string, mounts []Mount) error {
+	orgPrefix, hasScope, err := worktreeScope(conversationID, memoryNamespace, worktree)
 	if err != nil {
 		return err
 	}
@@ -846,7 +847,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved git-hooks dir %q", m.Destination, m.Source, trusted)
 			}
 		case TrustedAgentHostSocketDestination:
-			trusted := TrustedAgentHostSocketPath(runID)
+			trusted := TrustedAgentHostSocketPath(conversationID)
 			realTrusted, rErr := realPath(trusted)
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve this run's agenthost socket: %w", rErr)
@@ -863,7 +864,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved gh binary path %q", m.Destination, m.Source, TrustedGHBinaryPath())
 			}
 		case TrustedGHInjectorCertDestination:
-			trusted := TrustedGHInjectorCertPath(runID)
+			trusted := TrustedGHInjectorCertPath(conversationID)
 			realTrusted, rErr := realPath(trusted)
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve this run's gh-injector cert: %w", rErr)
@@ -884,13 +885,13 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if err := requireReadOnlyMount(m); err != nil {
 				return err
 			}
-			if runID == "" {
+			if conversationID == "" {
 				return fmt.Errorf("sandbox: mount %q requires a run id to derive this run's own staging dir", m.Destination)
 			}
 			// Resolve the staging BASE and re-derive, rather than resolving the
 			// per-run path whole. Both forms reject a foreign source, but this one
 			// additionally pins the final component to a real directory: resolving
-			// <base>/<runID> whole would follow a symlink planted THERE — by the
+			// <base>/<conversationID> whole would follow a symlink planted THERE — by the
 			// same (compromised) orchestrator that owns the staging namespace —
 			// and then agree with the equally-followed source, waving through a
 			// read-only bind of anywhere on the host. With the base resolved
@@ -900,7 +901,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve step-skill staging base: %w", rErr)
 			}
-			trusted := filepath.Join(realBase, runID)
+			trusted := filepath.Join(realBase, conversationID)
 			if realSource != trusted {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own step-skill staging dir (want %q)", m.Destination, m.Source, trusted)
 			}
@@ -919,7 +920,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 				return fmt.Errorf("sandbox: mount %q source %q is not the broker-resolved tool host binary path %q", m.Destination, m.Source, TrustedToolHostBinaryPath())
 			}
 		case TrustedToolHostSocketDirDestination:
-			trusted := TrustedToolHostSocketDir(runID)
+			trusted := TrustedToolHostSocketDir(conversationID)
 			realTrusted, rErr := realPath(trusted)
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve this run's tool-host socket dir: %w", rErr)
@@ -937,7 +938,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if err := requireReadOnlyMount(m); err != nil {
 				return err
 			}
-			if runID == "" {
+			if conversationID == "" {
 				return fmt.Errorf("sandbox: mount %q requires a run id to derive this run's own staging dir", m.Destination)
 			}
 			// Resolve the staging BASE and re-derive, never the per-run path whole
@@ -949,7 +950,7 @@ func validateWorktreeAndMounts(runID, memoryNamespace, worktree string, mounts [
 			if rErr != nil {
 				return fmt.Errorf("sandbox: resolve entity-memory staging base: %w", rErr)
 			}
-			trustedMem := filepath.Join(realMemBase, runID)
+			trustedMem := filepath.Join(realMemBase, conversationID)
 			if realSource != trustedMem {
 				return fmt.Errorf("sandbox: mount %q source %q is not this run's own entity-memory staging dir (want %q)", m.Destination, m.Source, trustedMem)
 			}
@@ -1095,22 +1096,22 @@ func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// RunID only seeds the bundle dir's grep prefix + buildSpec's
+	// ConversationID only seeds the bundle dir's grep prefix + buildSpec's
 	// required-field check; the unique key is ContainerID. Fall back to it
-	// so an empty (but otherwise valid) RunID doesn't fail the build.
-	runID := p.RunID
-	if runID == "" {
-		runID = p.ContainerID
+	// so an empty (but otherwise valid) ConversationID doesn't fail the build.
+	conversationID := p.ConversationID
+	if conversationID == "" {
+		conversationID = p.ContainerID
 	}
 	cfg := Config{
-		RunID:         runID,
-		Worktree:      p.Worktree,
-		SDKDir:        p.SDKDir,
-		Argv:          p.Args,
-		Env:           envVarsToStrings(p.Env),
-		ExtraMounts:   p.Mounts,
-		MemoryLimitMB: p.MemoryLimitMB,
-		Rlimits:       p.Rlimits,
+		ConversationID: conversationID,
+		Worktree:       p.Worktree,
+		SDKDir:         p.SDKDir,
+		Argv:           p.Args,
+		Env:            envVarsToStrings(p.Env),
+		ExtraMounts:    p.Mounts,
+		MemoryLimitMB:  p.MemoryLimitMB,
+		Rlimits:        p.Rlimits,
 	}
 	spec, err := buildSpec(cfg, p.NetnsPath)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -30,13 +31,31 @@ const maxWebhookBody = 25 << 20
 // another org simply fails verification.
 //
 // installation.created → UpsertInstallation; installation.deleted →
-// MarkInstallationRemoved + the resolver's token-cache invalidate hook.
-// Every other (verified) event is published to the bus for downstream
-// content processing and acked with 204. Validation failures return 4xx
-// so GitHub doesn't retry a structurally-bad delivery indefinitely.
+// MarkInstallationRemoved; installation.suspend / .unsuspend →
+// SetInstallationSuspension. deleted and suspend both fire the resolver's
+// token-cache invalidate hook, since either leaves the installation's
+// already-minted tokens dead. Every other (verified) event is published to
+// the bus for downstream content processing and acked with 204. Validation
+// failures return 4xx so GitHub doesn't retry a structurally-bad delivery
+// indefinitely.
+//
+// Every refusal that depends on the org — no App, a PAT org, a bad signature —
+// is the same bare 401, so the reply carries no information about which orgs
+// exist or which of them have an App. The mount is rate-limited (routes(),
+// signed-webhook tier) because everything up to that 401 costs reads.
+//
+// A verified delivery is then deduped on its X-GitHub-Delivery GUID before any
+// of the work above runs — see the gate below, which sits inside the rate limit
+// and after verification so neither a flood nor a forgery can claim a GUID.
+// Structural validation stays ahead of the gate, so a delivery that is bad on
+// its face answers 4xx on every attempt rather than 4xx once and then 204 as a
+// "duplicate".
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	orgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(orgID); err != nil {
+		// A 404 here says nothing about any org: the path isn't an org id at
+		// all, so this is a statement about the URL rather than about what is
+		// behind it. Every org-dependent refusal below is a uniform 401.
 		http.NotFound(w, r)
 		return
 	}
@@ -63,95 +82,271 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the org's webhook secret via the system (claims-free) path —
-	// the handler has only a trusted org_id from the URL, no JWT.
-	app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "github-webhook", err)
-		return
-	}
-	if app == nil || app.WebhookSecretRef == "" {
-		// No registered App (or a hookless one) for this org — there's
-		// nothing to verify against, so this endpoint doesn't exist for it.
-		http.NotFound(w, r)
-		return
-	}
-	secret, err := s.secrets.GetSystem(r.Context(), orgID, app.WebhookSecretRef)
+	// Resolve the secret this delivery has to verify against — credential
+	// class, then registration row, then vault entry — behind the short-TTL
+	// per-org cache in github_webhook_secret.go, so a flood costs one
+	// resolution per org per window rather than three reads per request. An
+	// org with nothing to verify against resolves to "", which is answered
+	// below exactly as a bad signature is.
+	//
+	// TODO(TFAC-802): those reads still happen BEFORE verification. Per-org
+	// webhook URLs force the order — the secret is reachable only through the
+	// org, so org → secret → verify is the only one available. The
+	// shared-App receiver inverts it, resolving a deployment-level secret
+	// before any org is known.
+	secret, err := s.webhookSecretFor(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
 		return
 	}
 	if secret == "" || !validWebhookSignature(secret, body, sigHeader) {
-		// Deliberately no body and no payload logging on a mismatch.
+		// One reply for both, deliberately. Answering "this org has no App"
+		// with a 404 and "your signature is wrong" with a 401 would let an
+		// unauthenticated caller walk a list of org ids and learn which
+		// workspaces have a GitHub App registered — an org-existence oracle on
+		// a route that requires no credential to reach. Note the empty secret
+		// must short-circuit rather than fall into the HMAC check: verifying
+		// against an empty key is a check anyone can pass. Deliberately no
+		// body and no payload logging either way.
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 
 	// Signature verified past this point.
-	if eventName == "installation" {
-		s.handleInstallationEvent(w, r, orgID, body)
+
+	// Dedup gates ahead of every side effect — the mirror write and the bus
+	// publish alike. GitHub never auto-retries a failed delivery, but it
+	// redelivers on demand (the Redeliver button; POST
+	// /app/hook/deliveries/{delivery_id}/attempts), which is the recovery an
+	// operator reaches for after an outage — so a second copy of a delivery is
+	// ordinary traffic, and without this it re-runs the upsert and re-publishes.
+	deliveryID := r.Header.Get("X-GitHub-Delivery")
+	if deliveryID == "" {
+		// Every genuine delivery carries a GUID. Without one there is nothing
+		// to dedup on, so applying it would quietly void the exactly-once
+		// promise for that delivery — refused as structurally bad, like a
+		// delivery naming no event.
+		badRequest(w, "missing X-GitHub-Delivery header")
 		return
 	}
 
-	s.publishWebhookEvent(orgID, eventName, r.Header.Get("X-GitHub-Delivery"))
+	// Structural validation of the payload runs BEFORE the gate, so a delivery
+	// that is bad on its face keeps its 4xx on every attempt. Recording it
+	// first would answer the operator's redelivery with a 204 — the receiver
+	// reporting success for a payload it never applied and never could. What
+	// this leaves behind the gate is only work that can fail on TF's state
+	// rather than on the delivery, and every one of those answers 5xx.
+	var install *installationWebhook
+	if eventName == "installation" {
+		var perr error
+		if install, perr = parseInstallationWebhook(body); perr != nil {
+			badRequest(w, perr.Error())
+			return
+		}
+	}
+
+	// The installation half of the dedup key. An installation delivery was just
+	// parsed in full and its id validated non-zero, so it is already in hand;
+	// only the other events pay a narrow sniff of the body for it.
+	var installationID string
+	if install != nil {
+		installationID = strconv.FormatInt(install.Installation.ID, 10)
+	} else {
+		installationID = deliveryInstallationID(body)
+	}
+
+	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), installationID, deliveryID)
+	if err != nil {
+		internalError(w, "github-webhook", err)
+		return
+	}
+	if !fresh {
+		// Losing is terminal for this request and carries no retry: GitHub was
+		// already told the first copy succeeded, and reporting failure on the
+		// duplicate would provoke exactly the redelivery this dedup exists to
+		// absorb. Debug, not warn — an operator replaying a delivery is
+		// ordinary, not a fault.
+		githubAppLog.Debug("dropping duplicate github webhook delivery",
+			"org", orgID, "event", eventName, "delivery", deliveryID)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	if install != nil {
+		s.applyInstallationEvent(w, r, orgID, deliveryID, *install)
+		return
+	}
+
+	s.publishWebhookEvent(orgID, eventName, deliveryID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// deliveryInstallationID sniffs the installation id out of a delivery body for
+// the dedup key. Every App-scoped event carries the installation object
+// whatever its event name, so one narrow envelope serves them all — except the
+// installation events themselves, whose caller already holds the fully parsed
+// payload and passes its id straight through.
+//
+// Returns "" — keying the delivery on its GUID alone — for a delivery that
+// names no installation (github_app_authorization, for one) and for a body
+// this can't parse. A malformed body is not this function's to report: an
+// installation delivery is already refused ahead of the gate, and no other
+// event requires a parseable payload to be recorded and published.
+func deliveryInstallationID(body []byte) string {
+	var envelope struct {
+		Installation struct {
+			ID int64 `json:"id"`
+		} `json:"installation"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Installation.ID == 0 {
+		return ""
+	}
+	return strconv.FormatInt(envelope.Installation.ID, 10)
 }
 
 // installationWebhook is the subset of the installation event payload the
 // lifecycle handler needs. The account block mirrors GitHub's verbatim
 // "User" / "Organization" type, which is exactly what the
-// org_github_app_installations CHECK constraint accepts.
+// org_github_app_installations CHECK constraint accepts, and carries both
+// halves of the account's identity: the numeric id the mirror resolves on and
+// the login it displays. suspended_at / suspended_by are nullable on the wire;
+// encoding/json leaves a null as the zero value, so an unsuspended
+// installation reads back as a zero time and an empty login.
 type installationWebhook struct {
 	Action       string `json:"action"`
 	Installation struct {
 		ID      int64 `json:"id"`
 		Account struct {
+			ID    int64  `json:"id"`
 			Login string `json:"login"`
 			Type  string `json:"type"`
 		} `json:"account"`
-		CreatedAt time.Time `json:"created_at"`
+		CreatedAt   time.Time `json:"created_at"`
+		SuspendedAt time.Time `json:"suspended_at"`
+		SuspendedBy struct {
+			Login string `json:"login"`
+		} `json:"suspended_by"`
+		// repository_selection: "all" or "selected". The latency optimization on
+		// top of the reconcile — a fresh install's grant width lands the moment
+		// the delivery does instead of at the next poll. The reconcile is what
+		// makes it CORRECT, since GitHub never re-sends a delivery it failed to
+		// deliver and local mode receives none at all.
+		RepositorySelection string `json:"repository_selection"`
 	} `json:"installation"`
 }
 
-// handleInstallationEvent applies a verified installation event to the
-// mirror. created upserts, deleted soft-removes + fires the cache
-// invalidate hook; any other action (suspend, new_permissions_accepted,
-// …) is published to the bus and acked — the mirror only tracks
-// existence, not those finer states.
-func (s *Server) handleInstallationEvent(w http.ResponseWriter, r *http.Request, orgID string, body []byte) {
+// parseInstallationWebhook decodes and structurally validates an installation
+// delivery. Both failures it reports are properties of the payload itself —
+// nothing about TF's state can change either answer — so they are identical on
+// every attempt, which is what makes this safe to run ahead of the dedup gate
+// and unsafe to run behind it.
+func parseInstallationWebhook(body []byte) (*installationWebhook, error) {
 	var p installationWebhook
 	if err := json.Unmarshal(body, &p); err != nil {
-		badRequest(w, "malformed installation payload")
-		return
+		return nil, errors.New("malformed installation payload")
 	}
 	if p.Installation.ID == 0 {
-		badRequest(w, "installation payload missing installation id")
-		return
+		return nil, errors.New("installation payload missing installation id")
 	}
+	return &p, nil
+}
+
+// applyInstallationEvent applies a verified, parsed, deduped installation event
+// to the mirror. created upserts, deleted soft-removes, suspend / unsuspend
+// stamp and clear the suspension columns; deleted and suspend additionally fire
+// the token-cache invalidate hook, because both leave every token already
+// minted from the installation dead while the cache would keep serving one
+// until its natural expiry. Any other action (new_permissions_accepted, …) is
+// published to the bus and acked — the mirror doesn't track those states.
+//
+// Every failure here is a store failure, answered 5xx: the payload was
+// validated before the delivery was recorded, so nothing in this function can
+// discover that the delivery was bad.
+func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, p installationWebhook) {
 	installationID := strconv.FormatInt(p.Installation.ID, 10)
+
+	// A payload that omits the account id (0) writes "" and so leaves any
+	// stored id alone — the upsert fills the column in opportunistically
+	// rather than treating a partial payload as an erasure.
+	var accountID string
+	if p.Installation.Account.ID != 0 {
+		accountID = strconv.FormatInt(p.Installation.Account.ID, 10)
+	}
 
 	switch p.Action {
 	case "created":
-		if err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
+		// Which GitHub this installation lives on is the org's configured base
+		// URL — a delivery arrives over the org's own webhook secret, so the
+		// deployment that sent it is the one the org is pointed at. Resolved
+		// here rather than defaulted in the store, because a GHES org whose
+		// host we failed to read would be mirrored as a github.com
+		// installation, which is exactly the confusion the column exists to
+		// prevent. A read failure fails the delivery instead, so no row claims a
+		// host nobody established. Nothing replays that delivery — GitHub does
+		// not auto-retry, and the dedup gate above has already recorded it, so
+		// a manual redelivery is dropped as a duplicate — but the
+		// /app/installations reconcile mints the row on its next pass.
+		host, err := s.orgGitHubHost(r.Context(), orgID)
+		if err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+		// No suspension is carried: a just-created installation is not
+		// suspended, and the upsert writes the zero verbatim — which is what
+		// clears an inherited suspension when this `created` is a RE-install
+		// over a row that was suspended before it was removed. The account
+		// re-installed the App; they did not re-install its suspension.
+		if _, err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
 			InstallationID: installationID,
 			OrgID:          orgID,
 			AccountType:    p.Installation.Account.Type,
+			AccountID:      accountID,
 			AccountLogin:   p.Installation.Account.Login,
+			GitHubHost:     host,
 			InstalledAt:    p.Installation.CreatedAt,
+			// A payload that omits repository_selection writes "" and so leaves
+			// any stored width alone, the same fill-in-only rule the account id
+			// takes: a writer that didn't look must not erase what a reconcile
+			// established.
+			RepositorySelection: p.Installation.RepositorySelection,
 		}); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
 	case "deleted":
-		if err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
+		if _, err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
-		if s.onInstallationRemoved != nil {
-			s.onInstallationRemoved(orgID, installationID)
+		s.invalidateInstallationToken(orgID, installationID)
+	case "suspend":
+		// A suspension is not a removal: the row stays live and the grant
+		// survives, so only the suspension columns move. GitHub stamps
+		// suspended_at on the payload, but a delivery that omits it still
+		// describes an installation that is suspended right now — falling back
+		// to the receipt time records the state rather than dropping it, since
+		// a zero timestamp IS "not suspended" in the mirror.
+		suspendedAt := p.Installation.SuspendedAt
+		if suspendedAt.IsZero() {
+			suspendedAt = time.Now().UTC()
+		}
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+		// Every token minted from a suspended installation is refused from this
+		// moment, and the cached one outlives the suspension by up to an hour.
+		s.invalidateInstallationToken(orgID, installationID)
+	case "unsuspend":
+		// Restores the prior state exactly: both columns back to NULL, nothing
+		// else on the row touched. No cache work — the installation mints again,
+		// and the entry the suspend dropped is simply re-minted on next use.
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, time.Time{}, ""); err != nil {
+			internalError(w, "github-webhook", err)
+			return
 		}
 	default:
-		s.publishWebhookEvent(orgID, "installation", r.Header.Get("X-GitHub-Delivery"))
+		s.publishWebhookEvent(orgID, "installation", deliveryID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

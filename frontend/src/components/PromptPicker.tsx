@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react'
 import { Layers } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt } from '../types'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { apiListAll } from '../lib/apiClient'
 import TeamPicker from './TeamPicker'
 
 interface Props {
@@ -142,7 +143,7 @@ export default function PromptPicker({
     // teamValue → unscoped (a solo user's sole team, or the swipe / chain /
     // curator callers that don't scope). Refetching on teamValue keeps rows
     // matched to the header's team so a user can't preview another team's item.
-    const q = teamValue ? `?team_id=${encodeURIComponent(teamValue)}` : ''
+    const teamFilter = teamValue ? { team_id: teamValue } : {}
     // Clear the prior failure so this attempt (first open, reopen, team switch)
     // shows the loading skeleton again rather than getting stuck on the
     // "Failed to load." message while the refetch is in flight; the .catch below
@@ -159,7 +160,7 @@ export default function PromptPicker({
     const load = async () => {
       // The 'prompts' source is already a flat list carrying bodies + models.
       if (source !== 'blueprints') {
-        const data: Prompt[] = await fetch(`/api/prompts${q}`).then((r) => r.json())
+        const data = await apiListAll<Prompt>('/api/prompts/list', teamFilter)
         if (!cancelled) setItems(data.map((p) => ({ ...p })))
         return
       }
@@ -170,11 +171,11 @@ export default function PromptPicker({
       // former per-blueprint N+1. A failed steps fetch degrades to empty
       // compositions rather than breaking the picker.
       const [blueprints, promptList, allSteps] = await Promise.all([
-        fetch(`/api/blueprints${q}`).then((r) => r.json() as Promise<Blueprint[]>),
-        fetch(`/api/prompts${q}`).then((r) => r.json() as Promise<Prompt[]>),
-        fetch(`/api/blueprint-steps${q}`)
-          .then((r) => r.json() as Promise<BlueprintStep[]>)
-          .catch(() => [] as BlueprintStep[]),
+        apiListAll<Blueprint>('/api/blueprints/list', teamFilter),
+        apiListAll<Prompt>('/api/prompts/list', teamFilter),
+        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter).catch(
+          () => [] as BlueprintStep[],
+        ),
       ])
       const promptById = new Map(promptList.map((p): [string, Prompt] => [p.id, p]))
       const stepsByBlueprint = new Map<string, BlueprintStep[]>()

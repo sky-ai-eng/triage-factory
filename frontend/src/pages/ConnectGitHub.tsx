@@ -246,9 +246,9 @@ export default function ConnectGitHub() {
       </div>
 
       <p className="text-reported text-ink-3 leading-relaxed">
-        Either way, Triage Factory only reads your GitHub username — it doesn&apos;t store your
-        token or gain access to your repositories. Repository access is configured separately by
-        your admin.
+        Either way, Triage Factory reads your GitHub username and verified primary email — it
+        doesn&apos;t store your token or gain access to your repositories. Repository access is
+        configured separately by your admin.
       </p>
     </Card>
   )

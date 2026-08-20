@@ -64,12 +64,12 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 	store := sqlitestore.New(database).Blueprints
 	ctx := context.Background()
 	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, blueprintID); existing == nil {
-		if err := store.Create(ctx, runmode.LocalDefaultOrgID, teamID, domain.Blueprint{
+		if _, err := store.Create(ctx, runmode.LocalDefaultOrgID, teamID, domain.Blueprint{
 			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: teamID,
 		}); err != nil {
 			t.Fatalf("blueprintWrappingPrompt create %s (team %s): %v", blueprintID, teamID, err)
 		}
-		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("blueprintWrappingPrompt steps %s: %v", blueprintID, err)
 		}
 	}
@@ -78,7 +78,7 @@ func blueprintWrappingPrompt(t *testing.T, database *sql.DB, promptID, teamID st
 
 // createTriggerForTestRouting + setTriggerEnabledForTestRouting are
 // trigger-shape helpers used by drain_test + rederive_test. They
-// wrap EventHandlerStore.Create / SetEnabled, building a
+// wrap EventHandlerStore.Create / Update, building a
 // kind='trigger' EventHandler from the legacy-shaped fields.
 // createTriggerForTestRouting builds a kind='trigger' EventHandler on the
 // local default team (team A). The trigger's BlueprintID field is supplied
@@ -94,14 +94,24 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPrompt(t, database, trig.BlueprintID, runmode.LocalDefaultTeamID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
 	}
 }
 
+// setTriggerEnabledForTestRouting flips a trigger's enabled bit through the
+// same read-then-Update the PATCH route performs, so the fixture and the
+// product reach the stored row by one path.
 func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, enabled bool) {
 	t.Helper()
-	if err := testEventHandlerStore(database).SetEnabled(context.Background(), runmode.LocalDefaultOrgID, id, enabled); err != nil {
+	ctx := context.Background()
+	store := testEventHandlerStore(database)
+	trig, err := store.Get(ctx, runmode.LocalDefaultOrgID, id)
+	if err != nil || trig == nil {
+		t.Fatalf("setTriggerEnabledForTestRouting %s: get: %v", id, err)
+	}
+	trig.Enabled = enabled
+	if _, err := store.Update(ctx, runmode.LocalDefaultOrgID, *trig); err != nil {
 		t.Fatalf("setTriggerEnabledForTestRouting %s: %v", id, err)
 	}
 }
@@ -115,7 +125,7 @@ func setTriggerEnabledForTestRouting(t *testing.T, database *sql.DB, id string, 
 func createTestPrompt(t *testing.T, database *sql.DB, p domain.Prompt) {
 	t.Helper()
 	store := testPromptStore(database)
-	if err := store.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
+	if _, err := store.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, p); err != nil {
 		t.Fatalf("createTestPrompt %s: %v", p.ID, err)
 	}
 }
@@ -168,7 +178,7 @@ func floatPtr(v float64) *float64 { return &v }
 // seedHandlerFKTargets seeds the prompts AND blueprints that shipped triggers
 // reference so EventHandlerStore.Seed's trigger rows resolve their FK to a
 // same-team blueprint (a trigger fires a blueprint, not a prompt
-// directly). Production's SeedTeamDefaults seeds prompts → blueprints (each
+// directly). Production's SeedShippedIntoTeam seeds prompts → blueprints (each
 // wrapping its prompt as a 1-step list) → handlers; tests that call Seed
 // directly replicate that ordering here. Returns the system_slug →
 // blueprint-id map the caller threads into Seed (the id is a random UUID per
@@ -193,16 +203,16 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 		// user rows satisfy it (this test resolves the trigger's blueprint through
 		// the returned slug→id map, not by system_slug). The id is a random UUID.
 		promptID := uuid.New().String()
-		if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Prompt{ID: promptID, Name: s.name, Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("seed prompt %s: %v", s.slug, err)
 		}
 		bpID := uuid.New().String()
-		if err := blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+		if _, err := blueprints.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 			domain.Blueprint{ID: bpID, Name: s.name, Source: "user"}); err != nil {
 			t.Fatalf("seed blueprint %s: %v", s.slug, err)
 		}
-		if err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {
+		if _, err := blueprints.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, bpID, []string{promptID}, nil); err != nil {
 			t.Fatalf("seed blueprint steps %s: %v", s.slug, err)
 		}
 		out[s.slug] = bpID

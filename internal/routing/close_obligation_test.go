@@ -64,9 +64,9 @@ type entityCloseOutageStore struct {
 	o *outage
 }
 
-func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id string) error {
+func (s entityCloseOutageStore) CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	if s.o.down() {
-		return errOutage
+		return nil, errOutage
 	}
 	return s.EntityStore.CloseSystem(ctx, orgID, id)
 }
@@ -81,11 +81,11 @@ type taskCloseOutageStore struct {
 	o          *outage
 }
 
-func (s *taskCloseOutageStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskCloseOutageStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if taskID == s.failTaskID && s.o.down() {
 		return false, nil, errOutage
 	}
-	return s.TaskStore.CloseWithRunCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
+	return s.TaskStore.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, closeReason, closeEventType, closingEventID)
 }
 
 func closeAuditCount(t *testing.T, database *sql.DB, taskID string) int {

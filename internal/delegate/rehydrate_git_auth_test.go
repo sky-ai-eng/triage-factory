@@ -17,22 +17,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// seedRepoStore embeds db.RepoStore as nil and answers only GetSystem — the one
-// read the rehydrate's seed resolution makes. profile nil models a repo with no
-// row; err models a store failure.
-type seedRepoStore struct {
-	db.RepoStore
-	profile *domain.RepoProfile
-	err     error
-	gotIDs  []string
+// seedRepositoryStore embeds db.RepositoryStore as nil and answers only
+// GetByRefSystem — the one read the rehydrate's seed resolution makes. profile
+// nil models a repo with no row; err models a store failure.
+type seedRepositoryStore struct {
+	db.RepositoryStore
+	profile  *domain.Repository
+	err      error
+	gotNames []string
 }
 
-func (s *seedRepoStore) GetSystem(_ context.Context, _, repoID string) (*domain.RepoProfile, error) {
-	s.gotIDs = append(s.gotIDs, repoID)
+func (s *seedRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	s.gotNames = append(s.gotNames, ref.Slug())
 	return s.profile, s.err
 }
 
-var _ db.RepoStore = (*seedRepoStore)(nil)
+var _ db.RepositoryStore = (*seedRepositoryStore)(nil)
 
 // proxySandbox is an runSidecar carrying only the git-proxy coordinates —
 // everything gitSeedFor reads. Close() is never called on it (the seed path
@@ -70,7 +70,7 @@ func assertEntries(t *testing.T, got, want [][2]string) {
 // dying on "could not read Username". Asserts the git config, not an outcome.
 func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 	const cloneURL = "https://github.com/acme/widgets.git"
-	repos := &seedRepoStore{profile: &domain.RepoProfile{Owner: "acme", Repo: "widgets", CloneURL: cloneURL}}
+	repos := &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "widgets", CloneURL: cloneURL}}
 	s := NewSpawner(nil, db.Stores{Repos: repos}, nil, nil, "")
 
 	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "per-run-placeholder"))
@@ -79,10 +79,10 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 		t.Errorf("seed repo = %s/%s, want acme/widgets", seed.owner, seed.repo)
 	}
 	if seed.cloneURL != cloneURL {
-		t.Errorf("seed clone URL = %q, want the profile's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
+		t.Errorf("seed clone URL = %q, want the repository row's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
 	}
-	if len(repos.gotIDs) != 1 || repos.gotIDs[0] != "acme/widgets" {
-		t.Errorf("repo profile lookups = %v, want one for %q", repos.gotIDs, "acme/widgets")
+	if len(repos.gotNames) != 1 || repos.gotNames[0] != "acme/widgets" {
+		t.Errorf("repository lookups = %v, want one for %q", repos.gotNames, "acme/widgets")
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://github.com", "per-run-placeholder"))
@@ -96,17 +96,17 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 
 // TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost: the promisor fetch
 // needs auth whether or not a clone URL is on file (the bare it fetches from is
-// already here). With no profile row the insteadOf falls back to the org's git
+// already here). With no repository row the insteadOf falls back to the org's git
 // host base — the upstream the sidecar's proxy relays to — so the rebuild is
 // still authenticated; only the seed-a-missing-bare half degrades.
 func TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{Repos: &seedRepoStore{profile: nil}}, nil, nil, "")
+	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{profile: nil}}, nil, nil, "")
 	s.SetRunCredentialResolvers(&fakeResolver{baseURL: "https://ghe.acme.dev"}, nil, nil)
 
 	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
-		t.Errorf("seed clone URL = %q, want empty (no profile row to read one from)", seed.cloneURL)
+		t.Errorf("seed clone URL = %q, want empty (no repository row to read one from)", seed.cloneURL)
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://ghe.acme.dev", "ph"))
@@ -116,26 +116,25 @@ func TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost(t *testing.T) {
 // logged, not fatal — the seed still authenticates off the org git host so a
 // rehydrate onto an existing bare survives a transient read failure.
 func TestGitSeedFor_ProfileReadFailureDoesNotStrandTheRebuild(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{Repos: &seedRepoStore{err: errors.New("boom")}}, nil, nil, "")
+	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{err: errors.New("boom")}}, nil, nil, "")
 	s.SetRunCredentialResolvers(&fakeResolver{}, nil, nil)
 
 	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
-		t.Errorf("seed clone URL = %q, want empty after a failed profile read", seed.cloneURL)
+		t.Errorf("seed clone URL = %q, want empty after a failed repository read", seed.cloneURL)
 	}
 	if len(seed.auth.GitConfigEntries()) == 0 {
-		t.Error("a failed profile read left the rebuild unauthenticated; the org git host base is the fallback insteadOf")
+		t.Error("a failed repository read left the rebuild unauthenticated; the org git host base is the fallback insteadOf")
 	}
 }
 
-// TestGitSeedFor_LocalCarriesCloneURLAndNoCredential pins the local-mode half of
-// the contract: ambient git credentials are local's design, so there is no
-// sandbox and no injected credential — but the clone URL still rides along, so a
-// local rehydrate whose bare is gone can seed one instead of erroring.
-func TestGitSeedFor_LocalCarriesCloneURLAndNoCredential(t *testing.T) {
+// TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential pins the fixture
+// fallback: without a local channel the clone URL still rides along, but no
+// credential is invented. Production dispatch starts the managed channel first.
+func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 	const cloneURL = "https://github.com/acme/widgets.git"
-	s := NewSpawner(nil, db.Stores{Repos: &seedRepoStore{profile: &domain.RepoProfile{CloneURL: cloneURL}}}, nil, nil, "")
+	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}}, nil, nil, "")
 
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "acme", "widgets", nil)
 
@@ -143,21 +142,21 @@ func TestGitSeedFor_LocalCarriesCloneURLAndNoCredential(t *testing.T) {
 		t.Errorf("seed clone URL = %q, want %q", seed.cloneURL, cloneURL)
 	}
 	if entries := seed.auth.GitConfigEntries(); len(entries) != 0 {
-		t.Errorf("local seed injected git config %v; local mode must run on the operator's own credentials", entries)
+		t.Errorf("unwired local seed injected git config %v; no channel means no invented auth", entries)
 	}
 }
 
 // TestGitSeedFor_NonGitRunRootIsZero: a Jira/Slack lazy run-root names no repo,
 // so nothing is read and nothing is injected.
 func TestGitSeedFor_NonGitRunRootIsZero(t *testing.T) {
-	repos := &seedRepoStore{profile: &domain.RepoProfile{CloneURL: "https://github.com/acme/widgets.git"}}
+	repos := &seedRepositoryStore{profile: &domain.Repository{CloneURL: "https://github.com/acme/widgets.git"}}
 	s := NewSpawner(nil, db.Stores{Repos: repos}, nil, nil, "")
 
 	if seed := s.gitSeedFor(context.Background(), "org-1", "", "", proxySandbox("http://10.42.0.1:4100", "ph")); seed != (gitSeed{}) {
 		t.Errorf("seed for a non-git run root = %+v, want the zero value", seed)
 	}
-	if len(repos.gotIDs) != 0 {
-		t.Errorf("repo profile was read for a non-git run root: %v", repos.gotIDs)
+	if len(repos.gotNames) != 0 {
+		t.Errorf("repository was read for a non-git run root: %v", repos.gotNames)
 	}
 }
 
@@ -171,15 +170,15 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	setupGitTestEnv(t)
 
 	const cloneURL = "https://github.com/acme/widgets.git"
-	repos := &seedRepoStore{profile: &domain.RepoProfile{CloneURL: cloneURL}}
+	repos := &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}
 	s := newStorageSpawner(t)
 	s.repos = repos
 
-	const runID = "wt-proxy-auth"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-proxy-auth"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 	writeSession(t, wtPath, "sess-proxy", `{"type":"summary"}`)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, "sess-proxy"); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	// The concluded blueprint's worktree is gone — cold rehydrate.
@@ -200,9 +199,9 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	t.Cleanup(func() { restoreWorkspaceGit = restore })
 
 	sandbox := proxySandbox("http://10.42.0.3:4100", "run-placeholder")
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, sandbox)
-	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed); err != nil {
+	if _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed, nil); err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
 
@@ -229,16 +228,16 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
 
-	const runID = "wt-seed-bare"
-	wtPath, owner, repo := setupTestWorktree(t, runID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, runID) })
+	const conversationID = "wt-seed-bare"
+	wtPath, owner, repo := setupTestWorktree(t, conversationID)
+	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 
 	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
 	gitT(t, wtPath, "add", "agent.txt")
 	gitT(t, wtPath, "commit", "-m", "agent work")
 
 	s := newStorageSpawner(t)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, runID, runID, wtPath, ""); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -256,11 +255,11 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	if err := os.RemoveAll(bareDir); err != nil {
 		t.Fatalf("rm bare: %v", err)
 	}
-	s.repos = &seedRepoStore{profile: &domain.RepoProfile{CloneURL: upstream}}
+	s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: upstream}}
 
-	run := &domain.Conversation{ID: runID, WorktreePath: wtPath, BlueprintRunID: runID}
+	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: conversationID}
 	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, nil)
-	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, run, seed)
+	got, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}

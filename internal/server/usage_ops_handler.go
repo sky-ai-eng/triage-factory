@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // usageOrgOpsResponse is the org-scoped operations subset an org admin sees on
@@ -35,32 +36,34 @@ type opsFailureKind struct {
 	Count int    `json:"count"`
 }
 
-// handleUsageOrgOps serves GET /api/usage/org/ops — org-admin gated. Reuses the
-// usage window parsing and the RunQueue's org-scoped timing reads.
+// handleUsageOrgOps serves GET /api/orgs/{org_id}/usage/ops — org-admin gated
+// against the org in the path. Reuses the usage window parsing and the
+// ConversationQueue's org-scoped timing reads.
 func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	orgID, _, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return
-	}
-	if h.runQueue == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "run queue not ready"})
+	if h.conversationQueue == nil {
+		// This pod holds no conversation-queue reader — deployment shape, not
+		// an outage.
+		writeNotConfigured(w, "the conversation queue reader is not configured on this deployment")
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
 	if errMsg != "" {
-		badRequest(w, errMsg)
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: errMsg,
+		})
 		return
 	}
 
-	timings, err := h.runQueue.RecentRunTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
+	timings, err := h.conversationQueue.RecentConversationTimingsForOrgSystem(r.Context(), orgID, since, until, 0)
 	if err != nil {
 		internalError(w, "usage-ops-timings", err)
 		return
 	}
-	queued, err := h.runQueue.QueuedRunAgesForOrgSystem(r.Context(), orgID)
+	queued, err := h.conversationQueue.QueuedConversationAgesForOrgSystem(r.Context(), orgID)
 	if err != nil {
 		internalError(w, "usage-ops-queue", err)
 		return
@@ -97,7 +100,7 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 				failureCounts[t.FailureKind]++
 			}
 		}
-		if domain.IsActiveRunStatus(t.Status) {
+		if domain.IsActiveConversationStatus(t.Status) {
 			resp.RunsActive++
 		}
 	}

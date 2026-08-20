@@ -18,7 +18,7 @@ import (
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -33,10 +33,11 @@ func newTestDB(t *testing.T) *sql.DB {
 
 func seedProject(t *testing.T, database *sql.DB, name string) string {
 	t.Helper()
-	id, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: name})
+	created, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: name})
 	if err != nil {
 		t.Fatalf("create project %q: %v", name, err)
 	}
+	id := created.ID
 	return id
 }
 
@@ -60,7 +61,7 @@ func turnState(t *testing.T, stores db.Stores, projectID, requestID string) (sta
 	if err != nil {
 		t.Fatalf("parse request id %q: %v", requestID, err)
 	}
-	msgs, err := stores.Curator.ListConversationMessages(ctx, org, conv.ID)
+	msgs, err := stores.Curator.ListConversationMessages(ctx, org, conv.ID, 0)
 	if err != nil {
 		t.Fatalf("list messages: %v", err)
 	}
@@ -291,7 +292,7 @@ func startTestClaimLoop(t *testing.T, stores db.Stores, c *Curator) (stop func()
 			if ctx.Err() != nil {
 				return
 			}
-			claimed, err := stores.RunQueue.ClaimNextRun(ctx, "test-claim-loop", 1, db.ClaimPlacement{})
+			claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "test-claim-loop", 1, db.ClaimPlacement{})
 			if err != nil || claimed == nil {
 				select {
 				case <-ctx.Done():
@@ -307,7 +308,7 @@ func startTestClaimLoop(t *testing.T, stores db.Stores, c *Curator) (stop func()
 				defer inFlight.Done()
 				if !c.DriveClaimedTurn(claimed.OrgID, claimed.ProjectID, claimed.ID, claimed.ClaimID,
 					claimed.ClaimMessageID, claimed.CreatorUserID) {
-					_ = stores.RunQueue.RequeueRun(context.Background(), claimed.OrgID, claimed.ID, "test loop handoff refused")
+					_, _ = stores.ConversationQueue.RequeueConversation(context.Background(), claimed.OrgID, claimed.ID, "test loop handoff refused")
 				}
 			}()
 		}

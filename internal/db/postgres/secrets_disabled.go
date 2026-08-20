@@ -10,7 +10,7 @@ import (
 // (TFAC-614): every method returns db.ErrSecretStoreUnavailable
 // immediately, without touching the database or any key material. It
 // exists so a consumer that was missed when converting to the sealed
-// run_credentials bundle path fails loudly and greppably at the first call,
+// claim_credentials bundle path fails loudly and greppably at the first call,
 // rather than an executor holding (or worse, silently lacking) a real
 // decrypting SecretStore.
 type disabledSecretStore struct{}

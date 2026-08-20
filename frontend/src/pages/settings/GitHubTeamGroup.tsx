@@ -25,7 +25,7 @@ function keyToGroup(
  * GitHubTeamGroup is the team-scope GitHub-team → TF-team mapping field
  * group: which GitHub teams route their CODEOWNERS review requests to this
  * Triage Factory team. A controlled component — the container owns the
- * selected mappings (`value`) and the PUT /api/settings/team/{id}/github-
+ * selected mappings (`value`) and the PUT /api/teams/{id}/github-
  * groups — so the same group serves the team Settings tab and the setup
  * wizard's team steps.
  *
@@ -77,7 +77,7 @@ export default function GitHubTeamGroup({
   const onLoadedRef = useRef(onLoaded)
   onLoadedRef.current = onLoaded
 
-  const base = `/api/settings/team/${encodeURIComponent(teamId)}/github-groups`
+  const base = `/api/teams/${encodeURIComponent(teamId)}/github-groups`
 
   const load = useCallback(async () => {
     setLoading(true)

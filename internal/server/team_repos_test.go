@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -55,57 +54,6 @@ func TestFirstUnreachableRepo(t *testing.T) {
 			t.Errorf("case-variant of a reachable repo must pass; got reject on %q", slug)
 		}
 	})
-}
-
-// TestReachableRepoCache_HitMissExpiryEviction exercises the
-// enumeration cache directly: a put is readable until it expires or the org is
-// evicted, and an unrelated org's eviction leaves it intact.
-func TestReachableRepoCache_HitMissExpiryEviction(t *testing.T) {
-	srv := newTestServer(t)
-	const org, user = "org-1", "user-1"
-	set := map[string]struct{}{"owner/api": {}}
-
-	// Miss before any put.
-	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
-		t.Fatal("empty cache should miss")
-	}
-
-	// Hit after put.
-	srv.reachableRepoCachePut(org, user, set)
-	got, ok := srv.reachableRepoCacheGet(org, user)
-	if !ok {
-		t.Fatal("expected cache hit after put")
-	}
-	if _, member := got["owner/api"]; !member {
-		t.Errorf("cached set missing owner/api: %v", got)
-	}
-
-	// Different user → miss (the key namespaces per user).
-	if _, ok := srv.reachableRepoCacheGet(org, "user-2"); ok {
-		t.Error("another user must not read user-1's entry")
-	}
-
-	// Expiry: force the entry stale and confirm it stops satisfying reads.
-	srv.reachableRepoMu.Lock()
-	e := srv.reachableRepoCache[reachableCacheKey(org, user)]
-	e.expiresAt = time.Now().Add(-time.Second)
-	srv.reachableRepoCache[reachableCacheKey(org, user)] = e
-	srv.reachableRepoMu.Unlock()
-	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
-		t.Error("expired entry must miss")
-	}
-
-	// Eviction-on-creds-change: a fresh put, then evict the *other* org
-	// (no-op), then evict ours.
-	srv.reachableRepoCachePut(org, user, set)
-	srv.evictReachableRepoCache("org-2")
-	if _, ok := srv.reachableRepoCacheGet(org, user); !ok {
-		t.Error("evicting a different org must not drop our entry")
-	}
-	srv.evictReachableRepoCache(org)
-	if _, ok := srv.reachableRepoCacheGet(org, user); ok {
-		t.Error("evicting our org must drop the entry (creds rotated)")
-	}
 }
 
 // TestFirstUnreachableViaFanOut_MixedOutcomes drives the cold-path
@@ -172,16 +120,15 @@ func TestFirstUnreachableViaFanOut_MixedOutcomes(t *testing.T) {
 	})
 }
 
-// TestTeamReposPut_HotPathCacheAuthoritative proves the cached enumeration is
-// authoritative for membership: with the cache warmed from an enumeration that
-// lists only owner/tracked, a PUT of owner/ghost is rejected even though the
-// per-repo probe (cold path) would have accepted it. Asserting 400 proves the
-// gate consulted the cache rather than re-probing.
-func TestTeamReposPut_HotPathCacheAuthoritative(t *testing.T) {
+// TestTeamReposPut_MirrorIsAuthoritative proves the mirror decides membership:
+// with only owner/tracked reachable, a PUT of owner/ghost is rejected even
+// though the per-repo probe (cold path) would have accepted it. Asserting 400
+// proves the gate consulted the mirror rather than re-probing.
+func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Enumeration lists only owner/tracked.
+		// The enumeration the mirror is built from lists only owner/tracked.
 		if r.URL.Path == "/api/v3/user/repos" {
 			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Query().Get("page") != "1" {
@@ -192,7 +139,7 @@ func TestTeamReposPut_HotPathCacheAuthoritative(t *testing.T) {
 			return
 		}
 		// Every per-repo probe would say reachable — so a cold-path fall-through
-		// would wrongly accept owner/ghost. The cache must win.
+		// would wrongly accept owner/ghost. The mirror must win.
 		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/") {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"full_name":"x"}`))
@@ -207,28 +154,24 @@ func TestTeamReposPut_HotPathCacheAuthoritative(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
+	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
-	// Warm the cache through the picker endpoint.
-	if rec := doJSON(t, srv, http.MethodGet, "/api/github/repos", nil); rec.Code != http.StatusOK {
-		t.Fatalf("picker GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Cache hit → owner/ghost absent from the enumeration → 400.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	// Mirrored, and owner/ghost is not in it → 400.
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("cache-hit unreachable PUT = %d, want 400; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("unreachable PUT against a fresh mirror = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "owner/ghost") {
 		t.Errorf("rejection should name the offending repo; body=%s", body)
 	}
 
-	// And a slug that IS in the cached enumeration is accepted via the hot path.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	// And a slug that IS mirrored is accepted without a probe.
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked"},
 	}); rec.Code != http.StatusOK {
-		t.Fatalf("cache-hit reachable PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("reachable PUT against a fresh mirror = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -262,7 +205,7 @@ func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/whatever"},
 	})
 	if rec.Code != http.StatusOK {
@@ -339,14 +282,14 @@ func TestTeamReposPut_RejectsUnreachableRepo(t *testing.T) {
 	}
 
 	// Reachable repo → accepted.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("reachable repo PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Unreachable repo → rejected before any write.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked", "owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -375,7 +318,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed wide creds: %v", err)
 	}
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/stale", "owner/other"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("initial track PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -394,7 +337,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	// Re-saving the current set (still carrying the now-unreachable
 	// owner/stale) must succeed — it's already tracked, so it's not
 	// reachability-checked.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/stale", "owner/other"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("re-save with stale tracked repo = %d, want 200 (already tracked, not re-checked); body=%s", rec.Code, rec.Body.String())
@@ -402,7 +345,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Dropping owner/stale while ADDING a reachable owner/fresh must
 	// succeed: the only newly-added repo (owner/fresh) is reachable.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/other", "owner/fresh"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("drop-stale + add-reachable PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -410,7 +353,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Control: a NEWLY-added unreachable repo is still rejected — the guard
 	// didn't go slack, it just scopes to additions.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/other", "owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -426,8 +369,8 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 // credentials configured means checked=false, so the save proceeds.
 func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 	srv := newTestServer(t)
-	// No credentials seeded → reachableRepoSet returns checked=false.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	// No credentials seeded → fanOutUnreachableRepo returns checked=false.
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"anyone/anything"},
 	})
 	if rec.Code != http.StatusOK {

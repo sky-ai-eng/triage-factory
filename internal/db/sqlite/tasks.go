@@ -75,128 +75,136 @@ func sqliteTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 	return fmt.Sprintf(" AND (t.team_id IN (%s) OR EXISTS (SELECT 1 FROM task_teams tt WHERE tt.task_id = t.id AND tt.team_id IN (%s)))", ph, ph), args
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+// sqliteTaskRuleOrderJoin attaches each task's matching event_handler rule
+// sort_order (the lowest, when several rules cover the event type) so the list
+// ordering can put "CI is broken" above "someone asked for a review" without
+// the caller knowing the rule set. LEFT JOIN: a task whose event type no
+// enabled rule covers still lists, ordered by the COALESCE default. The
+// derived table is org-scoped so another org's rules can't influence ordering.
+const sqliteTaskRuleOrderJoin = `
+	LEFT JOIN (
+		SELECT org_id, event_type, MIN(sort_order) AS sort_order
+		FROM event_handlers
+		WHERE enabled = 1 AND kind = 'rule'
+		GROUP BY org_id, event_type
+	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
+
+// sqliteTaskListOrder is List's ordering — fixed (it never varies with the
+// filters, so a filter change can't silently reshuffle a surface) and total
+// (the id tiebreaker is what makes offset paging return each row exactly once
+// instead of dropping and repeating rows that tie on every other key).
+//
+// Read top to bottom as "what does the reader want to see first":
+//
+//  1. live before snoozed — a deferred entry never jumps above pickable work,
+//     however high its priority. SQLite evaluates the comparison as 0/1, so
+//     false (live) sorts first; Postgres orders false before true identically.
+//  2. open before closed, then newest-closed first. Both terms are inert on a
+//     single-lane query (every row ties), so the queue keeps the ordering it
+//     had and the Done column keeps recency — and neither term ever compares a
+//     NULL against a non-NULL closed_at, because the partition above separates
+//     them, which is what keeps the two dialects' NULL-ordering defaults from
+//     diverging here.
+//  3. rule sort_order, then priority, then id — the queue's own ordering.
+const sqliteTaskListOrder = `
+	ORDER BY (t.status = 'snoozed') ASC,
+	         (t.closed_at IS NOT NULL) ASC,
+	         t.closed_at DESC,
+	         COALESCE(tr.sort_order, 999) ASC,
+	         COALESCE(t.priority_score, 0.5) DESC,
+	         t.id ASC`
+
+// sqliteTaskListWhere renders db.TaskListFilter as a WHERE body (no leading
+// WHERE) plus its args in placeholder order. "1=1" for the empty filter keeps
+// every caller's SQL one shape.
+func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
+	clauses := []string{"1=1"}
+	var args []any
+
+	if len(f.Statuses) > 0 {
+		var arms []string
+		var lifecycle []string
+		for _, s := range f.Statuses {
+			if s == db.TaskListStatusClaimed {
+				// The claim axis, not a lifecycle status — see
+				// db.TaskListStatusClaimed. Bot claims count: they surface the
+				// window between a delegate stamp and the run's first
+				// transition, plus spawn-failure rows that stay claimed-queued
+				// until someone retries.
+				arms = append(arms, "(t.status = 'queued' AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL))")
+				continue
+			}
+			lifecycle = append(lifecycle, s)
+		}
+		if len(lifecycle) > 0 {
+			ph := strings.TrimRight(strings.Repeat("?, ", len(lifecycle)), ", ")
+			arms = append(arms, fmt.Sprintf("t.status IN (%s)", ph))
+			for _, s := range lifecycle {
+				args = append(args, s)
+			}
+		}
+		clauses = append(clauses, "("+strings.Join(arms, " OR ")+")")
 	}
-	// Derived filter: queue = status='queued' + both claim
-	// cols NULL + not future-snoozed.
-	teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+sqliteTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = 1 AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.status = 'queued'
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL
-			AND (t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))`+teamClause+`
-		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
+	if f.OnlyUnclaimed {
+		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
+	}
+	if !f.IncludeSnoozed {
+		clauses = append(clauses, "(t.snooze_until IS NULL OR t.snooze_until <= datetime('now'))")
+	}
+	if f.ClosedSince != nil {
+		// Terminal rows only: a closed_at window says nothing about an open
+		// task, so narrowing one on it would silently empty a mixed query.
+		//
+		// datetime() on both sides so the two on-disk shapes — the schema's
+		// CURRENT_TIMESTAMP default and a Go-bound time.Time — compare as
+		// instants rather than as text of differing widths.
+		clauses = append(clauses, "(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND datetime(t.closed_at) >= datetime(?)))")
+		args = append(args, f.ClosedSince.UTC().Format("2006-01-02 15:04:05"))
+	}
+	teamClause, args := sqliteTaskTeamFilter(f.TeamIDs, args)
+	// sqliteTaskTeamFilter renders as " AND (...)" for direct concatenation
+	// onto a WHERE body; it is always last, so its args stay in placeholder
+	// order behind the ones above.
+	return strings.Join(clauses, " AND ") + teamClause, args
 }
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
+func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter, opts db.ListOpts) ([]domain.Task, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	// Drops the snooze-window filter so the Board's "show
-	// snoozed" toggle surfaces deferred entries. Status='queued' +
-	// status='snoozed' both qualify; the derived queue filter enforces
-	// snoozed↔unclaimed so the claim guards are still safe to apply.
-	//
-	// Ordering puts snoozed rows at the tail (the "wakes Mar 5"
-	// badge cluster) regardless of priority so a high-priority but
-	// deferred entry doesn't jump above live queued work. SQLite
-	// treats the boolean expression as 0/1 — false (live) sorts
-	// before true (snoozed).
-	teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+sqliteTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = 1 AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.status IN ('queued', 'snoozed')
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL`+teamClause+`
-		ORDER BY (t.status = 'snoozed') ASC,
-		         COALESCE(tr.sort_order, 999) ASC,
-		         COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
-}
+	where, args := sqliteTaskListWhere(f)
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	// 'claimed' and 'delegated' aren't real lifecycle
-	// values — they're derived filters on the claim columns.
-	// in_progress + in_review were added as first-class statuses,
-	// so the "claimed" derivation now means specifically "any claim
-	// (user or bot) at status='queued'." Status='queued' avoids
-	// double-rendering once a task advances to in_progress / in_review
-	// (those have their own columns). Including bot claims here
-	// surfaces the brief window between delegate-stamp and the run's
-	// first non-initializing status — plus delegate-spawn-failure
-	// rows that stay claimed-queued indefinitely until retry.
-	switch status {
-	case "claimed":
-		teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+sqliteTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id
-			WHERE (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL)
-				AND t.status = 'queued'`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "delegated":
-		teamClause, args := sqliteTaskTeamFilter(teamIDs, nil)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+sqliteTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id
-			WHERE t.claimed_by_agent_id IS NOT NULL
-				AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "done", "dismissed":
-		// Cap the Done column at the last 7 days so the
-		// board doesn't accumulate an unbounded history. closed_at
-		// is now populated by every close path — Close(),
-		// RecordSwipe (complete/dismiss), spawner auto-close — so
-		// requiring it here means rows that bypass those paths
-		// surface as bugs (column empty) rather than accumulating
-		// silently. Legacy pre-330 rows with NULL closed_at fall
-		// out of the cap; they're old enough to be excluded anyway.
-		teamClause, args := sqliteTaskTeamFilter(teamIDs, []any{status})
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+sqliteTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id
-			WHERE t.status = ?
-				AND t.closed_at IS NOT NULL
-				AND t.closed_at >= datetime('now', '-7 days')`+teamClause+`
-			ORDER BY t.closed_at DESC, COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	}
-	teamClause, args := sqliteTaskTeamFilter(teamIDs, []any{status})
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+sqliteTaskColumnsWithEntity+`
+	// The total runs the same filters on the same connection as the page, so
+	// a caller's "showing 50 of 213" can't be assembled from two different
+	// snapshots. The rule-order join is absent here on purpose: it is a LEFT
+	// JOIN of a grouped derived table referenced only by the ORDER BY, so it
+	// can neither drop nor duplicate a row — including it would only make the
+	// count slower.
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id
-		WHERE t.status = ?`+teamClause+`
-		ORDER BY COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
+		WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `
+		SELECT ` + sqliteTaskColumnsWithEntity + `
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id` + sqliteTaskRuleOrderJoin + `
+		WHERE ` + where + sqliteTaskListOrder
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += `
+		LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	tasks, err := queryTasksCtx(ctx, s.q, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return tasks, total, nil
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
@@ -265,19 +273,19 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return s.VisibilityTeams(ctx, orgID, taskID)
 }
 
-func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	return s.SetOwnerTeam(ctx, orgID, taskID, teamID)
 }
 
-func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return s.Bump(ctx, orgID, taskID, eventID)
 }
 
-func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	return s.Close(ctx, orgID, taskID, closeReason, closeEventType)
 }
 
-func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	return s.SetStatus(ctx, orgID, taskID, status)
 }
 
@@ -285,8 +293,8 @@ func (s *taskStore) RecordEventSystem(ctx context.Context, orgID, taskID, eventI
 	return s.RecordEvent(ctx, orgID, taskID, eventID, kind)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return s.CountConsecutiveFailedRuns(ctx, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return s.CountConsecutiveFailedConversations(ctx, orgID, entityID, promptID)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -340,7 +348,7 @@ func (s *taskStore) FindActiveByEntity(ctx context.Context, orgID, entityID stri
 
 // listActiveRefsChunkSize is the chunk applied to the IN clause when
 // fanning out across many entities, kept conservatively below SQLite's
-// historical bound-variable limit. Same shape ListRecentEventsByEntity
+// historical bound-variable limit. Same shape RecentEventsByEntity
 // uses.
 const listActiveRefsChunkSize = 500
 
@@ -423,7 +431,7 @@ func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source 
 // --- Lifecycle ---
 
 func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now().UTC())
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
@@ -473,7 +481,7 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 		                   status, priority_score, scoring_status, created_at,
 		                   team_id, visibility)
 		VALUES (?, ?, ?, ?, ?, 'queued', ?, 'pending', ?, ?, 'team')
-	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt, teamBind)
+	`, id, entityID, eventType, dedupKey, primaryEventID, defaultPriority, createdAt.UTC(), teamBind)
 	if err != nil {
 		var raced domain.Task
 		err2 := scanTaskFromRow(s.q.QueryRowContext(ctx, `
@@ -497,54 +505,68 @@ func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID,
 	return task, true, nil
 }
 
-func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
 		WHERE id = ?
-	`, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		taskID), &t)
 }
 
-func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := closeTaskRows(ctx, s.q, taskID, closeReason, closeEventType)
-	return err
+	t, err := closeTaskRow(ctx, s.q, taskID, closeReason, closeEventType)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if t == nil {
+		return domain.Task{}, db.ErrNoSuchTask
+	}
+	return *t, nil
 }
 
-// closeTaskRows is Close's body reporting whether it actually transitioned a
-// row. The guard is the same one that makes a replayed close a no-op; the
-// caller that stamps stop intent needs to know which side of it this call
-// landed on.
-func closeTaskRows(ctx context.Context, q queryer, taskID, closeReason, closeEventType string) (int64, error) {
+// closeTaskRow is Close's body, reporting the closed row via RETURNING or
+// nil when the state-guarded WHERE matched nothing — a missing id, or a task
+// already terminal (the same guard that makes a replayed close a no-op).
+// CloseWithConversationCancelIntentSystem shares it so both close paths agree
+// on what "did this land" means, and on the SAME connection this call's
+// caller is already inside a transaction on.
+func closeTaskRow(ctx context.Context, q queryer, taskID, closeReason, closeEventType string) (*domain.Task, error) {
 	var cet *string
 	if closeEventType != "" {
 		cet = &closeEventType
 	}
-	res, err := q.ExecContext(ctx, `
+	var t domain.Task
+	row, err := scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = ?, close_event_type = ?,
 		                 closed_at = ?
 		WHERE id = ? AND status NOT IN ('done', 'dismissed')
-	`, closeReason, cet, time.Now(), taskID)
-	if err != nil {
-		return 0, err
+		RETURNING `+sqliteTaskBareColumns,
+		closeReason, cet, time.Now().UTC(), taskID), &t)
+	if err == db.ErrNoSuchTask {
+		return nil, nil
 	}
-	return res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
-// scanActiveRunIDs drains the task's non-terminal conversation ids and closes
+// scanActiveConversationIDs drains the task's non-terminal conversation ids and closes
 // the cursor before returning.
-func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
+func scanActiveConversationIDs(ctx context.Context, q queryer, taskID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE task_id = ?
-		  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -561,26 +583,26 @@ func scanActiveRunIDs(ctx context.Context, q queryer, taskID string) ([]string, 
 	return out, rows.Err()
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, nil, err
 	}
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.q, func(q queryer) error {
-		n, err := closeTaskRows(ctx, q, taskID, closeReason, closeEventType)
+		t, err := closeTaskRow(ctx, q, taskID, closeReason, closeEventType)
 		if err != nil {
 			return fmt.Errorf("close task: %w", err)
 		}
-		closed = n > 0
+		closed = t != nil
 
 		if closingEventID != "" {
 			if _, err := q.ExecContext(ctx, `
 				INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
 				VALUES (?, ?, 'closed', ?)
-			`, taskID, closingEventID, time.Now()); err != nil {
+			`, taskID, closingEventID, time.Now().UTC()); err != nil {
 				return fmt.Errorf("record close audit: %w", err)
 			}
 		}
@@ -591,8 +613,8 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		// Drained and closed before the UPDATE below rather than on a defer:
 		// both ride the one connection this tx holds, and an open cursor is
 		// the kind of thing a driver is entitled to refuse to write around.
-		if runIDs, err = scanActiveRunIDs(ctx, q, taskID); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+		if conversationIDs, err = scanActiveConversationIDs(ctx, q, taskID); err != nil {
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// `status = 'running' AND cancel_requested = 0` is
@@ -608,7 +630,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 			      SELECT c.blueprint_run_id FROM conversations c
 			      WHERE c.task_id = ?
 			        AND c.blueprint_run_id IS NOT NULL
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)
@@ -618,15 +640,18 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
-func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET status = ? WHERE id = ?`, status, taskID)
-	return err
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks SET status = ? WHERE id = ?
+		RETURNING `+sqliteTaskBareColumns,
+		status, taskID), &t)
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error) {
@@ -660,7 +685,7 @@ func (s *taskStore) RecordEvent(ctx context.Context, orgID, taskID, eventID, kin
 	_, err := s.q.ExecContext(ctx, `
 		INSERT OR IGNORE INTO task_events (task_id, event_id, kind, created_at)
 		VALUES (?, ?, ?, ?)
-	`, taskID, eventID, kind, time.Now())
+	`, taskID, eventID, kind, time.Now().UTC())
 	return err
 }
 
@@ -747,39 +772,45 @@ const sqliteActingTeamExpr = `COALESCE(
 		  LIMIT 1),
 		team_id)`
 
-func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
-	if teamID == "" {
-		return nil
-	}
-	_, err := s.q.ExecContext(ctx, `UPDATE tasks SET team_id = ? WHERE id = ?`, teamID, taskID)
-	return err
+	// Empty teamID keeps the stored team_id (COALESCE/NULLIF, the same idiom
+	// stampAgentClaimIfUnclaimed uses below) rather than skipping the
+	// statement — the row still has to exist for the write to answer
+	// anything, so a bogus id reports ErrNoSuchTask on this path too instead
+	// of the prior silent no-op.
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
+		UPDATE tasks SET team_id = COALESCE(NULLIF(?, ''), team_id) WHERE id = ?
+		RETURNING `+sqliteTaskBareColumns,
+		teamID, taskID), &t)
 }
 
 // --- Claim mutations ---
 
-func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {
+func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
 	var claimedByAgentID any = agentID
 	if agentID == "" {
 		claimedByAgentID = nil
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = ?,
 		       claimed_by_user_id  = NULL
 		 WHERE id = ?
-	`, claimedByAgentID, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		claimedByAgentID, taskID), &t)
 }
 
-func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error {
+func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Task{}, err
 	}
 	var claimedByUserID any = userID
 	if userID == "" {
@@ -787,13 +818,14 @@ func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID 
 		// would violate the users(id) FK on the next read.
 		claimedByUserID = nil
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id  = ?,
 		       claimed_by_agent_id = NULL
 		 WHERE id = ?
-	`, claimedByUserID, taskID)
-	return err
+		RETURNING `+sqliteTaskBareColumns,
+		claimedByUserID, taskID), &t)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -1036,7 +1068,7 @@ func reassignClaimToUserSQLite(ctx context.Context, q queryer, taskID, fromUserI
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
@@ -1121,6 +1153,20 @@ const sqliteTaskColumnsWithEntity = `
 		ELSE 0
 	END`
 
+// sqliteTaskBareColumns is tasks' own columns — no entity join — in the
+// order taskScanState.bareTargets expects. It is the leading, identical
+// prefix of sqliteTaskColumnsWithEntity (kept that way so the two column
+// lists cannot drift apart) and is what every converted write's RETURNING
+// projects: see the returned-row shape note on db.TaskStore.
+const sqliteTaskBareColumns = `
+	id, entity_id, event_type, dedup_key, primary_event_id,
+	team_id,
+	status, priority_score, ai_summary, autonomy_suitability,
+	priority_reasoning, scoring_status, severity, relevance_reason,
+	source_status, snooze_until, close_reason, close_event_type,
+	closed_at, created_at,
+	claimed_by_agent_id, claimed_by_user_id`
+
 // taskScanState holds the NullX intermediates for one row of
 // sqliteTaskColumnsWithEntity. Keeping the helper here means
 // TaskStore's scan path is right next to the column list — the
@@ -1137,7 +1183,10 @@ type taskScanState struct {
 	claimedByAgentID, claimedByUserID  sql.NullString
 }
 
-func (s *taskScanState) targets(t *domain.Task) []any {
+// bareTargets is the scan-target list for sqliteTaskBareColumns — the
+// tasks-table columns only, none of the entity-join fields. targets below
+// extends it with those.
+func (s *taskScanState) bareTargets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
 		&s.teamID,
@@ -1146,9 +1195,14 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
 		&s.claimedByAgentID, &s.claimedByUserID,
+	}
+}
+
+func (s *taskScanState) targets(t *domain.Task) []any {
+	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount,
-	}
+	)
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
@@ -1196,6 +1250,22 @@ func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
 	}
 	s.finalize(t)
 	return nil
+}
+
+// scanTaskBareRow decodes a sqliteTaskBareColumns row — an id-keyed write's
+// UPDATE ... RETURNING. No row scanned means the write's WHERE clause
+// matched nothing (a missing id, or a state guard the row's current status
+// didn't satisfy), which is db.ErrNoSuchTask.
+func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
+	var s taskScanState
+	if err := row.Scan(s.bareTargets(t)...); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Task{}, db.ErrNoSuchTask
+		}
+		return domain.Task{}, err
+	}
+	s.finalize(t)
+	return *t, nil
 }
 
 func queryTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {

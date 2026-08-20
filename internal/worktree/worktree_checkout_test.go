@@ -50,7 +50,7 @@ func coPushBranch(t *testing.T, upstream, branch string) string {
 }
 
 // TestCreateForCheckoutInRoot_DefaultBranchDetached pins the generalized default
-// `workspace add`: the worktree lands at {runRoot}/{owner}/{repo}/@default,
+// `workspace add`: the worktree lands at {runRoot}/{owner}/{repo}/default,
 // checked out DETACHED at the repo's default-branch tip (no branch claimed), and
 // the agent can then create its own branch — which CurrentBranch (the push
 // gate's source) reports.
@@ -65,7 +65,7 @@ func TestCreateForCheckoutInRoot_DefaultBranchDetached(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = RemoveAt(wt, "run-1") })
 
-	if want := filepath.Join(runRoot, "owner", "repo", "@default"); wt != want {
+	if want := filepath.Join(runRoot, "owner", "repo", "default"); wt != want {
 		t.Errorf("path = %q, want %q", wt, want)
 	}
 	// HEAD is detached → no live branch → push gate authorizes nothing yet.

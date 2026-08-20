@@ -30,7 +30,7 @@ type CommitIdentity struct {
 //     fabricated identity).
 //   - orgEmail is the author/committer email, already in its final form. The
 //     App-vs-PAT decision lives in the resolver (which has the data): a PAT org
-//     gets "<login>@users.noreply.github.com"; an App org gets the numeric-id
+//     gets the credential owner's verified primary email; an App org gets the numeric-id
 //     noreply form "<bot_user_id>+<slug>[bot]@users.noreply.github.com" when the
 //     bot user id is known (the form that links a bot's commits on github.com),
 //     else the plain "<slug>[bot]@..." form (TFAC-474). This function passes it

@@ -31,7 +31,7 @@ covered in [Secret storage](secret-storage.md).
 
 Team Settings → **Team defaults** → *Pushes to the base branch* controls whether
 a delegated agent may push straight to a repository's base or default branch —
-`main`, `master`, or whatever the repo profile records, plus any base branch you
+`main`, `master`, or whatever the repository records, plus any base branch you
 configured for the repo. The default is **Never**: agents push their own branch
 and open a pull request. **Only runs a human started** allows it for a run you
 dispatched yourself while still refusing it on runs a trigger fired, and
@@ -43,15 +43,14 @@ can change it. That is deliberate: a task's text comes from pull-request bodies,
 issue comments and labels, so anyone who can comment on an issue in a tracked
 repository could otherwise talk a run into pushing to `main`.
 
-In local mode this is enforced by TF's `pre-push` git hook, which the agent's
-git runs under. Treat it as a **safety guard against mistakes, not a security
-boundary**: a local-mode agent runs as you, with unrestricted shell access, so
-`git push --no-verify` skips the hook entirely and nothing here can stop an
-agent that is actively trying to get around it. What it does reliably stop is
-the far more common case — an agent that never considered the rule and ran the
-obvious command. Branch protection on GitHub is what actually enforces this;
-this setting is the local-first line of defence in front of it.
+In local mode TF routes the managed Git path through a per-run loopback proxy.
+That proxy authenticates with the GitHub identity configured in TF, checks the
+team's tracked/materialized repository set and base-branch policy, and records
+the actual upstream result. It refuses a push when it cannot authorize the
+repository or ref instead of falling back to your SSH key or credential helper.
 
-The guard also fails open on purpose: if the hook cannot work out the policy —
-no run context, an unreadable database — the push proceeds rather than being
-blocked by an unrelated outage.
+This is still a **safety and identity guarantee for ordinary behavior, not a
+security boundary**: a local-mode agent runs as you with unrestricted shell
+access and can deliberately bypass process-scoped routing. Multi mode's sandbox
+is the containment boundary; GitHub branch protection remains the authoritative
+server-side guard in either mode.

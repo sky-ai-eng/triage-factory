@@ -41,7 +41,7 @@ func (a *App) openStores(ctx context.Context) error {
 		registerPoolMetrics(database, "sqlite", db.PoolLocal)
 		// No tenant rows exist on a fresh local DB — provisioning is the
 		// explicit "Start your factory" action (db.BootstrapLocalOrg via
-		// POST /api/setup/start), not a boot- or migration-time side
+		// POST /api/orgs), not a boot- or migration-time side
 		// effect. The server, pollers, scorer, router, and spawner all
 		// start and idle cleanly with zero tenant rows.
 		a.database = database
@@ -102,7 +102,7 @@ func (a *App) openStores(ctx context.Context) error {
 		// (TFAC-402). Required in every role EXCEPT executor (TFAC-614):
 		// an executor never holds the secret-decryption key — all per-run
 		// credential material arrives pre-resolved via sealed
-		// run_credentials bundles instead (see internal/credprovision and
+		// claim_credentials bundles instead (see internal/credprovision and
 		// the awaiting-credentials wait in internal/delegate). If the var
 		// is set on an executor anyway (a stale compose file, an operator
 		// override) it is logged once and ignored, never loaded — the
@@ -112,7 +112,7 @@ func (a *App) openStores(ctx context.Context) error {
 		a.appDB = appDB
 		if a.plan.role == runmode.RoleExecutor {
 			if secretenv.Get(pgstore.EnvSecretEncryptionKey) != "" {
-				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-run credentials arrive via sealed bundles instead (TFAC-614)")
+				appLog.Warn("TF_SECRET_ENCRYPTION_KEY is set but ignored on TF_ROLE=executor — executors never hold the secret-decryption key; per-claim credentials arrive via sealed bundles instead (TFAC-614)")
 			}
 			a.stores = pgstore.NewWithoutSecrets(adminDB, appDB)
 		} else {

@@ -9,10 +9,20 @@ import { MemoryRouter } from 'react-router'
 // another page instead of archiving. What a control LOOKS like it does is not
 // checkable in a screenshot; what it calls is.
 
-const api = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn() }))
+// The page reads through the shared helpers (fetchTeamRoster, fetchTeamRepos),
+// and those read through apiClient — so stubbing the client covers the page and
+// the sub-pages it mounts alike. apiList and apiListAll are stubbed beside
+// apiJSON because they call it through apiClient's own local binding, which a
+// mocked export does not reach.
+const api = vi.hoisted(() => ({
+  apiJSON: vi.fn(),
+  apiFetch: vi.fn(),
+  apiList: vi.fn(),
+  apiListAll: vi.fn(),
+}))
 vi.mock('../../lib/apiClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../lib/apiClient')>()
-  return { ...actual, apiJSON: api.apiJSON, apiFetch: api.apiFetch }
+  return { ...actual, ...api }
 })
 
 const life = vi.hoisted(() => ({ fetchArchivePreview: vi.fn(), archiveTeam: vi.fn() }))
@@ -76,10 +86,17 @@ beforeEach(() => {
   roles.team = 'admin'
   roles.org = true
   api.apiJSON.mockImplementation((path: string) => {
-    if (path.endsWith('/members')) return Promise.resolve(MEMBERS)
-    if (path.endsWith('/repos')) return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
+    if (path.endsWith('/members/list'))
+      return Promise.resolve({ items: MEMBERS.members, total_count: MEMBERS.members.length })
+    if (path.endsWith('/github-repos'))
+      return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
     return Promise.reject(new Error('no route: ' + path))
   })
+  // The org directory behind `+ add teammate`. Empty is the honest default
+  // here: no test in this file adds anyone, and a candidate nobody asked for
+  // would just be a row to explain.
+  api.apiList.mockResolvedValue({ items: [], next_page_token: '', total_count: 0 })
+  api.apiListAll.mockResolvedValue([])
   api.apiFetch.mockResolvedValue({ ok: true })
   life.fetchArchivePreview.mockResolvedValue({
     team_id: 't1',

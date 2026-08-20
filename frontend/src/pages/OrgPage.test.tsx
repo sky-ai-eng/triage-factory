@@ -6,11 +6,24 @@ import type { PendingInvite } from '../types'
 
 // Mock the apiClient I/O but keep HttpError + httpErrorMessage real (the page's
 // error path uses them).
-const apiMocks = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn() }))
+const apiMocks = vi.hoisted(() => ({ apiJSON: vi.fn(), apiFetch: vi.fn(), apiList: vi.fn() }))
 vi.mock('../lib/apiClient', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../lib/apiClient')>()
-  return { ...actual, apiJSON: apiMocks.apiJSON, apiFetch: apiMocks.apiFetch }
+  return {
+    ...actual,
+    apiJSON: apiMocks.apiJSON,
+    apiFetch: apiMocks.apiFetch,
+    // apiList is mocked separately rather than left to compose the mocked
+    // apiJSON: the real apiList closes over the module's own apiJSON, so
+    // mocking only the latter would leave list reads hitting the network.
+    apiList: apiMocks.apiList,
+  }
 })
+
+// page wraps rows in the list envelope every POST /…/list read answers with.
+function page<T>(items: T[]) {
+  return { items, next_page_token: '', total_count: items.length }
+}
 
 // Admin viewer in a concrete active org — so the People tab (these tests'
 // subject) and the admin tabs all gate open.
@@ -70,19 +83,21 @@ beforeEach(() => {
   invitesState = [makeInvite()]
   apiMocks.apiJSON.mockReset()
   apiMocks.apiFetch.mockReset()
+  apiMocks.apiList.mockReset()
   apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-    if (path === '/members') return { members: [OWNER_ROW] }
-    if (path === '/api/invites') {
-      if (opts?.method === 'POST') {
-        return {
-          id: 'inv-new',
-          accept_url: 'https://tf.example.com/invite/accept?token=fresh',
-          expires_at: makeInvite().expires_at,
-        }
+    if (path === '/api/invites' && opts?.method === 'POST') {
+      return {
+        id: 'inv-new',
+        accept_url: 'https://tf.example.com/invite/accept?token=fresh',
+        expires_at: makeInvite().expires_at,
       }
-      return invitesState
     }
     throw new Error('unexpected apiJSON path: ' + path)
+  })
+  apiMocks.apiList.mockImplementation(async (path: string) => {
+    if (path === '/api/orgs/org-1/members/list') return page([OWNER_ROW])
+    if (path === '/api/invites/list') return page(invitesState)
+    throw new Error('unexpected apiList path: ' + path)
   })
   apiMocks.apiFetch.mockResolvedValue(undefined as unknown as Response)
 })
@@ -146,10 +161,8 @@ describe('OrgPage — pending invites', () => {
       return undefined as unknown as Response
     })
     apiMocks.apiJSON.mockImplementation(async (path: string, opts?: { method?: string }) => {
-      if (path === '/members') return { members: [OWNER_ROW] }
-      if (path === '/api/invites') {
-        if (opts?.method === 'POST') throw new HttpError(500, 'boom') // re-create fails
-        return invitesState // GET reflects the now-empty (revoked) state
+      if (path === '/api/invites' && opts?.method === 'POST') {
+        throw new HttpError(500, 'boom') // re-create fails
       }
       throw new Error('unexpected apiJSON path: ' + path)
     })

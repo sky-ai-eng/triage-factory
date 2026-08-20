@@ -26,17 +26,44 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
 		seed := dbtest.TaskMemorySeeder{
-			Run: func(t *testing.T, suffix string) (runID, entityID string) {
+			Conversation: func(t *testing.T, suffix string) (conversationID, entityID string) {
 				t.Helper()
-				return seedSQLiteRunForTaskMemory(t, conn, suffix)
+				return seedSQLiteConversationForTaskMemory(t, conn, suffix)
 			},
 			BlueprintRun: func(t *testing.T, suffix string) (blueprintRunID string) {
 				t.Helper()
 				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
 			},
-			Role: func(t *testing.T, runID, entityID string) string {
+			Role: func(t *testing.T, conversationID, entityID string) string {
 				t.Helper()
-				return roleForSQLiteJoinRow(t, conn, runID, entityID)
+				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
+			},
+		}
+		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
+	})
+}
+
+// TestTaskMemoryStore_SQLite_ReturnedRowConformance runs the returned-row
+// suite against the SQLite impl. SQLite has one connection and no
+// RLS, so there is no separate app-pool wiring the way the Postgres suite
+// needs — this single run covers both the plain and System variants.
+func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {
+	dbtest.RunTaskMemoryReturnedRowConformance(t, func(t *testing.T) (db.TaskMemoryStore, string, dbtest.TaskMemorySeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		seed := dbtest.TaskMemorySeeder{
+			Conversation: func(t *testing.T, suffix string) (conversationID, entityID string) {
+				t.Helper()
+				return seedSQLiteConversationForTaskMemory(t, conn, suffix)
+			},
+			BlueprintRun: func(t *testing.T, suffix string) (blueprintRunID string) {
+				t.Helper()
+				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
+			},
+			Role: func(t *testing.T, conversationID, entityID string) string {
+				t.Helper()
+				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
 			},
 		}
 		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
@@ -47,10 +74,10 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 // store interface has no role-returning read, so the
 // RecordEntityTouchSystem precedence conformance subtest needs a raw
 // escape hatch. Returns "" if no row exists.
-func roleForSQLiteJoinRow(t *testing.T, conn *sql.DB, runID, entityID string) string {
+func roleForSQLiteJoinRow(t *testing.T, conn *sql.DB, conversationID, entityID string) string {
 	t.Helper()
 	var role string
-	err := conn.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, runID, entityID).Scan(&role)
+	err := conn.QueryRow(`SELECT role FROM conversation_memory_entities WHERE conversation_id = ? AND entity_id = ?`, conversationID, entityID).Scan(&role)
 	if err == sql.ErrNoRows {
 		return ""
 	}
@@ -71,14 +98,14 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 
 	const badOrg = "11111111-1111-1111-1111-111111111111"
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemory(non-local org) should error")
 	}
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemorySystem(non-local org) should error")
 	}
-	if err := stores.TaskMemory.UpdateRunMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
-		t.Error("UpdateRunMemoryHumanContent(non-local org) should error")
+	if _, err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
+		t.Error("UpdateConversationMemoryHumanContent(non-local org) should error")
 	}
 	if _, err := stores.TaskMemory.GetMemoriesForEntity(ctx, badOrg, "e"); err == nil {
 		t.Error("GetMemoriesForEntity(non-local org) should error")
@@ -103,11 +130,11 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	run1, entityID := seedSQLiteRunForTaskMemory(t, conn, "count-1")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run1, entityID, "", "first"); err != nil {
+	conv1, entityID := seedSQLiteConversationForTaskMemory(t, conn, "count-1")
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run1, entityID, domain.MemoryRolePrimary); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
@@ -117,11 +144,11 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 		t.Errorf("Count = %d, want 1", n)
 	}
 
-	run2, _ := seedSQLiteRunForTaskMemory(t, conn, "count-2")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, run2, entityID, "", "second"); err != nil {
+	conv2, _ := seedSQLiteConversationForTaskMemory(t, conn, "count-2")
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, run2, entityID, domain.MemoryRoleTouched); err != nil {
+	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv2, entityID, domain.MemoryRoleTouched); err != nil {
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
@@ -132,7 +159,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	}
 
 	// Unrelated entity has none.
-	_, otherEntity := seedSQLiteRunForTaskMemory(t, conn, "count-unrelated")
+	_, otherEntity := seedSQLiteConversationForTaskMemory(t, conn, "count-unrelated")
 	if n, err := stores.TaskMemory.CountMemoriesForEntitySystem(ctx, runmode.LocalDefaultOrgID, otherEntity, runmode.LocalDefaultTeamID); err != nil {
 		t.Fatalf("CountMemoriesForEntitySystem: %v", err)
 	} else if n != 0 {
@@ -151,11 +178,11 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	runID, entityID := seedSQLiteRunForTaskMemory(t, conn, "backfill")
+	conversationID, entityID := seedSQLiteConversationForTaskMemory(t, conn, "backfill")
 	now := time.Now().UTC()
 	if _, err := conn.Exec(
 		`INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content, created_at) VALUES (?, ?, ?, 'pre-migration note', ?)`,
-		uuid.New().String(), runID, entityID, now,
+		uuid.New().String(), conversationID, entityID, now,
 	); err != nil {
 		t.Fatalf("seed pre-migration conversation_memory row: %v", err)
 	}
@@ -175,7 +202,7 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 		t.Fatalf("run backfill: %v", err)
 	}
 
-	if role := roleForSQLiteJoinRow(t, conn, runID, entityID); role != domain.MemoryRolePrimary {
+	if role := roleForSQLiteJoinRow(t, conn, conversationID, entityID); role != domain.MemoryRolePrimary {
 		t.Errorf("backfilled role = %q, want %q", role, domain.MemoryRolePrimary)
 	}
 
@@ -188,11 +215,11 @@ func TestTaskMemoryStore_SQLite_BackfillProducesPrimaryJoinRows(t *testing.T) {
 	}
 }
 
-// seedSQLiteRunForTaskMemory seeds the entity + event + prompt +
-// task + run FK chain conversation_memory needs. Direct INSERTs keep the
-// fixture path schema-coupled and short — matches the SwipeStore
+// seedSQLiteConversationForTaskMemory seeds the entity + event + prompt +
+// task + conversation FK chain conversation_memory needs. Direct INSERTs
+// keep the fixture path schema-coupled and short — matches the SwipeStore
 // / EventStore conformance seed pattern.
-func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runID, entityID string) {
+func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (conversationID, entityID string) {
 	t.Helper()
 	entityID = uuid.New().String()
 	now := time.Now().UTC()
@@ -219,31 +246,31 @@ func seedSQLiteRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (runI
 	taskID := uuid.New().String()
 	// 'done' is the terminal task status (an earlier version of the seed used
 	// 'completed', which was never a valid task value — 'completed'
-	// is run-level; a later CHECK constraint caught the latent bug).
+	// is conversation-level; a later CHECK constraint caught the latent bug).
 	if _, err := conn.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
 		VALUES (?, ?, ?, ?, 'done')
 	`, taskID, entityID, eventType, eventID); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	// runs.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
-	// for this task so the run row satisfies the FK.
-	blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
-	runID = uuid.New().String()
+	// conversations.blueprint_run_id is NOT NULL — mint a blueprint + blueprint_run
+	// for this task so the conversation row satisfies the FK.
+	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
+	conversationID = uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, 'p_task_memory', 'completed', ?, ?)
-	`, runID, taskID, blueprintRunID, dbtest.TaskMemorySeedStepIndex); err != nil {
-		t.Fatalf("seed run: %v", err)
+	`, conversationID, taskID, blueprintRunID, dbtest.TaskMemorySeedStepIndex); err != nil {
+		t.Fatalf("seed conversation: %v", err)
 	}
-	return runID, entityID
+	return conversationID, entityID
 }
 
 // seedSQLiteBlueprintRunForTaskMemory seeds the entity + event + task +
 // blueprint + blueprint_run FK chain a conversation_memory.blueprint_run_id can point
 // at (the column FKs blueprint_runs(id) ON DELETE SET NULL). Returns the
-// blueprint_run id. Independent of seedSQLiteRunForTaskMemory's run — the
-// round-trip test only needs a valid FK target.
+// blueprint_run id. Independent of seedSQLiteConversationForTaskMemory's
+// conversation — the round-trip test only needs a valid FK target.
 func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix string) (blueprintRunID string) {
 	t.Helper()
 	now := time.Now().UTC()

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -9,18 +10,27 @@ import (
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskStore --output=./mocks --case=underscore --with-expecter
 
+// ErrNoSuchTask means an id-keyed write matched no row: the id names nothing,
+// or names a row whose current state refused the guard a write's WHERE
+// clause carries (Close on an already-terminal task, for instance). Both
+// collapse to the same sentinel — the same answer a rows-affected probe gave
+// either way, since RETURNING can't itself distinguish "missing" from "guard
+// didn't match" — so a caller that needs the distinction re-reads.
+var ErrNoSuchTask = errors.New("no task with that id")
+
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
 // task, written in the same durable step as the engagement that commits it
-// (a fenced run insert, a queued firing, an event folded into a live run).
+// (a fenced blueprint-run insert, a queued firing, an event folded into a
+// live conversation).
 //
 // It is a parameter type rather than a call of its own because the two
 // writes must not be separable. A commitment that lands while its stamp
 // silently fails leaves the board showing a free task under a live agent
-// run, and the firing fences (the (triggering_event_id, trigger_id) replay
+// conversation, and the firing fences (the (triggering_event_id, trigger_id) replay
 // fence, the pending-unique) mean a replay of the event skips before it
 // could ever re-stamp — so nothing repairs it. Coupling them is what makes
-// "unclaimed with a live run" mean only what the requeue path intends.
+// "unclaimed with a live conversation" mean only what the requeue path intends.
 //
 // A zero value (empty AgentID) means "no stamp": the commitment writes
 // alone. That is the honest degrade for the seam between DB init and agent
@@ -41,14 +51,64 @@ import (
 // including its three-way refusal (a user claim wins, a same-agent rewrite
 // is a no-op, a terminal task refuses) — and a refusal never fails the
 // surrounding commitment: the claim race has a winner either way, and the
-// run insert (or firing row) must still stand.
+// blueprint-run insert (or firing row) must still stand.
 type AgentClaimStamp struct {
 	AgentID      string
 	ActingTeamID string
 }
 
+// TaskListStatusClaimed is the one member of the list vocabulary that is not
+// a lifecycle status: it names the claim axis instead — a task at
+// status='queued' that someone (a user or the bot) has taken. The board's
+// Claimed column is exactly that set, and it can't be spelled with a
+// lifecycle status because a claim doesn't change one. It stays scoped to
+// status='queued' so a claimed task that advanced to in_progress/in_review
+// renders in its own column rather than twice.
+const TaskListStatusClaimed = "claimed"
+
+// TaskListStatuses is the full vocabulary TaskListFilter.Statuses accepts:
+// the six lifecycle statuses the tasks CHECK constraint enforces, plus the
+// derived "claimed". A value outside it is a caller fault, not an empty
+// result — the HTTP layer rejects it before the store is reached.
+var TaskListStatuses = []string{
+	"queued", "in_progress", "in_review", "done", "dismissed", "snoozed",
+	TaskListStatusClaimed,
+}
+
+// TaskListFilter is the filter set for TaskStore.List. Every field is
+// optional; the zero value matches every task the caller can see.
+//
+// The fields are independent predicates, ANDed together — Statuses selects
+// which lane, the rest narrow within it:
+//
+//   - Statuses: match any of these (see TaskListStatuses). Empty = all.
+//   - TeamIDs: the per-page *multi-team* view scope. Empty = the union of the
+//     viewer's teams (the RLS-scoped default). Non-empty narrows to tasks any
+//     of those teams owns (team_id) or can see (a task_teams visibility row) —
+//     the "show A and B together, hide the rest" board contract. Membership is
+//     still RLS-enforced underneath, so teams the caller isn't in contribute
+//     nothing rather than leaking.
+//   - OnlyUnclaimed: both claim columns NULL. This is the queue's "pickable by
+//     anyone" half.
+//   - IncludeSnoozed: when false, a task still inside its snooze window
+//     (snooze_until in the future) is excluded. It is a *wake-window* filter,
+//     not a status filter: whether status='snoozed' rows are candidates at all
+//     is Statuses' business.
+//   - ClosedSince: when set, a done/dismissed task is included only if its
+//     closed_at is at or after it. Non-terminal rows are unaffected, so a
+//     mixed query windows its terminal tail without touching the rest. Nil
+//     means no window — the board asks for the one it wants, and there is no
+//     hidden default.
+type TaskListFilter struct {
+	Statuses       []string
+	TeamIDs        []string
+	OnlyUnclaimed  bool
+	IncludeSnoozed bool
+	ClosedSince    *time.Time
+}
+
 // TaskStore owns the tasks table — lifecycle, claims, dedup,
-// swipe-triggered transitions, plus the run-history queries that
+// swipe-triggered transitions, plus the conversation-history queries that
 // power the auto-delegate breaker.
 //
 // All methods take orgID. Local mode passes runmode.LocalDefaultOrgID
@@ -75,6 +135,17 @@ type AgentClaimStamp struct {
 //     usually surfaces 409). HandoffAgentClaim returns the
 //     three-state HandoffResult so callers can distinguish no-op
 //     from refused.
+//
+// Returned-row shape: Get's point read projects a task joined to
+// its entity (title, url, source fields, the open-subtask and Slack-message
+// counts) — a join a single UPDATE ... RETURNING cannot reproduce, and
+// SQLite has no data-modifying CTE to fake it with. Every write below that
+// returns a row therefore returns tasks' OWN columns only, via the same bare
+// projection on both dialects: the "Join-populated display fields" on
+// domain.Task (see its doc comment) stay at their zero value on a write's
+// return. This is TeamsStore.Role's shape (PR #935) applied here — the
+// entity fields are the read's join, not the row's, and a write has no view
+// on them. A caller that needs them calls Get.
 type TaskStore interface {
 	// --- Lookup ---
 
@@ -82,36 +153,18 @@ type TaskStore interface {
 	// display fields. Returns (nil, nil) when no row matches.
 	Get(ctx context.Context, orgID, taskID string) (*domain.Task, error)
 
-	// Queued returns active queue tasks ordered by the matching
-	// event_handler rule's sort_order then priority_score DESC.
-	// Queue membership is the derived filter:
-	// status='queued' AND both claim cols NULL AND not future-snoozed.
+	// List is the paginated task read every task-list surface goes
+	// through — the queue deck, each board column, any future filter.
+	// It returns the page named by opts and the *filtered* total (the
+	// count the same filters match, not the page length), both computed
+	// on the same connection so a caller's page and total agree.
 	//
-	// teamIDs is the optional per-page read filter — a *multi-team* view
-	// scope. Empty/nil = the union of the viewer's teams (the RLS-scoped
-	// default). When non-empty, the result narrows to tasks any of those
-	// teams owns (team_id) or can see (a task_teams visibility row) — the
-	// "show A and B together, hide the rest" board contract. The viewer's
-	// membership is still RLS-enforced underneath, so teams the caller
-	// isn't in contribute nothing rather than leaking.
-	Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
-
-	// QueuedIncludingSnoozed mirrors Queued but drops the snooze-
-	// window filter so future-snoozed rows surface too. The
-	// Board Queued column uses this when the user toggles "show
-	// snoozed"; the default Queued() stays the canonical "what's
-	// actually pickable right now" projection. teamIDs is the same
-	// optional multi-team read filter as Queued.
-	QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error)
-
-	// ByStatus returns tasks with the given lifecycle status,
-	// ordered by priority. Two pseudo-values are mapped to claim-
-	// axis queries for API back-compat:
-	//   "claimed"   → claimed_by_user_id IS NOT NULL + active
-	//   "delegated" → claimed_by_agent_id IS NOT NULL + active
-	// Other status values are passed through literally. teamIDs is the
-	// same optional multi-team read filter as Queued.
-	ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error)
+	// See TaskListFilter for what the filters mean. Ordering is fixed and
+	// total (TaskListOrder): live before snoozed, open before closed,
+	// newest-closed first among closed, then the matching event_handler
+	// rule's sort_order, then priority_score DESC, then id — the id
+	// tiebreaker is what makes offset paging return each row exactly once.
+	List(ctx context.Context, orgID string, filter TaskListFilter, opts ListOpts) ([]domain.Task, int, error)
 
 	// FindActiveByEntityAndType returns non-terminal tasks for an
 	// entity matching the given event type. Used by inline close
@@ -188,6 +241,10 @@ type TaskStore interface {
 	// originals. An empty slice is a no-op. The owning team_id stamped
 	// on the task by FindOrCreate need not be included — it grants
 	// visibility on its own — but passing it is harmless.
+	//
+	// Exempt from the returned-row rule: it reconciles a set (the task's
+	// visibility team rows), so there is no single row a return value could
+	// name.
 	SetVisibilityTeams(ctx context.Context, orgID, taskID string, teamIDs []string) error
 
 	// VisibilityTeams returns the team IDs in a task's visibility set.
@@ -196,31 +253,36 @@ type TaskStore interface {
 
 	// SetOwnerTeam updates a task's owning/attributed team_id without
 	// touching the claim columns. The router uses it to consolidate the
-	// owner to the acting team just before an auto-fired run is created,
-	// so the run — which inherits runs.team_id from tasks.team_id at
-	// insert — is attributed to the team that acted even when the
-	// creation-time owner team was skipped (e.g. it had auto-delegation
-	// disabled while a lower-priority team fires). The Postgres impl
-	// resolves the LocalDefaultTeamID sentinel to the org's canonical
-	// team. Empty teamID is a no-op.
-	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error
+	// owner to the acting team just before an auto-fired conversation is
+	// created, so the conversation — which inherits conversations.team_id
+	// from tasks.team_id at insert — is attributed to the team that acted
+	// even when the creation-time owner team was skipped (e.g. it had auto-
+	// delegation disabled while a lower-priority team fires). The Postgres
+	// impl resolves the LocalDefaultTeamID sentinel to the org's canonical
+	// team. Empty teamID is a no-op on the column (the stored team_id is
+	// unchanged) but still requires taskID to name a row: a miss is
+	// ErrNoSuchTask, same as every other write here.
+	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
 
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
 	// the task_events junction (see RecordEvent).
-	Bump(ctx context.Context, orgID, taskID, eventID string) error
+	Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 
 	// Close sets a task to done with the given close reason.
 	// closeEventType may be empty (only set when close_reason is
-	// "auto_closed_by_event"). No-op on terminal rows.
-	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+	// "auto_closed_by_event"). The WHERE clause is state-guarded (status NOT
+	// IN ('done', 'dismissed')), so an already-terminal task and a missing
+	// id answer the same way: ErrNoSuchTask. A caller that needs to tell
+	// them apart re-reads.
+	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
 	// SetStatus updates the lifecycle status only — claim cols are
 	// unaffected. The only production caller is
 	// revertTaskStatus in DrainTask's mark-fired-failure rollback;
 	// every other lifecycle write routes through a guarded helper.
-	SetStatus(ctx context.Context, orgID, taskID, status string) error
+	SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
 
 	// AdvanceStatusForUser flips a user-claimed task's lifecycle
 	// status forward (board manual transitions). Guards:
@@ -228,7 +290,7 @@ type TaskStore interface {
 	//   - current status must be one of {queued, in_progress, in_review}
 	//   - newStatus must be one of {in_progress, in_review}
 	// Refuses all other shapes — terminal transitions (done /
-	// dismissed) go through Close + handleSwipe, requeue clears the
+	// dismissed) go through Close + handleTaskPatch, requeue clears the
 	// claim entirely, and bot-claimed tasks transition via
 	// SetStatusSystem from the router. Returns ok=true when the
 	// update actually changed a row; false means a guard tripped
@@ -237,6 +299,13 @@ type TaskStore interface {
 
 	// RecordEvent inserts into the task_events junction (task_id,
 	// event_id, kind). Idempotent on (task_id, event_id).
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape:
+	// the insert is ON CONFLICT DO NOTHING (a replay re-recording the same
+	// (task, event) pair), the row is an append-only audit trail with no
+	// display surface, and no caller — the router's dispatch bookkeeping,
+	// the factory's spawn marker — does anything with it beyond checking the
+	// error. Same call as OperatorStore.Add.
 	RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error
 
 	// --- Claim mutations ---
@@ -246,11 +315,11 @@ type TaskStore interface {
 	// (auto-trigger) or HandoffAgentClaim (user-initiated) instead;
 	// this primitive survives for test fixtures and migration
 	// backfills only.
-	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error
+	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error)
 
 	// SetClaimedByUser is the symmetric unconditional user-claim
 	// stamp. Same scope-warning as SetClaimedByAgent.
-	SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error
+	SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error)
 
 	// StampAgentClaimIfUnclaimed is the race-safe agent-claim stamp
 	// for the auto-trigger path. Guards on (a) no user claim,
@@ -328,13 +397,13 @@ type TaskStore interface {
 	// relationship to the task's team(s) would silently hand them a claim
 	// they can't even see afterward.
 	//
-	// On success the owning team_id consolidates to the acting team
-	// derived from toUserID — the same task_teams-visibility-set
-	// derivation ClaimQueuedForUser applies — so reassigning across teams
-	// re-homes the card to the new claimant's team. Run ownership is
-	// per-run, not per-claim: this method never touches runs — an active
-	// delegated run keeps executing regardless of who now holds the
-	// task's claim.
+	// On success the owning team_id consolidates to the acting team derived
+	// from toUserID — the same task_teams-visibility-set derivation
+	// ClaimQueuedForUser applies — so reassigning across teams re-homes the
+	// card to the new claimant's team. Conversation ownership is per-
+	// conversation, not per-claim: this method never touches conversations
+	// — an active delegated conversation keeps executing regardless of who
+	// now holds the task's claim.
 	//
 	// Callers should use the admin-pool ReassignClaimToUserSystem variant
 	// below rather than this one: unlike every other claim mutation, the
@@ -348,12 +417,12 @@ type TaskStore interface {
 
 	// --- Breaker ---
 
-	// CountConsecutiveFailedRuns counts consecutive non-success
-	// auto-runs at the tail of runs for (entity_id, prompt_id),
-	// stopping at the first completed row. Chain instances count
-	// once, not once-per-step. Used by the router to check the
-	// circuit-breaker threshold.
-	CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error)
+	// CountConsecutiveFailedConversations counts consecutive non-success
+	// auto-fired conversations at the tail of the conversation history for
+	// (entity_id, prompt_id), stopping at the first completed row. Chain
+	// instances count once, not once-per-step. Used by the router to check
+	// the circuit-breaker threshold.
+	CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error)
 
 	// --- Admin-pool variants (`...System`) ---
 	//
@@ -396,15 +465,19 @@ type TaskStore interface {
 	// found an active task and no row was created or returned (task is
 	// nil); suppressed=false behaves exactly like FindOrCreateAtSystem.
 	FindOrCreateAtUnlessEntityActiveSystem(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (task *domain.Task, created, suppressed bool, err error)
+	//
+	// Exempt from the returned-row rule: it reconciles a set, same as
+	// SetVisibilityTeams.
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
-	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error
-	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
-	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
+	BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
+	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
-	// CloseWithRunCancelIntentSystem is the close the router performs: the
+	// CloseWithConversationCancelIntentSystem is the close the router performs: the
 	// task's terminal flip, its task_events audit row, and the durable STOP
-	// INTENT for the runs the close ends — one transaction, three tables.
+	// INTENT for the conversations the close ends — one transaction, three
+	// tables.
 	//
 	// The intent is `cancel_requested` on the blueprint runs behind the task's
 	// then-active conversations, and it is transactional because the kill that
@@ -412,19 +485,20 @@ type TaskStore interface {
 	// afterwards leaves no active task for a replay to find, so nothing walks
 	// back to the runs; stamping here means the system cannot forget it meant
 	// to stop them. From the flag alone the rest finishes on its own — the
-	// claim gate refuses to drive a cancel-requested run, and the reaper's
+	// claim gate refuses to drive a cancel-requested step, and the reaper's
 	// cancel arm finalizes it once its executor is gone.
 	//
-	// The returned run ids are that same then-active set, read inside the tx:
-	// every non-terminal conversation on the task, blueprint-parented or not,
-	// which is the selection the caller's post-commit stop cascade targets.
-	// Conversations with no blueprint parent are returned (they still get
-	// stopped) but stamp nothing — there is no blueprint to call off.
+	// The returned conversation ids are that same then-active set, read
+	// inside the tx: every non-terminal conversation on the task,
+	// blueprint-parented or not, which is the selection the caller's post-
+	// commit stop cascade targets. Conversations with no blueprint parent
+	// are returned (they still get stopped) but stamp nothing — there is no
+	// blueprint to call off.
 	//
 	// closed reports whether THIS call performed the transition. False means
 	// the task was already terminal, and then nothing is stamped and no ids
-	// are returned: a task that closed earlier may since have had a run
-	// legitimately resumed under it (a finished blueprint's final step, which
+	// are returned: a task that closed earlier may since have had a
+	// conversation legitimately resumed under it (a finished blueprint's final step, which
 	// the resume ladder allows), and a replayed close must not reach back and
 	// kill work a user started after the fact. The audit row is written either
 	// way, matching CloseSystem+RecordEventSystem's INSERT-or-nothing shape.
@@ -434,24 +508,28 @@ type TaskStore interface {
 	// neither, and an empty closingEventID writes no audit row. Passing one
 	// without the other stamps a close_event_type no task_events row accounts
 	// for — not rejected here, but no caller does it.
-	CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeRunIDs []string, err error)
+	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
-	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
+	SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
+
+	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
+	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's
 	// kind to "injected" in place — the event bumped the task AND was folded
-	// into the live run, and the fold is the fact worth surfacing over the
+	// into the live conversation, and the fold is the fact worth surfacing over the
 	// row RecordEventSystem/upsertTaskForEvent already wrote for that same
 	// (task, event) pair (RecordEventSystem itself is INSERT-only and would
 	// silently no-op on that PK collision). No-op if the row is absent.
 	//
-	// claim rides the same transaction: folding an event into a live run is
-	// the bot committing to that task, so the claim is written with the fold
-	// or not at all (see AgentClaimStamp). Returns claimed=true only when the
-	// stamp actually moved the claim — a refusal commits the fold anyway.
+	// claim rides the same transaction: folding an event into a live
+	// conversation is the bot committing to that task, so the claim is written
+	// with the fold or not at all (see AgentClaimStamp). Returns claimed=true
+	// only when the stamp actually moved the claim — a refusal commits the
+	// fold anyway.
 	MarkEventInjectedSystem(ctx context.Context, orgID, taskID, eventID string, claim AgentClaimStamp) (claimed bool, err error)
-	CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
+	CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error)
 	StampAgentClaimIfUnclaimedSystem(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error)
 
 	// ReassignClaimToUserSystem is ReassignClaimToUser routed through the
@@ -488,7 +566,7 @@ const (
 	HandoffChanged HandoffResult = iota
 	// HandoffNoOp — same agent already owns the task. Idempotent;
 	// caller skips the broadcast (and any sibling work like a
-	// duplicate run spawn).
+	// duplicate conversation spawn).
 	HandoffNoOp
 	// HandoffRefused — a different user owns the task (or the task
 	// vanished / is terminal). Caller returns 409 — the gesture

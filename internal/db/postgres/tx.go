@@ -25,7 +25,7 @@ import (
 //
 // Callers always pass orgID + userID explicitly. D7 will replace the
 // explicit pass with extraction from a request-scoped context (e.g.
-// authctx.ClaimsFromContext(ctx)), but the WithTx shape stays the same.
+// httpx.ClaimsFrom(ctx)), but the WithTx shape stays the same.
 //
 // Closures that need to bypass RLS (system services) shouldn't use
 // WithTx at all — they should call store methods directly on the
@@ -49,7 +49,7 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 //
 // userID must be a real users row id. Passing
 // runmode.LocalDefaultUserID is rejected — that sentinel has no FK
-// target in the multi-mode users table, and runs.creator_user_id
+// target in the multi-mode users table, and conversations.creator_user_id
 // has an FK to users(id). Callers that lack a real user identity
 // (event-triggered runs by schema CHECK, system services) should
 // route through the admin pool via per-store `...System` methods
@@ -137,9 +137,12 @@ func (s *Store) runClaimsBoundTx(ctx context.Context, orgID, userID string, fn f
 // even from inside a claims-set tx — see the Create comment).
 func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 	return db.TxStores{
-		Scores:    newScoreStore(tx),
-		Prompts:   newTxPromptStore(tx),
-		Swipes:    newSwipeStore(tx),
+		Scores:  newScoreStore(tx),
+		Prompts: newTxPromptStore(tx),
+		// Swipes keeps the real admin pool for its admin half even inside a
+		// claims-set tx, same as Conversations below: UndoLastSwipe's guard
+		// has to see swipe_events rows RLS hides from the requesting user.
+		Swipes:    newSwipeStore(tx, s.admin),
 		Dashboard: newDashboardStore(tx),
 		// Secrets: app half is the claims-set tx (Put/Get/Delete +
 		// per-user trio → org_secrets under tf_app + RLS); admin half
@@ -169,10 +172,10 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// compose with the surrounding claims tx (artifacts_* RLS scopes
 		// by team_id like runs); admin half stays pinned to s.admin so
 		// UpsertSystem inside WithTx routes outside the tx and commits
-		// autonomously, the same shape Conversations / RunWorktrees use.
+		// autonomously, the same shape Conversations / ConversationWorktrees use.
 		Artifacts:      newArtifactStore(tx, s.admin),
 		Entities:       newEntityStore(tx, tx),
-		Repos:          newRepoStore(tx, tx),
+		Repos:          newRepositoryStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
 		// Projects: ListSystem routes around RLS the same way
 		// Conversations' event-triggered Create does. Keeping the admin
@@ -192,12 +195,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// autonomously, same shape Events / Conversations use for their
 		// admin-pool halves.
 		TaskMemory: newTaskMemoryStore(tx, s.admin),
-		// RunWorktrees: app-side write routes through the tx; admin
+		// ConversationWorktrees: app-side write routes through the tx; admin
 		// half stays pinned to s.admin so DeleteByPathSystem +
 		// ListSystem inside WithTx route outside the tx — those
 		// writes commit autonomously, same shape Events /
 		// Conversations / TaskMemory use for their admin-pool halves.
-		RunWorktrees: newRunWorktreeStore(tx, s.admin),
+		ConversationWorktrees: newConversationWorktreeStore(tx, s.admin),
 		// Orgs: app-side writes route through the tx so settings
 		// upserts compose with the surrounding claims tx; admin half
 		// stays pinned to s.admin so ListActiveSystem +
@@ -229,7 +232,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// TeamGitHubRepos: app-side write (the team-row replace inside
 		// ReplaceForTeam) routes through the tx so it composes with the
 		// surrounding claims tx; admin half stays pinned to s.admin so
-		// the org-wide union read + repo_profiles reconcile (which must
+		// the org-wide union read + repositories reconcile (which must
 		// see sibling teams' rows past RLS) route outside the tx, the
 		// same autonomous-commit shape Events / TaskMemory use.
 		TeamGitHubRepos: newTeamGitHubReposStore(tx, s.admin),
@@ -289,12 +292,12 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// RLS for its cross-team aggregate, mirroring Spend/ExternalActions'
 		// split.
 		Marketplace: newMarketplaceStore(tx, s.admin),
-		// RunPendingInput: bound to the claims tx (not s.admin) so a resume
+		// ConversationPendingInput: bound to the claims tx (not s.admin) so a resume
 		// wake's input write commits atomically with its status flip under the
 		// resuming user's claims — the RLS policy admits it via the run's own
 		// visibility. Consume (claim time) runs system-side off the top-level
 		// store, never this tx-bound handle.
-		RunPendingInput: newRunPendingInputStore(tx),
+		ConversationPendingInput: newConversationPendingInputStore(tx),
 		// Permissions: the app half is the tx, so the pending read runs under
 		// the caller's claims in the same transaction that authorized the
 		// conversation. The admin half stays pinned to s.admin — every write

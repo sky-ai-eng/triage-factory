@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -15,14 +17,15 @@ import (
 	"github.com/zalando/go-keyring"
 )
 
-// pendingApprovalFixture installs the full FK chain for a task whose
-// delegated run has COMPLETED (terminal) while leaving an unresolved review
-// artifact in the approval column — a finalized pending review plus the
-// agent-side memory row. Returns (taskID, runID, reviewID). Centralized here so
-// each teardown test exercises the shape the task-level resolve-all gesture is
-// meant to clean up: agent finished, wrote memory, prepared a review, the human
-// then dragged the card to Done / Queue / dismissed it instead of approving.
-func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, reviewID string) {
+// pendingApprovalFixture installs the full FK chain for a task whose delegated
+// conversation has COMPLETED (terminal) while leaving an unresolved review
+// artifact in the approval column — a finalized pending review plus the agent-
+// side memory row. Returns (taskID, conversationID, reviewID). Centralized here
+// so each teardown test exercises the shape the task-level resolve-all gesture
+// is meant to clean up: agent finished, wrote memory, prepared a review, the
+// human then dragged the card to Done / Queue / dismissed it instead of
+// approving.
+func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversationID, reviewID string) {
 	t.Helper()
 	// The review-abandon path resolves a GitHub client (to delete the pending
 	// review), which is the first secret-backend resolution in some test orderings.
@@ -59,27 +62,27 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	}
 	if _, err := database.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('t_pa', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000024', 'e_pa', ?, 'ev_pa', 'queued', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
-	blueprintRunID := seedBlueprintRunSQLite(t, database, "t_pa")
+	blueprintRunID := seedBlueprintRunSQLite(t, database, "00000000-0000-4000-8000-000000000024")
 	if _, err := database.Exec(
 		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
-		 VALUES ('r_pa', 't_pa', 'p_pa', 'completed', 'manual', ?, 0)`,
+		 VALUES ('r_pa', '00000000-0000-4000-8000-000000000024', 'p_pa', 'completed', 'manual', ?, 0)`,
 		blueprintRunID,
 	); err != nil {
-		t.Fatalf("seed run: %v", err)
+		t.Fatalf("seed conversation: %v", err)
 	}
 
 	// conversation_memory: agent finished and wrote its self-report (the
 	// termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
-	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
-	// The primary join row a real run's completion will carry once the
+	// The primary join row a real conversation's completion will carry once the
 	// run-end attach ticket (TFAC-625) lands — GetMemoriesForEntity's
 	// join-based read (TFAC-622), exercised in assertPendingApprovalCleanedUp
 	// below, needs it to find anything.
@@ -87,10 +90,11 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 		t.Fatalf("RecordEntityTouchSystem: %v", err)
 	}
 
-	// A finalized review draft parks the run: a review artifact in state=pending
-	// whose ready sentinel (details.review_event) is set, with the agent's draft
-	// snapshotted into details.proposed. Abandon flips it to dismissed (no GitHub
-	// call — the draft is local). Returns the artifact id.
+	// A finalized review draft parks the conversation: a review artifact in
+	// state=pending whose ready sentinel (details.review_event) is set,
+	// with the agent's draft snapshotted into details.proposed. Abandon
+	// flips it to dismissed (no GitHub call — the draft is local). Returns
+	// the artifact id.
 	line := 1
 	reviewArt := domain.NewReviewArtifact("owner/repo", 7, "headsha_pa", "r_pa")
 	reviewArt.ConversationID = "r_pa"
@@ -109,7 +113,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
-	return "t_pa", "r_pa", stored.ID
+	return "00000000-0000-4000-8000-000000000024", "r_pa", stored.ID
 }
 
 // assertPendingApprovalCleanedUp checks every post-condition the task-level
@@ -121,14 +125,15 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, runID, revi
 // assertion across the requeue (`queued` + "returned to the triage queue") and
 // dismiss (`dismissed` + "dismissed the task entirely") paths.
 //
-// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips runs.status —
-// the completed run stays completed. The live-run cancellation that the old park
-// model folded in here is now the spawner's job (only a still-running run is
-// cancelled, by swipeTeardownRuns), so a terminal run is left untouched.
+// Decoupled-lifecycle invariant (TFAC-379): teardown NEVER flips
+// conversations.status — the completed conversation stays completed. The
+// live-conversation cancellation that the old park model folded in here is now
+// the spawner's job (only a still-running conversation is cancelled, by
+// teardownTaskConversations), so a terminal conversation is left untouched.
 func assertPendingApprovalCleanedUp(
 	t *testing.T,
 	database *sql.DB,
-	taskID, runID, reviewID string,
+	taskID, conversationID, reviewID string,
 	wantTaskStatus, wantHumanContentMarker string,
 ) {
 	t.Helper()
@@ -141,14 +146,14 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
-	// The run is untouched by the resolve — it stays terminal (completed). A
-	// resolve must never flip runs.status.
-	var runStatus string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("scan run: %v", err)
+	// The conversation is untouched by the resolve — it stays terminal
+	// (completed). A resolve must never flip conversations.status.
+	var convStatus string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("scan conversation: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Errorf("run.status = %q, want %q (teardown must not flip run lifecycle)", runStatus, "completed")
+	if convStatus != "completed" {
+		t.Errorf("conversation status = %q, want %q (teardown must not flip conversation lifecycle)", convStatus, "completed")
 	}
 
 	// The review artifact must be flipped to dismissed (its proposed snapshot is
@@ -166,7 +171,7 @@ func assertPendingApprovalCleanedUp(
 
 	var agentContent, humanContent sql.NullString
 	if err := database.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan conversation_memory: %v", err)
 	}
@@ -198,13 +203,13 @@ func assertPendingApprovalCleanedUp(
 	}
 	var mem *domain.TaskMemory
 	for i := range mems {
-		if mems[i].RunID == runID {
+		if mems[i].ConversationID == conversationID {
 			mem = &mems[i]
 			break
 		}
 	}
 	if mem == nil {
-		t.Fatalf("GetMemoriesForEntity returned no row for run %s after cleanup", runID)
+		t.Fatalf("GetMemoriesForEntity returned no row for conversation %s after cleanup", conversationID)
 	}
 	headingCount := strings.Count(mem.Content, "## Human feedback (post-run)")
 	if headingCount != 1 {
@@ -213,21 +218,36 @@ func assertPendingApprovalCleanedUp(
 	}
 }
 
-// TestHandleUndo_CleansUpPendingApprovalRun is the regression
+// seedCallerGesture records a swipe_events row attributed to the acting user,
+// which is what /undo reverses. Fixtures that insert a claimed task row
+// directly skip the gesture that would have produced it in production, and
+// undo refuses when the caller has nothing of their own to reverse.
+func seedCallerGesture(t *testing.T, database *sql.DB, taskID, action string) {
+	t.Helper()
+	if _, err := database.Exec(
+		`INSERT INTO swipe_events (task_id, action, hesitation_ms) VALUES (?, ?, 0)`,
+		taskID, action,
+	); err != nil {
+		t.Fatalf("seed %s gesture on %s: %v", action, taskID, err)
+	}
+}
+
+// TestHandleUndo_CleansUpPendingApprovalConversation is the regression
 // for the swipe-toast UX path: Cards user dismissed/claimed the
 // task, agent ran and left an artifact awaiting approval, user hits Cmd-Z (or
 // the toast's Undo button). The full cleanup must run AND a swipe
 // audit row should be recorded since this is a swipe undo.
-func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleUndo_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
+	seedCallerGesture(t, s.db, taskID, "claim")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "returned to the triage queue")
 
 	// /undo must record an 'undo' swipe_events row — that's the
@@ -244,20 +264,20 @@ func TestHandleUndo_CleansUpPendingApprovalRun(t *testing.T) {
 	}
 }
 
-// TestHandleRequeue_CleansUpPendingApprovalRun is the parallel for
+// TestHandleRequeue_CleansUpPendingApprovalConversation is the parallel for
 // the state-driven path: Board's drag-to-Queue, the "Return
 // to queue" button. Same cleanup, but NO swipe row — drag/click
 // gestures aren't swipes and shouldn't muddy the swipe analytics.
-func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
+func TestHandleRequeue_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "returned to the triage queue")
 
 	// /requeue must NOT record a swipe_events row — this is a
@@ -275,7 +295,7 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DismissCleansUpPendingApprovalRun is the third
+// TestTaskPatch_DismissCleansUpPendingApprovalConversation is the third
 // entry point: user swipes left to dismiss a delegated card whose
 // agent already produced a review awaiting approval. Today this
 // orphans the review and leaves it hanging unresolved against a
@@ -286,73 +306,73 @@ func TestHandleRequeue_CleansUpPendingApprovalRun(t *testing.T) {
 // requeue paths so a future agent reading prior memory can
 // distinguish "the human shelved this verdict but kept the entity
 // on the docket" from "the human walked away from this entity".
-func TestHandleSwipe_DismissCleansUpPendingApprovalRun(t *testing.T) {
+func TestTaskPatch_DismissCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "dismiss", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "dismissed", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"dismissed", "dismissed the task entirely")
 }
 
-// TestHandleSwipe_CompleteCleansUpPendingApprovalRun is the fourth
-// entry point: the Board's drag-AgentCard-to-Done gesture for a run
+// TestTaskPatch_CompleteCleansUpPendingApprovalConversation is the fourth
+// entry point: the Board's drag-AgentCard-to-Done gesture for a conversation
 // awaiting approval. The complete swipe action flips the task to
 // 'done' (so the card lands in the Done column rather than
 // disappearing from the board, the way dismiss makes it) but reuses
-// the same cleanup — pending_reviews row gone, run flipped
-// to cancelled, agent_content preserved, human_content recording
-// the user's verdict with a complete-flavored marker that's distinct
-// from both the requeue and dismiss shapes. Future agents reading
-// memory should be able to tell "the human resolved this themselves
-// without applying my prepared review" from "the human walked away
-// from the entity entirely."
-func TestHandleSwipe_CompleteCleansUpPendingApprovalRun(t *testing.T) {
+// the same cleanup — review artifact flipped to dismissed, the
+// completed conversation left untouched, agent_content preserved,
+// human_content recording the user's verdict with a complete-flavored
+// marker that's distinct from both the requeue and dismiss shapes.
+// Future agents reading memory should be able to tell "the human
+// resolved this themselves without applying my prepared review" from
+// "the human walked away from the entity entirely."
+func TestTaskPatch_CompleteCleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "complete", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"status": "done", "hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"done", "marked the task complete without submitting")
 }
 
-// TestHandleSwipe_ClaimCleansUpPendingApprovalRun guards the
-// race the PR #77 review flagged: Board's drag-Agent-to-You issues
-// /swipe claim, but the frontend's agentRuns map can be transiently
-// empty during a fetchTasks refresh — so any frontend gating on a stale
-// run-status snapshot would silently skip the cleanup, stranding the prepared
-// review and leaving an unresolved artifact behind.
+// TestTaskClaim_CleansUpPendingApprovalConversation guards the race the PR #77
+// review flagged: Board's drag-Agent-to-You issues /claim, but the
+// frontend's conversations map can be transiently empty during a fetchTasks
+// refresh — so any frontend gating on a stale conversation-status snapshot
+// would silently skip the cleanup, stranding the prepared review and leaving an
+// unresolved artifact behind.
 //
 // Backend-authoritative teardown closes that hole: the swipe handler runs
 // teardownTaskArtifacts for every claim, resolving every unresolved artifact (a
 // no-op for tasks without one). The claim-flavored marker carries its own
 // recalibration signal — "human took over manually" — distinct from
 // requeue/dismiss/complete.
-func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
+func TestTaskClaim_CleansUpPendingApprovalConversation(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Claim no longer transitions status; the task stays
 	// 'queued' and claimed_by_user_id is set instead. The
-	// pending-approval cleanup invariants (run cancelled, review row
+	// pending-approval cleanup invariants (conversation cancelled, review row
 	// removed, human_content marker) are unchanged.
-	assertPendingApprovalCleanedUp(t, s.db, taskID, runID, reviewID,
+	assertPendingApprovalCleanedUp(t, s.db, taskID, conversationID, reviewID,
 		"queued", "claimed the task to handle it themselves")
 	// Pin the claim col too — it's the actual responsibility signal
 	// post-B+.
@@ -367,17 +387,17 @@ func TestHandleSwipe_ClaimCleansUpPendingApprovalRun(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp pins the
+// TestTaskClaim_WithoutPendingApprovalIsNoOp pins the
 // idempotency contract: teardownTaskArtifacts must be a no-op
 // when the task has no unresolved artifact, so wiring the teardown
 // into the claim path doesn't disturb the queue → claim flow used by
 // Cards.tsx and the existing Board queue → you drag.
-func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
+func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Plain queued task with no agent run. Mirrors what claim from
+	// Plain queued task with no agent conversation. Mirrors what claim from
 	// the queue looks like — the event/task FK chain mirrors
-	// pendingApprovalFixture but stops short of any runs or reviews.
+	// pendingApprovalFixture but stops short of any conversations or reviews.
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, state)
@@ -385,13 +405,13 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 		INSERT INTO events (id, entity_id, event_type, dedup_key)
 		VALUES ('ev1', 'e1', ?, '');
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		VALUES ('task-noruns', 'e1', ?, 'ev1', 'queued');
+		VALUES ('00000000-0000-4000-8000-000000000002', 'e1', ?, 'ev1', 'queued');
 	`, eventType, eventType); err != nil {
 		t.Fatalf("seed FK chain: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-noruns/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000002/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -401,7 +421,7 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	var status string
 	var claimedByUserID sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 'task-noruns'`,
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000002'`,
 	).Scan(&status, &claimedByUserID); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -413,13 +433,13 @@ func TestHandleSwipe_ClaimWithoutPendingApprovalIsNoOp(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRejectsStealingFromBot pins the swipe-claim
+// TestTaskClaim_AgainstBotClaimedIsTakeover pins the swipe-claim
 // race-safe handler: when the task is bot-claimed, the handler must
 // route through TakeoverClaimFromAgent's optimistic guard and
 // produce a clean takeover (bot claim → user claim, atomic). This
 // pins the legitimate takeover branch — the steal-from-bot is
 // allowed; what's not allowed is stealing from another user.
-func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
+func TestTaskClaim_AgainstBotClaimedIsTakeover(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
@@ -437,21 +457,21 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id)
-		 VALUES ('task-bot', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000001', 'e_bot', ?, 'ev_bot', 'queued', ?)`,
 		eventType, runmode.LocalDefaultAgentID,
 	); err != nil {
 		t.Fatalf("seed task with bot claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-bot/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000001/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	var claimedAgent, claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-bot'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000001'`,
 	).Scan(&claimedAgent, &claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -463,7 +483,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRefusedLeavesNoAuditRow pins the
+// TestTaskClaim_RefusedLeavesNoAuditRow pins the
 // audit contract: swipe_events records state CHANGES, not gesture
 // ATTEMPTS. A claim swipe that's refused (different user owns the
 // task) returns 409 with no audit row, no status flip, no snooze
@@ -471,7 +491,7 @@ func TestHandleSwipe_ClaimAgainstBotClaimedIsTakeover(t *testing.T) {
 // top mutates state for refused gestures" — the post-restructure
 // handler runs claim mutation first and only records the audit
 // after accept.
-func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
+func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	const otherUserID = "00000000-0000-0000-0000-0000000004cc"
@@ -497,14 +517,14 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_refuse', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000009', 'e_refuse', ?, 'ev_refuse', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_refuse/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000009/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -512,7 +532,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	// No swipe_events row written — refused gesture leaves no trace.
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_refuse'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000009'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -524,7 +544,7 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	var status string
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, claimed_by_user_id FROM tasks WHERE id = 't_refuse'`,
+		`SELECT status, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000009'`,
 	).Scan(&status, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -536,11 +556,11 @@ func TestHandleSwipe_ClaimRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateRefusedLeavesNoAuditRow is the delegate
+// TestTaskDelegate_RefusedLeavesNoAuditRow is the delegate
 // half of the audit-contract guarantee. Pre-condition: task is
 // user-claimed by ANOTHER user (the only delegate refuse path).
 // Post: 409, no swipe_events, no state change.
-func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
+func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 	const eventType = "github:pr:opened"
@@ -567,21 +587,21 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_drefuse', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000007', 'e_drefuse', ?, 'ev_drefuse', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_drefuse/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000007/delegate",
+		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_drefuse'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000007'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -591,7 +611,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	var claimUser sql.NullString
 	var claimAgent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = 't_drefuse'`,
+		`SELECT claimed_by_user_id, claimed_by_agent_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000007'`,
 	).Scan(&claimUser, &claimAgent); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -603,7 +623,7 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimRefusedOnTerminalTask pins the handler-level
+// TestTaskClaim_RefusedOnTerminalTask pins the handler-level
 // guard for the same-user-idempotent fall-through path. The data-
 // layer helpers refuse claim transitions on done/dismissed rows,
 // but the handler's same-user check is a no-op early-return that
@@ -613,9 +633,9 @@ func TestHandleSwipe_DelegateRefusedLeavesNoAuditRow(t *testing.T) {
 // audit row.
 //
 // Seeds a done task already claimed by the local user (the sticky-
-// past-close audit state), fires /swipe claim, asserts 409 +
+// past-close audit state), fires /claim, asserts 409 +
 // status preserved + no swipe_events row written.
-func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
+func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 	for _, terminalStatus := range []string{"done", "dismissed"} {
 		t.Run(terminalStatus, func(t *testing.T) {
 			s := newTestServer(t)
@@ -638,14 +658,14 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// would have triggered the reopen bug pre-guards.
 			if _, err := s.db.Exec(
 				`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-				 VALUES ('t_term', 'e_term', ?, 'ev_term', ?, ?)`,
+				 VALUES ('00000000-0000-4000-8000-000000000012', 'e_term', ?, 'ev_term', ?, ?)`,
 				eventType, terminalStatus, runmode.LocalDefaultUserID,
 			); err != nil {
 				t.Fatalf("seed terminal task: %v", err)
 			}
 
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term/swipe",
-				map[string]any{"action": "claim", "hesitation_ms": 0})
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000012/claim",
+				map[string]any{"hesitation_ms": 0})
 			if rec.Code != http.StatusConflict {
 				t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 			}
@@ -654,7 +674,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// flipped it to 'queued' via RecordSwipe's lifecycle write.
 			var status string
 			if err := s.db.QueryRow(
-				`SELECT status FROM tasks WHERE id = 't_term'`,
+				`SELECT status FROM tasks WHERE id = '00000000-0000-4000-8000-000000000012'`,
 			).Scan(&status); err != nil {
 				t.Fatalf("scan task: %v", err)
 			}
@@ -665,7 +685,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 			// Audit must be silent on the refusal.
 			var swipeCount int
 			if err := s.db.QueryRow(
-				`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_term'`,
+				`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000012'`,
 			).Scan(&swipeCount); err != nil {
 				t.Fatalf("scan swipe_events: %v", err)
 			}
@@ -676,7 +696,7 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateDifferentiatesRefusalReasons pins the
+// TestTaskDelegate_DifferentiatesRefusalReasons pins the
 // post-fix error-mapping on the swipe-delegate path. HandoffRefused
 // collapses three reasons (missing task / terminal task / different-
 // user claim); the handler pre-loads to disambiguate so the
@@ -686,11 +706,11 @@ func TestHandleSwipe_ClaimRefusedOnTerminalTask(t *testing.T) {
 //   - terminal task → 409 "task is closed; delegate transitions
 //     aren't allowed past close"
 //   - different-user claim → 409 "task is claimed by another user"
-func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
+func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 	t.Run("missing_task_404", func(t *testing.T) {
 		s := newTestServer(t)
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusNotFound {
 			t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
 		}
@@ -714,13 +734,13 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-			 VALUES ('t_term_del', 'e_term_del', ?, 'ev_term_del', 'done')`,
+			 VALUES ('00000000-0000-4000-8000-000000000011', 'e_term_del', ?, 'ev_term_del', 'done')`,
 			eventType,
 		); err != nil {
 			t.Fatalf("seed terminal task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_term_del/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000011/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -754,13 +774,13 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 		}
 		if _, err := s.db.Exec(
 			`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-			 VALUES ('t_diff_del', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
+			 VALUES ('00000000-0000-4000-8000-000000000006', 'e_diff_del', ?, 'ev_diff_del', 'queued', ?)`,
 			eventType, otherUserID,
 		); err != nil {
 			t.Fatalf("seed other-user-claimed task: %v", err)
 		}
-		rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_diff_del/swipe",
-			map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+		rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000006/delegate",
+			map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 		}
@@ -770,14 +790,14 @@ func TestHandleSwipe_DelegateDifferentiatesRefusalReasons(t *testing.T) {
 	})
 }
 
-// TestHandleSwipe_DelegateRefusedWhenBotDisabled pins the
+// TestTaskDelegate_RefusedWhenBotDisabled pins the
 // acceptance criterion "swipe-to-delegate re-checks team_agents.enabled
 // at swipe time." A team admin can toggle the bot off via SetEnabled
-// — subsequent /swipe delegate gestures must 409, with no claim
+// — subsequent /delegate gestures must 409, with no claim
 // stamp, no spawn, no audit row. Local-mode N=1 doesn't normally
 // flip this off but the data-layer enforcement is what multi-tenant
 // will need.
-func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
+func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	s := newTestServer(t)
 	// Flip the bot OFF on the local team.
 	if _, err := s.db.Exec(
@@ -802,14 +822,14 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('t_bot_off', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
+		 VALUES ('00000000-0000-4000-8000-000000000005', 'e_bot_off', ?, 'ev_bot_off', 'queued')`,
 		eventType,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_bot_off/swipe",
-		map[string]any{"action": "delegate", "hesitation_ms": 0, "blueprint_id": "any"})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000005/delegate",
+		map[string]any{"hesitation_ms": 0, "blueprint_id": "any"})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (bot disabled); body=%s", rec.Code, rec.Body.String())
 	}
@@ -817,7 +837,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	// No state changes — claim cols untouched, no swipe_events row.
 	var claimAgent, claimUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 't_bot_off'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000005'`,
 	).Scan(&claimAgent, &claimUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -829,7 +849,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_bot_off'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000005'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -838,23 +858,7 @@ func TestHandleSwipe_DelegateRefusedWhenBotDisabled(t *testing.T) {
 	}
 }
 
-// TestHandleSnooze_404OnMissingTask pins missing-task parity with
-// /undo and /requeue. Pre-fix, hitting /snooze on a bogus id would
-// trip the swipe_events→tasks FK constraint inside SnoozeTask and
-// surface the SQLite error string as 500. The GetTask pre-check
-// catches the common case so legitimate 404 callers don't have to
-// parse FK error strings to tell "doesn't exist" from "real server
-// error."
-func TestHandleSnooze_404OnMissingTask(t *testing.T) {
-	s := newTestServer(t)
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/snooze",
-		map[string]any{"until": "1h", "hesitation_ms": 0})
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
-	}
-}
-
-// TestHandleSnooze_RefusesOnClaimedTask pins the
+// TestTaskPatchSnooze_RefusesOnClaimedTask pins the
 // "snoozed ↔ unclaimed" invariant from the snooze side: the
 // SnoozeTask store-level atomic UPDATE refuses on a claimed task,
 // the handler maps the refusal to 409, and no state mutates (status
@@ -864,7 +868,7 @@ func TestHandleSnooze_404OnMissingTask(t *testing.T) {
 // This is the deliberate trade we made to avoid the snoozed+claimed
 // incoherent state: users wanting to defer work on a claimed task
 // must explicitly requeue first.
-func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
+func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
@@ -882,14 +886,14 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_snz_claim', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000010', 'e_snz_claim', ?, 'ev_snz_claim', 'queued', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed claimed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_snz_claim/snooze",
-		map[string]any{"until": "1h", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/00000000-0000-4000-8000-000000000010",
+		map[string]any{"snooze_until": time.Now().Add(time.Hour).UTC().Format(time.RFC3339), "hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409 (snooze refused on claimed task); body=%s", rec.Code, rec.Body.String())
 	}
@@ -901,7 +905,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	var snoozeUntil sql.NullTime
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = 't_snz_claim'`,
+		`SELECT status, snooze_until, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000010'`,
 	).Scan(&status, &snoozeUntil, &claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -916,7 +920,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_snz_claim'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000010'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -925,7 +929,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_DelegateTransfersOwnUserClaim pins the
+// TestTaskDelegate_TransfersOwnUserClaim pins the
 // flow: when the user drags their own claimed task from the You
 // lane to the Agent lane, the FE fires a delegate swipe. The
 // handler must accept the gesture as a legitimate user → bot
@@ -935,7 +939,7 @@ func TestHandleSnooze_RefusesOnClaimedTask(t *testing.T) {
 // used a stamp helper that refused ANY non-NULL claimed_by_user_id
 // — HandoffAgentClaim is the post-fix helper that allows same-user
 // transfer while still refusing different-user theft.
-func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
+func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), "haiku"))
 
@@ -958,29 +962,41 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('task-y2a', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000004', 'e_y2a', ?, 'ev_y2a', 'queued', ?)`,
 		eventType, runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed user-claimed task: %v", err)
 	}
 
-	// Use a prompt id that won't resolve — the spawner will fail
-	// before producing a run, but the claim stamping is the part
-	// under test and that runs before the spawn. delegate_error in
-	// the response is expected; what we care about is that the
-	// transfer landed (claim flipped to bot).
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-y2a/swipe", map[string]any{
-		"action":        "delegate",
+	// Use a blueprint id that won't resolve — the spawner will fail
+	// before producing a conversation, but the claim stamping is the part
+	// under test and that runs before the spawn. The failed spawn is a
+	// 422 (bad blueprint reference); what we care about is that the
+	// transfer landed (claim flipped to bot) despite the error status.
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000004/delegate", map[string]any{
 		"hesitation_ms": 0,
 		"blueprint_id":  "no-such-prompt",
 	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (delegate accepted as user→bot transfer); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422 (spawn failed on a bad blueprint; transfer still landed); body=%s", rec.Code, rec.Body.String())
+	}
+	// The claim-survived marker: without SPAWN_FAILED the FE would read this
+	// as a nothing-landed failure and skip the refetch + retry affordance.
+	var errBody struct {
+		Errors []struct {
+			Reason string `json:"reason"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if len(errBody.Errors) != 1 || errBody.Errors[0].Reason != "SPAWN_FAILED" {
+		t.Errorf("errors = %+v; want one SPAWN_FAILED item", errBody.Errors)
 	}
 
 	var claimedAgent, claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = 'task-y2a'`,
+		`SELECT claimed_by_agent_id, claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000004'`,
 	).Scan(&claimedAgent, &claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -992,16 +1008,16 @@ func TestHandleSwipe_DelegateTransfersOwnUserClaim(t *testing.T) {
 	}
 }
 
-// TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409 pins the
+// TestTaskClaim_AgainstOtherUserClaimReturns409 pins the
 // anti-steal guarantee: if a different user already owns the task,
 // the swipe-claim handler must refuse with 409 rather than
 // overwriting the other user's claim. The previous unconditional
-// SetTaskClaimedByUser would have silently stolen the row.
+// SetClaimedByUser would have silently stolen the row.
 //
 // At N=1 local mode this can't happen via real user gestures, but
 // the helper-level race-safety is load-bearing for multi-mode and
 // the test pins the contract.
-func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
+func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	// Synthetic "other user" — distinct from LocalDefaultUserID so
@@ -1033,14 +1049,14 @@ func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('task-oth', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000003', 'e_oth', ?, 'ev_oth', 'queued', ?)`,
 		eventType, otherUserID,
 	); err != nil {
 		t.Fatalf("seed task with other-user claim: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/task-oth/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000003/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1048,7 +1064,7 @@ func TestHandleSwipe_ClaimAgainstOtherUserClaimReturns409(t *testing.T) {
 	// Claim must be unchanged — the swipe refused to overwrite.
 	var claimedUser sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 'task-oth'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000003'`,
 	).Scan(&claimedUser); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -1071,6 +1087,43 @@ func TestHandleUndo_404OnMissingTask(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/no-such-task/undo", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleUndo_RefusesWithNothingOfTheCallersToReverse closes the
+// force-reset hole: /undo used to write an 'undo' row and full-reset ANY task
+// the caller could address, whether or not they had ever touched it. It now
+// reverses the caller's own last gesture and refuses when there isn't one —
+// including a second undo, whose target was already reversed. The deliberate
+// version of "put this back in the queue" is /requeue.
+func TestHandleUndo_RefusesWithNothingOfTheCallersToReverse(t *testing.T) {
+	s := newTestServer(t)
+	taskID := seedLifecycleTask(t, s.db, "undo-guard", lifecycleTaskOpts{status: "dismissed"})
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("undo with no gesture = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	// The refusal changes nothing — in particular it does not re-open the
+	// closed task, which is the whole point of the guard.
+	if got := readTaskStatus(t, s.db, taskID); got != "dismissed" {
+		t.Errorf("task.status = %q, want dismissed (a refused undo must not re-open a closed task)", got)
+	}
+	if got := readSwipeActions(t, s.db, taskID); len(got) != 0 {
+		t.Errorf("swipe_events actions = %v, want none (a refused undo leaves no trace)", got)
+	}
+
+	// With a gesture of the caller's own to reverse, the same call succeeds —
+	// and a second one is refused, because the first already reversed it.
+	seedCallerGesture(t, s.db, taskID, "dismiss")
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusOK {
+		t.Fatalf("undo with a gesture to reverse = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if got := readTaskStatus(t, s.db, taskID); got != "queued" {
+		t.Errorf("task.status = %q, want queued after the undo", got)
+	}
+	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/undo", nil); rec.Code != http.StatusConflict {
+		t.Fatalf("second undo = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1108,13 +1161,13 @@ func TestRequeueTask_OkFalseOnMissingID(t *testing.T) {
 }
 
 // TestHandleUndo_NoPendingApprovalIsNoOp guards the common case:
-// the task has no delegated run (or its delegated run is still
+// the task has no delegated conversation (or its delegated conversation is still
 // active, with nothing awaiting approval). The cleanup should silently
-// no-op rather than touching unrelated runs/reviews.
+// no-op rather than touching unrelated conversations/reviews.
 func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	s := newTestServer(t)
 
-	// Seed a plain user-claimed task with no run at all — the simplest
+	// Seed a plain user-claimed task with no conversation at all — the simplest
 	// shape that exercises handleUndo's other half (claim clear +
 	// Jira reversal skipped because EntitySource isn't 'jira'). Post-B+
 	// this is status='queued' + claimed_by_user_id; pre-B+
@@ -1133,18 +1186,20 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_plain', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000008', 'e_plain', 'github:pr:opened', 'ev_plain', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_plain/undo", nil)
+	seedCallerGesture(t, s.db, "00000000-0000-4000-8000-000000000008", "claim")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000008/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	var taskStatus string
-	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, "t_plain").Scan(&taskStatus); err != nil {
+	if err := s.db.QueryRow(`SELECT status FROM tasks WHERE id = ?`, "00000000-0000-4000-8000-000000000008").Scan(&taskStatus); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
 	if taskStatus != "queued" {
@@ -1184,13 +1239,15 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_user_id)
-		 VALUES ('t_undo_claim', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
+		 VALUES ('00000000-0000-4000-8000-000000000013', 'e_undo_claim', 'github:pr:opened', 'ev_undo_claim', 'queued', ?)`,
 		runmode.LocalDefaultUserID,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_undo_claim/undo", nil)
+	seedCallerGesture(t, s.db, "00000000-0000-4000-8000-000000000013", "claim")
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000013/undo", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1199,7 +1256,7 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	var snoozeUntil sql.NullTime
 	if err := s.db.QueryRow(
 		`SELECT status, claimed_by_agent_id, claimed_by_user_id, snooze_until
-		 FROM tasks WHERE id = ?`, "t_undo_claim",
+		 FROM tasks WHERE id = ?`, "00000000-0000-4000-8000-000000000013",
 	).Scan(&status, &claimedAgent, &claimedUser, &snoozeUntil); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -1228,17 +1285,17 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 // We pick discardOutcomeDismissed for the second call so that if the no-op broke,
 // the human_content marker would visibly flip from "returned to the triage queue"
 // to "dismissed the task entirely" — making the test failure mode loud rather
-// than silent. The completed run stays completed across both calls (a resolve
-// never flips run lifecycle).
+// than silent. The completed conversation stays completed across both calls (a
+// resolve never flips conversation lifecycle).
 func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
 	var humanContentBefore sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&humanContentBefore); err != nil {
 		t.Fatalf("scan after first call: %v", err)
 	}
@@ -1251,16 +1308,16 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeDismissed)
 
 	var humanContentAfter sql.NullString
-	var runStatusAfter string
+	var convStatusAfter string
 	if err := s.db.QueryRow(
 		`SELECT rm.human_content, r.status
 		 FROM conversation_memory rm JOIN conversations r ON r.id = rm.conversation_id
-		 WHERE rm.conversation_id = ?`, runID,
-	).Scan(&humanContentAfter, &runStatusAfter); err != nil {
+		 WHERE rm.conversation_id = ?`, conversationID,
+	).Scan(&humanContentAfter, &convStatusAfter); err != nil {
 		t.Fatalf("scan after second call: %v", err)
 	}
-	if runStatusAfter != "completed" {
-		t.Errorf("run.status drifted after second call: %q (teardown must not flip run lifecycle)", runStatusAfter)
+	if convStatusAfter != "completed" {
+		t.Errorf("conversation status drifted after second call: %q (teardown must not flip conversation lifecycle)", convStatusAfter)
 	}
 	if humanContentAfter.String != humanContentBefore.String {
 		t.Errorf("human_content overwritten by second call:\n  before: %q\n  after:  %q",
@@ -1271,16 +1328,17 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 // TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry is the regression for
 // the all-or-nothing contract: if a DB op inside the teardown tx fails
 // transiently, the whole batch rolls back, leaving the artifact unresolved
-// (still pending) and the run untouched — a subsequent call retries cleanly.
+// (still pending) and the conversation untouched — a subsequent call retries
+// cleanly.
 //
 // We force a failure by temporarily renaming the artifacts table — the teardown's
-// ListByRun (and the dismiss upsert) reference it by name and the whole tx rolls
+// ListByConversation (and the dismiss upsert) reference it by name and the whole tx rolls
 // back. After restoring it, a second call resolves the review.
 func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, reviewID := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, reviewID := pendingApprovalFixture(t, s.db)
 
-	// Sabotage: rename the artifacts table so the teardown's ListByRun fails with
+	// Sabotage: rename the artifacts table so the teardown's ListByConversation fails with
 	// "no such table" and the tx rolls back before any flip.
 	if _, err := s.db.Exec(`ALTER TABLE artifacts RENAME TO artifacts_temp`); err != nil {
 		t.Fatalf("rename artifacts table: %v", err)
@@ -1288,17 +1346,17 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID, discardOutcomeRequeued)
 
-	// Run is untouched (it was never flipped — teardown doesn't touch run status),
+	// The conversation is untouched (never flipped — teardown doesn't touch its status),
 	// and human_content was rolled back with the rest of the batch.
-	var runStatus string
-	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, runID).Scan(&runStatus); err != nil {
-		t.Fatalf("scan run after sabotaged teardown: %v", err)
+	var convStatus string
+	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("scan conversation after sabotaged teardown: %v", err)
 	}
-	if runStatus != "completed" {
-		t.Fatalf("run.status = %q after failure; want %q (run untouched)", runStatus, "completed")
+	if convStatus != "completed" {
+		t.Fatalf("conversation status = %q after failure; want %q (conversation untouched)", convStatus, "completed")
 	}
 	var humanContent sql.NullString
-	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, runID).Scan(&humanContent); err != nil {
+	if err := s.db.QueryRow(`SELECT human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID).Scan(&humanContent); err != nil {
 		t.Fatalf("scan conversation_memory after failure: %v", err)
 	}
 	if humanContent.Valid {
@@ -1329,13 +1387,13 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 // no INSERT-or-UPDATE branching is needed downstream).
 func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 	s := newTestServer(t)
-	taskID, runID, _ := pendingApprovalFixture(t, s.db)
+	taskID, conversationID, _ := pendingApprovalFixture(t, s.db)
 
 	// Force agent_content NULL to simulate a noncompliant gate
 	// (UpsertAgentMemory("") would have done this in
 	// production; we set it directly to skip the dependency).
 	if _, err := s.db.Exec(
-		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, runID,
+		`UPDATE conversation_memory SET agent_content = NULL WHERE conversation_id = ?`, conversationID,
 	); err != nil {
 		t.Fatalf("force null agent_content: %v", err)
 	}
@@ -1344,7 +1402,7 @@ func TestTeardownTaskArtifacts_AgentContentNullSurvives(t *testing.T) {
 
 	var agentContent, humanContent sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, runID,
+		`SELECT agent_content, human_content FROM conversation_memory WHERE conversation_id = ?`, conversationID,
 	).Scan(&agentContent, &humanContent); err != nil {
 		t.Fatalf("scan conversation_memory: %v", err)
 	}

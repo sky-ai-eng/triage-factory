@@ -108,13 +108,14 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
     {
       kind: 'app' as const,
       title: 'GitHub App',
-      detail: 'Polls under its own bot identity and supports multiple installations.',
+      detail:
+        'Polls under its own durable bot identity, with per-team repository access enforced by GitHub.',
       status: appModeStatus(state),
     },
     {
       kind: 'pat' as const,
       title: 'Personal access token',
-      detail: 'A classic token with repo + read:org scopes — the simpler setup.',
+      detail: 'A classic token with repo + read:org + user:email scopes — the simpler setup.',
       status: patModeStatus(state),
     },
   ]

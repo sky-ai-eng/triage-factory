@@ -23,10 +23,10 @@ func TestRun_ImplicitCompletionConcludesWithFinalText(t *testing.T) {
 		t.Fatalf("disposition = %v, want concluded (err: %v)", got.Kind, got.Err)
 	}
 	// `continue`, not `finish`: stopping says "my part is done", and only
-	// decideBlueprintStep knows whether that ends the task. It resolves a
-	// final-step continue to a structural finish, so a single run is
-	// unaffected — but the loop must not be the thing that decides.
-	if got.Outcome != domain.RunOutcomeContinue {
+	// blueprintDecisionForStepConversation knows whether that ends the task. It
+	// resolves a final-step continue to a structural finish, so a single run
+	// is unaffected — but the loop must not be the thing that decides.
+	if got.Outcome != domain.ConversationOutcomeContinue {
 		t.Errorf("outcome = %q, want continue", got.Outcome)
 	}
 	if got.ResultSummary != "Done: renamed the field." {
@@ -415,8 +415,8 @@ func TestRun_EmptyLengthStopIsNeverAConclusion(t *testing.T) {
 	if truncated.OutputTokens == nil || *truncated.OutputTokens != 8000 {
 		t.Errorf("the truncated row must keep its usage stamp: %+v", truncated.OutputTokens)
 	}
-	if got, ok := truncated.Metadata["finish_reason"].(string); !ok || got != "length" {
-		t.Errorf("finish_reason metadata = %v, want \"length\" — the transcript should say why it stopped", truncated.Metadata)
+	if truncated.StopReason != "length" {
+		t.Errorf("stop_reason = %q, want \"length\" — the transcript should say why it stopped", truncated.StopReason)
 	}
 
 	notice := tr.find(func(m domain.Message) bool { return m.Subtype == domain.MessageSubtypeInjectionOutputLimit })
@@ -582,8 +582,8 @@ func TestRun_FinishReasonIsRecordedOnEveryAssistantTurn(t *testing.T) {
 		if r.Role != "assistant" {
 			continue
 		}
-		if got, _ := r.Metadata["finish_reason"].(string); got != want[r.Content] {
-			t.Errorf("assistant row %q: finish_reason = %q, want %q", r.Content, got, want[r.Content])
+		if r.StopReason != want[r.Content] {
+			t.Errorf("assistant row %q: stop_reason = %q, want %q", r.Content, r.StopReason, want[r.Content])
 		}
 	}
 }
@@ -808,7 +808,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		}}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testParams())
-		if got.Outcome != domain.RunOutcomeFinish || got.OutcomeReason != "no reviewable changes" {
+		if got.Outcome != domain.ConversationOutcomeFinish || got.OutcomeReason != "no reviewable changes" {
 			t.Fatalf("finish must reach the outcome unchanged: %+v", got)
 		}
 		if got.ResultSummary != "Checked the PR; it only touches generated files." {
@@ -828,7 +828,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		}}
 		e := newTestEngine(tr, p, host)
 		got := e.Run(context.Background(), testParams())
-		if got.Outcome != domain.RunOutcomeContinue {
+		if got.Outcome != domain.ConversationOutcomeContinue {
 			t.Fatalf("a batch that also did real work must keep going: %+v", got)
 		}
 		if calls := host.calls(); len(calls) != 1 || calls[0] != "write" {
@@ -844,7 +844,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		}}
 		e := newTestEngine(tr, p, newScriptedToolHost())
 		got := e.Run(context.Background(), testParams())
-		if got.Outcome != domain.RunOutcomeAbort || got.OutcomeReason != "the branch is gone" {
+		if got.Outcome != domain.ConversationOutcomeAbort || got.OutcomeReason != "the branch is gone" {
 			t.Fatalf("abort must carry its reason: %+v", got)
 		}
 		if got.ResultSummary != "could not rebase; upstream branch was deleted" {
@@ -867,7 +867,7 @@ func TestRun_TerminateContractRequiresEveryResultToTerminate(t *testing.T) {
 		// It ends as a continue anyway — but by stopping, which is the point:
 		// the tool never mints one, so the loop stays the only thing that
 		// decides what an ordinary ending means.
-		if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "handing off" {
+		if got.Outcome != domain.ConversationOutcomeContinue || got.ResultSummary != "handing off" {
 			t.Fatalf("a bad type must not terminate the run: %+v", got)
 		}
 		first := tr.toolResults()[0]
@@ -1048,7 +1048,7 @@ func TestRun_StopBlueprintIsInertWithoutABlueprint(t *testing.T) {
 	params.HasBlueprint = false
 
 	got := e.Run(context.Background(), params)
-	if got.Outcome != domain.RunOutcomeContinue || got.ResultSummary != "sorry, ignore that" {
+	if got.Outcome != domain.ConversationOutcomeContinue || got.ResultSummary != "sorry, ignore that" {
 		t.Fatalf("a hallucinated stop must not end the conversation: %+v", got)
 	}
 	if calls := host.calls(); len(calls) != 1 || calls[0] != ToolStopBlueprint {
@@ -1221,8 +1221,8 @@ func TestRun_AFailedWriteWithALiveContextStillFails(t *testing.T) {
 	if got.Kind != ResultFailed {
 		t.Fatalf("disposition = %v, want failed", got.Kind)
 	}
-	if got.FailureKind != domain.RunFailureAgentError {
-		t.Errorf("failure kind = %q, want %q", got.FailureKind, domain.RunFailureAgentError)
+	if got.FailureKind != domain.ConversationFailureAgentError {
+		t.Errorf("failure kind = %q, want %q", got.FailureKind, domain.ConversationFailureAgentError)
 	}
 }
 

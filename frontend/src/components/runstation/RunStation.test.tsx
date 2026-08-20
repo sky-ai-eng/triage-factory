@@ -3,12 +3,13 @@ import { render, screen, fireEvent, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import RunStation, { type StationActions } from './RunStation'
 import type { Conversation } from '../../types'
+import { jsonBody } from '../../test/apiResponse'
 
 // The dock is the surface this suite is about: whether the composer input is
 // offered (and what stands in its place when it isn't), and how the approval
 // affordance routes over the unresolved artifact set.
 function station(over: Partial<Conversation>, actions: Partial<StationActions> = {}) {
-  const run = {
+  const conversation = {
     ID: 'r1',
     TaskID: '',
     Status: 'open',
@@ -21,7 +22,7 @@ function station(over: Partial<Conversation>, actions: Partial<StationActions> =
   return render(
     <MemoryRouter>
       <RunStation
-        run={run}
+        conversation={conversation}
         task={null}
         messages={[]}
         now={new Date('2026-07-30T00:01:00Z').getTime()}
@@ -44,7 +45,7 @@ describe('RunStation composer gate', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  it('offers the input on a parked run the server says is resumable', () => {
+  it('offers the input on a parked conversation the server says is resumable', () => {
     station({ Status: 'open', resumable: true })
     expect(composer()).toBeInTheDocument()
   })
@@ -74,7 +75,7 @@ describe('RunStation composer gate', () => {
     expect(screen.getByText(/blueprint/i)).toBeInTheDocument()
   })
 
-  it('says nothing about resuming a failed run', () => {
+  it('says nothing about resuming a failed conversation', () => {
     // Not a resumable status to begin with, so there is no offer to withdraw
     // and no explanation to give.
     station({ Status: 'failed' })
@@ -114,31 +115,30 @@ describe('RunStation dock approval affordance', () => {
       'fetch',
       vi.fn().mockResolvedValue({
         ok: true,
-        json: () =>
-          Promise.resolve([
-            {
-              id: 'pr1',
-              kind: 'pull_request',
-              provider: 'github',
-              state: 'draft',
-              target: 'org/repo#18',
-              external_id: '18',
-              url: 'https://gh/pr',
-              details: null,
-              created_at: '2026-07-30T00:00:00Z',
-            },
-            {
-              id: 'rv1',
-              kind: 'review',
-              provider: 'github',
-              state: 'pending',
-              target: 'org/repo#19',
-              external_id: '19',
-              url: 'https://gh/rv',
-              details: null,
-              created_at: '2026-07-30T00:00:00Z',
-            },
-          ]),
+        ...jsonBody([
+          {
+            id: 'pr1',
+            kind: 'pull_request',
+            provider: 'github',
+            state: 'draft',
+            target: 'org/repo#18',
+            external_id: '18',
+            url: 'https://gh/pr',
+            details: null,
+            created_at: '2026-07-30T00:00:00Z',
+          },
+          {
+            id: 'rv1',
+            kind: 'review',
+            provider: 'github',
+            state: 'pending',
+            target: 'org/repo#19',
+            external_id: '19',
+            url: 'https://gh/rv',
+            details: null,
+            created_at: '2026-07-30T00:00:00Z',
+          },
+        ]),
       }),
     )
     const onOpenArtifact = vi.fn()

@@ -11,9 +11,17 @@
 // Bumping: pick a newer tag from https://github.com/cli/cli/releases, refresh
 // every SHA256 below from that release's gh_<VER>_checksums.txt, and mirror the
 // version + the two linux values into docker/Dockerfile. The drift test fails
-// until both sides match, and the ghinjector wire tests re-drive the new binary
-// so a transport change in gh's porcelain surfaces as a test failure rather than
-// as silently dropped artifacts.
+// until both sides match.
+//
+// A bump is then a test-mediated event rather than a version string. The
+// ghinjector conformance gate drives the pinned binary through every write
+// command it knows and asserts each still lands the audit row — or the refusal
+// — the classification table says it should, and it reads Version to check it
+// is driving the release this package names, so a bump with a stale binary
+// staged fails rather than quietly proving nothing. A release that moves a
+// command to a different mutation, or that gains a porcelain path to an act
+// only hand-written calls could reach before, fails there and is dealt with in
+// the same change as the bump.
 package ghpin
 
 import "fmt"

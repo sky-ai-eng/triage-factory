@@ -19,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Connect GitHub — the user-to-server OAuth handler that binds a
@@ -39,8 +40,9 @@ import (
 //
 // It reuses the org App's stored client_id/secret (the App's user-to-server
 // OAuth credentials), exchanges the code for a `ghu_` user token, calls
-// GET /user, records the login, and discards the token — there's no per-user
-// API consumer yet, so nothing is persisted beyond the identity row.
+// GET /user plus /user/emails, records the identity, and discards the token —
+// there's no per-user API consumer yet, so nothing is persisted beyond the
+// identity row.
 //
 // This is NOT a TF session: it's attribute-binding, not login. The session
 // the user already holds (from GoTrue or SAML) is untouched.
@@ -83,6 +85,32 @@ func resolveGitHubHost(orgBase string) (string, bool) {
 		return "", false
 	}
 	return host, true
+}
+
+// orgGitHubHost fetches the org's configured base URL and resolves it to that
+// same canonical host, for callers that hold only an orgID. It is the fetching
+// sibling of resolveGitHubHost and lands on the identical string for any base
+// URL that resolveGitHubHost accepts — db.EffectiveGitHubHost applies the same
+// two rules (trim trailing slashes; an unset setting is the public host), and
+// is what the poller and the routing subscribers already key on.
+//
+// It does NOT re-validate the base URL the way resolveGitHubHost does. That
+// gate belongs to the settings writer, and a caller that is recording which
+// GitHub a row came from wants the org's answer whatever it is — refusing a
+// host the rest of the system happily uses would key this row differently from
+// every other row about the same GitHub.
+//
+// System (claims-free) read: the caller is the pre-auth webhook receiver, which
+// has a trusted org_id from the URL and no session.
+func (s *Server) orgGitHubHost(ctx context.Context, orgID string) (string, error) {
+	if s.orgs == nil {
+		return "", fmt.Errorf("read github host: orgs store not wired")
+	}
+	set, err := s.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github host: %w", err)
+	}
+	return db.EffectiveGitHubHost(set.GitHubBaseURL), nil
 }
 
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
@@ -163,8 +191,8 @@ func (s *Server) handleGitHubConnectStart(w http.ResponseWriter, r *http.Request
 
 	// No `scope`: this is a GitHub *App* user-to-server flow, where the token's
 	// capabilities come from the App's configured permissions, not an OAuth
-	// scope string (the OAuth-App model) — and GET /user, all we do, needs
-	// none. Only the CSRF nonce travels through GitHub; the
+	// scope string (the OAuth-App model). This flow calls /user/emails, so the
+	// manifest grants read access to Email addresses. Only the CSRF nonce travels through GitHub; the
 	// orgID/userID/return_to stay in the signed cookie, off GitHub's logs and
 	// the URL bar.
 	q := url.Values{}
@@ -279,7 +307,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
 		return
 	}
-	ghUser, err := auth.ValidateGitHub(r.Context(), ghWeb, token)
+	ghUser, err := auth.CaptureGitHubIdentity(r.Context(), ghWeb, token)
 	if err != nil {
 		githubConnectLog.Warn("whoami failed", "org", orgID, "error", err)
 		s.redirectConnect(w, r, orgID, returnTo, connectErrCode(err))
@@ -291,7 +319,7 @@ func (s *Server) handleGitHubConnectCallback(w http.ResponseWriter, r *http.Requ
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, "connect_oauth"); err != nil {
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "connect_oauth"); err != nil {
 			return err
 		}
 		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)
@@ -418,25 +446,28 @@ func recordGitHubIdentityBind(ctx context.Context, tx db.TxStores, orgID, userID
 }
 
 // validateGitHubIdentityPAT proves a PAT against the org's resolved GitHub host
-// (GET /user) and returns the bound @login, WITHOUT storing the token. It is the
-// shared validation core of the PAT-capture HTTP handler and the headless
+// (GET /user) and returns the account it authenticates as — the @login and the
+// numeric id that binding records together — WITHOUT storing the token. It is
+// the shared validation core of the PAT-capture HTTP handler and the headless
 // bootstrap; each caller writes user_github_identities in its own tx (the tx
-// context differs). Errors wrap auth.ValidateGitHub's (callers can
-// errors.Is auth.ErrGitHubHostUnreachable) or are errGitHubNoLogin.
-func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (string, error) {
-	ghUser, err := auth.ValidateGitHub(ctx, ghWeb, pat)
+// context differs). Errors wrap auth.CaptureGitHubIdentity's (callers can
+// errors.Is auth.ErrGitHubHostUnreachable) or are errGitHubNoLogin. The login
+// is what proves the token; a host that answers with no id still binds, and the
+// id fills in on a later capture.
+func validateGitHubIdentityPAT(ctx context.Context, ghWeb, pat string) (auth.GitHubUser, error) {
+	ghUser, err := auth.CaptureGitHubIdentity(ctx, ghWeb, pat)
 	if err != nil {
-		return "", err
+		return auth.GitHubUser{}, err
 	}
 	if ghUser.Login == "" {
-		return "", errGitHubNoLogin
+		return auth.GitHubUser{}, errGitHubNoLogin
 	}
-	return ghUser.Login, nil
+	return *ghUser, nil
 }
 
 // handleGitHubIdentityPAT binds the caller's GitHub identity from a personal
-// access token they supply, WITHOUT storing the token. It validates the PAT
-// against the org's resolved host (GET /user), writes
+// access token they supply, WITHOUT storing the token. It captures the account
+// against the org's resolved host (GET /user and /user/emails), writes
 // user_github_identities(source='pat'), and discards the token — the same end
 // state as the Connect OAuth flow, just proven by a token instead of a consent
 // click. This is PAT_2: the per-user identity credential, independent of the
@@ -451,7 +482,7 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var req githubIdentityPATRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	pat := strings.TrimSpace(req.PAT)
@@ -473,54 +504,50 @@ func (s *Server) handleGitHubIdentityPAT(w http.ResponseWriter, r *http.Request)
 	}
 	ghWeb, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
 	if !okHost {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.",
-			"field": "github_pat",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace's GitHub URL looks misconfigured. Ask your admin to fix it in Workspace Settings.", Field: "github_pat"})
 		return
 	}
 
-	login, err := validateGitHubIdentityPAT(r.Context(), ghWeb, pat)
+	ghUser, err := validateGitHubIdentityPAT(r.Context(), ghWeb, pat)
 	if err != nil {
 		// Keep the two failure shapes distinct, like the Connect flow: a host we
 		// couldn't reach (infra) vs. a token the host rejected (your action).
 		if errors.Is(err, auth.ErrGitHubHostUnreachable) {
-			writeJSON(w, http.StatusBadGateway, map[string]string{
-				"error": fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb),
-				"field": "github_pat",
-			})
+			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: fmt.Sprintf("Couldn't reach %s. This is a connectivity issue between Triage Factory and your GitHub server, not the token — try again.", ghWeb), Field: "github_pat"})
 			return
 		}
 		if errors.Is(err, errGitHubNoLogin) {
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error": "GitHub didn't return a username for that token.",
-				"field": "github_pat",
-			})
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub didn't return a username for that token.", Field: "github_pat"})
 			return
 		}
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "That token didn't validate against " + ghWeb + ". Double-check it and try again.",
-			"field": "github_pat",
-		})
+		if errors.Is(err, auth.ErrGitHubEmailPermission) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token needs read access to your GitHub email addresses. For a classic token, add the user:email scope.", Field: "github_pat"})
+			return
+		}
+		if errors.Is(err, auth.ErrGitHubPrimaryEmailUnavailable) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "GitHub did not return a verified primary email for that account.", Field: "github_pat"})
+			return
+		}
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "That token didn't validate against " + ghWeb + ". Double-check it and try again.", Field: "github_pat"})
 		return
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, login, "pat"); err != nil {
+		if err := tx.Users.UpsertGitHubIdentity(r.Context(), userID, ghWeb, ghUser.Login, ghUser.UserID(), ghUser.PrimaryEmail, "pat"); err != nil {
 			return err
 		}
-		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, login)
+		return recordGitHubIdentityBind(r.Context(), tx, orgID, userID, ghWeb, ghUser.Login)
 	}); err != nil {
 		internalError(w, "github-identity", err)
 		return
 	}
 	// The token is intentionally not persisted anywhere — it existed only for
 	// the whoami above. Identity captured; org access untouched.
-	githubIdentityLog.Info("bound user", "user", userID, "login", login, "host", ghWeb, "org", orgID, "source", "pat")
+	githubIdentityLog.Info("bound user", "user", userID, "login", ghUser.Login, "host", ghWeb, "org", orgID, "source", "pat")
 	// Seed this login's trailing-window PR history for the dashboard (TFAC-396).
-	s.kickDashboardBackfill(orgID, userID, login, ghWeb)
+	s.kickDashboardBackfill(orgID, userID, ghUser.Login, ghWeb)
 
-	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: login, Host: ghWeb})
+	writeJSON(w, http.StatusOK, githubIdentityCaptureResponse{Login: ghUser.Login, Host: ghWeb})
 }
 
 // redirectConnect bounces a failed/aborted Connect flow back to the FE gate

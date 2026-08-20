@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -117,7 +118,7 @@ func (s *eventQueueStore) ClaimNext(ctx context.Context, executorID string, boot
 	// ErrNoRows -> (nil, nil).
 	//
 	// executor_id + boot_epoch are stamped in this same statement,
-	// mirroring RunQueueStore.ClaimNextRun — see ResetProcessing.
+	// mirroring ConversationQueueStore.ClaimNextConversation — see ResetProcessing.
 	row := s.conn.QueryRowContext(ctx, `
 		UPDATE public.event_queue
 		SET status = 'processing', claimed_at = now(), attempts = attempts + 1,
@@ -166,7 +167,7 @@ func (s *eventQueueStore) Requeue(ctx context.Context, orgID string, id int64, l
 }
 
 func (s *eventQueueStore) ResetProcessing(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// Ownership-scoped, mirroring RunQueueStore.ResetProcessingRuns:
+	// Ownership-scoped, mirroring ConversationQueueStore.ResetProcessingConversations:
 	// only rows this instance itself claimed (executor_id = $1) during a
 	// strictly earlier boot (boot_epoch < $2) are reset. A live sibling's
 	// still-processing row carries a different executor_id and is never
@@ -229,44 +230,82 @@ func (s *eventQueueStore) PruneDone(ctx context.Context, before time.Time) (int,
 	return int(n), nil
 }
 
-func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, limit int) ([]domain.FailedEvent, error) {
-	// LEFT JOIN, not JOIN: entity_id is nullable and a queue row can outlive
-	// the entity it named (the FK cascades, but a parked row read mid-cascade
-	// or one enqueued without an entity must still list). The join is bound on
-	// org_id as well as id — the composite FK means the pair is what
-	// identifies an entity, and binding only id would let a future
-	// cross-org id collision join the wrong title in.
-	//
+// pgFailedEventSelect is the projection both the list and the single read
+// answer with, so a row read one way is byte-identical to the same row read
+// the other.
+//
+// LEFT JOIN, not JOIN: entity_id is nullable and a queue row can outlive the
+// entity it named (the FK cascades, but a parked row read mid-cascade or one
+// enqueued without an entity must still list). The join is bound on org_id as
+// well as id — the composite FK means the pair is what identifies an entity,
+// and binding only id would let a future cross-org id collision join the wrong
+// title in.
+const pgFailedEventSelect = `
+	SELECT q.id, q.event_type,
+	       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
+	       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
+	FROM public.event_queue q
+	LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
+	WHERE q.org_id = $1 AND q.status = 'failed'`
+
+func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.FailedEvent, int, error) {
+	var total int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM public.event_queue WHERE org_id = $1 AND status = 'failed'
+	`, orgID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
 	// id DESC is enqueue order reversed: the most recently dropped work is
 	// what an operator is looking for, and id is monotonic per insert so the
 	// order is total and stable across pages.
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT q.id, q.event_type,
-		       COALESCE(q.entity_id::text, ''), COALESCE(e.source, ''), COALESCE(e.source_id, ''), COALESCE(e.title, ''),
-		       q.attempts, COALESCE(q.last_error, ''), q.enqueued_at
-		FROM public.event_queue q
-		LEFT JOIN public.entities e ON e.id = q.entity_id AND e.org_id = q.org_id
-		WHERE q.org_id = $1 AND q.status = 'failed'
-		ORDER BY q.id DESC
-		LIMIT $2
-	`, orgID, db.NormalizeFailedEventsLimit(limit))
+	query := pgFailedEventSelect + `
+		ORDER BY q.id DESC`
+	args := []any{orgID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []domain.FailedEvent{}
 	for rows.Next() {
-		var fe domain.FailedEvent
-		if err := rows.Scan(
-			&fe.ID, &fe.EventType,
-			&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
-			&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
-		); err != nil {
-			return nil, err
+		fe, err := scanFailedEvent(rows)
+		if err != nil {
+			return nil, 0, err
 		}
 		out = append(out, fe)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+func (s *eventQueueStore) GetFailedEvent(ctx context.Context, orgID string, id int64) (*domain.FailedEvent, error) {
+	fe, err := scanFailedEvent(s.conn.QueryRowContext(ctx, pgFailedEventSelect+`
+		AND q.id = $2`, orgID, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &fe, nil
+}
+
+// scanFailedEvent reads one pgFailedEventSelect row. It takes the narrow Scan
+// interface so *sql.Row and *sql.Rows share it — the two reads must not drift
+// on column order.
+func scanFailedEvent(row interface{ Scan(...any) error }) (domain.FailedEvent, error) {
+	var fe domain.FailedEvent
+	err := row.Scan(
+		&fe.ID, &fe.EventType,
+		&fe.EntityID, &fe.EntitySource, &fe.EntitySourceID, &fe.EntityTitle,
+		&fe.Attempts, &fe.LastError, &fe.EnqueuedAt,
+	)
+	return fe, err
 }
 
 func (s *eventQueueStore) RequeueFailedEvents(ctx context.Context, orgID string, ids []int64) (int, error) {

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -13,29 +15,44 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// errAbortHandler is a sentinel used by handlers that write their own
-// error response inside a WithTx closure and need the outer code to
-// return without writing a second response.
-var errAbortHandler = fmt.Errorf("handler already responded")
-
 // --------------------------------------------------------------------
-// /api/settings/user — any authenticated user
+// /api/me/settings — the caller's own settings row, GET and PATCH.
+//
+// Under /api/me because the subject is the caller: the handlers read and
+// write user_settings for the session principal, and no caller may address
+// another's, so there is no id to put in the path.
+//
+// The response carries the settings row alone. A user's GitHub / Jira
+// identities are the same rows GET /api/orgs/{org_id}/{github,jira}/identity
+// answers — one fact belongs in one place, and the identity reads are the
+// place, since they are the ones that also say which host it is keyed under.
 // --------------------------------------------------------------------
 
 type userSettingsResponse struct {
-	UserSettings   domain.UserSettings `json:"user_settings"`
-	GitHubUsername string              `json:"github_username,omitempty"`
-	JiraAccountID  string              `json:"jira_account_id,omitempty"`
+	UserSettings domain.UserSettings `json:"user_settings"`
 }
 
-func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
+// handleMeSettingsGet answers the caller's settings resource.
+//
+// GET /api/me/settings
+func (s *Server) handleMeSettingsGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
 
+	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// readUserSettings reads the settings resource, shared by the GET and the
+// PATCH's read-back so the write answers exactly what a follow-up read would.
+func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID, userID string) (userSettingsResponse, bool) {
 	var resp userSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		settings, err := tx.Users.GetSettings(r.Context(), userID)
@@ -43,45 +60,32 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("user settings: %w", err)
 		}
 		resp.UserSettings = settings
-
-		// Identity is host-scoped: resolve the org's GitHub host
-		// from org_settings, then look up the login for (user, host). An
-		// absent row degrades to "" exactly as the old NULL column did.
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("org settings: %w", err)
-		}
-		ghUsername, err := tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
-		if err != nil {
-			return fmt.Errorf("github identity: %w", err)
-		}
-		resp.GitHubUsername = ghUsername
-
-		// Jira identity is host-scoped too: look it up for the
-		// org's Jira host (same org_settings already loaded above).
-		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
-		if err != nil {
-			return fmt.Errorf("jira identity: %w", err)
-		}
-		resp.JiraAccountID = jiraAccountID
 		return nil
 	}); err != nil {
-		internalError(w, "settings/user", err)
-		return
+		internalError(w, "me/settings", err)
+		return resp, false
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	return resp, true
 }
 
-type userSettingsUpdate struct {
+// userSettingsPatch is the PATCH body. user_settings absent keeps the stored
+// row; present replaces the fields it carries. v1's domain.UserSettings has no
+// fields yet, so strict decoding makes any key inside it a named 400 rather
+// than a value quietly dropped.
+type userSettingsPatch struct {
 	UserSettings *domain.UserSettings `json:"user_settings,omitempty"`
 }
 
-func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) {
+// handleMeSettingsPatch applies a partial update to the caller's settings row
+// and answers the settings resource as a follow-up GET would return it — so a
+// body that describes no change answers the state, not the word "saved".
+//
+// PATCH /api/me/settings
+func (s *Server) handleMeSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
-	var req userSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	var req userSettingsPatch
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -89,25 +93,45 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			return tx.Users.UpdateSettings(r.Context(), userID, *req.UserSettings)
 		}); err != nil {
-			internalError(w, "settings/user", err)
+			internalError(w, "me/settings", err)
 			return
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+	// Read back rather than echo the request: UpdateSettings is exempt from the
+	// returned-row rule while domain.UserSettings is empty (see UsersStore), so
+	// there is no persisted row to hand back from the write itself.
+	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --------------------------------------------------------------------
-// /api/settings/team/{team_id} — team members (GET), team admin (POST)
+// /api/teams/{team_id}/settings — team members (GET), team admin (PATCH)
 //
-// The path segment {team_id} accepts a UUID or the literal "default",
-// which resolves to the org's default team via TeamsStore.GetDefaultForOrg.
-// This keeps the frontend functional before team pickers ship.
+// It lives under the team resource rather than at /api/settings/team/{id}
+// because the path segment is what the authorization check is about: the
+// caller names a team and the handler authorizes them against it. The
+// segment takes the one team grammar (a uuid, or the literal "default" in
+// local mode) through authz.TeamIDFromPath, like every other {team_id} route.
+//
+// The Jira project rules are NOT part of the PATCH body. They're a child
+// collection with their own replace-set write (PUT
+// /api/teams/{team_id}/jira-projects), matching the tracked-repo and
+// github-group siblings; they still ride the composite GET, which is a
+// deliberate convenience for the settings page rather than an oversight.
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {
 	TeamSettings domain.TeamSettings   `json:"team_settings"`
 	JiraProjects []jiraProjectSettings `json:"jira_projects"`
+	// Warning is advisory prose about a save that SUCCEEDED — today, that the
+	// org's model cap clamps the default the team just picked. Only the PATCH
+	// response ever carries it; the GET leaves it empty and omitempty drops it,
+	// so the read and the write answer one shape.
+	Warning string `json:"warning,omitempty"`
 	// MemberCount + Role describe the caller's relationship to this team,
 	// so the frontend can collapse to the flat N=1 layout and gate the
 	// write-side fields without a second round trip. They live on the
@@ -131,9 +155,8 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
-	if err != nil {
-		authz.WriteResolveError(w, "settings/team", err)
+	teamID, ok := s.az.TeamIDFromPath(w, r, "settings/team", orgID, userID)
+	if !ok {
 		return
 	}
 
@@ -141,11 +164,32 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID, nil)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// readTeamSettings assembles the team-settings resource: the settings row, the
+// team's Jira project rules, and the caller-relative annotations the settings
+// page collapses its layout on. Shared by the GET and by the PATCH's read-back,
+// so the write answers with exactly what a follow-up read would return.
+// known is the settings row a caller already holds — the one a save's write
+// just returned. When non-nil this skips the settings read and composes the
+// rest of the response around it, so a PATCH never re-reads the row its own
+// write produced. The GET route passes nil.
+func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string, known *domain.TeamSettings) (teamSettingsResponse, bool) {
 	var resp teamSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		settings, err := tx.Teams.GetSettings(r.Context(), teamID)
-		if err != nil {
-			return fmt.Errorf("team settings: %w", err)
+		var settings domain.TeamSettings
+		if known != nil {
+			settings = *known
+		} else {
+			var err error
+			if settings, err = tx.Teams.GetSettings(r.Context(), teamID); err != nil {
+				return fmt.Errorf("team settings: %w", err)
+			}
 		}
 		resp.TeamSettings = settings
 
@@ -158,7 +202,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}); err != nil {
 		internalError(w, "settings/team", err)
-		return
+		return resp, false
 	}
 
 	if resp.JiraProjects == nil {
@@ -168,56 +212,56 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 	count, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team", err)
-		return
+		return resp, false
 	}
 	resp.MemberCount = count
 	resp.Role = role
 	resp.PermissionAbsentGraceMinSeconds = delegate.AbsentGraceMinSeconds
 	resp.PermissionAbsentGraceMaxSeconds = delegate.AbsentGraceMaxSeconds
-
-	writeJSON(w, http.StatusOK, resp)
+	return resp, true
 }
 
-type teamSettingsUpdate struct {
-	AIModel                    string                 `json:"ai_model,omitempty"`
-	AIAutoDelegate             *bool                  `json:"ai_auto_delegate_enabled,omitempty"`
-	AIReprioritizeThreshold    *int                   `json:"ai_reprioritize_threshold,omitempty"`
-	AIPreferenceUpdateInterval *int                   `json:"ai_preference_update_interval,omitempty"`
-	JiraProjects               *[]jiraProjectSettings `json:"jira_projects,omitempty"`
-	// BranchTemplate is the team's branch-name convention shown to delegated
-	// agents as envelope guidance (TFAC-498), not enforced. Pointer so an
-	// unrelated save that omits it leaves the stored value untouched; an empty
-	// string coalesces to domain.DefaultBranchTemplate so a blank never persists.
-	BranchTemplate *string `json:"branch_template,omitempty"`
-	// ReviewPosture is how the team's delegated reviews reach GitHub
-	// — one of domain.ValidReviewPostures. Pointer for the same
-	// reason as BranchTemplate: an unrelated save that omits the key must not
-	// clobber the stored posture. An empty string coalesces to
-	// domain.DefaultReviewPosture; an unrecognized value is a 400.
-	ReviewPosture *string `json:"review_posture,omitempty"`
-	// BaseBranchPushPolicy is whether the team's delegated agents may push to a
-	// repo's base/default branch — one of domain.ValidBaseBranchPushPolicies.
-	// Pointer for the same reason as the two above: an unrelated save that omits
-	// the key must not clobber the stored policy. An empty string coalesces to
-	// domain.DefaultBaseBranchPushPolicy; an unrecognized value is a 400.
-	BaseBranchPushPolicy *string `json:"base_branch_push_policy,omitempty"`
-	// Presence-gated absent auto-deny knobs (TFAC-392). Pointers so an
-	// unrelated save (e.g. editing projects) that omits them leaves the
-	// stored values untouched. Grace is in seconds on the wire (the UI input
-	// is seconds); it's stored as ms and the spawner clamps it at run time.
-	PermissionAbsentAutodenyEnabled *bool `json:"permission_absent_autodeny_enabled,omitempty"`
-	PermissionAbsentGraceSeconds    *int  `json:"permission_absent_grace_seconds,omitempty"`
+// teamSettingsPatch is the body of PATCH /api/teams/{team_id}/settings.
+//
+// Every field is json.RawMessage under ONE clearing convention: absent keeps
+// the stored value, an explicit null clears it (ai_model) or resets it to the
+// shipped default (everything else), and any other value is applied. The route
+// used to speak three conventions at once — pointer-nil-keeps for most fields,
+// ""-keeps for ai_model, present-but-empty-resets for the three string enums —
+// so "how do I clear this" had a different answer per field, and for ai_model
+// no answer at all.
+//
+// jira_projects is deliberately absent. The team's Jira rules are a child
+// collection with their own replace-set write (PUT
+// /api/teams/{team_id}/jira-projects), like the tracked repos and the
+// github-group mappings; strict decoding turns a stale caller that still sends
+// them here into a 400 naming the field rather than a silent half-save.
+type teamSettingsPatch struct {
+	AIModel                         json.RawMessage `json:"ai_model"`
+	AIAutoDelegate                  json.RawMessage `json:"ai_auto_delegate_enabled"`
+	AutoModeEnabled                 json.RawMessage `json:"auto_mode_enabled"`
+	AIReprioritizeThreshold         json.RawMessage `json:"ai_reprioritize_threshold"`
+	AIPreferenceUpdateInterval      json.RawMessage `json:"ai_preference_update_interval"`
+	BranchTemplate                  json.RawMessage `json:"branch_template"`
+	ReviewPosture                   json.RawMessage `json:"review_posture"`
+	BaseBranchPushPolicy            json.RawMessage `json:"base_branch_push_policy"`
+	PermissionAbsentAutodenyEnabled json.RawMessage `json:"permission_absent_autodeny_enabled"`
+	PermissionAbsentGraceSeconds    json.RawMessage `json:"permission_absent_grace_seconds"`
 }
 
-func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) {
+// handleTeamSettingsPatch applies a partial update to the team's settings row.
+// Team admin, non-archived team. Answers with the settings resource as a
+// follow-up GET would return it, so a client's post-save state is exact.
+//
+// PATCH /api/teams/{team_id}/settings
+func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
-	if err != nil {
-		authz.WriteResolveError(w, "settings/team", err)
+	teamID, ok := s.az.TeamIDFromPath(w, r, "settings/team", orgID, userID)
+	if !ok {
 		return
 	}
 
@@ -234,17 +278,20 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var req teamSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
+	var req teamSettingsPatch
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	apply, ok := resolveTeamSettingsPatch(w, req)
+	if !ok {
 		return
 	}
 
 	var (
-		prevProjects    []jiraProjectConfig
-		writtenProjects []jiraProjectConfig
-		prevModel       string
-		savedModel      string
-		orgMaxTier      string
+		prevModel  string
+		savedModel string
+		orgMaxTier string
+		saved      domain.TeamSettings
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
@@ -255,149 +302,28 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 		if orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID); err == nil {
 			orgMaxTier = orgSet.MaxLLMModelTier
 		}
-		rules, err := tx.JiraStatusRules.ListForTeam(r.Context(), teamID)
-		if err != nil {
-			return fmt.Errorf("load jira rules: %w", err)
-		}
-		projects := rulesToProjectConfigsOrdered(rules, teamSet.JiraProjects)
-		prevProjects = cloneJiraProjects(projects)
-
-		if req.AIModel != "" {
-			teamSet.DefaultModel = req.AIModel
-		}
-		if req.AIAutoDelegate != nil {
-			teamSet.AutoDelegateEnabled = *req.AIAutoDelegate
-		}
-		if req.AIReprioritizeThreshold != nil {
-			teamSet.AIReprioritizeThreshold = *req.AIReprioritizeThreshold
-		}
-		if req.AIPreferenceUpdateInterval != nil {
-			teamSet.AIPreferenceUpdateInterval = *req.AIPreferenceUpdateInterval
-		}
-		if req.BranchTemplate != nil {
-			// Coalesce a blank to the default so an empty string never persists
-			// (mirrors the model-cap "" → default convention). The literal
-			// "<ticket-id>" stays verbatim — it's substituted at prompt-render time.
-			bt := *req.BranchTemplate
-			if bt == "" {
-				bt = domain.DefaultBranchTemplate
-			}
-			teamSet.BranchTemplate = bt
-		}
-		if req.ReviewPosture != nil {
-			// Blank coalesces to the default (same convention as the template
-			// above); anything else must name a known posture — an unrecognized
-			// value would silently degrade to "stage everything" at finalize
-			// time, which is exactly the misconfiguration a team switching to
-			// auto would never notice.
-			rp := *req.ReviewPosture
-			if rp == "" {
-				rp = domain.DefaultReviewPosture
-			}
-			if !domain.ValidReviewPosture(rp) {
-				badRequest(w, "review_posture: unknown value "+rp)
-				return errAbortHandler
-			}
-			teamSet.ReviewPosture = rp
-		}
-		if req.BaseBranchPushPolicy != nil {
-			// Same blank-coalesces-to-default convention. An unrecognized value
-			// must not persist: pushpolicy reads anything it doesn't recognize as
-			// the strictest policy, so a typo would silently look like "never"
-			// forever — exactly the misconfiguration a team that just enabled
-			// base-branch pushes would spend an afternoon debugging.
-			bp := *req.BaseBranchPushPolicy
-			if bp == "" {
-				bp = domain.DefaultBaseBranchPushPolicy
-			}
-			if !domain.ValidBaseBranchPushPolicy(bp) {
-				badRequest(w, "base_branch_push_policy: unknown value "+bp)
-				return errAbortHandler
-			}
-			teamSet.BaseBranchPushPolicy = bp
-		}
-		if req.PermissionAbsentAutodenyEnabled != nil {
-			teamSet.PermissionAbsentAutodenyEnabled = *req.PermissionAbsentAutodenyEnabled
-		}
-		if req.PermissionAbsentGraceSeconds != nil {
-			// Accept seconds from the UI; store ms. Clamp into the honored band
-			// [AbsentGraceMinSeconds, AbsentGraceMaxSeconds] so a 0/negative input
-			// can't disable the grace by collapsing it and an over-large one can't
-			// pretend to exceed permTimeout(). The spawner re-clamps against the
-			// live permTimeout() at run time, but a sane band here keeps the
-			// persisted value honest and matches the UI slider's range.
-			secs := *req.PermissionAbsentGraceSeconds
-			if secs < delegate.AbsentGraceMinSeconds {
-				secs = delegate.AbsentGraceMinSeconds
-			}
-			if secs > delegate.AbsentGraceMaxSeconds {
-				secs = delegate.AbsentGraceMaxSeconds
-			}
-			teamSet.PermissionAbsentGraceMS = secs * 1000
-		}
-
-		if req.JiraProjects != nil {
-			seen := map[string]bool{}
-			next := make([]jiraProjectConfig, 0, len(*req.JiraProjects))
-			for _, p := range *req.JiraProjects {
-				key := normalizeJiraProjectKey(p.Key)
-				if key == "" {
-					badRequest(w, "jira_projects: project key must not be empty")
-					return errAbortHandler
-				}
-				if !jiraProjectKeyRe.MatchString(key) {
-					badRequest(w, "jira_projects: invalid project key "+key)
-					return errAbortHandler
-				}
-				if seen[key] {
-					badRequest(w, "jira_projects: duplicate project key "+key)
-					return errAbortHandler
-				}
-				seen[key] = true
-				normalized := jiraProjectConfig{Key: key, Pickup: p.Pickup, InProgress: p.InProgress, Done: p.Done}
-				if err := validateProjectRules(normalized); err != nil {
-					badRequest(w, err.Error())
-					return errAbortHandler
-				}
-				next = append(next, normalized)
-			}
-			projects = next
-		}
-
-		writtenProjects = projects
+		apply(&teamSet)
 		savedModel = teamSet.DefaultModel
-		teamSet.JiraProjects = projectKeysFromConfigs(projects)
-		if err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
+		if saved, err = tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
-		}
-		if err := tx.JiraStatusRules.ReplaceForTeam(r.Context(), teamID, projectConfigsToRules(projects)); err != nil {
-			return fmt.Errorf("save jira rules: %w", err)
 		}
 		return nil
 	}); err != nil {
-		if err == errAbortHandler {
-			return
-		}
 		internalError(w, "settings/team", err)
 		return
 	}
 
-	if req.JiraProjects != nil && !jiraProjectsEqual(writtenProjects, prevProjects) {
-		if s.onJiraChanged != nil {
-			s.MarkJiraRestarted(r.Context(), orgID)
-			go s.onJiraChanged(orgID)
-		}
+	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID, &saved)
+	if !ok {
+		return
 	}
-
-	resp := map[string]string{"status": "saved"}
-	// The team default doesn't override the org cap. If a newly-picked
-	// default exceeds it, accept the save (the team owns its preference)
-	// but tell them the effective model is the org's cap. Gate on an
-	// actual model change so an unrelated save (e.g. editing projects,
-	// which re-sends the current model) doesn't re-warn every time.
-	if req.AIModel != "" && savedModel != prevModel {
+	// The team default doesn't override the org cap. If a newly-picked default
+	// exceeds it, accept the save (the team owns its preference) but say that
+	// the effective model is the org's cap. Gated on an actual change so a save
+	// that re-sends the current model doesn't re-warn every time.
+	if savedModel != "" && savedModel != prevModel {
 		if eff, source := domain.EffectiveModel(savedModel, orgMaxTier); source == "org-cap" {
-			resp["warning"] = fmt.Sprintf(
+			resp.Warning = fmt.Sprintf(
 				"Team default of %s exceeds the org cap of %s. Effective model is %s.",
 				savedModel, orgMaxTier, eff,
 			)
@@ -406,8 +332,173 @@ func (s *Server) handleTeamSettingsPost(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// resolveTeamSettingsPatch validates the body ONCE and returns the mutation it
+// describes, so the transaction below applies a decided plan rather than
+// re-deriving it against a row (and re-reporting the same faults).
+//
+// The two validation passes carry two statuses because they are two different
+// faults. Shape and vocabulary are protocol-level — "you didn't say it right" —
+// and answer 400; a well-formed number outside the band its field honors is
+// semantic — "you said it right but it can't be done to this data" — and
+// answers 422. Each pass accumulates every failure in its class before
+// flushing, so a body with three bad fields reports three.
+//
+// On any failure the response is already written and ok is false.
+func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (apply func(*domain.TeamSettings), ok bool) {
+	if !httpx.PatchNamed(
+		req.AIModel, req.AIAutoDelegate, req.AutoModeEnabled, req.AIReprioritizeThreshold,
+		req.AIPreferenceUpdateInterval, req.BranchTemplate, req.ReviewPosture,
+		req.BaseBranchPushPolicy, req.PermissionAbsentAutodenyEnabled,
+		req.PermissionAbsentGraceSeconds,
+	) {
+		// A PATCH that names no field wrote nothing, so it must not answer as
+		// though it did — the one response a client can't tell from a real save.
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: name at least one settings field (null clears it)",
+		})
+		return nil, false
+	}
+
+	var (
+		shape    httpx.Validation
+		ranges   httpx.Validation
+		mutators []func(*domain.TeamSettings)
+		defaults = domain.DefaultTeamSettings()
+	)
+	set := func(f func(*domain.TeamSettings)) { mutators = append(mutators, f) }
+
+	// ai_model's VOCABULARY is deliberately unvalidated: a model identifier is
+	// provider-agnostic and opaque here, and settling what the accepted set is
+	// belongs to the model-selection epic. Non-empty is the whole rule; null
+	// clears the team's preference so the org default applies.
+	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
+		switch {
+		case st == httpx.PatchClear:
+			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
+		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
+			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
+		case st == httpx.PatchSet:
+			set(func(t *domain.TeamSettings) { t.DefaultModel = v })
+		}
+	}
+	if v, st := httpx.PatchBool(&shape, req.AIAutoDelegate, "ai_auto_delegate_enabled"); st != httpx.PatchAbsent {
+		next := defaults.AutoDelegateEnabled
+		if st == httpx.PatchSet {
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.AutoDelegateEnabled = next })
+	}
+	if v, st := httpx.PatchBool(&shape, req.AutoModeEnabled, "auto_mode_enabled"); st != httpx.PatchAbsent {
+		next := defaults.AutoModeEnabled
+		if st == httpx.PatchSet {
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.AutoModeEnabled = next })
+	}
+	if v, st := httpx.PatchInt(&shape, req.AIReprioritizeThreshold, "ai_reprioritize_threshold"); st != httpx.PatchAbsent {
+		next := defaults.AIReprioritizeThreshold
+		if st == httpx.PatchSet {
+			if v <= 0 {
+				ranges.OutOfRange("ai_reprioritize_threshold", "ai_reprioritize_threshold must be greater than 0")
+			}
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.AIReprioritizeThreshold = next })
+	}
+	if v, st := httpx.PatchInt(&shape, req.AIPreferenceUpdateInterval, "ai_preference_update_interval"); st != httpx.PatchAbsent {
+		next := defaults.AIPreferenceUpdateInterval
+		if st == httpx.PatchSet {
+			if v <= 0 {
+				ranges.OutOfRange("ai_preference_update_interval", "ai_preference_update_interval must be greater than 0")
+			}
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.AIPreferenceUpdateInterval = next })
+	}
+	// The literal "<ticket-id>" stays verbatim — it's substituted at
+	// prompt-render time, not here.
+	if v, st := httpx.PatchString(&shape, req.BranchTemplate, "branch_template"); st != httpx.PatchAbsent {
+		next := defaults.BranchTemplate
+		if st == httpx.PatchSet {
+			if strings.TrimSpace(v) == "" {
+				shape.Invalid("branch_template", "branch_template must not be blank; send null to reset it to the default")
+			}
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.BranchTemplate = next })
+	}
+	// An unrecognized posture would silently degrade to "stage everything" at
+	// finalize time — exactly the misconfiguration a team switching to auto
+	// would never notice.
+	if v, st := httpx.PatchString(&shape, req.ReviewPosture, "review_posture"); st != httpx.PatchAbsent {
+		next := defaults.ReviewPosture
+		if st == httpx.PatchSet {
+			if !domain.ValidReviewPosture(v) {
+				shape.Invalid("review_posture", "review_posture must be one of: "+strings.Join(domain.ValidReviewPostures, ", "))
+			}
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.ReviewPosture = next })
+	}
+	// pushpolicy reads anything it doesn't recognize as the strictest policy, so
+	// a typo would silently look like "never" forever.
+	if v, st := httpx.PatchString(&shape, req.BaseBranchPushPolicy, "base_branch_push_policy"); st != httpx.PatchAbsent {
+		next := defaults.BaseBranchPushPolicy
+		if st == httpx.PatchSet {
+			if !domain.ValidBaseBranchPushPolicy(v) {
+				shape.Invalid("base_branch_push_policy", "base_branch_push_policy must be one of: "+strings.Join(domain.ValidBaseBranchPushPolicies, ", "))
+			}
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.BaseBranchPushPolicy = next })
+	}
+	if v, st := httpx.PatchBool(&shape, req.PermissionAbsentAutodenyEnabled, "permission_absent_autodeny_enabled"); st != httpx.PatchAbsent {
+		next := defaults.PermissionAbsentAutodenyEnabled
+		if st == httpx.PatchSet {
+			next = v
+		}
+		set(func(t *domain.TeamSettings) { t.PermissionAbsentAutodenyEnabled = next })
+	}
+	// Seconds on the wire (the UI input is seconds); stored as ms. Outside the
+	// band this route advertises on its GET the value is REJECTED, not clamped:
+	// a 0 would collapse the grace and an over-large one would pretend to exceed
+	// permTimeout(), and a clamp answers "saved" for a value the caller never
+	// asked for. The spawner still re-clamps against the live permTimeout().
+	if v, st := httpx.PatchInt(&shape, req.PermissionAbsentGraceSeconds, "permission_absent_grace_seconds"); st != httpx.PatchAbsent {
+		next := defaults.PermissionAbsentGraceMS
+		if st == httpx.PatchSet {
+			if v < delegate.AbsentGraceMinSeconds || v > delegate.AbsentGraceMaxSeconds {
+				ranges.OutOfRange("permission_absent_grace_seconds", fmt.Sprintf(
+					"permission_absent_grace_seconds must be between %d and %d",
+					delegate.AbsentGraceMinSeconds, delegate.AbsentGraceMaxSeconds))
+			}
+			next = v * 1000
+		}
+		set(func(t *domain.TeamSettings) { t.PermissionAbsentGraceMS = next })
+	}
+
+	if shape.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	if ranges.Flush(w, http.StatusUnprocessableEntity) {
+		return nil, false
+	}
+	return func(t *domain.TeamSettings) {
+		for _, m := range mutators {
+			m(t)
+		}
+	}, true
+}
+
 // --------------------------------------------------------------------
-// /api/settings/org — org members (GET), org admin (POST)
+// /api/orgs/{org_id}/settings — org members (GET), org admin (PATCH)
+//
+// Path-scoped rather than session-scoped because the write is admin-gated:
+// the caller asserts a scope and the handler authorizes them against the id in
+// the path, which is what the authorization check has to be about. The read
+// sits on the same resource so there is one address for the settings, not one
+// per verb.
 // --------------------------------------------------------------------
 
 type orgSettingsResponse struct {
@@ -479,17 +570,51 @@ type orgSettingsResponse struct {
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
 	MemberCount int `json:"member_count"`
+	// Version is the settings row's optimistic-concurrency token. The read
+	// hands it out and the PATCH requires it back: the settings save is a
+	// read-modify-write over the whole form, so without it two admins editing
+	// different sections silently undo each other. A PATCH carrying a stale
+	// token is refused with 409 VERSION_CONFLICT and the loser refetches — this
+	// field is what the refetch is FOR, so it is not omitempty.
+	Version int `json:"version"`
+	// Warning is advisory prose about a save that SUCCEEDED — today, that a
+	// newly-lowered model cap now clamps the default team's preference. Only the
+	// PATCH response carries it; the GET leaves it empty and omitempty drops it,
+	// so the read and the write answer one shape.
+	Warning string `json:"warning,omitempty"`
 }
 
+// handleOrgSettingsGet serves the org's configuration. Any org member — the
+// base URLs and poll cadence are read by member-facing surfaces (the curator's
+// Jira host, the repo page's GitHub host), and nothing here is a secret.
+//
+// GET /api/orgs/{org_id}/settings
 func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
+	resp, ok := s.readOrgSettings(w, r, orgID, userID, nil)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	var orgSet domain.OrgSettings
-	var creds auth.Credentials
+// readOrgSettings assembles the org-settings resource. Shared by the GET and by
+// the PATCH's read-back, so a write answers with exactly what a follow-up read
+// would return — including the version the next PATCH has to carry.
+//
+// known, when non-nil, is the settings row a write in the same request already
+// produced (off UpdateSettingsVersioned's RETURNING) — skip the redundant
+// GetSettings and build the rest of the composite response (credentials,
+// member count, Bedrock config) around it, mirroring readTeamSettings.
+func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, userID string, known *domain.OrgSettings) (orgSettingsResponse, bool) {
+	var (
+		out    orgSettingsResponse
+		orgSet domain.OrgSettings
+		creds  auth.Credentials
+	)
 	var ghPATLogin string
 	var bedrockRegion, bedrockModelID, bedrockBaseURL, bedrockRoleARN, bedrockExternalID string
 
@@ -503,11 +628,20 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error
-		orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return err
+		if known != nil {
+			orgSet = *known
+		} else {
+			orgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
+			if err != nil {
+				return err
+			}
 		}
-		creds, _ = integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A vault fault is a 500, never "not configured" — the status read
+		// drives the whole settings page's connected/disconnected rendering.
+		creds, err = integrations.Load(r.Context(), tx.Secrets, orgID)
+		if err != nil {
+			return fmt.Errorf("load integration credentials: %w", err)
+		}
 		// The login the org PAT authenticates as, recorded on the agents row by
 		// every PAT bind. Only meaningful while the BOUND PAT is the credential —
 		// an App org's bot login (<slug>[bot]) resolves live from the
@@ -536,7 +670,7 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}); err != nil {
 		internalError(w, "settings/org", err)
-		return
+		return out, false
 	}
 
 	// Fall back to SecretStore URLs when org_settings is empty — covers
@@ -554,14 +688,14 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	memberCount, err := s.az.OrgMemberCount(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "settings/org", err)
-		return
+		return out, false
 	}
 
 	// Marker-based "is Jira connected" (matches the integrations-status signal),
 	// so a Cloud org with no PAT still reports a stored credential.
 	_, hasJiraCred := integrations.JiraSystemConfig(creds)
 
-	writeJSON(w, http.StatusOK, orgSettingsResponse{
+	return orgSettingsResponse{
 		GitHubBaseURL:             ghBaseURL,
 		GitHubPollInterval:        orgSet.GitHubPollInterval.String(),
 		GitHubCloneProtocol:       defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
@@ -584,200 +718,99 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 		BedrockRoleARN:            bedrockRoleARN,
 		BedrockExternalID:         bedrockExternalID,
 		MemberCount:               memberCount,
-	})
+		Version:                   orgSet.Version,
+	}, true
 }
 
-// orgSettingsUpdate is the body of POST /api/settings/org — the org's PURE
-// CONFIG. No secrets: the GitHub PAT and the Jira service credential each live
-// on their own resource (PUT/DELETE /api/orgs/{org_id}/github/access/pat and
-// .../jira/access/credential, see org_credentials.go), so this route touches no
-// vault key, makes no outbound call, and cannot revoke access as a side effect.
-// The Anthropic key and the Bedrock set are likewise writable only through
-// their own validated capture endpoints. A stray credential field in the
-// request body is ignored by the decoder, not stored.
+// orgSettingsPatch is the body of PATCH /api/orgs/{org_id}/settings — the org's
+// PURE CONFIG. No secrets: the GitHub PAT, the Jira service credential and the
+// LLM provider material each live on their own resource (see org_credentials.go
+// and llm_credentials.go), so this route touches no vault key, makes no
+// outbound call, and cannot revoke access as a side effect. A credential field
+// in the body is a 400 UNKNOWN_FIELD, not a silent store.
 //
-// Every field is a pointer with ONE meaning: nil = leave it alone, present =
-// apply (including the zero value, which clears). The route used to mix three
-// different "unset" encodings — nil-vs-empty for some fields, empty-means-
-// untouched for others, zero-means-clear for the caps — which among other
-// things left the poll intervals with no way to be cleared at all.
-type orgSettingsUpdate struct {
-	GitHubBaseURL       *string `json:"github_base_url"`
-	GitHubPollInterval  *string `json:"github_poll_interval"`
-	GitHubCloneProtocol *string `json:"github_clone_protocol"`
-	JiraBaseURL         *string `json:"jira_base_url"`
-	JiraPollInterval    *string `json:"jira_poll_interval"`
-	MaxLLMModelTier     *string `json:"max_llm_model_tier"`
-	// MaxDailyCostUSD is the org-wide daily LLM spend cap; 0 clears it.
-	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
-	// MaxConcurrentRuns is the org-wide concurrent-run ceiling; 0 clears it
-	// back to unlimited.
-	MaxConcurrentRuns *int `json:"max_concurrent_runs"`
+// Every field is json.RawMessage under the one clearing convention: absent
+// keeps, explicit null clears (a base URL, a cap) or resets to the shipped
+// default (a poll interval, the clone protocol), any other value is applied and
+// validated. There is no empty-string sentinel and no zero-means-clear: an
+// explicit 0 cap is a 422, because "cap at $0" and "no cap" are different
+// intents and the caller has a spelling for the second one.
+type orgSettingsPatch struct {
+	GitHubBaseURL       json.RawMessage `json:"github_base_url"`
+	GitHubPollInterval  json.RawMessage `json:"github_poll_interval"`
+	GitHubCloneProtocol json.RawMessage `json:"github_clone_protocol"`
+	JiraBaseURL         json.RawMessage `json:"jira_base_url"`
+	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
+	MaxLLMModelTier     json.RawMessage `json:"max_llm_model_tier"`
+	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
+	MaxConcurrentRuns   json.RawMessage `json:"max_concurrent_runs"`
+	// Version is the token the caller read this row at. Required, and a plain
+	// int rather than a patch field: it is not something you can clear, and a
+	// PATCH without it would be exactly the unconditional last-write-wins save
+	// this route stopped being.
+	Version *int `json:"version"`
 }
 
-// handleOrgSettingsPost saves the org's configuration. Org-admin only.
+// handleOrgSettingsPatch saves the org's configuration. Org-admin only.
 //
 // Base URLs stay here rather than moving onto the credential resources: the
 // GitHub App path has to set a host with no credential in sight (the manifest
 // is built against the stored host, before any App exists), so the host is
 // genuinely config. Clearing one no longer destroys the matching credential the
 // way it used to — disconnecting is an explicit DELETE on the credential.
-func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
+//
+// PATCH /api/orgs/{org_id}/settings
+func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	userID := ClaimsFrom(r.Context()).Subject
 
-	if !s.az.RequireOrgAdminRole(w, r, orgID, userID) {
+	var req orgSettingsPatch
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	if req.Version == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "version is required: send the value the settings read returned",
+			Field:   "version",
+		})
+		return
+	}
+	apply, ok := s.resolveOrgSettingsPatch(w, r, orgID, req)
+	if !ok {
 		return
 	}
 
-	var req orgSettingsUpdate
-	if !decodeJSON(w, r, &req, "") {
-		return
-	}
-
-	var prevOrgSet domain.OrgSettings
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var err error
-		prevOrgSet, err = tx.Orgs.GetSettings(r.Context(), orgID)
+	// ONE transaction for the read-modify-write, with the concurrency guard in
+	// the write itself. It used to span two — read the row, mutate in Go, write
+	// it back — so two admins saving different sections of the settings page
+	// each carried the other's fields as their client last saw them and the
+	// first one's change was undone with a 200.
+	var prevOrgSet, orgSet domain.OrgSettings
+	err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		cur, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		prevOrgSet = cur
+		apply(&cur)
+		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
-	}); err != nil {
-		internalError(w, "settings/org", err)
+	})
+	if errors.Is(err, db.ErrOrgSettingsVersion) {
+		// No server-side merge: the two writers disagree about fields neither of
+		// them named, so the only honest resolution is for the loser to see the
+		// winner's row and decide again.
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonVersionConflict,
+			Message: "these settings changed since you loaded them — reload and re-apply your edit",
+			Field:   "version",
+		})
 		return
 	}
-
-	orgSet := prevOrgSet
-
-	if req.GitHubBaseURL != nil {
-		// Blanking the host while an App registration exists is REFUSED. The
-		// resolver's base lookup falls org_settings → the github_url secret →
-		// github.com, so an empty column silently re-points a GHES org's App at
-		// github.com: wrong host, no error, nothing in any log.
-		//
-		// Refused rather than skipped, which is where this differs from the PAT
-		// unbind's identical hazard. There, clearing the host is a side effect of
-		// unbinding a token, so quietly keeping it is right. Here the clear IS
-		// the request, and answering "saved" for work we declined to do is the
-		// parse-and-drop bug in another costume.
-		//
-		// Re-targeting to a different NON-empty host stays allowed: that's a real
-		// move during a GHES domain change, and whatever breaks is at least the
-		// value the admin typed rather than a default they never chose.
-		//
-		// GitHub-only: jira.CanonicalHost returns ok=false on a blank base URL,
-		// so the Jira surfaces fail loudly instead of resolving somewhere wrong.
-		if *req.GitHubBaseURL == "" {
-			app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
-			if err != nil {
-				internalError(w, "settings/org", err)
-				return
-			}
-			if app != nil {
-				writeJSON(w, http.StatusConflict, map[string]string{
-					"error": "this workspace's GitHub App is registered against this host — remove the App before clearing it",
-					"field": "github_base_url",
-				})
-				return
-			}
-		}
-		orgSet.GitHubBaseURL = *req.GitHubBaseURL
-	}
-	if req.JiraBaseURL != nil {
-		orgSet.JiraBaseURL = *req.JiraBaseURL
-	}
-	// A malformed duration is rejected rather than silently ignored — the old
-	// parse-and-drop behavior meant a typo'd interval reported "saved" while
-	// keeping the previous value.
-	if req.GitHubPollInterval != nil {
-		d, err := parseOrgPollInterval(*req.GitHubPollInterval, domain.DefaultOrgSettings().GitHubPollInterval)
-		if err != nil {
-			badRequestField(w, err.Error(), "github_poll_interval")
-			return
-		}
-		orgSet.GitHubPollInterval = d
-	}
-	if req.JiraPollInterval != nil {
-		d, err := parseOrgPollInterval(*req.JiraPollInterval, domain.DefaultOrgSettings().JiraPollInterval)
-		if err != nil {
-			badRequestField(w, err.Error(), "jira_poll_interval")
-			return
-		}
-		orgSet.JiraPollInterval = d
-	}
-	if req.GitHubCloneProtocol != nil {
-		proto := *req.GitHubCloneProtocol
-		if proto != "ssh" && proto != "https" {
-			badRequest(w, "github_clone_protocol must be 'ssh' or 'https'")
-			return
-		}
-		// Multi-mode is HTTPS-only: refuse an ssh write rather than persist a
-		// value the effective resolver (and the clone path) will ignore. The UI
-		// hides the control in multi mode; this rejects a direct API call.
-		if proto == "ssh" && runmode.Current() != runmode.ModeLocal {
-			badRequest(w, "ssh clone protocol is not available in this deployment; use https")
-			return
-		}
-		orgSet.GitHubCloneProtocol = proto
-	}
-	if req.MaxLLMModelTier != nil {
-		tier := *req.MaxLLMModelTier
-		if tier != "" && domain.ParseTier(tier) == domain.TierUnknown {
-			badRequest(w, "max_llm_model_tier must be haiku, sonnet, or opus")
-			return
-		}
-		orgSet.MaxLLMModelTier = tier
-	}
-	// Reject a negative cap — it would either block every run (if the trip is
-	// >=) or be silently inert, neither a meaningful input.
-	if req.MaxDailyCostUSD != nil {
-		if *req.MaxDailyCostUSD < 0 {
-			badRequest(w, "max_daily_cost_usd must be >= 0")
-			return
-		}
-		orgSet.MaxDailyCostUSD = *req.MaxDailyCostUSD
-	}
-	// A negative concurrency limit reads as "unlimited" to the claim path, so
-	// it can't mean anything; the ceiling keeps a validated value inside the
-	// Postgres int4 column rather than 500ing on "integer out of range".
-	if req.MaxConcurrentRuns != nil {
-		if *req.MaxConcurrentRuns < 0 {
-			badRequest(w, "max_concurrent_runs must be >= 0")
-			return
-		}
-		if *req.MaxConcurrentRuns > domain.MaxConcurrentRunsCeiling {
-			badRequest(w, fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentRunsCeiling))
-			return
-		}
-		orgSet.MaxConcurrentRuns = *req.MaxConcurrentRuns
-	}
-
-	// SSH preflight: gate the transition INTO SSH mode. Local-mode only —
-	// PreflightSSH writes the container's ~/.ssh/known_hosts and probes the
-	// operator's ssh-agent, neither of which belongs in a hosted runtime. In
-	// multi mode the ssh write is already rejected above, so the explicit mode
-	// gate makes the no-SSH-in-multi guarantee provable at this call site too.
-	if runmode.Current() == runmode.ModeLocal &&
-		orgSet.GitHubCloneProtocol == "ssh" && prevOrgSet.GitHubCloneProtocol != "ssh" {
-		sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-		err := worktree.PreflightSSH(ctx, sshHost)
-		cancel()
-		if err != nil {
-			settingsOrgLog.Warn("blocked ssh switch", "ssh_host", sshHost, "error", err)
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-				"error":  fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
-				"field":  "github_clone_protocol",
-				"stderr": err.Error(),
-			})
-			return
-		}
-	}
-
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet)
-	}); err != nil {
+	if err != nil {
 		internalError(w, "settings/org", err)
 		return
 	}
@@ -798,35 +831,277 @@ func (s *Server) handleOrgSettingsPost(w http.ResponseWriter, r *http.Request) {
 		go s.onJiraChanged(orgID)
 	}
 
-	resp := map[string]string{"status": "saved"}
+	resp, ok := s.readOrgSettings(w, r, orgID, userID, &orgSet)
+	if !ok {
+		return
+	}
 	// Lowering the cap doesn't block the save — the admin has authority — but if
 	// the default team already prefers a higher tier, surface that its effective
-	// model just dropped. Gate on an actual cap change: the frontend re-sends
-	// max_llm_model_tier on every org save, so without this an unrelated save
-	// would re-warn each time the default team sits above an unchanged cap.
+	// model just dropped. Gated on an actual cap change so an unrelated save
+	// doesn't re-warn each time the default team sits above an unchanged cap.
 	// Single-team-per-org today, so we check the default team; broadens to a
 	// team list when multi-team lands.
 	if orgSet.MaxLLMModelTier != "" && orgSet.MaxLLMModelTier != prevOrgSet.MaxLLMModelTier {
-		if w := s.capDowngradeWarning(r.Context(), orgID, userID, orgSet.MaxLLMModelTier); w != "" {
-			resp["warning"] = w
-		}
+		resp.Warning = s.capDowngradeWarning(r.Context(), orgID, userID, orgSet.MaxLLMModelTier)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// parseOrgPollInterval resolves a poll-interval field: an empty string clears
-// the override back to that poller's shipped default, any other value must
-// parse as a duration of at least the floor. `def` is the caller's own default
-// so the two pollers can diverge without this helper picking a side.
-func parseOrgPollInterval(raw string, def time.Duration) (time.Duration, error) {
-	if strings.TrimSpace(raw) == "" {
-		return def, nil
+// resolveOrgSettingsPatch validates the body once and returns the mutation it
+// describes. Two statuses for two fault classes, exactly as the team sibling:
+// shape and vocabulary answer 400, a well-formed value outside its band answers
+// 422. Checks that need the world rather than the body — the App-registration
+// gate on clearing the GitHub host, the SSH preflight — run here too, before
+// any transaction is open, because one of them takes fifteen seconds.
+//
+// On any failure the response is already written and ok is false.
+func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request, orgID string, req orgSettingsPatch) (apply func(*domain.OrgSettings), ok bool) {
+	if !httpx.PatchNamed(
+		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
+		req.JiraBaseURL, req.JiraPollInterval, req.MaxLLMModelTier,
+		req.MaxDailyCostUSD, req.MaxConcurrentRuns,
+	) {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: name at least one settings field (null clears it)",
+		})
+		return nil, false
 	}
-	d, err := parseMinDuration(raw, orgPollIntervalMinMinutes)
-	if err != nil {
-		return 0, fmt.Errorf("poll interval must be a duration of at least %dm (e.g. \"15m\")", orgPollIntervalMinMinutes)
+
+	var (
+		shape    httpx.Validation
+		ranges   httpx.Validation
+		mutators []func(*domain.OrgSettings)
+		defaults = domain.DefaultOrgSettings()
+	)
+	set := func(f func(*domain.OrgSettings)) { mutators = append(mutators, f) }
+
+	clearingGitHubHost := false
+	if v, st := httpx.PatchString(&shape, req.GitHubBaseURL, "github_base_url"); st != httpx.PatchAbsent {
+		switch st {
+		case httpx.PatchClear:
+			clearingGitHubHost = true
+			set(func(o *domain.OrgSettings) { o.GitHubBaseURL = "" })
+		case httpx.PatchSet:
+			// Non-empty hosts go through the same validator + canonicalizer the
+			// reachability probe uses, so what the column holds is what the probe
+			// accepted. Persisting verbatim let a value the probe merely tolerated
+			// ("  https://ghes.example.com/ ") through, and the App/PAT host
+			// derivation reads the column, not the probe's answer. A blank string
+			// is not the clear — null is — so it fails here like any other
+			// unusable URL.
+			base, valid := normalizeBaseURL(v)
+			if !valid {
+				shape.Invalid("github_base_url", "github_base_url must be a valid http(s) URL, or null to clear it")
+			} else {
+				set(func(o *domain.OrgSettings) { o.GitHubBaseURL = base })
+			}
+		}
 	}
-	return d, nil
+	if v, st := httpx.PatchString(&shape, req.JiraBaseURL, "jira_base_url"); st != httpx.PatchAbsent {
+		switch st {
+		case httpx.PatchClear:
+			set(func(o *domain.OrgSettings) { o.JiraBaseURL = "" })
+		case httpx.PatchSet:
+			base, valid := normalizeBaseURL(v)
+			if !valid {
+				shape.Invalid("jira_base_url", "jira_base_url must be a valid http(s) URL, or null to clear it")
+			} else {
+				set(func(o *domain.OrgSettings) { o.JiraBaseURL = base })
+			}
+		}
+	}
+	// A malformed duration is rejected rather than silently ignored — the old
+	// parse-and-drop behavior meant a typo'd interval reported "saved" while
+	// keeping the previous value. null resets to that poller's shipped default.
+	for _, f := range []struct {
+		raw   json.RawMessage
+		field string
+		def   time.Duration
+		set   func(*domain.OrgSettings, time.Duration)
+	}{
+		{req.GitHubPollInterval, "github_poll_interval", defaults.GitHubPollInterval,
+			func(o *domain.OrgSettings, d time.Duration) { o.GitHubPollInterval = d }},
+		{req.JiraPollInterval, "jira_poll_interval", defaults.JiraPollInterval,
+			func(o *domain.OrgSettings, d time.Duration) { o.JiraPollInterval = d }},
+	} {
+		v, st := httpx.PatchString(&shape, f.raw, f.field)
+		if st == httpx.PatchAbsent {
+			continue
+		}
+		next := f.def
+		if st == httpx.PatchSet {
+			d, err := parseMinDuration(v, orgPollIntervalMinMinutes)
+			if err != nil {
+				ranges.OutOfRange(f.field, fmt.Sprintf(
+					"%s must be a duration of at least %dm (e.g. \"15m\"), or null for the default",
+					f.field, orgPollIntervalMinMinutes))
+			}
+			next = d
+		}
+		apply := f.set
+		set(func(o *domain.OrgSettings) { apply(o, next) })
+	}
+	if v, st := httpx.PatchString(&shape, req.GitHubCloneProtocol, "github_clone_protocol"); st != httpx.PatchAbsent {
+		next := defaults.GitHubCloneProtocol
+		if st == httpx.PatchSet {
+			switch {
+			case v != "ssh" && v != "https":
+				shape.Invalid("github_clone_protocol", "github_clone_protocol must be \"ssh\" or \"https\", or null for the default")
+			case v == "ssh" && runmode.Current() != runmode.ModeLocal:
+				// Multi-mode is HTTPS-only: refuse an ssh write rather than
+				// persist a value the effective resolver (and the clone path)
+				// will ignore. The UI hides the control in multi mode; this
+				// rejects a direct API call.
+				shape.Invalid("github_clone_protocol", "ssh clone protocol is not available in this deployment; use https")
+			default:
+				next = v
+			}
+		}
+		set(func(o *domain.OrgSettings) { o.GitHubCloneProtocol = next })
+	}
+	if v, st := httpx.PatchString(&shape, req.MaxLLMModelTier, "max_llm_model_tier"); st != httpx.PatchAbsent {
+		switch {
+		case st == httpx.PatchClear:
+			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = "" })
+		case st == httpx.PatchSet && domain.ParseTier(v) == domain.TierUnknown:
+			shape.Invalid("max_llm_model_tier", "max_llm_model_tier must be haiku, sonnet, or opus, or null for no cap")
+		case st == httpx.PatchSet:
+			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = v })
+		}
+	}
+	// "No cap" is null. An explicit 0 is refused rather than quietly read as
+	// "no cap": capping at $0 and having no cap are different intents, and a
+	// caller who means the second one has a spelling for it.
+	if v, st := httpx.PatchFloat(&shape, req.MaxDailyCostUSD, "max_daily_cost_usd"); st != httpx.PatchAbsent {
+		next := 0.0
+		if st == httpx.PatchSet {
+			if v <= 0 {
+				ranges.OutOfRange("max_daily_cost_usd", "max_daily_cost_usd must be greater than 0, or null for no cap")
+			}
+			next = v
+		}
+		set(func(o *domain.OrgSettings) { o.MaxDailyCostUSD = next })
+	}
+	// Same reasoning as the cap above: null is "unlimited", 0 is a refusal. The
+	// ceiling keeps a validated value inside the Postgres int4 column rather
+	// than 500ing on "integer out of range".
+	if v, st := httpx.PatchInt(&shape, req.MaxConcurrentRuns, "max_concurrent_runs"); st != httpx.PatchAbsent {
+		next := 0
+		if st == httpx.PatchSet {
+			switch {
+			case v <= 0:
+				ranges.OutOfRange("max_concurrent_runs", "max_concurrent_runs must be greater than 0, or null for unlimited")
+			case v > domain.MaxConcurrentClaimsCeiling:
+				ranges.OutOfRange("max_concurrent_runs", fmt.Sprintf("max_concurrent_runs must be at most %d", domain.MaxConcurrentClaimsCeiling))
+			}
+			next = v
+		}
+		set(func(o *domain.OrgSettings) { o.MaxConcurrentRuns = next })
+	}
+
+	if shape.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	if ranges.Flush(w, http.StatusUnprocessableEntity) {
+		return nil, false
+	}
+
+	// Blanking the host while an App registration exists is REFUSED. The
+	// resolver's base lookup falls org_settings → the github_url secret →
+	// github.com, so an empty column silently re-points a GHES org's App at
+	// github.com: wrong host, no error, nothing in any log.
+	//
+	// Refused rather than skipped, which is where this differs from the PAT
+	// unbind's identical hazard. There, clearing the host is a side effect of
+	// unbinding a token, so quietly keeping it is right. Here the clear IS the
+	// request, and answering "saved" for work we declined to do is the
+	// parse-and-drop bug in another costume.
+	//
+	// Re-targeting to a different NON-empty host stays allowed: that's a real
+	// move during a GHES domain change, and whatever breaks is at least the
+	// value the admin typed rather than a default they never chose.
+	//
+	// GitHub-only: jira.CanonicalHost returns ok=false on a blank base URL, so
+	// the Jira surfaces fail loudly instead of resolving somewhere wrong.
+	if clearingGitHubHost {
+		app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
+		if err != nil {
+			internalError(w, "settings/org", err)
+			return nil, false
+		}
+		if app != nil {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonConflict,
+				Message: "this workspace's GitHub App is registered against this host — remove the App before clearing it",
+				Field:   "github_base_url",
+			})
+			return nil, false
+		}
+	}
+
+	if !s.orgSettingsSSHPreflight(w, r, orgID, mutators) {
+		return nil, false
+	}
+
+	return func(o *domain.OrgSettings) {
+		for _, m := range mutators {
+			m(o)
+		}
+	}, true
+}
+
+// orgSettingsSSHPreflight gates the transition INTO SSH clone mode. Local-mode
+// only — PreflightSSH writes the container's ~/.ssh/known_hosts and probes the
+// operator's ssh-agent, neither of which belongs in a hosted runtime. In multi
+// mode the ssh write is already rejected above, so the explicit mode gate makes
+// the no-SSH-in-multi guarantee provable at this call site too.
+//
+// It reads the stored settings to decide whether this save is a TRANSITION, and
+// that read is deliberately outside the write's transaction: the probe can take
+// fifteen seconds and must not hold one open. The read is only a decision input
+// — if another admin flips the protocol in between, their write bumps the row's
+// version and this request's write is refused, so the stale answer never
+// reaches the column.
+func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request, orgID string, mutators []func(*domain.OrgSettings)) bool {
+	if runmode.Current() != runmode.ModeLocal {
+		return true
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	var cur domain.OrgSettings
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var err error
+		cur, err = tx.Orgs.GetSettings(r.Context(), orgID)
+		return err
+	}); err != nil {
+		internalError(w, "settings/org", err)
+		return false
+	}
+	next := cur
+	for _, m := range mutators {
+		m(&next)
+	}
+	if next.GitHubCloneProtocol != "ssh" || cur.GitHubCloneProtocol == "ssh" {
+		return true
+	}
+
+	sshHost := worktree.SSHHostFromBaseURL(next.GitHubBaseURL)
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	err := worktree.PreflightSSH(ctx, sshHost)
+	cancel()
+	if err == nil {
+		return true
+	}
+	// The probe's stderr used to ride along in its own key, a dialect only this
+	// route spoke. It is already the second half of the message, and the full
+	// output is in the log line above.
+	settingsOrgLog.Warn("blocked ssh switch", "ssh_host", sshHost, "error", err)
+	httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: fmt.Sprintf("SSH preflight against %s failed — fix your SSH setup or keep HTTPS. %s", sshHost, err.Error()),
+		Field:   "github_clone_protocol",
+	})
+	return false
 }
 
 // orgPollIntervalMinMinutes is the floor for an org poll interval. Anything

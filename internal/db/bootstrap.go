@@ -19,7 +19,7 @@ import (
 // Callers:
 //
 //   - BootstrapLocalOrg — the local "Start your factory"
-//     provision action (POST /api/setup/start). Creates the synthetic
+//     provision action (POST /api/orgs). Creates the synthetic
 //     tenant rows, then runs the shared BootstrapNewOrg chain. Nothing
 //     provisions at boot anymore.
 //   - BootstrapAgentForOrg — multi-mode org-create handler (D7),
@@ -48,7 +48,7 @@ import (
 // Fully re-entrant for crash-mid-provision recovery: re-running after a
 // partial provision reaches the same end state. Note that if it runs
 // again after a user has deleted shipped defaults, the seed step can
-// re-create them — POST /api/setup/start avoids that by no-op'ing once a
+// re-create them — POST /api/orgs avoids that by no-op'ing once a
 // tenant exists, which is where the non-resurrection guarantee lives.
 // shippedPrompts + shippedBlueprints are passed in
 // (rather than read from internal/promptseed) so internal/db

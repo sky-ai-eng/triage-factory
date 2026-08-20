@@ -23,7 +23,7 @@ func TestRelayServer_AuthorizeRepoRoutesToGate(t *testing.T) {
 			return gitproxy.Decision{Allowed: true, AllowedRefs: []string{"refs/heads/feature"}}, nil
 		},
 	}
-	s := NewRelayServer(db.Stores{}, RunInfo{OrgID: "org1"}, git)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org1"}, git)
 
 	args, _ := json.Marshal(agentproc.AuthorizeRepoArgs{Owner: "acme", Repo: "widgets"})
 	raw, err := s.DispatchCall(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpAuthorizeRepo, args)
@@ -56,7 +56,7 @@ func TestRelayServer_AuthorizeRepoPropagatesDenyFields(t *testing.T) {
 			}, nil
 		},
 	}
-	s := NewRelayServer(db.Stores{}, RunInfo{OrgID: "org1"}, git)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org1"}, git)
 
 	args, _ := json.Marshal(agentproc.AuthorizeRepoArgs{Owner: "acme", Repo: "widgets"})
 	raw, err := s.DispatchCall(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpAuthorizeRepo, args)
@@ -80,7 +80,7 @@ func TestRelayServer_AuthorizeRepoPropagatesDenyFields(t *testing.T) {
 
 func TestRelayServer_AuthorizeRepoFailsClosedWithoutGate(t *testing.T) {
 	// A run with no git gate wired (a Jira-only run) must deny, never allow-all.
-	s := NewRelayServer(db.Stores{}, RunInfo{}, nil)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 	args, _ := json.Marshal(agentproc.AuthorizeRepoArgs{Owner: "acme", Repo: "widgets"})
 	raw, err := s.DispatchCall(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpAuthorizeRepo, args)
 	if err != nil {
@@ -100,7 +100,7 @@ func TestRelayServer_RecordPushRoutesToRecorder(t *testing.T) {
 	git := &agentproc.GitProxyConfig{
 		RecordPush: func(_ context.Context, push gitproxy.PushedRef) { recorded <- push },
 	}
-	s := NewRelayServer(db.Stores{}, RunInfo{}, git)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
 
 	args, _ := json.Marshal(agentproc.RecordPushArgs{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200})
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, args)
@@ -117,7 +117,7 @@ func TestRelayServer_RecordDenialRoutesToRecorder(t *testing.T) {
 	git := &agentproc.GitProxyConfig{
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) { recorded <- denied },
 	}
-	s := NewRelayServer(db.Stores{}, RunInfo{}, git)
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
 
 	args, _ := json.Marshal(agentproc.RecordDenialArgs{Owner: "acme", Repo: "widgets", Ref: "refs/heads/main", Op: "push", Reason: "off-ref"})
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordDenial, args)
@@ -130,7 +130,7 @@ func TestRelayServer_RecordDenialRoutesToRecorder(t *testing.T) {
 
 // TestRelayServer_EgressDenialWritesAuditRow pins the executor-side half of the
 // egress audit: the sidecar relays only (target, reason), and the orchestrator
-// binds the conversation from its OWN RunInfo — so a sidecar can neither
+// binds the conversation from its OWN ConversationInfo — so a sidecar can neither
 // attribute a probe to another run nor forge the dedup key that collapses the
 // repeats.
 func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
@@ -154,8 +154,8 @@ func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
 		a.Provider != domain.ArtifactProviderNetwork {
 		t.Errorf("relayed egress row mismatch: %+v", a)
 	}
-	if a.ConversationID != info.RunID {
-		t.Errorf("conversation = %q, want the server's own run %q (never the wire)", a.ConversationID, info.RunID)
+	if a.ConversationID != info.ConversationID {
+		t.Errorf("conversation = %q, want the server's own conversation %q (never the wire)", a.ConversationID, info.ConversationID)
 	}
 }
 
@@ -177,7 +177,7 @@ func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 	}
 	a := acts[0]
 	if a.Action != domain.ActionGHChannelWrite || a.Target != "octo/repo" ||
-		a.ConversationID != info.RunID {
+		a.ConversationID != info.ConversationID {
 		t.Errorf("relayed gh write row mismatch: %+v", a)
 	}
 	if !strings.Contains(a.DetailJSON, `"http_status":404`) ||
@@ -213,7 +213,7 @@ func TestRelayServer_PRCreateLandsOneArtifactAndOneAction(t *testing.T) {
 	})
 	s.DispatchNotify(ctx, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, writeArgs)
 
-	arts := listRunArtifacts(t, stores, info.RunID)
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindPullRequest {
 		t.Fatalf("want 1 pull_request artifact, got %d: %+v", len(arts), arts)
 	}
@@ -256,7 +256,7 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 	a := acts[0]
 	if a.Action != domain.ActionCommentPosted || a.Target != "acme/widgets#841" ||
 		a.ExternalID != "777" || a.URL != "https://github.com/acme/widgets/pull/841#discussion_r777" ||
-		a.ConversationID != info.RunID {
+		a.ConversationID != info.ConversationID {
 		t.Errorf("relayed reply row mismatch: %+v", a)
 	}
 	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
@@ -290,7 +290,7 @@ func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
 		t.Fatalf("want 1 graphql write row, got %d: %+v", len(acts), acts)
 	}
 	a := acts[0]
-	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ConversationID != info.RunID {
+	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ConversationID != info.ConversationID {
 		t.Errorf("relayed graphql write row mismatch: %+v", a)
 	}
 }

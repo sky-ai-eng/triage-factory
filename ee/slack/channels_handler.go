@@ -6,7 +6,7 @@
 // tracked channel seeds its default slack:message blueprint so mentions in a
 // newly tracked channel have somewhere to route once TFAC-510's routing flip
 // lands. Deliberately under /api/slack/* rather than
-// /api/settings/team/... — ee-owned routes stay in the slack namespace.
+// /api/teams/{team_id}/... — ee-owned routes stay in the slack namespace.
 package slack
 
 import (
@@ -36,7 +36,7 @@ import (
 // handler families can't drift.
 func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", false
 	}
 	orgID, ok = httpx.RequireOrg(w, r)
@@ -44,7 +44,7 @@ func slackEntitlementGate(w http.ResponseWriter, r *http.Request) (orgID string,
 		return "", false
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureSlack) {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "route")
 		return "", false
 	}
 	return orgID, true
@@ -131,7 +131,7 @@ func (h *channelsHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	// channel roster is member-visible, not org-visible (same non-disclosure
 	// posture as VerifyTeamInOrg above).
 	if role == "" {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "team")
 		return
 	}
 
@@ -171,7 +171,7 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req putChannelsRequest
-	if !httpx.DecodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	desired := normalizeChannelIDs(req.ChannelIDs)
@@ -252,12 +252,12 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 
 	channelID := r.PathValue("channel_id")
 	if channelID == "" {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "channel")
 		return
 	}
 
 	var req primaryRequest
-	if !httpx.DecodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.TeamID == "" {
@@ -630,7 +630,11 @@ func diffChannelIDs(prior []slackstore.TeamChannel, desired []string) (added, re
 // own trigger is respected (no default forced beside it), and a team that
 // deleted the default doesn't get it resurrected on the next PUT.
 func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, teamID string) (bool, error) {
-	handlers, err := tx.EventHandlers.List(ctx, orgID, domain.EventHandlerKindTrigger, teamID)
+	// Unwindowed (ListOpts zero Limit): this derives a per-channel set from
+	// the team's whole trigger list rather than browsing it, so a page would
+	// silently narrow what the channel is reported as tracking.
+	handlers, _, err := tx.EventHandlers.List(ctx, orgID,
+		db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.Unwindowed)
 	if err != nil {
 		return false, err
 	}
@@ -644,7 +648,7 @@ func teamHasSlackMessageTrigger(ctx context.Context, tx db.TxStores, orgID, team
 
 // slackMessagePromptName/Body are the shipped-content for the default
 // slack:message blueprint seeded on a team's first tracked channel. The
-// message's channel/thread_ts/sender/text reach the run through the task
+// message's channel/thread_ts/sender/text reach the conversation through the task
 // context's raw event metadata — a task itself carries only its title — so the
 // body points there rather than interpolating anything. Deliberately doesn't
 // hinge on whether the triggering message was an explicit @-mention or an
@@ -680,7 +684,7 @@ const (
 // app-pool Create path rather than the admin-pool seeders.
 func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID string) error {
 	promptID := uuid.New().String()
-	if err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
+	if _, err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
 		ID:     promptID,
 		Name:   slackMessagePromptName,
 		Body:   slackMessagePromptBody,
@@ -690,21 +694,21 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 	}
 
 	blueprintID := uuid.New().String()
-	if err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{
+	if _, err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{
 		ID:     blueprintID,
 		Name:   slackMessagePromptName,
 		Source: "user",
 	}); err != nil {
 		return fmt.Errorf("seed slack message blueprint: %w", err)
 	}
-	if err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
+	if _, err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
 		return fmt.Errorf("seed slack message blueprint steps: %w", err)
 	}
 
 	predicate := `{"channel_in":[]}`
 	threshold := slackMessageTriggerBreakerThreshold
 	minAutonomy := slackMessageTriggerMinAutonomy
-	if err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
+	if _, err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
 		ID:                     uuid.New().String(),
 		Kind:                   domain.EventHandlerKindTrigger,
 		EventType:              domain.EventSlackMessage,

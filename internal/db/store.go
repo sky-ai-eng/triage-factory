@@ -14,6 +14,14 @@ import (
 // specific interfaces they consume (db.ScoreStore, db.TaskStore, …).
 // The bundle exists for main.go wiring and for the WithTx wrapper —
 // nothing else. See docs/for-agents/specs/sky-246-d2-store-abstraction.html §5.
+//
+// A single-row Insert/Update/Upsert returns the row it persisted, off
+// RETURNING on the write statement, sharing the point read's column list and
+// scanner. RepositoryStore's doc states the rule in full; every store in this
+// package holds it now, or states its own exemption at the interface
+// (WorkspaceSnapshotStore, whose writes deliberately answer with the CAS
+// outcome rather than a row). Exceptions are documented at the method or
+// interface that carries them, not here.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.
@@ -71,7 +79,7 @@ type Stores struct {
 	Users UsersStore
 
 	// Tasks owns the tasks table — lifecycle, claims, dedup,
-	// swipe-triggered transitions, plus the run-history queries
+	// swipe-triggered transitions, plus the conversation-history queries
 	// powering the auto-delegate breaker. App pool in Postgres
 	// (RLS-active) since the queue + per-task surface is request-
 	// driven; the AI scorer reads tasks via the admin-pooled
@@ -94,33 +102,33 @@ type Stores struct {
 	// a request handler.
 	Conversations ConversationStore
 
-	// Artifacts owns the artifacts table — the durable, run-attributed,
-	// polymorphic record of everything a run produces externally (branch,
-	// PR, review, issue, comment). Deduped per (org_id, dedup_key) so all
-	// of TFAC-454's capture writers UPSERT to one row. App pool in
-	// Postgres (team-scoped RLS via team_id, like runs); consumers are the
-	// exec choke point + reconciliation (writers) and run-detail / C2
-	// (readers). See TFAC-455.
+	// Artifacts owns the artifacts table — the durable,
+	// conversation-attributed, polymorphic record of everything a conversation
+	// produces externally (branch, PR, review, issue, comment). Deduped per
+	// (org_id, dedup_key) so all of TFAC-454's capture writers UPSERT to one
+	// row. App pool in Postgres (team-scoped RLS via team_id, like
+	// conversations); consumers are the exec choke point + reconciliation
+	// (writers) and conversation-detail / C2 (readers). See TFAC-455.
 	Artifacts ArtifactStore
 
 	// Entities owns the entities table — the long-lived source
-	// objects (PR, Jira issue) every event/task/run hangs off. App
+	// objects (PR, Jira issue) every event/task/conversation hangs off. App
 	// pool in Postgres; consumers are the tracker, projectclassify,
 	// delegate context loaders, the scorer, and the server panels.
 	Entities EntityStore
 
-	// Repos owns repo_profiles — the user-configured GitHub repos
+	// Repos owns repositories — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
 	// curator, the projects handler, the poller manager, the
 	// profiler, and the workspace CLI tests. Every method accepts
 	// repoID as "owner/repo" — Postgres splits to (owner, repo) and
 	// queries by the natural key UNIQUE(org_id, owner, repo).
-	Repos RepoStore
+	Repos RepositoryStore
 
 	// PendingFirings owns the pending_firings table — the FIFO queue
 	// of intent-to-auto-delegate rows the router enqueues when an
-	// entity already has an active auto run. Admin pool in Postgres
+	// entity already has an active auto conversation. Admin pool in Postgres
 	// (the router has no per-user identity; system service).
 	PendingFirings PendingFiringsStore
 
@@ -133,7 +141,7 @@ type Stores struct {
 	Projects ProjectStore
 
 	// Events owns the events audit log — append-only event rows the
-	// router records and the factory/delegate paths read. Holds both
+	// router records and the task-creation paths read. Holds both
 	// pools: app for request-handler equivalents (stock
 	// carry-over, factory drag-to-delegate) and admin for background
 	// goroutines without JWT-claims context (router RecordSystem +
@@ -148,33 +156,33 @@ type Stores struct {
 	// worker run as background goroutines with no per-user identity.
 	EventQueue EventQueueStore
 
-	// RunQueue owns the run queue — the work list the delegation dispatcher
-	// drains to drive blueprints through their steps (sibling of EventQueue).
-	// A blueprint step is enqueued as a conversations row with no stored
-	// status — the absence of an outcome is what makes it claimable;
-	// a worker claims it (minting a claims row), runs the agent, and the
-	// reactor advances the blueprint_run.
-	// A system-service store (admin pool in Postgres): the dispatcher runs as
-	// a background worker with no per-user identity.
-	RunQueue RunQueueStore
+	// ConversationQueue owns the conversation queue — the work list the
+	// delegation dispatcher drains to drive blueprints through their steps
+	// (sibling of EventQueue). A blueprint step is enqueued as a
+	// conversations row with no stored status — the absence of an outcome is
+	// what makes it claimable; a worker claims it (minting a claims row),
+	// runs the agent, and the reactor advances the blueprint_run. A
+	// system-service store (admin pool in Postgres): the dispatcher runs as a
+	// background worker with no per-user identity.
+	ConversationQueue ConversationQueueStore
 
-	// TaskMemory owns the conversation_memory table — per-run agent narrative
-	// + human verdict, read back by the delegate spawner to
-	// materialize prior context into fresh worktrees. Holds both
-	// pools: app for request-handler equivalents (review/PR submit,
-	// swipe-discard cleanup, factory/run-summary reads) and admin for
-	// the spawner's runAgent goroutine (post-completion upsert + run-
-	// start materializer, both without a JWT-claims context).
+	// TaskMemory owns the conversation_memory table — per-conversation agent
+	// narrative + human verdict, read back by the delegate spawner to
+	// materialize prior context into fresh worktrees. Holds both pools: app
+	// for request-handler equivalents (review/PR submit, swipe-discard
+	// cleanup, factory/conversation-summary reads) and admin for the
+	// spawner's runAgent goroutine (post-completion upsert +
+	// engagement-start materializer, both without a JWT-claims context).
 	TaskMemory TaskMemoryStore
 
-	// RunWorktrees owns the conversation_worktrees table — one row per
+	// ConversationWorktrees owns the conversation_worktrees table — one row per
 	// (conversation_id, repo_id) lazy worktree reservation a Jira-style run
 	// accumulates as the agent materializes repos via `workspace
 	// add`. Holds both pools: app for the cmd/exec workspace CLI
 	// (its synthetic-claims wrap is owned by a separate cmd/exec
 	// auth pass) and admin for the spawner's runAgent + chain
 	// orchestrator cleanup defers (no JWT-claims context).
-	RunWorktrees RunWorktreeStore
+	ConversationWorktrees ConversationWorktreeStore
 
 	// Orgs owns the orgs table — the tenancy root. Background
 	// services (poller, tracker, projectclassify, repoprofile)
@@ -226,11 +234,10 @@ type Stores struct {
 	// GitHub repo *tracking* selection and source of truth for which
 	// repos a team cares about (the tracking-scope twin of
 	// jira_project_status_rules, distinct from TeamGitHubGroups which is
-	// review routing). App pool in Postgres for the request-handler
-	// reads/writes (RLS gates by team membership / team admin); admin
-	// pool for the `...System` router-gate reads + the repo_profiles
-	// reconcile that ReplaceForTeam runs (repo_profiles is now the
-	// org-wide UNION of every team's rows, a derived cache).
+	// review routing). Each row references a repository by the registry
+	// row's id, so a rename moves nothing here. App pool in Postgres for
+	// the request-handler reads/writes (RLS gates by team membership /
+	// team admin); admin pool for the `...System` router-gate reads.
 	TeamGitHubRepos TeamGitHubReposStore
 
 	// Curator owns the curator's view of the shared conversations /
@@ -249,6 +256,28 @@ type Stores struct {
 	// admin). SQLite is also wired in local mode and reads/writes
 	// org_github_apps for the same manifest-flow path.
 	GitHubApps GitHubAppsStore
+
+	// ReachableRepos owns reachable_repositories — the mirror of what the org's
+	// GitHub credentials can reach, kept correct by pull. It backs the repository
+	// picker, the team-repos write gate, and the org page's reach-without-purpose
+	// and scope-drift findings. Admin-pool-only in Postgres, like the
+	// installation rows the App half hangs off: no user gesture adds or removes a
+	// reachable entry, so every app-pool write is denied by RLS.
+	//
+	// Two system writers, not one. The refresh owns the content, and
+	// GitHubAppsStore.MarkInstallationRemoved deletes an installation's entries
+	// in the same transaction as the soft removal — an uninstalled installation
+	// reaches nothing, and the two writes are one fact. Not in TxStores: neither
+	// writer composes into a caller's transaction.
+	ReachableRepos ReachableReposStore
+
+	// GitHubDeliveries owns github_webhook_deliveries — the dedup record of
+	// GitHub App webhook deliveries the receiver has already applied, so an
+	// operator-triggered redelivery doesn't re-run the installation upsert or
+	// re-publish to the bus. Admin-pool-only in Postgres: the receiver is
+	// pre-auth and has no claims for a policy to gate on. Not in TxStores —
+	// the gate runs before any of the work a delivery does, never inside it.
+	GitHubDeliveries GitHubDeliveryStore
 
 	// JiraApps owns the org_jira_apps table — per-org Atlassian OAuth (3LO)
 	// app registrations (the BYO-app override / local-supplied app). App pool
@@ -344,7 +373,7 @@ type Stores struct {
 	// every TF process registers into at boot and refreshes via periodic
 	// heartbeat. Admin-pool-only in Postgres: no org_id (a fleet member
 	// isn't tenant data), so there's no app-pool counterpart and no
-	// "...System" suffix, same shape as RunQueueStore/EventQueueStore.
+	// "...System" suffix, same shape as ConversationQueueStore/EventQueueStore.
 	// SQLite is N=1: one row, epoch bumping per restart.
 	Instances InstanceStore
 
@@ -366,19 +395,20 @@ type Stores struct {
 	// deployment config, not tenant data.
 	Operators OperatorStore
 
-	// RunSignals owns the conversation_signals table — the cross-pod run-control
-	// outbox (TFAC-585). Postgres only: the SQLite impl is a stub
-	// returning ErrNotApplicableInLocal from every method, mirroring
-	// MarketplaceStore/InvitesStore — local mode is always its own run's
-	// owner, so no code path may reach this store there.
-	RunSignals RunSignalStore
+	// ConversationSignals owns the conversation_signals table — the cross-pod
+	// conversation-control outbox (TFAC-585). Postgres only: the SQLite impl
+	// is a stub returning ErrNotApplicableInLocal from every method,
+	// mirroring MarketplaceStore/InvitesStore — local mode owns every live
+	// conversation itself, so no code path may reach this store there.
+	ConversationSignals ConversationSignalStore
 
-	// RunPendingInput is the durable half of resume-by-enqueue (TFAC-585):
-	// the message recorded before a parked run's continuation is re-queued
-	// as ordinary claimable work, stored as an undelivered user messages
-	// row. Both dialects (unlike RunSignals): local mode's dispatcher
-	// claims its own resumed runs through the identical queue path.
-	RunPendingInput RunPendingInputStore
+	// ConversationPendingInput is the durable half of resume-by-enqueue (TFAC-585):
+	// the message recorded before a parked conversation's continuation is
+	// re-queued as ordinary claimable work, stored as an undelivered user
+	// messages row. Both dialects (unlike ConversationSignals): local mode's
+	// dispatcher claims its own resumed conversations through the identical
+	// queue path.
+	ConversationPendingInput ConversationPendingInputStore
 
 	// Permissions owns the conversation_permissions table — the durable
 	// record of every tool-approval prompt a conversation raised and how it
@@ -408,13 +438,20 @@ type Stores struct {
 	// PlacementOverrides: placement coordination, not a browsable RLS surface.
 	CuratorHomes CuratorHomeStore
 
-	// RunCredentials owns the claim_credentials table — the sealed
+	// ClaimCredentials owns the claim_credentials table — the sealed
 	// per-claim credential bundle channel (TFAC-614), keyed by the run's
 	// active claim. Admin-pool-only, same shape as
-	// Instances/RunSignals: never a request-handler surface, and unlike
-	// RunPendingInput its payload is credential-bearing ciphertext, so
+	// Instances/ConversationSignals: never a request-handler surface, and unlike
+	// ConversationPendingInput its payload is credential-bearing ciphertext, so
 	// there is no app-pool grant at all.
-	RunCredentials RunCredentialsStore
+	ClaimCredentials ClaimCredentialsStore
+
+	// WorkspaceSnapshots owns the workspace_snapshots table — per snapshot key,
+	// whether the workspace blob is being written, was written, or failed, and
+	// which engagement owns the write. Admin-pool-only, same shape as
+	// ClaimCredentials: written by an executor's teardown, read by the resume
+	// path and the retention reaper, never by a request handler.
+	WorkspaceSnapshots WorkspaceSnapshotStore
 
 	// The SSO stores (sso_connections / sso_domains / sso_break_glass) live in
 	// the Enterprise Edition (ee/sso/store) and attach via the Ext slot below —
@@ -442,48 +479,48 @@ type Stores struct {
 // in the same transaction. Fields are added as their parent stores
 // land in successive waves.
 type TxStores struct {
-	Scores           ScoreStore
-	Prompts          PromptStore
-	Swipes           SwipeStore
-	Dashboard        DashboardStore
-	Secrets          SecretStore
-	EventHandlers    EventHandlerStore
-	Blueprints       BlueprintStore
-	Agents           AgentStore
-	TeamAgents       TeamAgentStore
-	Users            UsersStore
-	Tasks            TaskStore
-	Factory          FactoryReadStore
-	Conversations    ConversationStore
-	Artifacts        ArtifactStore
-	Entities         EntityStore
-	Repos            RepoStore
-	PendingFirings   PendingFiringsStore
-	Projects         ProjectStore
-	Events           EventStore
-	TaskMemory       TaskMemoryStore
-	RunWorktrees     RunWorktreeStore
-	Orgs             OrgsStore
-	OrgMemberships   OrgMembershipsStore
-	Teams            TeamsStore
-	JiraStatusRules  JiraStatusRulesStore
-	TeamGitHubGroups TeamGitHubGroupsStore
-	TeamGitHubRepos  TeamGitHubReposStore
-	Curator          CuratorStore
-	GitHubApps       GitHubAppsStore
-	JiraApps         JiraAppsStore
-	ShippedDefaults  ShippedDefaultsStore
-	Invites          InvitesStore
-	SystemLLMRuns    SystemLLMRunStore
-	AccessChangeLog  AccessChangeLogStore
-	ExternalActions  ExternalActionStore
-	Spend            SpendStore
-	AuthEvents       AuthEventStore
-	StagedInjections StagedInjectionStore
-	Marketplace      MarketplaceStore
-	Instances        InstanceStore
-	RunPendingInput  RunPendingInputStore
-	Permissions      PermissionStore
+	Scores                   ScoreStore
+	Prompts                  PromptStore
+	Swipes                   SwipeStore
+	Dashboard                DashboardStore
+	Secrets                  SecretStore
+	EventHandlers            EventHandlerStore
+	Blueprints               BlueprintStore
+	Agents                   AgentStore
+	TeamAgents               TeamAgentStore
+	Users                    UsersStore
+	Tasks                    TaskStore
+	Factory                  FactoryReadStore
+	Conversations            ConversationStore
+	Artifacts                ArtifactStore
+	Entities                 EntityStore
+	Repos                    RepositoryStore
+	PendingFirings           PendingFiringsStore
+	Projects                 ProjectStore
+	Events                   EventStore
+	TaskMemory               TaskMemoryStore
+	ConversationWorktrees    ConversationWorktreeStore
+	Orgs                     OrgsStore
+	OrgMemberships           OrgMembershipsStore
+	Teams                    TeamsStore
+	JiraStatusRules          JiraStatusRulesStore
+	TeamGitHubGroups         TeamGitHubGroupsStore
+	TeamGitHubRepos          TeamGitHubReposStore
+	Curator                  CuratorStore
+	GitHubApps               GitHubAppsStore
+	JiraApps                 JiraAppsStore
+	ShippedDefaults          ShippedDefaultsStore
+	Invites                  InvitesStore
+	SystemLLMRuns            SystemLLMRunStore
+	AccessChangeLog          AccessChangeLogStore
+	ExternalActions          ExternalActionStore
+	Spend                    SpendStore
+	AuthEvents               AuthEventStore
+	StagedInjections         StagedInjectionStore
+	Marketplace              MarketplaceStore
+	Instances                InstanceStore
+	ConversationPendingInput ConversationPendingInputStore
+	Permissions              PermissionStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same
@@ -526,7 +563,7 @@ func (t TxStores) Extension(key string) any { return t.Ext[key] }
 // userID (no auth concept in local mode).
 //
 // userID is required and must reference a real users row in
-// Postgres — runs.creator_user_id has an FK to users(id). Callers
+// Postgres — conversations.creator_user_id has an FK to users(id). Callers
 // that don't have a real user (event-triggered run completion,
 // system services) should route to admin pool via the per-store
 // `...System` methods instead. Passing runmode.LocalDefaultUserID
@@ -538,7 +575,7 @@ type TxRunner interface {
 }
 
 // ErrNotApplicableInLocal is returned by SQLite impls of multi-only
-// store methods (SessionStore.Insert, MembershipStore.Add, …). The
+// store methods (InvitesStore.Create, OrgMembershipsStore.RoleFor, …). The
 // auth path is gated behind runmode.ModeMulti, so this should never
 // reach a production user; the error is the safety net for code that
 // escapes that gate.

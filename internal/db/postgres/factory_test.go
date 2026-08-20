@@ -76,8 +76,8 @@ func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	return orgID, userID
 }
 
-// seedPgFactoryPrompt inserts a user-source prompt that runs can FK
-// into. team_id is read from the org's default team (created by
+// seedPgFactoryPrompt inserts a user-source prompt that conversations can
+// FK into. team_id is read from the org's default team (created by
 // seedPgFactoryOrg via seedPgDefaultTeam). source='user' satisfies
 // prompts_system_has_no_creator (creator must be non-NULL).
 func seedPgFactoryPrompt(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
@@ -119,9 +119,18 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO team_github_repos (team_id, owner, repo)
-				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $2, $3)
-				ON CONFLICT (team_id, owner, repo) DO NOTHING
+				INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+				ON CONFLICT DO NOTHING
+			`, orgID, owner, repo); err != nil {
+				t.Fatalf("seed entity repository %s/%s: %v", owner, repo, err)
+			}
+			if _, err := conn.Exec(`
+				INSERT INTO team_github_repos (team_id, repository_id, org_id)
+				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1),
+				        (SELECT id FROM repositories
+				          WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)),
+				        $1)
+				ON CONFLICT (team_id, repository_id) DO NOTHING
 			`, orgID, owner, repo); err != nil {
 				t.Fatalf("track entity repo %s/%s: %v", owner, repo, err)
 			}
@@ -167,9 +176,9 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			}
 			return id
 		},
-		Run: func(t *testing.T, taskID, status string) string {
+		Conversation: func(t *testing.T, taskID, status string) string {
 			t.Helper()
-			// runs.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
+			// conversations.blueprint_run_id is NOT NULL — mint a 1-step blueprint_run for
 			// the task first (the firing unit), then link the run to it.
 			bpID := uuid.New().String()
 			if _, err := conn.Exec(`
@@ -200,7 +209,7 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
 				        'team', $4, $5, 'manual', $6, $7)
 			`, id, orgID, userID, taskID, promptID, stored, brID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
@@ -216,19 +225,19 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			t.Helper()
 			if _, err := conn.Exec(
 				`UPDATE entities SET state = 'closed', closed_at = $1 WHERE id = $2 AND org_id = $3`,
-				closedAt, entityID, orgID,
+				closedAt.UTC(), entityID, orgID,
 			); err != nil {
 				t.Fatalf("close entity: %v", err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 					VALUES ($1, $2, $3, $4, NULL)
-				`, memID, orgID, runID, entityID); err != nil {
+				`, memID, orgID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -236,25 +245,19 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, org_id, conversation_id, entity_id, agent_content)
 				VALUES ($1, $2, $3, $4, $5)
-			`, memID, orgID, runID, entityID, content); err != nil {
+			`, memID, orgID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},
 	}
 }
 
-// trackPgRepo registers (owner, repo) as a tracked repo for teamID via a
-// raw team_github_repos insert — the multi-mode factory belt's GitHub
-// visibility gate (TFAC-516). Idempotent on the (team, owner, repo) PK.
-func trackPgRepo(t *testing.T, h *pgtest.Harness, teamID, owner, repo string) {
+// trackPgRepo registers (owner, repo) as a tracked repo for teamID — the
+// multi-mode factory belt's GitHub visibility gate (TFAC-516). The registry
+// row comes first, because that is what the tracking row references.
+func trackPgRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, owner, repo string) {
 	t.Helper()
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_github_repos (team_id, owner, repo)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (team_id, owner, repo) DO NOTHING
-	`, teamID, owner, repo); err != nil {
-		t.Fatalf("track repo %s/%s for team %s: %v", owner, repo, teamID, err)
-	}
+	pgtest.SeedTrackedRepo(t, h, orgID, teamID, owner, repo)
 }
 
 // seedPgGitHubEntityRaw / seedPgJiraEntityRaw insert an active entity with
@@ -319,12 +322,12 @@ func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 
 	// onTracked: repo in the tracked set, NO task — under the old
 	// task-existence gate it would have been hidden; now it rides the belt.
-	trackPgRepo(t, h, teamID, "acme", "tracked")
+	trackPgRepo(t, h, orgID, teamID, "acme", "tracked")
 	onTracked := seedPgGitHubEntityRaw(t, h, orgID, "acme", "tracked", 1)
 
 	// mixedCase: tracked repo casing differs from the entity's source_id
 	// casing — the lower()/lower() match must still surface it.
-	trackPgRepo(t, h, teamID, "acme", "casefold")
+	trackPgRepo(t, h, orgID, teamID, "acme", "casefold")
 	mixedCase := seedPgGitHubEntityRaw(t, h, orgID, "ACME", "CaseFold", 7)
 
 	// onUntracked: no team tracks its repo. It has a station and, like the
@@ -404,8 +407,8 @@ func TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS(t *testing.T) {
 
 	// teamA tracks acme/a-repo (GitHub) + SKY (Jira); teamB tracks
 	// acme/b-repo + BOB. Same org, disjoint tracked sets.
-	trackPgRepo(t, h, teamA, "acme", "a-repo")
-	trackPgRepo(t, h, teamB, "acme", "b-repo")
+	trackPgRepo(t, h, orgID, teamA, "acme", "a-repo")
+	trackPgRepo(t, h, orgID, teamB, "acme", "b-repo")
 	seedPgJiraRule(t, h, teamA, "SKY")
 	seedPgJiraRule(t, h, teamB, "BOB")
 

@@ -14,14 +14,14 @@ import (
 // Linux. Present only to keep the package building on dev machines; it runs the
 // capture in-process as a safe fallback, reading the transcript as this same
 // (single) uid.
-func captureIsolated(ctx context.Context, wtPath, sessionID string) (*worktree.GitDelta, []byte, error) {
+func captureIsolated(ctx context.Context, wtPath, sessionID string) (worktree.CapturedState, func(), error) {
 	delta, err := worktree.CaptureWorkspaceGit(ctx, wtPath)
 	if err != nil {
-		return nil, nil, err
+		return worktree.CapturedState{}, nil, err
 	}
-	var transcript []byte
+	state := worktree.CapturedState{Delta: delta, SessionID: sessionID}
 	if data, ok := worktree.ReadClaudeSessionTranscript(wtPath, sessionID); ok {
-		transcript = data
+		state.Transcript = data
 	}
-	return delta, transcript, nil
+	return state, nil, nil
 }

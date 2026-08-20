@@ -32,7 +32,7 @@ import (
 // contract real chances to correct without spending unbounded turns on one
 // that's ignoring it. Not a config knob because no one needs to tune it
 // per-run. A turn that ends with NO envelope attempt is not retried — the run
-// is left open (see driveLiveRun). The live driver's results-channel buffer is
+// is left open (see driveLiveConversation). The live driver's results-channel buffer is
 // sized off this (resultsBufferDepth in live.go); keep that in mind if you bump
 // it.
 const maxCompletionRetries = 3
@@ -40,13 +40,16 @@ const maxCompletionRetries = 3
 // memoryNamespace is the key that groups everything one workflow run's steps
 // share: the run tree on disk, its workspace snapshot blob, and — as the value
 // materializePriorMemories compares against — which prior memories belong to
-// the current run rather than to history. It is the blueprint_run_id the run
-// belongs to. Every run is a blueprint step now (a single prompt is a 1-step
-// blueprint), so there is no run-id fallback — the value is always the
-// blueprint_run_id. The runID arg is retained so call sites read uniformly and a
-// future change can't silently mis-key.
-func memoryNamespace(blueprintRunID, runID string) string {
-	_ = runID
+// the current run rather than to history. It is the blueprint_run_id the
+// conversation belongs to. Every conversation is a blueprint step now (a
+// single prompt is a 1-step blueprint), so there is no conversation-id
+// fallback — the value is always the blueprint_run_id.
+//
+// It stays a named function over an identity return because the name is what
+// tells a call site which of the two ids in scope keys the workspace: a
+// conversation id reads as an equally plausible argument and silently keys a
+// tree nothing else will look under.
+func memoryNamespace(blueprintRunID string) string {
 	return blueprintRunID
 }
 
@@ -170,7 +173,7 @@ func fingerprintAgentMemoryFile(cwd string) *memoryFingerprint {
 	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		delegateLog.Warn("fingerprint inherited memory file failed; this run's memory will be taken at face value", "cwd", cwd, "error", err)
+		delegateLog.Warn("fingerprint inherited memory file failed; this conversation's memory will be taken at face value", "cwd", cwd, "error", err)
 		return nil
 	}
 	var fp memoryFingerprint
@@ -185,14 +188,14 @@ func (f *memoryFingerprint) covers(content string) bool {
 	return f != nil && sha256.Sum256([]byte(content)) == f.sum
 }
 
-// readRunMemory returns what THIS run wrote at the fixed path. Content identical
+// readConversationMemory returns what THIS run wrote at the fixed path. Content identical
 // to what the run inherited is not this run's work: it reads as "wrote nothing",
 // so the conversation_memory row lands with agent_content NULL rather than
 // adopting a predecessor's narrative.
 //
 // prior is nil on every path with no inherited file to distrust — a resume,
 // whose own file is its work, and a fresh tree.
-func readRunMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
+func readConversationMemory(cwd string, prior *memoryFingerprint) (string, memoryFileState) {
 	content, state := readAgentMemoryFile(cwd)
 	if state == memoryFilePresent && prior.covers(content) {
 		return "", memoryFileStale
@@ -307,9 +310,10 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 		}
 	}
 
-	// teamID is THIS run's owning team. The System read scopes the prior
-	// memory to what that team can see, so a run never materializes another
-	// team's run narratives on a shared entity (TFAC-506).
+	// teamID is THIS conversation's owning team. The System read scopes the
+	// prior memory to what that team can see, so a conversation never
+	// materializes another team's conversation narratives on a shared entity
+	// (TFAC-506).
 	memories, err := taskMemory.GetMemoriesForEntitySystem(context.Background(), orgID, entityID, teamID)
 	if err != nil {
 		delegateLog.Warn("load prior memories for entity failed", "entity", entityID, "error", err)
@@ -382,27 +386,27 @@ func materializePriorMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root
 //
 // The repo-owned set only travels with the in-tree target. A staging dir is TF's
 // outright, is no repo, and shares no path with one.
-func entityMemoryTarget(cfg *runConfig, runID, cwd string, owned repoFiles) (string, repoFiles) {
+func entityMemoryTarget(cfg *runConfig, conversationID, cwd string, owned repoFiles) (string, repoFiles) {
 	if !agentproc.WillSandbox() {
 		return filepath.Join(cwd, scratchDirName, entityMemoryDirName), owned
 	}
-	dir := sandbox.TrustedMemorySourcePath(runID)
+	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	cfg.memorySourcePath = dir
 	return dir, nil
 }
 
-// stagedEntityMemorySource returns runID's memory staging dir when one is still
+// stagedEntityMemorySource returns conversationID's memory staging dir when one is still
 // on disk, else "". A resume re-invokes the agent in the same conversation and
 // runs none of the per-launch setup, so it re-mounts whatever its original claim
 // materialized rather than re-rendering it. Absent — a cold resume on an executor
 // that never staged it, or after a startup sweep — the resumed agent continues
 // from its transcript with nothing behind the symlink; the mount is ambient
 // context, not the conversation's state.
-func stagedEntityMemorySource(runID string) string {
-	if runID == "" || !agentproc.WillSandbox() {
+func stagedEntityMemorySource(conversationID string) string {
+	if conversationID == "" || !agentproc.WillSandbox() {
 		return ""
 	}
-	dir := sandbox.TrustedMemorySourcePath(runID)
+	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	if _, err := os.Stat(dir); err != nil {
 		return ""
 	}
@@ -505,7 +509,7 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 	return entity.ProjectID
 }
 
-// attachRunMemoryEntities makes a terminated run's memory reachable from every
+// attachConversationMemoryEntities makes a terminated run's memory reachable from every
 // entity the run materially engaged: the primary (task) entity, plus every
 // entity it produced (derived from the run's artifacts). Touched entities are
 // recorded durably at verb time by the exec funnel; role precedence in
@@ -525,13 +529,13 @@ func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *str
 // attach mints the create-minimal stub the poller/enrichment path later fills
 // (the artifact URL links it out). A repo-level artifact target (a branch
 // push, or owner/repo with no '#N') maps to no entity and is skipped.
-func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, primaryEntityID string) {
+func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
 	if s.taskMemory == nil {
 		return
 	}
-	// primary — the task's entity always carries the run's memory.
-	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
-		delegateLog.Warn("attach primary entity to run memory failed", "run", runID, "entity", primaryEntityID, "error", err)
+	// primary — the task's entity always carries the conversation's memory.
+	if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, primaryEntityID, domain.MemoryRolePrimary); err != nil {
+		delegateLog.Warn("attach primary entity to conversation memory failed", "conversation", conversationID, "entity", primaryEntityID, "error", err)
 	}
 
 	if s.artifacts == nil || s.entities == nil {
@@ -539,9 +543,9 @@ func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, pri
 	}
 	// produced — every external object the run created/mutated, resolved from
 	// its artifacts. A listing failure leaves the upsert + primary row intact.
-	arts, err := s.artifacts.ListByRunSystem(ctx, orgID, runID)
+	arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("list artifacts for produced-entity attach failed", "run", runID, "error", err)
+		delegateLog.Warn("list artifacts for produced-entity attach failed", "conversation", conversationID, "error", err)
 		return
 	}
 	for _, a := range arts {
@@ -551,12 +555,12 @@ func (s *Spawner) attachRunMemoryEntities(ctx context.Context, orgID, runID, pri
 		}
 		ent, _, err := s.entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
 		if err != nil || ent == nil {
-			delegateLog.Warn("resolve produced entity for run memory failed",
-				"run", runID, "provider", a.Provider, "target", a.Target, "error", err)
+			delegateLog.Warn("resolve produced entity for conversation memory failed",
+				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
 			continue
 		}
-		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, runID, ent.ID, domain.MemoryRoleProduced); err != nil {
-			delegateLog.Warn("attach produced entity to run memory failed", "run", runID, "entity", ent.ID, "error", err)
+		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
+			delegateLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
 		}
 	}
 }

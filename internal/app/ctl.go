@@ -16,7 +16,7 @@ import (
 // per consuming subsystem). dispatchCtl routes each payload by its JSON
 // "kind" to the subsystem that owns it:
 //
-//	"new"/"ack"           → the spawner's run-signal doorbells (TFAC-585)
+//	"new"/"ack"           → the spawner's conversation-signal doorbells (TFAC-585)
 //	"trigger"/"pollsoon"  → the brain trigger/PollSoon relay (TFAC-583),
 //	                        holder-gated inside handleCtlMessage
 //	"kick"                → the WS backplane's cross-pod session kick
@@ -32,7 +32,7 @@ import (
 // latency (every tf_ctl doorbell has one), never a boot failure.
 //
 // Local mode never calls this: no conversation_signals writes exist there
-// (SetRunSignals is never wired), no backplane is constructed, and
+// (SetConversationSignals is never wired), no backplane is constructed, and
 // role=all always self-holds the brain, so nothing ever needs to relay
 // INTO the process.
 func (a *App) startCtlListener(ctx context.Context) {

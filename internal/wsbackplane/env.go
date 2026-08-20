@@ -11,15 +11,15 @@ import (
 
 // Channel names for the three LISTEN/NOTIFY channels this package owns
 // (docs/for-agents/specs/horizontal-scaling/README.md §5). tf_wake (control→executor
-// claim nudges) belongs to the run-queue dispatcher, not here.
+// claim nudges) belongs to the conversation-queue dispatcher, not here.
 const (
 	// ChannelWS carries websocket.Hub.Broadcast envelopes: every control
 	// pod LISTENs and fans a received event into its own local sockets.
 	ChannelWS = "tf_ws"
 	// ChannelCtl is the shared, kind-discriminated control-plane channel:
 	// session kicks (kind "kick", TFAC-584 — published by PublishKick
-	// here), run-signal doorbells (kinds "new"/"ack", TFAC-585 — published
-	// by internal/delegate), and brain trigger/PollSoon relays (kinds
+	// here), conversation-signal doorbells (kinds "new"/"ack", TFAC-585 —
+	// published by internal/delegate), and brain trigger/PollSoon relays (kinds
 	// "trigger"/"pollsoon", TFAC-583 — published by internal/ctlbus). All
 	// low-volume by design — high-volume traffic must never ride this
 	// channel, see ChannelBus. Consumed by exactly ONE listener per pod:
@@ -82,7 +82,7 @@ const (
 // envelope that rides inline on the NOTIFY payload before falling back to
 // a ws_outbox row + ref. An invalid or out-of-range value logs and falls
 // back to the default rather than bricking boot (matches
-// ParseMaxConcurrentRuns's convention in internal/delegate).
+// ParseMaxConcurrentClaims's convention in internal/delegate).
 func InlineMaxBytesFromEnv() int {
 	raw := strings.TrimSpace(os.Getenv("TF_WS_INLINE_MAX_B"))
 	if raw == "" {

@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -57,73 +58,106 @@ func (bh *blueprintsHandler) gateBlueprintWrite(w http.ResponseWriter, r *http.R
 
 // --- Blueprint header CRUD -----------------------------------------------
 
+// blueprintListRequest is the body of POST /api/blueprints/list. TeamID
+// narrows to one team's blueprints on the multi-team page; empty returns
+// everything visible.
+type blueprintListRequest struct {
+	TeamID string `json:"team_id"`
+
+	httpx.PageRequest
+}
+
+type blueprintListFilterKey struct {
+	TeamID string `json:"team_id"`
+}
+
+// POST /api/blueprints/list
 func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := teamscope.SingleParam(r)
-	var blueprints []domain.Blueprint
+
+	var req blueprintListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintListFilterKey{TeamID: req.TeamID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	// The entitlement gate (TFAC-524) hides a blueprint whose every attached
+	// trigger fires on an event type this org isn't licensed for. It rides
+	// into the query as a filter rather than trimming the page afterwards:
+	// a post-window trim makes the page short and total_count a lie about
+	// rows the caller cannot see.
+	filter := db.BlueprintListFilter{TeamID: req.TeamID, GatedEventTypes: gatedEventTypes(orgID)}
+
+	var (
+		blueprints []domain.Blueprint
+		total      int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		listed, e := tx.Blueprints.List(r.Context(), orgID, teamID)
-		if e != nil {
-			return e
-		}
-		// One query for every trigger visible at this scope, grouped by
-		// blueprint_id, instead of a per-blueprint ListForBlueprint call
-		// (TFAC-524 code review: avoids N+1 / a longer-held tx as the
-		// blueprint count grows). Safe to scope by the same teamID as the
-		// blueprint list: a trigger's team_id is pinned to its blueprint's
-		// team_id by the (blueprint_id, team_id) composite FK, so this set
-		// is exactly what per-blueprint ListForBlueprint calls would have
-		// returned.
-		triggers, e := tx.EventHandlers.List(r.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
-		if e != nil {
-			return e
-		}
-		triggersByBlueprint := make(map[string][]domain.EventHandler, len(triggers))
-		for _, tr := range triggers {
-			triggersByBlueprint[tr.BlueprintID] = append(triggersByBlueprint[tr.BlueprintID], tr)
-		}
-		// Hide a blueprint iff it has ≥1 attached trigger AND every one of its
-		// triggers' EventType fails EventTypeAllowed (TFAC-524). A blueprint
-		// with at least one allowed trigger stays (it has live non-gated
-		// behavior); a trigger-less blueprint stays (unrelated to gating).
-		// Rows persist — visibility only.
-		visible := make([]domain.Blueprint, 0, len(listed))
-		for _, bp := range listed {
-			if blueprintGatedOff(orgID, triggersByBlueprint[bp.ID]) {
-				continue
-			}
-			visible = append(visible, bp)
-		}
-		blueprints = visible
-		return nil
+		var e error
+		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if blueprints == nil {
-		blueprints = []domain.Blueprint{}
-	}
-	writeJSON(w, http.StatusOK, blueprints)
+	httpx.WriteList(w, page, blueprints, total)
 }
 
-// blueprintGatedOff reports whether every one of triggers' event types fails
-// EventTypeAllowed for orgID. A trigger-less blueprint (len(triggers) == 0)
-// is never gated off by this check — that's the pre-existing orphaned/
-// trigger-less state, unrelated to entitlement gating.
-func blueprintGatedOff(orgID string, triggers []domain.EventHandler) bool {
-	if len(triggers) == 0 {
-		return false
-	}
-	for _, tr := range triggers {
-		if entitlements.EventTypeAllowed(orgID, tr.EventType) {
-			return false
+// gatedEventTypes returns the event types orgID is NOT entitled to fire on.
+// The catalog is a fixed, small registry, so deriving the complement here is
+// cheaper than teaching the store about entitlements — and it keeps the gate's
+// policy in one place while the store only applies a set.
+func gatedEventTypes(orgID string) []string {
+	var gated []string
+	for _, et := range domain.AllEventTypes() {
+		if !entitlements.EventTypeAllowed(orgID, et.ID) {
+			gated = append(gated, et.ID)
 		}
 	}
-	return true
+	return gated
+}
+
+// handleBlueprintGet is the canonical single read: one blueprint, in the
+// list's row shape. It is deliberately NOT entitlement-gated the way the list
+// is — the gate is a visibility rule for a browse surface, and a caller
+// holding a blueprint's id (from a run, a trigger, a link) must be able to
+// resolve its name rather than meet a 404 that reads as deletion.
+//
+// GET /api/blueprints/{id}
+func (bh *blueprintsHandler) handleBlueprintGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
+
+	var blueprint *domain.Blueprint
+	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "blueprints", err)
+		return
+	}
+	if blueprint == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	writeJSON(w, http.StatusOK, blueprint)
 }
 
 // firstPromptInput is the optional inline prompt the canvas's "New Prompt"
@@ -159,7 +193,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 		return
 	}
 	var req createBlueprintRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -169,22 +203,22 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 	// because it is a pure string assignment independent of team resolution.
 	if req.FirstPrompt != nil {
 		if req.FirstPrompt.Name == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.name is required"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.name is required", Field: "first_prompt.name"})
 			return
 		}
 		if req.FirstPrompt.Body == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "first_prompt.body is required"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "first_prompt.body is required", Field: "first_prompt.body"})
 			return
 		}
 		if !prompts.ValidModel(req.FirstPrompt.Model) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "first_prompt.model"})
 			return
 		}
 		if req.Name == "" {
 			req.Name = req.FirstPrompt.Name
 		}
 	} else if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
 		return
 	}
 
@@ -209,7 +243,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 		// step — all in this tx so a mid-stream failure leaves no orphan prompt.
 		if req.FirstPrompt != nil {
 			firstPromptID = uuid.New().String()
-			if e := tx.Prompts.Create(r.Context(), orgID, teamID, domain.Prompt{
+			if _, e := tx.Prompts.Create(r.Context(), orgID, teamID, domain.Prompt{
 				ID:     firstPromptID,
 				Name:   req.FirstPrompt.Name,
 				Body:   req.FirstPrompt.Body,
@@ -219,21 +253,24 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 				return e
 			}
 		}
-		if e := tx.Blueprints.Create(r.Context(), orgID, teamID, domain.Blueprint{
+		row, e := tx.Blueprints.Create(r.Context(), orgID, teamID, domain.Blueprint{
 			ID:     id,
 			Name:   req.Name,
 			Source: "user",
-		}); e != nil {
+		})
+		if e != nil {
 			return e
 		}
+		// Seeding a first step re-stamps the header (user_modified,
+		// updated_at), so the row the create returned is superseded by the one
+		// the step write returns — not by a re-read.
 		if firstPromptID != "" {
-			if e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, []string{firstPromptID}, nil); e != nil {
+			if row, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, []string{firstPromptID}, nil); e != nil {
 				return e
 			}
 		}
-		var ge error
-		created, ge = tx.Blueprints.Get(r.Context(), orgID, id)
-		return ge
+		created = &row
+		return nil
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -257,15 +294,18 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
 
 	var req renameBlueprintRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name"})
 		return
 	}
 
@@ -274,23 +314,19 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var updated *domain.Blueprint
+	var updated domain.Blueprint
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
-		if e != nil || existing == nil {
-			return e
-		}
-		if e := tx.Blueprints.Rename(r.Context(), orgID, id, name); e != nil {
-			return e
-		}
-		updated, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		var e error
+		updated, e = tx.Blueprints.Rename(r.Context(), orgID, id, name)
 		return e
 	}); err != nil {
+		// The rename itself reports a missing or soft-deleted row now, so the
+		// probe read this handler used to bracket the write with is gone.
+		if errors.Is(err, db.ErrNoSuchBlueprint) {
+			notFound(w, "blueprint")
+			return
+		}
 		internalError(w, "blueprints", err)
-		return
-	}
-	if updated == nil {
-		notFound(w, "blueprint")
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -326,7 +362,10 @@ func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *htt
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
 
 	// Viewers can't delete a blueprint (TFAC-447).
 	if !bh.gateBlueprintWrite(w, r, orgID, userID, id) {
@@ -391,68 +430,150 @@ func (bh *blueprintsHandler) handleBlueprintDelete(w http.ResponseWriter, r *htt
 
 // --- Blueprint steps -----------------------------------------------------
 
-// handleBlueprintStepsAll returns every step of the scope's blueprints in one
-// read — the binding canvas's bulk fetch, which avoids an N+1 of
-// GET .../{id}/steps over the blueprint list. Always an array; the client
-// groups by blueprint_id.
+// blueprintStepListRequest is the body of POST /api/blueprint-steps/list.
+//
+// It is ONE route for what used to be two GETs — the canvas's org-wide bulk
+// fetch and the per-blueprint read. They differed only in a filter, and a
+// filter is what a list body is for; keeping them apart meant two shapes, two
+// envelopes, and two places to remember the ordering contract.
+type blueprintStepListRequest struct {
+	// TeamID narrows to one team's blueprints, like the blueprint list's.
+	TeamID string `json:"team_id"`
+	// BlueprintIDs narrows to specific blueprints. Empty is the canvas's
+	// bulk read; a single id is the old per-blueprint read.
+	BlueprintIDs []string `json:"blueprint_ids"`
+
+	httpx.PageRequest
+}
+
+type blueprintStepListFilterKey struct {
+	TeamID       string   `json:"team_id"`
+	BlueprintIDs []string `json:"blueprint_ids"`
+}
+
+// maxBlueprintStepIDs bounds the id set one request may name. A canvas asks
+// for every blueprint in scope by sending none; a caller naming more ids than
+// a team could plausibly hold is hand-rolled, and the bound keeps the IN-list
+// from growing without limit.
+const maxBlueprintStepIDs = 200
+
+// handleBlueprintStepsAll returns the steps of the scope's blueprints — the
+// binding canvas's bulk fetch (which avoids an N+1 over the blueprint list)
+// and, with blueprint_ids, the per-blueprint read.
+//
+// POST /api/blueprint-steps/list
 func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	teamID := teamscope.SingleParam(r)
-	var steps []domain.BlueprintStep
+
+	var req blueprintStepListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	blueprintIDs := canonicalStrings(req.BlueprintIDs)
+	if len(blueprintIDs) > maxBlueprintStepIDs {
+		v.OutOfRange("blueprint_ids", fmt.Sprintf("at most %d blueprint ids per request", maxBlueprintStepIDs))
+	}
+	for _, id := range blueprintIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			v.Invalid("blueprint_ids", fmt.Sprintf("blueprint id %q is not a valid blueprint id", id))
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintStepListFilterKey{
+		TeamID: req.TeamID, BlueprintIDs: blueprintIDs,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		steps []domain.BlueprintStep
+		total int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		steps, e = tx.Blueprints.ListAllSteps(r.Context(), orgID, teamID)
+		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
+			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	writeJSON(w, http.StatusOK, steps)
+	httpx.WriteList(w, page, steps, total)
 }
 
-// handleBlueprintStepsGet returns the ordered step list for a blueprint.
-// Always returns an array (never null) so frontend code can iterate without a
-// nil check.
-func (bh *blueprintsHandler) handleBlueprintStepsGet(w http.ResponseWriter, r *http.Request) {
+// blueprintRunListRequest is the body of POST /api/blueprint-runs/list. Before
+// this route the collection was unenumerable — a run could only be read by an
+// id the caller already held.
+type blueprintRunListRequest struct {
+	BlueprintID string   `json:"blueprint_id"`
+	Statuses    []string `json:"statuses"`
+
+	httpx.PageRequest
+}
+
+type blueprintRunListFilterKey struct {
+	BlueprintID string   `json:"blueprint_id"`
+	Statuses    []string `json:"statuses"`
+}
+
+// POST /api/blueprint-runs/list
+func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
 
-	var blueprint *domain.Blueprint
-	var steps []domain.BlueprintStep
+	var req blueprintRunListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	if req.BlueprintID != "" {
+		if _, err := uuid.Parse(req.BlueprintID); err != nil {
+			v.Invalid("blueprint_id", fmt.Sprintf("blueprint_id %q is not a valid blueprint id", req.BlueprintID))
+		}
+	}
+	statuses := canonicalStrings(req.Statuses)
+	for _, st := range statuses {
+		if !domain.ValidBlueprintRunStatus(st) {
+			v.Invalid("statuses", fmt.Sprintf("unknown status %q; must be one of: %s",
+				st, strings.Join(domain.BlueprintRunStatuses, ", ")))
+		}
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(blueprintRunListFilterKey{
+		BlueprintID: req.BlueprintID, Statuses: statuses,
+	}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		runs  []domain.BlueprintRun
+		total int
+	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if blueprint == nil {
-			return nil
-		}
-		steps, e = tx.Blueprints.ListSteps(r.Context(), orgID, id)
+		runs, total, e = tx.Blueprints.ListRuns(r.Context(), orgID,
+			db.BlueprintRunListFilter{BlueprintID: req.BlueprintID, Statuses: statuses},
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if blueprint == nil {
-		notFound(w, "blueprint")
-		return
-	}
-	if steps == nil {
-		steps = []domain.BlueprintStep{}
-	}
-	writeJSON(w, http.StatusOK, steps)
+	// The rows are the run objects themselves — the same shape the single
+	// read carries under its "blueprint_run" key. The single read adds the
+	// per-step views, which are a composite of the run and its conversations
+	// and belong to opening one run, not to enumerating many.
+	httpx.WriteList(w, page, runs, total)
 }
 
 type blueprintStepInput struct {
@@ -473,7 +594,10 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
 
 	var blueprint *domain.Blueprint
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -495,14 +619,12 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 	}
 
 	var req blueprintStepsPutRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
 	if len(req.Steps) > maxBlueprintSteps {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
-			"error": "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps",
-		})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "blueprint may not exceed " + strconv.Itoa(maxBlueprintSteps) + " steps", Field: "steps"})
 		return
 	}
 
@@ -510,9 +632,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 	briefs := make([]string, 0, len(req.Steps))
 	for _, step := range req.Steps {
 		if step.StepPromptID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "step_prompt_id is required for every step",
-			})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "step_prompt_id is required for every step", Field: "steps"})
 			return
 		}
 		stepIDs = append(stepIDs, step.StepPromptID)
@@ -521,8 +641,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 
 	// Validate each step's prompt exists + is same-team, then replace in one
 	// tx so all lookups and the final write share claims.
-	var validationErr string
-	var validationStatus int
+	var fault blueprintFault
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		for i, sid := range stepIDs {
 			stepPrompt, e := tx.Prompts.Get(r.Context(), orgID, sid)
@@ -530,16 +649,16 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 				return e
 			}
 			if stepPrompt == nil {
-				validationErr = "step " + strconv.Itoa(i) + " references a non-existent prompt"
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonNotFound,
+					"step "+strconv.Itoa(i)+" references a non-existent prompt", "steps")
 				return nil
 			}
 			// Same-team guard: a blueprint may only step through prompts its own
 			// team owns. The DB enforces this via the (step_prompt_id, team_id)
 			// composite FK on ReplaceSteps; pre-check for a clean 422.
 			if blueprint.TeamID != "" && stepPrompt.TeamID != "" && stepPrompt.TeamID != blueprint.TeamID {
-				validationErr = "step " + strconv.Itoa(i) + " references a prompt owned by another team"
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+					"step "+strconv.Itoa(i)+" references a prompt owned by another team", "steps")
 				return nil
 			}
 			// Copy-only guard: a prompt belongs to at most one blueprint. If this
@@ -551,25 +670,58 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 				return e
 			}
 			if owned && ownerID != id {
-				validationErr = "step " + strconv.Itoa(i) + " references a prompt that already belongs to another blueprint — copy it to reuse."
-				validationStatus = http.StatusUnprocessableEntity
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+					"step "+strconv.Itoa(i)+" references a prompt that already belongs to another blueprint — copy it to reuse.", "steps")
 				return nil
 			}
 		}
-		if validationErr != "" {
+		if fault.status != 0 {
 			return nil
 		}
-		return tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		_, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}
-	if validationErr != "" {
-		writeJSON(w, validationStatus, map[string]string{"error": validationErr})
+	if fault.write(w) {
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// blueprintFault is a validation refusal raised inside a WithTx closure and
+// written after it unwinds — the response can't be written mid-tx, so the fault
+// travels back as data. It carries its own reason and field because these
+// handlers refuse for several distinct causes: a prompt that doesn't exist, one
+// another team owns, one another blueprint already claims, a size bound, an
+// attached trigger. A single reason stamped at the write site would answer
+// "something about teams" to all of them, which is true of exactly one.
+type blueprintFault struct {
+	status int
+	item   httpx.ErrorItem
+}
+
+// raise records a refusal. Every caller returns from the closure immediately
+// after, so the first one is the only one; a later raise is a bug rather than a
+// second fault to accumulate, and is dropped rather than overwriting.
+func (f *blueprintFault) raise(status int, reason, message, field string) {
+	if f.status != 0 {
+		return
+	}
+	f.status = status
+	f.item = httpx.ErrorItem{Reason: reason, Message: message, Field: field}
+}
+
+// write emits the refusal if one was raised, reporting whether it did so the
+// caller can return without falling through to the success body.
+func (f *blueprintFault) write(w http.ResponseWriter) bool {
+	if f.status == 0 {
+		return false
+	}
+	httpx.WriteErrors(w, f.status, f.item)
+	return true
 }
 
 // --- Blueprint composition (merge / split) -------------------------------
@@ -604,15 +756,15 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 	hostID := r.PathValue("id")
 
 	var req mergeBlueprintRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.SourceBlueprintID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source_blueprint_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "source_blueprint_id is required", Field: "source_blueprint_id"})
 		return
 	}
 	if req.SourceBlueprintID == hostID {
-		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "cannot merge a blueprint into itself"})
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "cannot merge a blueprint into itself", Field: "source_blueprint_id"})
 		return
 	}
 
@@ -627,8 +779,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		host, source *domain.Blueprint
 		merged       *domain.Blueprint
 		steps        []domain.BlueprintStep
-		failStatus   int
-		failMsg      string
+		fault        blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -644,7 +795,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		// Same-team guard: both blueprints must belong to one team (MergeInto
 		// leaves team_id on the reparented steps unchanged).
 		if host.TeamID != "" && source.TeamID != "" && host.TeamID != source.TeamID {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "host and source blueprints belong to different teams"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+				"host and source blueprints belong to different teams", "source_blueprint_id")
 			return nil
 		}
 		// Source must be trigger-less. Unreachable from the canvas (you can only
@@ -656,7 +808,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 			return e
 		}
 		if len(triggers) > 0 {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "the absorbed blueprint has its own event trigger; detach it first"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"the absorbed blueprint has its own event trigger; detach it first", "source_blueprint_id")
 			return nil
 		}
 		// Cap: the merged blueprint must stay editable via the normal steps-PUT,
@@ -671,7 +824,8 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 			return e
 		}
 		if len(hostSteps)+len(sourceSteps) > maxBlueprintSteps {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"merged blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "source_blueprint_id")
 			return nil
 		}
 		if e := tx.Blueprints.MergeInto(r.Context(), orgID, hostID, req.SourceBlueprintID); e != nil {
@@ -694,8 +848,7 @@ func (bh *blueprintsHandler) handleBlueprintMerge(w http.ResponseWriter, r *http
 		notFound(w, "source blueprint")
 		return
 	}
-	if failMsg != "" {
-		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+	if fault.write(w) {
 		return
 	}
 	if steps == nil {
@@ -727,16 +880,19 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
 
 	var req splitBlueprintRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	// *int so a missing field is distinguishable from an explicit 0 (which is a
 	// real index whose 422 message is about non-empty halves, not absence).
 	if req.AtStepIndex == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at_step_index is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
 		return
 	}
 	atIndex := *req.AtStepIndex
@@ -751,8 +907,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		bp                   *domain.Blueprint
 		upstream, downstream *domain.Blueprint
 		upSteps, downSteps   []domain.BlueprintStep
-		failStatus           int
-		failMsg              string
+		fault                blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -765,7 +920,8 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		}
 		// 0 < k < N: a split that keeps one side empty is a no-op.
 		if atIndex <= 0 || atIndex >= len(steps) {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
 		// The downstream name defaults to its new step-0 prompt's name (the
@@ -804,8 +960,7 @@ func (bh *blueprintsHandler) handleBlueprintSplit(w http.ResponseWriter, r *http
 		notFound(w, "blueprint")
 		return
 	}
-	if failMsg != "" {
-		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+	if fault.write(w) {
 		return
 	}
 	if upSteps == nil {
@@ -852,18 +1007,21 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint")
+	if !ok {
+		return
+	}
 
 	var req reconnectBlueprintRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.AtStepIndex == nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "at_step_index is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "at_step_index is required", Field: "at_step_index"})
 		return
 	}
 	if req.TargetBlueprintID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_blueprint_id is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "target_blueprint_id is required", Field: "target_blueprint_id"})
 		return
 	}
 
@@ -880,8 +1038,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		host, target *domain.Blueprint
 		hostOut      *domain.Blueprint
 		hostSteps    []domain.BlueprintStep
-		failStatus   int
-		failMsg      string
+		fault        blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -892,13 +1049,15 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if req.TargetBlueprintID == id {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "cannot reconnect a blueprint into itself"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonInvalidField,
+				"cannot reconnect a blueprint into itself", "target_blueprint_id")
 			return nil
 		}
 		// Same-team guard (MergeInto leaves team_id on the reparented steps
 		// unchanged).
 		if host.TeamID != "" && target.TeamID != "" && host.TeamID != target.TeamID {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "host and target blueprints belong to different teams"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+				"host and target blueprints belong to different teams", "target_blueprint_id")
 			return nil
 		}
 		steps, e := tx.Blueprints.ListSteps(r.Context(), orgID, id)
@@ -908,7 +1067,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		// 0 < k < N: both the surviving upstream and the orphaned downstream must
 		// be non-empty (a sequence edge always sits at such a boundary).
 		if atIndex <= 0 || atIndex >= len(steps) {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "at_step_index must split the blueprint into two non-empty halves"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"at_step_index must split the blueprint into two non-empty halves", "at_step_index")
 			return nil
 		}
 		// Target must be trigger-less to be absorbed (mirrors merge). The
@@ -918,7 +1078,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if len(triggers) > 0 {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "the target blueprint has its own event trigger; detach it first"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonConflict,
+				"the target blueprint has its own event trigger; detach it first", "target_blueprint_id")
 			return nil
 		}
 		// Cap: the surviving upstream (atIndex steps) + the absorbed target must
@@ -928,7 +1089,8 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 			return e
 		}
 		if atIndex+len(targetSteps) > maxBlueprintSteps {
-			failStatus, failMsg = http.StatusUnprocessableEntity, "reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps"
+			fault.raise(http.StatusUnprocessableEntity, httpx.ReasonOutOfRange,
+				"reconnected blueprint would exceed "+strconv.Itoa(maxBlueprintSteps)+" steps", "target_blueprint_id")
 			return nil
 		}
 		// Orphan name defaults to its new step-0 prompt's name (the prompt at the
@@ -970,8 +1132,7 @@ func (bh *blueprintsHandler) handleBlueprintReconnect(w http.ResponseWriter, r *
 		notFound(w, "target blueprint")
 		return
 	}
-	if failMsg != "" {
-		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+	if fault.write(w) {
 		return
 	}
 	if hostSteps == nil {
@@ -1008,11 +1169,11 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	userID := ClaimsFrom(r.Context()).Subject
 
 	var req duplicateBlueprintsRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if len(req.PromptIDs) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt_ids is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "prompt_ids is required", Field: "prompt_ids"})
 		return
 	}
 
@@ -1022,9 +1183,8 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 	}
 
 	var (
-		out        []blueprintWithSteps
-		failStatus int
-		failMsg    string
+		out   []blueprintWithSteps
+		fault blueprintFault
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
@@ -1035,13 +1195,16 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		if e != nil {
 			switch {
 			case errors.Is(e, db.ErrDuplicateNoPrompts):
-				failStatus, failMsg = http.StatusBadRequest, "prompt_ids is required"
+				fault.raise(http.StatusBadRequest, httpx.ReasonMissingField,
+					"prompt_ids is required", "prompt_ids")
 				return nil
 			case errors.Is(e, db.ErrDuplicatePromptNotFound):
-				failStatus, failMsg = http.StatusNotFound, "a prompt id does not resolve to a blueprint step"
+				fault.raise(http.StatusNotFound, httpx.ReasonNotFound,
+					"a prompt id does not resolve to a blueprint step", "prompt_ids")
 				return nil
 			case errors.Is(e, db.ErrDuplicateCrossTeam):
-				failStatus, failMsg = http.StatusUnprocessableEntity, "prompt_ids span more than one team"
+				fault.raise(http.StatusUnprocessableEntity, httpx.ReasonCrossTeamRef,
+					"prompt_ids span more than one team", "prompt_ids")
 				return nil
 			}
 			return e
@@ -1074,8 +1237,7 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 		internalError(w, "blueprints", err)
 		return
 	}
-	if failMsg != "" {
-		writeJSON(w, failStatus, map[string]string{"error": failMsg})
+	if fault.write(w) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -1085,8 +1247,8 @@ func (bh *blueprintsHandler) handleBlueprintDuplicate(w http.ResponseWriter, r *
 
 // blueprintRunResponse bundles the blueprint run row with its per-step runs
 // so the run-detail UI can render the timeline in one fetch instead of N+1.
-// Each step run carries its terminal runs.outcome inline (Run.Outcome); there
-// is no separate verdict channel.
+// Each step run carries its terminal conversations.outcome inline
+// (Run.Outcome); there is no separate verdict channel.
 type blueprintRunResponse struct {
 	BlueprintRun *domain.BlueprintRun   `json:"blueprint_run"`
 	Steps        []blueprintRunStepView `json:"steps"`
@@ -1164,11 +1326,14 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint run")
+	if !ok {
+		return
+	}
 
 	var br *domain.BlueprintRun
 	var fallbackSteps []domain.BlueprintStep
-	var stepRuns []domain.Conversation
+	var stepConversations []domain.Conversation
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		br, e = tx.Blueprints.GetRun(r.Context(), orgID, id)
@@ -1178,7 +1343,7 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		if br == nil {
 			return nil
 		}
-		stepRuns, e = tx.Blueprints.RunsForBlueprint(r.Context(), orgID, id)
+		stepConversations, e = tx.Blueprints.ConversationsForBlueprint(r.Context(), orgID, id)
 		if e != nil {
 			return e
 		}
@@ -1213,18 +1378,18 @@ func (bh *blueprintsHandler) handleBlueprintRunGet(w http.ResponseWriter, r *htt
 		}
 	}
 
-	runByStep := map[int]*domain.Conversation{}
-	for i := range stepRuns {
-		if stepRuns[i].BlueprintStepIndex != nil {
-			runByStep[*stepRuns[i].BlueprintStepIndex] = &stepRuns[i]
+	convByStep := map[int]*domain.Conversation{}
+	for i := range stepConversations {
+		if stepConversations[i].BlueprintStepIndex != nil {
+			convByStep[*stepConversations[i].BlueprintStepIndex] = &stepConversations[i]
 		}
 	}
 
 	views := make([]blueprintRunStepView, 0, len(steps))
 	for _, step := range steps {
 		view := blueprintRunStepView{Step: step}
-		if run, ok := runByStep[step.StepIndex]; ok {
-			view.Run = run
+		if conv, ok := convByStep[step.StepIndex]; ok {
+			view.Run = conv
 		}
 		views = append(views, view)
 	}
@@ -1238,7 +1403,10 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "blueprint run")
+	if !ok {
+		return
+	}
 
 	var br *domain.BlueprintRun
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -1257,7 +1425,7 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 	switch br.Status {
 	case domain.BlueprintRunStatusCompleted, domain.BlueprintRunStatusFailed,
 		domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusCancelled:
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "blueprint run already terminal"})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonAlreadyTerminal, Message: "blueprint run already terminal"})
 		return
 	}
 
@@ -1265,10 +1433,10 @@ func (bh *blueprintsHandler) handleBlueprintRunCancel(w http.ResponseWriter, r *
 	// already-terminal run gets a 404/409 rather than a 503.
 	spawner := bh.spawner()
 	if spawner == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "delegation not configured"})
+		writeDelegationUnavailable(w)
 		return
 	}
-	if err := spawner.CancelBlueprint(orgID, id, userID); err != nil {
+	if err := spawner.CancelBlueprintRun(orgID, id, userID); err != nil {
 		internalError(w, "blueprints", err)
 		return
 	}

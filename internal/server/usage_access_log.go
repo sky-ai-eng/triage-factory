@@ -4,12 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strconv"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Access & credential change-log viewer (TFAC-484) — the org-admin EE audit
@@ -23,13 +24,6 @@ import (
 // VIEWER is Enterprise — a cross-team, org-wide lens gated by FeatureGovernance.
 // Only the gate is EE, so the endpoint lives next to the spend rollup in the core
 // usageHandler rather than in the ee/ subtree.
-
-const (
-	// accessLogDefaultLimit is the page size when the caller omits / malforms
-	// limit; accessLogMaxLimit caps it so one request can't scan the whole log.
-	accessLogDefaultLimit = 50
-	accessLogMaxLimit     = 200
-)
 
 // accessChangeJSON is one rendered audit row. ActionLabel is the server-rendered
 // human predicate the FE shows after the actor + timestamp ("changed Alice from
@@ -48,60 +42,74 @@ type accessChangeJSON struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
-// accessLogResponse is one page of the audit log, newest-first. HasMore drives
-// the viewer's "Older" pager without a COUNT — the handler reads Limit+1 rows and
-// reports HasMore when the extra row came back.
-type accessLogResponse struct {
-	Items   []accessChangeJSON `json:"items"`
-	Limit   int                `json:"limit"`
-	Offset  int                `json:"offset"`
-	HasMore bool               `json:"has_more"`
+// accessLogListRequest is the body of POST /api/orgs/{org_id}/usage/access-log/list.
+// Category narrows to one bucket of actions; empty is every action.
+type accessLogListRequest struct {
+	Category string `json:"category"`
+
+	httpx.PageRequest
+}
+
+type accessLogFilterKey struct {
+	Category string `json:"category"`
 }
 
 // handleUsageAccessLog serves the EE access & credential change-log viewer.
 //
-// Gate: org admin AND FeatureGovernance. The order is deliberate — the org-admin
-// check runs first (403 on a non-admin), THEN the entitlement check (a 404-and-
-// hide when unlicensed). Admin-first means a non-admin always gets a 403 and
-// never learns the deployment's license tier; an org admin on an unlicensed build
-// gets a 404 that reads as "no such route", so the feature stays invisible to
-// everyone who isn't entitled to see it. Local mode short-circuits the admin gate
-// to allowed (N=1), so a licensed local build still serves it.
+// Gate: org admin AND FeatureGovernance, in that order — the whole family's
+// rule (see resolveGovernedOrgAdmin). A non-admin always gets a 403 and so
+// never learns the deployment's licence tier; an org admin on an unlicensed
+// build gets a 404 that reads as "no such route", so the feature stays
+// invisible to everyone entitled to see it. Local mode short-circuits the admin
+// gate to allowed (N=1), so a licensed local build still serves it.
 //
 // The read runs on the app pool under the admin's claims: access_change_log's
 // org-scoped RLS (org_id = current_org_id() AND user_has_org_access) admits the
 // admin's own org and nothing else — the org-admin gate is the authorization for
 // the org-wide lens, RLS the defense-in-depth.
 //
-// GET /api/usage/org/access-log?limit=&offset=&category=
+// It answers the shared list envelope. Its old ad-hoc
+// `{items, limit, offset, has_more}` shape is gone, and with it the read-one-
+// past-the-page trick that stood in for a total: the viewer now knows how many
+// rows the filter matches, not merely that another page exists.
+//
+// POST /api/orgs/{org_id}/usage/access-log/list
 func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return
-	}
-	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 
-	q := r.URL.Query()
-	limit := parseAccessLogLimit(q.Get("limit"))
-	offset := parseAccessLogOffset(q.Get("offset"))
-	category := q.Get("category")
+	var req accessLogListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	category := strings.TrimSpace(req.Category)
+	// A closed vocabulary: an unknown category used to pass straight through to
+	// a filter that matched nothing, so a typo returned an
+	// authoritative-looking empty log.
+	if category != "" && !slices.Contains(accessLogCategories, category) {
+		v.Invalid("category", "must be one of: "+strings.Join(accessLogCategories, ", "))
+	}
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(accessLogFilterKey{Category: category}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
 
 	var (
 		rows  []domain.AccessChange
+		total int
 		names map[string]string // user id -> display name (actors + targets)
 		teams map[string]string // team id -> team name
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		// Peek one row past the page so HasMore needs no separate COUNT.
-		rows, e = tx.AccessChangeLog.ListByOrg(r.Context(), orgID, domain.AccessChangeListOpts{
-			Limit: limit + 1, Offset: offset, Category: category,
+		rows, total, e = tx.AccessChangeLog.ListByOrg(r.Context(), orgID, domain.AccessChangeListOpts{
+			Limit: page.Limit, Offset: page.Offset, Category: category,
 		})
 		if e != nil {
 			return e
@@ -116,10 +124,6 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	hasMore := len(rows) > limit
-	if hasMore {
-		rows = rows[:limit]
-	}
 	items := make([]accessChangeJSON, 0, len(rows))
 	for _, e := range rows {
 		target := names[e.TargetUserID]
@@ -135,34 +139,15 @@ func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Reque
 			CreatedAt:   e.CreatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, accessLogResponse{
-		Items: items, Limit: limit, Offset: offset, HasMore: hasMore,
-	})
+	httpx.WriteList(w, page, items, total)
 }
 
-// --- paging param parsing ---
-
-// parseAccessLogLimit resolves the page size: a missing / malformed / non-positive
-// value falls back to the default, and anything over the cap is clamped down.
-func parseAccessLogLimit(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return accessLogDefaultLimit
-	}
-	if n > accessLogMaxLimit {
-		return accessLogMaxLimit
-	}
-	return n
-}
-
-// parseAccessLogOffset resolves the row offset: a missing / malformed / negative
-// value is the first page (0).
-func parseAccessLogOffset(s string) int {
-	n, err := strconv.Atoi(s)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
+// accessLogCategories is the closed category vocabulary — the buckets
+// domain.AccessChangeListOpts knows how to narrow to.
+var accessLogCategories = []string{
+	domain.AccessCategoryMembership,
+	domain.AccessCategoryCredential,
+	domain.AccessCategoryPolicy,
 }
 
 // --- name resolution (N+1 over the small distinct-id sets; the page is bounded) ---

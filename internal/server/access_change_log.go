@@ -79,23 +79,6 @@ func accessDetailCredentialNamed(kind, host, name string) string {
 	return domain.AccessDetailCredential(kind, host, name)
 }
 
-// configuredLLMCredentialKinds names the org-level LLM credentials the settings
-// row says are actually stored. The refs are the record here, not the vault: the
-// deletes that clear a provider are idempotent and can't report whether anything
-// was there, and a credential_removed row for a provider that was never
-// configured is a phantom revocation in an audit log. Used by the "system
-// credentials" arm, the one path that drops BOTH providers at once.
-func configuredLLMCredentialKinds(s domain.OrgSettings) []string {
-	var kinds []string
-	if s.AnthropicAPIKeyRef != "" {
-		kinds = append(kinds, domain.CredentialKindAnthropicKey)
-	}
-	if s.BedrockCredentialsRef != "" {
-		kinds = append(kinds, domain.CredentialKindBedrock)
-	}
-	return kinds
-}
-
 // recordCredentialRemovals writes one host-less credential_removed row per kind
 // through the caller's tx, so the audit rows commit with the removal itself. A
 // nil/empty kinds slice is a no-op.

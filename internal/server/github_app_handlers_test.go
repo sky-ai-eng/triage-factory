@@ -8,9 +8,11 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -88,7 +90,7 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 				Slug:   "acme-bot",
 				Active: tc.active,
 			}
-			resp := newGitHubAppStatusResponse(app, nil, "", "")
+			resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
 			if resp.App == nil {
 				t.Fatal("App=nil, want the mapped registration")
 			}
@@ -97,6 +99,76 @@ func TestNewGitHubAppStatusResponse_CarriesActive(t *testing.T) {
 			}
 		})
 	}
+
+	// The status payload also carries each installation's suspension, so the
+	// panel can distinguish an installation whose tokens GitHub refuses from a
+	// working one. Nothing in the UI reads these yet — the surface is
+	// deliberately inert beyond the DTO — but a field the front end cannot see
+	// is a field it cannot adopt.
+	t.Run("installation suspension", func(t *testing.T) {
+		suspendedAt := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
+		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, nil, []domain.OrgGitHubAppInstallation{
+			{InstallationID: "456", AccountType: "Organization", AccountLogin: "acme"},
+			{InstallationID: "789", AccountType: "Organization", AccountLogin: "beta", SuspendedAt: suspendedAt, SuspendedBy: "octocat"},
+		}, "", "", nil)
+		if len(resp.Installations) != 2 {
+			t.Fatalf("installations=%d, want 2", len(resp.Installations))
+		}
+		// A live installation reports "" rather than the zero instant
+		// formatted, which would read as suspended since year one.
+		if got := resp.Installations[0]; got.SuspendedAt != "" || got.SuspendedBy != "" {
+			t.Errorf("live installation: suspended_at=%q suspended_by=%q, want both empty", got.SuspendedAt, got.SuspendedBy)
+		}
+		got := resp.Installations[1]
+		if want := suspendedAt.Format(time.RFC3339); got.SuspendedAt != want {
+			t.Errorf("suspended_at=%q, want %q", got.SuspendedAt, want)
+		}
+		if got.SuspendedBy != "octocat" {
+			t.Errorf("suspended_by=%q, want %q", got.SuspendedBy, "octocat")
+		}
+	})
+
+	// The payload also carries the App-webhook probe's answer, so the panel can
+	// tell an App that receives deliveries from one that receives none. The
+	// distinction the block has to preserve is between "no answer yet" and any
+	// answer at all: a null must never be renderable as healthy.
+	t.Run("webhook health", func(t *testing.T) {
+		app := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
+
+		unprobed := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
+		if unprobed.WebhookHealth != nil {
+			t.Errorf("webhook_health=%+v with no probe answer, want null", unprobed.WebhookHealth)
+		}
+
+		health := &githubAppWebhookHealth{
+			State:                  string(githubapp.WebhookStateRejected),
+			HookHost:               "https://tf.example.org",
+			SecretConfigured:       true,
+			LastDeliveryAt:         "2026-08-15T12:00:00Z",
+			LastDeliveryStatusCode: 401,
+			CheckedAt:              "2026-08-15T12:01:00Z",
+		}
+		resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", health)
+		if resp.WebhookHealth == nil {
+			t.Fatal("webhook_health=null, want the probe answer")
+		}
+		if resp.WebhookHealth.State != string(githubapp.WebhookStateRejected) {
+			t.Errorf("state=%q, want %q", resp.WebhookHealth.State, githubapp.WebhookStateRejected)
+		}
+		if resp.WebhookHealth.LastDeliveryStatusCode != 401 {
+			t.Errorf("last_delivery_status_code=%d, want 401", resp.WebhookHealth.LastDeliveryStatusCode)
+		}
+		if resp.WebhookHealth.HookHost != "https://tf.example.org" {
+			t.Errorf("hook_host=%q, want the configured origin", resp.WebhookHealth.HookHost)
+		}
+
+		// An unknown credential class renders no App, and must not describe the
+		// webhooks of a registration it just declined to render.
+		unknown := newGitHubAppStatusResponse(domain.GitHubCredentialClass("mystery"), app, nil, "", "", health)
+		if unknown.WebhookHealth != nil {
+			t.Errorf("webhook_health=%+v for an unknown credential class, want null", unknown.WebhookHealth)
+		}
+	})
 }
 
 // TestGitHubAppStatus_BadOrgID rejects a non-UUID path segment with 404.
@@ -158,6 +230,7 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	`, orgA.String(), alice.String()); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	seedPGBYOAppCredentialClass(t, rig, orgA.String())
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_github_app_installations
 			(installation_id, org_id, account_type, account_login)
@@ -263,6 +336,7 @@ func TestGitHubAppInstallationsRefresh_Success(t *testing.T) {
 		},
 	}
 	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusOK {
@@ -293,6 +367,7 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 		backfillErr: errors.New("github unreachable"),
 	}
 	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
 
 	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
 	if rec.Code != http.StatusBadGateway {
@@ -301,12 +376,8 @@ func TestGitHubAppInstallationsRefresh_BackfillError(t *testing.T) {
 	if fake.backfillCalls != 1 {
 		t.Errorf("backfill called %d times, want exactly 1", fake.backfillCalls)
 	}
-	var out map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if !strings.Contains(out["error"], "github unreachable") {
-		t.Errorf("error=%q, want it to contain the backfill error", out["error"])
+	if !strings.Contains(rec.Body.String(), "github unreachable") {
+		t.Errorf("body=%s, want it to contain the backfill error", rec.Body.String())
 	}
 }
 
@@ -349,12 +420,15 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 	`, orgA.String(), alice.String()); err != nil {
 		t.Fatalf("seed org_github_apps: %v", err)
 	}
+	seedPGBYOAppCredentialClass(t, rig, orgA.String())
 
 	path := "/api/orgs/" + orgA.String() + "/github/app/installations/refresh"
 
-	t.Run("non_admin_member_404", func(t *testing.T) {
-		if resp := rig.requestWithSid("POST", path, sidC); resp.StatusCode != http.StatusNotFound {
-			t.Errorf("member status=%d, want 404 (admin-only)", resp.StatusCode)
+	// A member of the org can see the org, so the admin gate answers 403 and
+	// names the role; only a non-member gets the non-disclosure 404.
+	t.Run("non_admin_member_403", func(t *testing.T) {
+		if resp := rig.requestWithSid("POST", path, sidC); resp.StatusCode != http.StatusForbidden {
+			t.Errorf("member status=%d, want 403 (admin-only)", resp.StatusCode)
 		}
 	})
 
@@ -375,4 +449,20 @@ func TestGitHubAppInstallationsRefresh_MultiMode_AdminGate(t *testing.T) {
 			t.Errorf("admin status=%d, want 502 (gate passes, backfill fails on the missing PEM)", resp.StatusCode)
 		}
 	})
+}
+
+// seedPGBYOAppCredentialClass records the BYO-App credential class for a
+// Postgres-rig org, which is what an App registration writes in the same
+// transaction as the org_github_apps row. A fixture that inserts the row
+// directly has to write this too — the handlers gate on the class before they
+// look for a registration at all.
+func seedPGBYOAppCredentialClass(t *testing.T, rig *authRig, orgID string) {
+	t.Helper()
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, github_credential_class)
+		VALUES ($1, 'byo_app')
+		ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'byo_app'
+	`, orgID); err != nil {
+		t.Fatalf("seed org_settings credential class: %v", err)
+	}
 }

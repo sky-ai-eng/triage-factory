@@ -71,13 +71,28 @@ func New(database *sql.DB, tx db.TxRunner) *Checker {
 	return &Checker{db: database, tx: tx}
 }
 
+// DefaultTeamAlias is the literal a {team_id} path segment may carry instead of
+// a uuid. It resolves to the org's only team, and only in local mode — see
+// ResolveTeamID.
+const DefaultTeamAlias = "default"
+
 // ResolveTeamID converts a raw {team_id} path value to a concrete team UUID.
-// The literal "default" resolves to the org's default team so the frontend can
-// call /api/settings/team/default before team pickers ship. Non-"default"
-// values are validated as UUIDs. A failed resolve returns a *resolveError;
-// render it with WriteResolveError.
+// It is the ONE grammar for that segment: every route with a {team_id} goes
+// through it, so a path that works on one team route works on all of them.
+//
+//   - Local mode additionally accepts the literal "default", which resolves to
+//     the org's only team. N=1 has no picker and no uuid a user could know, so
+//     without the alias the team routes would be unaddressable by hand.
+//   - Multi mode requires a uuid everywhere. There is no single "the" team to
+//     alias, and a magic value that silently retargets a write to whichever
+//     team happens to be oldest is the worst kind of default.
+//
+// A failed resolve returns a *resolveError; render it with WriteResolveError.
+// A malformed segment is not-found rather than a 400: a path id that cannot
+// name a row names nothing the caller may learn about (the disclosure rule),
+// and the answer is then identical across dialects.
 func (az *Checker) ResolveTeamID(ctx context.Context, orgID, userID, raw string) (string, error) {
-	if raw != "default" {
+	if raw != DefaultTeamAlias || runmode.Current() != runmode.ModeLocal {
 		if _, err := uuid.Parse(raw); err != nil {
 			return "", &resolveError{notFound: true, err: fmt.Errorf("invalid team_id")}
 		}
@@ -117,7 +132,7 @@ func (az *Checker) VerifyTeamInOrg(w http.ResponseWriter, r *http.Request, orgID
 		return false
 	}
 	if !belongs {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "team")
 		return false
 	}
 	return true
@@ -162,7 +177,9 @@ func (az *Checker) VerifyTeamNotArchived(w http.ResponseWriter, r *http.Request,
 		return false
 	}
 	if archived.Valid && archived.Bool {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]any{"error": archivedTeamMessage, "archived": true})
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonTeamArchived, Message: archivedTeamMessage,
+		})
 		return false
 	}
 	return true
@@ -187,7 +204,7 @@ func (az *Checker) RequireTeamAdmin(w http.ResponseWriter, r *http.Request, orgI
 		return false
 	}
 	if !isAdmin {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": "team admin role required"})
+		writeForbidden(w, "team admin role required")
 		return false
 	}
 	return true
@@ -205,7 +222,7 @@ func (az *Checker) RequireOrgAdminRole(w http.ResponseWriter, r *http.Request, o
 		return false
 	}
 	if !isAdmin {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": "org admin role required"})
+		writeForbidden(w, "org admin role required")
 		return false
 	}
 	return true
@@ -367,7 +384,7 @@ func (az *Checker) RequireTeamWrite(w http.ResponseWriter, r *http.Request, orgI
 		return false
 	}
 	if !canWrite {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		writeForbidden(w, viewOnlyMessage)
 		return false
 	}
 	return true
@@ -423,7 +440,7 @@ func (az *Checker) RequireTaskWrite(w http.ResponseWriter, r *http.Request, orgI
 	// Not visible → let the handler 404 (don't disclose existence). Visible but
 	// not writable → the role boundary; 403.
 	if visible && !canWrite {
-		httpx.WriteJSON(w, http.StatusForbidden, map[string]string{"error": viewOnlyMessage})
+		writeForbidden(w, viewOnlyMessage)
 		return false
 	}
 	return true
@@ -448,6 +465,16 @@ func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool,
 	return ok, err
 }
 
+// writeForbidden answers a visible-but-refused action: the caller may see the
+// resource, so the denial names the missing role rather than hiding behind a
+// 404. Which of the two a given gate uses is the disclosure rule's call, not
+// this helper's.
+func writeForbidden(w http.ResponseWriter, msg string) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason: httpx.ReasonForbidden, Message: msg,
+	})
+}
+
 // RequireOrgMember validates {org_id} from the URL path and checks the caller
 // is a member of that org (any role). Returns (orgID, userID, true) on success;
 // writes an error and returns ("", "", false) on failure. The read-only sibling
@@ -455,7 +482,7 @@ func (az *Checker) UserOwnsOrg(ctx context.Context, userID, orgID string) (bool,
 func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 
@@ -476,7 +503,7 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 		return
 	}
 	if !hasAccess {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 	return rawOrgID, userID, true
@@ -488,7 +515,7 @@ func (az *Checker) RequireOrgMember(w http.ResponseWriter, r *http.Request) (org
 func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	rawOrgID := r.PathValue("org_id")
 	if _, err := uuid.Parse(rawOrgID); err != nil {
-		http.NotFound(w, r)
+		httpx.NotFound(w, "org")
 		return
 	}
 
@@ -509,7 +536,22 @@ func (az *Checker) RequireOrgAdmin(w http.ResponseWriter, r *http.Request) (orgI
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// Two-valued denial, per the disclosure rule: a caller who can see
+		// the org gets 403 for the role they lack, and only a caller who
+		// cannot see it at all gets 404. Answering 404 to a member reads as
+		// a bug — they can list the org everywhere else in the app. The
+		// membership read only runs on the denial path, so the admin path
+		// still costs one query.
+		hasAccess, accessErr := az.UserHasOrgAccess(r.Context(), userID, rawOrgID)
+		if accessErr != nil {
+			httpx.InternalError(w, "authz", fmt.Errorf("member check %s/%s: %w", userID, rawOrgID, accessErr))
+			return
+		}
+		if hasAccess {
+			writeForbidden(w, "org admin role required")
+			return
+		}
+		httpx.NotFound(w, "org")
 		return
 	}
 	return rawOrgID, userID, true
@@ -540,4 +582,24 @@ func WriteResolveError(w http.ResponseWriter, scope string, err error) {
 		return
 	}
 	httpx.InternalError(w, scope, err)
+}
+
+// TeamIDFromPath is ResolveTeamID plus its error rendering — the shape a
+// handler wants at the top of its body:
+//
+//	teamID, ok := az.TeamIDFromPath(w, r, "teams", orgID, userID)
+//	if !ok {
+//	    return
+//	}
+//
+// It exists so every {team_id} route spells the grammar the same way. A
+// handler that parsed the segment itself would be a second grammar, which is
+// exactly what the settings family and the teams family used to be.
+func (az *Checker) TeamIDFromPath(w http.ResponseWriter, r *http.Request, scope, orgID, userID string) (string, bool) {
+	teamID, err := az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
+	if err != nil {
+		WriteResolveError(w, scope, err)
+		return "", false
+	}
+	return teamID, true
 }

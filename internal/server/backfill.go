@@ -3,11 +3,13 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -37,10 +39,17 @@ type backfillCandidate struct {
 	CurrentProjectName string `json:"current_project_name"`
 }
 
-// handleBackfillCandidates returns the list of non-terminal entities
-// that the create-flow popup should show for the given project.
+// backfillCandidateListRequest is the body of
+// POST /api/projects/{id}/backfill-candidates/list. The project is the path
+// id and its scope rules define the resource, so the body is paging alone.
+type backfillCandidateListRequest struct {
+	httpx.PageRequest
+}
+
+// handleBackfillCandidates returns the non-terminal entities the create-flow
+// popup can claim for this project.
 //
-// Scope rules:
+// Scope rules (applied in SQL — see EntityStore.ListBackfillCandidates):
 //   - pinned_repos non-empty → GitHub entities scoped to those repos.
 //   - pinned_repos empty → ALL GitHub entities (no filter on that source).
 //   - jira_project_key non-empty → Jira entities matching that key.
@@ -53,15 +62,34 @@ type backfillCandidate struct {
 //
 // Entities already assigned to this project are excluded — there's
 // nothing to backfill for them.
+//
+// POST /api/projects/{id}/backfill-candidates/list
 func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
-	var project *domain.Project
-	var out []backfillCandidate
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
+
+	var req backfillCandidateListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		project *domain.Project
+		out     []backfillCandidate
+		total   int
+	)
 	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
@@ -72,39 +100,22 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 			return nil
 		}
 
-		var collected []domain.Entity
-
-		github, e := tx.Entities.ListActive(r.Context(), orgID, "github")
+		var candidates []domain.Entity
+		candidates, total, e = tx.Entities.ListBackfillCandidates(r.Context(), orgID, db.BackfillCandidateFilter{
+			ExcludeProjectID: projectID,
+			GitHubRepos:      project.PinnedRepos,
+			JiraProjectKey:   project.JiraProjectKey,
+		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		if e != nil {
 			return e
-		}
-		for _, ent := range github {
-			if !entityInProjectScope(&ent, project) {
-				continue
-			}
-			collected = append(collected, ent)
-		}
-
-		jira, e := tx.Entities.ListActive(r.Context(), orgID, "jira")
-		if e != nil {
-			return e
-		}
-		for _, ent := range jira {
-			if !entityInProjectScope(&ent, project) {
-				continue
-			}
-			collected = append(collected, ent)
 		}
 
 		// Resolve current_project_name once per distinct project_id rather
 		// than per row — the same other-project may sponsor many candidates.
+		// Bounded by the page now rather than by the org's entity count.
 		nameCache := map[string]string{}
-		out = make([]backfillCandidate, 0, len(collected))
-		for _, ent := range collected {
-			// Already in this project — no work to do; skip from candidates.
-			if ent.ProjectID != nil && *ent.ProjectID == projectID {
-				continue
-			}
+		out = make([]backfillCandidate, 0, len(candidates))
+		for _, ent := range candidates {
 			c := backfillCandidate{
 				ID:       ent.ID,
 				Source:   ent.Source,
@@ -116,8 +127,8 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 			}
 			if ent.ProjectID != nil && *ent.ProjectID != "" {
 				c.CurrentProjectID = *ent.ProjectID
-				name, ok := nameCache[*ent.ProjectID]
-				if !ok {
+				name, cached := nameCache[*ent.ProjectID]
+				if !cached {
 					if p, perr := tx.Projects.Get(r.Context(), orgID, *ent.ProjectID); perr == nil && p != nil {
 						name = p.Name
 					}
@@ -129,16 +140,14 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 		}
 		return nil
 	}); err != nil {
-		backfillLog.Error("load candidates failed", "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load backfill candidates"})
+		internalError(w, "backfill", fmt.Errorf("load backfill candidates for project %s: %w", projectID, err))
 		return
 	}
 	if project == nil {
 		notFound(w, "project")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"candidates": out})
+	httpx.WriteList(w, page, out, total)
 }
 
 // manualAssignmentMessage is the rationale text stamped on entities
@@ -151,33 +160,48 @@ type backfillRequest struct {
 	EntityIDs []string `json:"entity_ids"`
 }
 
+// backfillFailure is one per-item result in a well-formed batch. Errors is
+// the envelope's item shape, so a per-row failure is as machine-readable as a
+// request-level one — it used to be a bare prose string, and on the
+// store-error path that string was the raw driver error.
 type backfillFailure struct {
-	EntityID string `json:"entity_id"`
-	Error    string `json:"error"`
+	EntityID string            `json:"entity_id"`
+	Errors   []httpx.ErrorItem `json:"errors"`
+}
+
+// backfillFailed builds a one-item per-row failure.
+func backfillFailed(entityID, reason, msg string) backfillFailure {
+	return backfillFailure{EntityID: entityID, Errors: []httpx.ErrorItem{{Reason: reason, Message: msg}}}
 }
 
 // handleBackfill bulk-assigns the named entities to the project. Reuses
 // EntityStore.AssignProject so each row gets its classified_at stamped —
 // popup-claimed entities stay sticky against the auto-classifier.
 //
-// Partial-success result shape mirrors handleJiraStockPost
-// (internal/server/stock.go): per-entity failures are collected into
-// `failed: [{entity_id, error}]` and the call returns 200 with the
-// applied count rather than failing the whole batch on a single row.
+// Batch policy: request-level faults fail the whole call — an empty list, a
+// blank id, a repeated id — so the accounting invariant applied + failed =
+// submitted holds for every batch that runs. Those three used to be dropped
+// silently mid-loop, which made a 5-id submission answer "applied: 3" with no
+// mention of the other two. Per-entity failures are then collected into
+// `failed: [{entity_id, errors}]` and the call returns 200 with the applied
+// count rather than failing the whole batch on a single row.
 func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	projectID := r.PathValue("id")
+	projectID, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, projectID)
 		return e
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "backfill", fmt.Errorf("load project %s: %w", projectID, err))
 		return
 	}
 	if project == nil {
@@ -186,27 +210,36 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 	}
 
 	var req backfillRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var v httpx.Validation
 	if len(req.EntityIDs) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"applied": 0, "failed": []backfillFailure{}})
+		v.Invalid("entity_ids", "entity_ids must contain at least one entity id")
+	}
+	seen := make(map[string]struct{}, len(req.EntityIDs))
+	ids := make([]string, 0, len(req.EntityIDs))
+	for _, eid := range req.EntityIDs {
+		eid = strings.TrimSpace(eid)
+		if eid == "" {
+			v.Invalid("entity_ids", "entity_ids contains a blank id")
+			continue
+		}
+		if _, dup := seen[eid]; dup {
+			v.Invalid("entity_ids", "entity_ids contains "+eid+" more than once")
+			continue
+		}
+		seen[eid] = struct{}{}
+		ids = append(ids, eid)
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 
 	applied := 0
 	var failures []backfillFailure
 	var assigned []string
-	seen := make(map[string]struct{}, len(req.EntityIDs))
-	for _, eid := range req.EntityIDs {
-		eid = strings.TrimSpace(eid)
-		if eid == "" {
-			continue
-		}
-		if _, ok := seen[eid]; ok {
-			continue
-		}
-		seen[eid] = struct{}{}
+	for _, eid := range ids {
 		// Re-validate every id server-side. The client built this list
 		// from /backfill-candidates, which already filtered, but a
 		// stale tab, a tampered request, or a race against entity
@@ -219,19 +252,26 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 		txErr := bf.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			entity, lookupErr := tx.Entities.Get(r.Context(), orgID, eid)
 			if lookupErr != nil {
-				failure = &backfillFailure{EntityID: eid, Error: "lookup failed: " + lookupErr.Error()}
+				// The raw store error stays in the log; the row carries a
+				// static message plus, in local mode only, the detail.
+				backfillLog.Error("backfill: entity lookup failed", "entity", eid, "error", lookupErr)
+				f := backfillFailed(eid, httpx.ReasonInternal, "lookup failed"+httpx.LocalDetail(lookupErr))
+				failure = &f
 				return nil
 			}
 			if entity == nil {
-				failure = &backfillFailure{EntityID: eid, Error: "entity not found"}
+				f := backfillFailed(eid, httpx.ReasonNotFound, "entity not found")
+				failure = &f
 				return nil
 			}
 			if entity.State != "active" {
-				failure = &backfillFailure{EntityID: eid, Error: "entity is not active"}
+				f := backfillFailed(eid, httpx.ReasonConflict, "entity is not active")
+				failure = &f
 				return nil
 			}
 			if !entityInProjectScope(entity, project) {
-				failure = &backfillFailure{EntityID: eid, Error: "entity is outside this project's scope"}
+				f := backfillFailed(eid, httpx.ReasonInvalidField, "entity is outside this project's scope")
+				failure = &f
 				return nil
 			}
 			// Stamp manual-assignment display copy so the entities-panel
@@ -241,9 +281,10 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 			// supersedes the classifier's vote, and showing the stale
 			// model rationale next to a human-claimed assignment would
 			// be misleading.
-			if assignErr := tx.Entities.AssignProject(r.Context(), orgID, eid, &projectID, manualAssignmentMessage); assignErr != nil {
+			if _, assignErr := tx.Entities.AssignProject(r.Context(), orgID, eid, &projectID, manualAssignmentMessage); assignErr != nil {
 				if errors.Is(assignErr, sql.ErrNoRows) {
-					failure = &backfillFailure{EntityID: eid, Error: "entity not found"}
+					f := backfillFailed(eid, httpx.ReasonNotFound, "entity not found")
+					failure = &f
 					return nil
 				}
 				return assignErr
@@ -251,7 +292,8 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 			return nil
 		})
 		if txErr != nil {
-			failures = append(failures, backfillFailure{EntityID: eid, Error: txErr.Error()})
+			backfillLog.Error("backfill: assign failed", "entity", eid, "project", projectID, "error", txErr)
+			failures = append(failures, backfillFailed(eid, httpx.ReasonInternal, "assignment failed"+httpx.LocalDetail(txErr)))
 			continue
 		}
 		if failure != nil {

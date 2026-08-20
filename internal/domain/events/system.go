@@ -52,8 +52,8 @@ func (p SystemScoringCompletedPredicate) Matches(m SystemScoringCompletedMetadat
 }
 
 // -----------------------------------------------------------------------------
-// system:delegation:completed / system:delegation:failed — terminal run
-// signals, emitted once per run.
+// system:delegation:completed / system:delegation:failed — terminal
+// conversation signals, emitted once per conversation.
 // -----------------------------------------------------------------------------
 
 type SystemDelegationCompletedMetadata struct {
@@ -123,23 +123,24 @@ func (p SystemTaskDelegationBlockedSubtasksPredicate) Matches(m SystemTaskDelega
 }
 
 // -----------------------------------------------------------------------------
-// system:conversation:status / system:conversation:activity — EE-observable run lifecycle
-// sentinels (TFAC-592), mirroring the two websocket choke points in
-// internal/delegate/spawner.go onto the bus. Deliberately minimal: no
-// TaskID/EntitySource, so consumers resolve run→task→entity context
-// themselves (and cache it) rather than costing a DB read on the hot
-// broadcast path.
+// system:conversation:status / system:conversation:activity — EE-observable
+// conversation-lifecycle sentinels (TFAC-592), mirroring the two websocket
+// choke points in internal/delegate/spawner.go onto the bus. Deliberately
+// minimal: no TaskID/EntitySource, so consumers resolve
+// conversation→task→entity context themselves (and cache it) rather than
+// costing a DB read on the hot broadcast path.
 // -----------------------------------------------------------------------------
 
 type SystemConversationStatusMetadata struct {
 	ConversationID string `json:"conversation_id"`
 	Status         string `json:"status"`                 // the broadcast status string
 	FailureKind    string `json:"failure_kind,omitempty"` // set on the failed arm only
-	// Resumable rides the parked status when the run's workspace snapshot
-	// lands after the park was already announced — the moment a follow-up
-	// becomes possible, which no status change of its own marks. A pointer
-	// because absence means "unchanged, ask the run read", which is not the
-	// same claim as false.
+	// Resumable rides the parked status when a conversation parked by one pod
+	// becomes resumable on another — the executor holding the workspace
+	// records that it owes a persist for it, moments after control announced
+	// the park. That is the moment a follow-up becomes possible, and no status
+	// change of its own marks it. A pointer because absence means "unchanged,
+	// ask the conversation read", which is not the same claim as false.
 	Resumable *bool `json:"resumable,omitempty"`
 }
 

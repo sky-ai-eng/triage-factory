@@ -13,12 +13,12 @@ import (
 )
 
 // This file is the Slack provider's credential half: the brain-side resolver
-// that seals the run's authorizable Slack bot tokens into the per-run bundle,
+// that seals the conversation's authorizable Slack bot tokens into the per-claim bundle,
 // and the keyed-set shape the sidecar-side handler selects from. It is
 // provider-owned (the shape crosses core only as opaque JSON), so core never
 // sees a Slack credential symbol.
 //
-// The unifying insight (same as GitHub's per-repo token set): a run's Slack
+// The unifying insight (same as GitHub's per-repo token set): a conversation's Slack
 // credential is not one token but a SET keyed by (workspace, app), resolved at
 // provision time to exactly the workspaces of the team's tracked channels —
 // which IS the authorizable set authorizeChannel already enforces, so sealing
@@ -28,7 +28,7 @@ import (
 // never a token.
 
 // slackBundleCreds is the Slack provider's sealed keyed set: one bot token per
-// (workspaceID, apiAppID) the run may act as. Marshaled opaque into
+// (workspaceID, apiAppID) the conversation may act as. Marshaled opaque into
 // bundle.Providers["slack"].
 type slackBundleCreds struct {
 	Workspaces []slackWorkspaceToken `json:"workspaces,omitempty"`
@@ -59,8 +59,8 @@ func (c slackBundleCreds) tokenFor(workspaceID, apiAppID string) (string, bool) 
 
 // slackProviderCredential is the brain-side resolver registered under the
 // "slack" namespace: it seals a bot token for every (workspace, app) that owns
-// a channel the run's team tracks. Returns (nil, nil) when the team tracks no
-// Slack channels or the org has none connected (a GitHub/Jira-only run's
+// a channel the conversation's team tracks. Returns (nil, nil) when the team tracks no
+// Slack channels or the org has none connected (a GitHub/Jira-only conversation's
 // bundle then carries no Slack section). Runs only on the brain, against the
 // secret-bearing stores — the sidecar never reaches a secret store.
 func slackProviderCredential(ctx context.Context, stores db.Stores, scope agenthost.ProvisionScope) (json.RawMessage, error) {

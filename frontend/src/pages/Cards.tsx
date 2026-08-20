@@ -6,7 +6,9 @@ import { useNavigate } from 'react-router'
 import type { Task, WSEvent } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
-import { useTeamFilter, teamFilterQuery } from '../hooks/useTeams'
+import { useTeamFilter } from '../hooks/useTeams'
+import { usePagedList } from '../hooks/usePagedList'
+import { TASK_LIST_PATH, queueListBody } from '../lib/taskList'
 import { SlidersHorizontal } from 'lucide-react'
 import EventBadge from '../components/EventBadge'
 import SourceBadge from '../components/SourceBadge'
@@ -14,15 +16,29 @@ import RequestedReviewerBadge from '../components/RequestedReviewerBadge'
 import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
+import { apiFetch } from '../lib/apiClient'
+import { snoozeUntilFromPreset } from '../lib/snooze'
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
 
 const SWIPE_THRESHOLD = 100
 const SWIPE_VELOCITY = 300
+// How few cards may be left before the deck fetches its next page.
+const DECK_TOP_UP_AT = 25
+// The deck's swipe-down gesture carries no picker with it, so it snoozes for
+// a fixed spell. Named here rather than inlined so the one place the deck
+// decides "how long" is legible.
+const DECK_SNOOZE_PRESET = '2h'
 
 export default function Cards() {
-  const [tasks, setTasks] = useState<Task[]>([])
+  // The deck is one page of the queue projection, threaded through the shared
+  // list hook. A swipe removes the top card locally and the next fetch
+  // reconciles; swiped cards leave the projection server-side, so a refetch
+  // always returns the next slice of pickable work rather than the same rows.
+  const deck = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the queue.')
+  const { load: loadDeck, loadMore: loadMoreDeck, setItems: setDeckItems } = deck
+  const tasks = deck.items
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [cardStart, setCardStart] = useState(() => Date.now())
   const [undoTask, setUndoTask] = useState<{ id: string; action: string } | null>(null)
@@ -39,27 +55,38 @@ export default function Cards() {
   useEffect(() => {
     teamFilterRef.current = teamFilter
   }, [teamFilter])
+  // The deck as of the last render, for the handlers that need to read it
+  // without being re-created on every card (fetchQueue's pin-the-top-card
+  // merge, the swipe's top-up check).
+  const tasksRef = useRef<Task[]>(tasks)
+  useEffect(() => {
+    tasksRef.current = tasks
+  }, [tasks])
 
-  const fetchQueue = useCallback(async (preserveCurrent = false) => {
-    const q = teamFilterQuery(teamFilterRef.current)
-    const res = await fetch('/api/queue' + (q ? `?${q}` : ''))
-    if (res.ok) {
-      const data: Task[] = await res.json()
-      setTasks((prev) => {
-        if (preserveCurrent && prev.length > 0) {
-          // Keep the current top card in place, merge updated queue behind it
-          const currentId = prev[0].id
-          const updated = data.find((t) => t.id === currentId)
-          const rest = data.filter((t) => t.id !== currentId)
-          return [updated ?? prev[0], ...rest]
-        }
-        return data
-      })
-      if (!preserveCurrent) setCardStart(Date.now())
+  const fetchQueue = useCallback(
+    async (preserveCurrent = false) => {
+      const current = preserveCurrent ? tasksRef.current[0] : undefined
+      const page = await loadDeck(queueListBody(teamFilterRef.current))
+      // Leave the deck as it is on a failed poll: the next fetchQueue (a
+      // swipe, an undo, a WS nudge) reconciles, and blanking the cards would
+      // be worse than showing a slightly stale queue.
+      if (!page) return
+      if (current) {
+        // Keep the current top card in place, merge the updated queue behind
+        // it — mid-gesture the card under the user's finger must not move,
+        // and it stays even if the refetch no longer lists it.
+        setDeckItems((items) => [
+          items.find((t) => t.id === current.id) ?? current,
+          ...items.filter((t) => t.id !== current.id),
+        ])
+      } else {
+        setCardStart(Date.now())
+      }
       hasFetched.current = true
-      setLoadState(data.length === 0 ? 'empty' : 'ready')
-    }
-  }, [])
+      setLoadState(page.items.length === 0 ? 'empty' : 'ready')
+    },
+    [loadDeck, setDeckItems],
+  )
 
   // Initial queue load on mount. fetchQueue calls setState internally, which
   // the lint rule flags transitively — but fetching data on mount is the
@@ -106,34 +133,60 @@ export default function Cards() {
     }
 
     const hesitationMs = Date.now() - cardStart
+    // Each gesture addresses its own route: the two lifecycle ones are field
+    // writes on the task, and claim/delegate are verbs because of what they
+    // reach — Jira, the spawner, artifact teardown.
+    const request: [string, RequestInit] =
+      action === 'snooze'
+        ? [
+            `/api/tasks/${task.id}`,
+            {
+              method: 'PATCH',
+              body: JSON.stringify({
+                snooze_until: snoozeUntilFromPreset(DECK_SNOOZE_PRESET),
+                hesitation_ms: hesitationMs,
+              }),
+            },
+          ]
+        : action === 'dismiss'
+          ? [
+              `/api/tasks/${task.id}`,
+              {
+                method: 'PATCH',
+                body: JSON.stringify({ status: 'dismissed', hesitation_ms: hesitationMs }),
+              },
+            ]
+          : action === 'claim'
+            ? [
+                `/api/tasks/${task.id}/claim`,
+                { method: 'POST', body: JSON.stringify({ hesitation_ms: hesitationMs }) },
+              ]
+            : [
+                `/api/tasks/${task.id}/delegate`,
+                {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    hesitation_ms: hesitationMs,
+                    ...(promptId && { blueprint_id: promptId }),
+                  }),
+                },
+              ]
 
     try {
-      const res =
-        action === 'snooze'
-          ? await fetch(`/api/tasks/${task.id}/snooze`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-            })
-          : await fetch(`/api/tasks/${task.id}/swipe`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action,
-                hesitation_ms: hesitationMs,
-                ...(promptId && { blueprint_id: promptId }),
-              }),
-            })
-
-      if (!res.ok) return
+      const [path, init] = request
+      await apiFetch(path, { ...init, headers: { 'Content-Type': 'application/json' } })
     } catch {
       return
     }
 
     setUndoTask({ id: task.id, action })
-    setTasks((prev) => prev.slice(1))
+    setDeckItems((prev) => prev.slice(1))
     setCardStart(Date.now())
     setTimeout(() => setUndoTask(null), 5000)
+    // Top the deck up before it runs dry. A page holds the first 200 pickable
+    // tasks; without this, a triage run long enough to swipe through them
+    // would show an empty deck with work still queued behind it.
+    if (deck.hasMore && tasksRef.current.length <= DECK_TOP_UP_AT) loadMoreDeck()
   }
 
   const delegateWithPrompt = (promptId: string) => {
@@ -144,8 +197,7 @@ export default function Cards() {
   const undo = async () => {
     if (!undoTask) return
     try {
-      const res = await fetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
-      if (!res.ok) return
+      await apiFetch(`/api/tasks/${undoTask.id}/undo`, { method: 'POST' })
     } catch {
       return
     }

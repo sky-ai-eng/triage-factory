@@ -30,7 +30,7 @@ func (s *factoryReadStore) EventCountsSince(ctx context.Context, orgID string, s
 		FROM events
 		WHERE created_at > ?
 		GROUP BY event_type
-	`, since)
+	`, since.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 		FROM tasks
 		WHERE created_at > ?
 		GROUP BY event_type
-	`, since)
+	`, since.UTC())
 	if err != nil {
 		return nil, err
 	}
@@ -106,16 +106,16 @@ func (s *factoryReadStore) TaskCountsSince(ctx context.Context, orgID string, si
 	return out, rows.Err()
 }
 
-// ActiveRuns lists the conversations the factory view treats as in flight:
+// ActiveConversations lists the conversations the factory view treats as in flight:
 // exactly those an engagement is actually driving (an unreleased claim — the
 // setup sub-states ride that claim's phase). Mirrors the X-button window in
 // AgentCard. Duplicated in postgres/factory.go; intentional per-backend copy.
-func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]domain.FactoryActiveRun, error) {
+func (s *factoryReadStore) ActiveConversations(ctx context.Context, orgID string) ([]domain.FactoryActiveConversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	// memory_missing is derived from a LEFT JOIN to conversation_memory rather
-	// than read off a column on runs: "the agent has not
+	// than read off a column on conversations: "the agent has not
 	// produced its memory file" === "no conversation_memory row exists, OR the
 	// row's agent_content is NULL/whitespace." NULLIF(TRIM(...), '')
 	// collapses both empty strings (legacy carry-over from before
@@ -135,7 +135,7 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			(SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = r.id),
 			(SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = r.id),
 			(SELECT SUM(cl.num_turns) FROM claims cl WHERE cl.conversation_id = r.id),
-			COALESCE(r.stop_reason, ''), COALESCE(r.worktree_path, ''),
+			COALESCE(r.park_reason, ''), COALESCE(r.worktree_path, ''),
 			COALESCE(r.result_summary, ''), COALESCE(r.sdk_session_id, ''),
 			(NULLIF(TRIM(rm.agent_content, ' ' || char(9) || char(10) || char(13)), '') IS NULL) AS memory_missing,
 			r.trigger_type, COALESCE(r.trigger_id, ''),
@@ -158,27 +158,27 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 	}
 	defer rows.Close()
 
-	var out []domain.FactoryActiveRun
+	var out []domain.FactoryActiveConversation
 	for rows.Next() {
 		var r domain.Conversation
 		var t domain.Task
 		var completedAt sql.NullTime
 		var costUSD sql.NullFloat64
 		var durationMs, numTurns sql.NullInt64
-		var failureKind string
+		var failureKind, parkReason string
 
-		runTargets := []any{
+		convTargets := []any{
 			&r.ID, &r.TaskID, &r.PromptID,
 			&r.Status, &r.Model, &r.StartedAt, &completedAt,
 			&costUSD, &durationMs, &numTurns,
-			&r.StopReason, &r.WorktreePath,
+			&parkReason, &r.WorktreePath,
 			&r.ResultSummary, &r.SessionID,
 			&r.MemoryMissing, &r.TriggerType, &r.TriggerID,
 			&r.ActorAgentID, &r.ActorAgentName,
 			&failureKind,
 		}
 		var ts taskScanState
-		if err := rows.Scan(append(runTargets, ts.targets(&t)...)...); err != nil {
+		if err := rows.Scan(append(convTargets, ts.targets(&t)...)...); err != nil {
 			return nil, err
 		}
 		ts.finalize(&t)
@@ -196,8 +196,9 @@ func (s *factoryReadStore) ActiveRuns(ctx context.Context, orgID string) ([]doma
 			v := int(numTurns.Int64)
 			r.NumTurns = &v
 		}
-		r.FailureKind = domain.RunFailureKind(failureKind)
-		out = append(out, domain.FactoryActiveRun{Run: r, Task: t, EntityEventTyp: t.EventType})
+		r.FailureKind = domain.ConversationFailureKind(failureKind)
+		r.ParkReason = domain.ParkReason(parkReason)
+		out = append(out, domain.FactoryActiveConversation{Conversation: r, Task: t, EntityEventTyp: t.EventType})
 	}
 	return out, rows.Err()
 }
@@ -346,7 +347,7 @@ func (s *factoryReadStore) Entities(ctx context.Context, orgID string, limit int
 		return nil, err
 	}
 
-	graceCutoff := time.Now().Add(-db.FactoryClosedGracePeriod)
+	graceCutoff := time.Now().UTC().Add(-db.FactoryClosedGracePeriod)
 	closed, err := queryFactoryEntities(ctx, s.q, `
 		SELECT `+sqliteFactoryEntitySelectColumns+`
 		FROM entities e

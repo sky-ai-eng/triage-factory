@@ -1,12 +1,15 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // failedEventsHandler serves the parked-event operator surface: the list of
@@ -48,26 +51,48 @@ type failedEventJSON struct {
 	EnqueuedAt     string `json:"enqueued_at"`
 }
 
-// handleFailedEventsList serves GET /api/events/failed — the org's parked
-// rows, newest first. ?limit= is advisory: the store clamps it, so a hand-
-// typed 100000 returns the ceiling rather than a 400.
+func failedEventToJSON(e domain.FailedEvent) failedEventJSON {
+	return failedEventJSON{
+		ID:             e.ID,
+		EventType:      e.EventType,
+		EntityID:       e.EntityID,
+		EntitySource:   e.EntitySource,
+		EntitySourceID: e.EntitySourceID,
+		EntityTitle:    e.EntityTitle,
+		Attempts:       e.Attempts,
+		LastError:      e.LastError,
+		EnqueuedAt:     e.EnqueuedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// failedEventListRequest is the body of POST /api/events/failed/list. It has
+// no filters of its own — the resource IS the parked rows — so the body is the
+// paging pair alone.
+type failedEventListRequest struct {
+	httpx.PageRequest
+}
+
+// handleFailedEventsList serves POST /api/events/failed/list — the org's
+// parked rows, newest first. total_count is the org's whole parked population,
+// which is the number the panel's badge wants: an operator needs to know there
+// are 900 dropped events, not that this page holds 50 of them.
 func (h *failedEventsHandler) handleFailedEventsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := h.resolveAdmin(w, r)
 	if !ok {
 		return
 	}
 
-	limit := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil {
-			badRequest(w, "limit must be a whole number")
-			return
-		}
-		limit = n
+	var req failedEventListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
 	}
 
-	rows, err := h.queue.ListFailedEvents(r.Context(), orgID, limit)
+	rows, total, err := h.queue.ListFailedEvents(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 	if err != nil {
 		internalError(w, "failed-events", err)
 		return
@@ -75,22 +100,39 @@ func (h *failedEventsHandler) handleFailedEventsList(w http.ResponseWriter, r *h
 
 	out := make([]failedEventJSON, len(rows))
 	for i, e := range rows {
-		out[i] = failedEventJSON{
-			ID:             e.ID,
-			EventType:      e.EventType,
-			EntityID:       e.EntityID,
-			EntitySource:   e.EntitySource,
-			EntitySourceID: e.EntitySourceID,
-			EntityTitle:    e.EntityTitle,
-			Attempts:       e.Attempts,
-			LastError:      e.LastError,
-			EnqueuedAt:     e.EnqueuedAt.UTC().Format(time.RFC3339),
-		}
+		out[i] = failedEventToJSON(e)
 	}
-	// count is the length of THIS page, not a total — the panel's badge shows
-	// what the operator can act on right now, and the page ceiling is far
-	// above any healthy deployment's parked population.
-	writeJSON(w, http.StatusOK, map[string]any{"events": out, "count": len(out)})
+	httpx.WriteList(w, page, out, total)
+}
+
+// handleFailedEventGet serves GET /api/events/failed/{id} — one parked row, in
+// the same shape the list serves it. A live (pending/processing/done) row is
+// 404 rather than 200: the resource this route addresses is the parked set,
+// and answering with a row the list would never show would make the two reads
+// disagree about what "a failed event" is.
+func (h *failedEventsHandler) handleFailedEventGet(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := h.resolveAdmin(w, r)
+	if !ok {
+		return
+	}
+	// event_queue.id is a bigint identity, so a non-numeric path segment names
+	// nothing — answer not-found before the store rather than letting the
+	// driver decide what a malformed id means.
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		notFound(w, "failed event")
+		return
+	}
+	row, err := h.queue.GetFailedEvent(r.Context(), orgID, id)
+	if err != nil {
+		internalError(w, "failed-events", err)
+		return
+	}
+	if row == nil {
+		notFound(w, "failed event")
+		return
+	}
+	writeJSON(w, http.StatusOK, failedEventToJSON(*row))
 }
 
 // failedEventsRequeueRequest is the requeue body: the queue ids an operator
@@ -121,18 +163,21 @@ func (h *failedEventsHandler) handleFailedEventsRequeue(w http.ResponseWriter, r
 	}
 
 	var req failedEventsRequeueRequest
-	if !decodeJSON(w, r, &req, "invalid requeue request") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if len(req.IDs) == 0 {
-		badRequest(w, "ids must contain at least one queue id")
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "ids must contain at least one queue id", Field: "ids",
+		})
 		return
 	}
-	if len(req.IDs) > db.MaxFailedEventsLimit {
-		// A selection can't exceed a page, and the page is clamped — so this
-		// only rejects a hand-rolled request, and rejecting it keeps the
-		// statement's bind list bounded.
-		badRequest(w, "too many ids in one requeue")
+	if len(req.IDs) > db.MaxFailedEventsRequeueIDs {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonOutOfRange,
+			Message: fmt.Sprintf("at most %d ids per requeue", db.MaxFailedEventsRequeueIDs),
+			Field:   "ids",
+		})
 		return
 	}
 

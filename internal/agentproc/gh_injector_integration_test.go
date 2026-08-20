@@ -78,11 +78,11 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	const runID = "itest-gh-injector"
+	const conversationID = "itest-gh-injector"
 
 	// Stand up the run network so the injector binds on the veth IP the jail
 	// reaches — the exact production shape (the git proxy binds the same way).
-	net, err := sandbox.SetupRunNetwork(ctx, runID)
+	net, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCert: %v", err)
 	}
-	certPath := sandbox.TrustedGHInjectorCertPath(runID)
+	certPath := sandbox.TrustedGHInjectorCertPath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
@@ -159,13 +159,13 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 			t.Skipf("can't chown worktree to UID %d: %v", sandbox.WorktreeUID, err)
 		}
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
-			RunID:       runID,
-			Worktree:    worktree,
-			SDKDir:      t.TempDir(),
-			Argv:        append([]string{sandboxGHBinary}, args...),
-			Env:         env,
-			ExtraMounts: mounts,
-			Network:     net,
+			ConversationID: conversationID,
+			Worktree:       worktree,
+			SDKDir:         t.TempDir(),
+			Argv:           append([]string{sandboxGHBinary}, args...),
+			Env:            env,
+			ExtraMounts:    mounts,
+			Network:        net,
 		})
 		if werr != nil {
 			t.Fatalf("sandbox.Wrap: %v", werr)
@@ -224,8 +224,8 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	const runID = "itest-gh-shared-origin"
-	net, err := sandbox.SetupRunNetwork(ctx, runID)
+	const conversationID = "itest-gh-shared-origin"
+	net, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateCert: %v", err)
 	}
-	certPath := sandbox.TrustedGHInjectorCertPath(runID)
+	certPath := sandbox.TrustedGHInjectorCertPath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		t.Fatalf("mkdir cert root: %v", err)
 	}
@@ -325,9 +325,9 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	}
 
 	lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
-		RunID:    runID,
-		Worktree: worktree,
-		SDKDir:   t.TempDir(),
+		ConversationID: conversationID,
+		Worktree:       worktree,
+		SDKDir:         t.TempDir(),
 		// No -R: the repository has to come from the tree's own remote.
 		Argv: []string{sandboxGHBinary, "pr", "list", "--limit", "1"},
 		Env:  env,

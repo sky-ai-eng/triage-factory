@@ -1,6 +1,6 @@
 // The org's integration credentials — the GitHub bot PAT and the Jira service
 // credential — as bind/unbind actions against their backend resources
-// (PUT/DELETE /api/orgs/{org}/github/access/pat and .../jira/access/credential;
+// (PUT/DELETE /api/orgs/{org}/github/pat and .../jira/access/credential;
 // see internal/server/org_credentials.go, which this mirrors). They are not
 // fields inside the bulk org-settings save, so each action is a single request
 // that validates, stores, re-dues the poller, and lands an audit row.
@@ -14,7 +14,7 @@
 // current token" contract to remember. If the user didn't type a token, don't
 // call this — the stored one is untouched because nothing asked it to change.
 
-import { readError } from '../../lib/api'
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
 
 // CredentialResult carries the bind/unbind outcome. `login` is the identity the
 // bound credential resolved to (GitHub only, and only on a bind) — the caller
@@ -39,7 +39,7 @@ export async function connectGitHubPAT(
   baseUrl: string,
   pat: string,
 ): Promise<CredentialResult> {
-  return credentialRequest(`/api/orgs/${orgId}/github/access/pat`, 'PUT', {
+  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'PUT', {
     base_url: baseUrl.trim(),
     pat: pat.trim(),
   })
@@ -49,7 +49,7 @@ export async function connectGitHubPAT(
 // host, in one server-side transaction. Idempotent. The caller's own GitHub
 // identity (PAT_2) is untouched — that's a separate surface.
 export async function disconnectGitHubPAT(orgId: string): Promise<CredentialResult> {
-  return credentialRequest(`/api/orgs/${orgId}/github/access/pat`, 'DELETE')
+  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'DELETE')
 }
 
 // disconnectJira unbinds the org's Jira service credential and clears the
@@ -71,21 +71,20 @@ async function credentialRequest(
   body?: unknown,
 ): Promise<CredentialResult> {
   try {
-    const res = await fetch(url, {
+    // A DELETE may answer 204 with no body, so this reads the response itself
+    // rather than going through apiJSON, and parses best-effort.
+    const res = await apiFetch(url, {
       method,
       ...(body === undefined
         ? {}
         : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     })
-    if (!res.ok) {
-      return { ok: false, error: await readError(res, 'Request failed') }
-    }
     const parsed = (await res.json().catch(() => null)) as {
       warning?: string
       login?: string
     } | null
     return { ok: true, warning: parsed?.warning, login: parsed?.login }
-  } catch {
-    return { ok: false, error: 'Could not reach the server.' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not reach the server.') }
   }
 }

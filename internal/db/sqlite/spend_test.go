@@ -27,9 +27,10 @@ func TestSpendStore_SQLite(t *testing.T) {
 		stores := sqlitestore.New(conn)
 
 		// One org agent (UNIQUE per org) for the actor_agent_id passthrough, and
-		// two projects (team-scoped + null-team) so curator_requests' NOT NULL
-		// project_id FK is satisfied and the curator team_id snapshot has both a
-		// team and a null-team source. The local tenant sentinels (org/team/user)
+		// two projects (team-scoped + null-team) so the curator conversations'
+		// project_id FK (set on curator rows, NULL for every other type) has both
+		// a team and a null-team source for the curator team_id snapshot. The
+		// local tenant sentinels (org/team/user)
 		// already exist via BootstrapSchemaForTest → SeedLocalTenantRows.
 		agentID := uuid.New().String()
 		if _, err := conn.Exec(
@@ -58,9 +59,10 @@ func TestSpendStore_SQLite(t *testing.T) {
 		}
 
 		// A blueprint + trigger event_handler so an autonomous run can carry a
-		// non-NULL trigger_id (runs.trigger_id FK → event_handlers; the trigger's
-		// same-team FK → blueprints). event_type is a stable seeded catalog id.
-		// The view passes runs.trigger_id straight through (TFAC-478).
+		// non-NULL trigger_id (conversations.trigger_id FK → event_handlers;
+		// the trigger's same-team FK → blueprints). event_type is a stable
+		// seeded catalog id.
+		// The view passes conversations.trigger_id straight through (TFAC-478).
 		blueprintID := uuid.New().String()
 		if _, err := conn.Exec(
 			`INSERT INTO blueprints (id, name, org_id, team_id, creator_user_id) VALUES (?, 'spend-bp', ?, ?, ?)`,
@@ -98,7 +100,7 @@ func TestSpendStore_SQLite(t *testing.T) {
 // time.String() serialization (unparseable) and silently drop every row.
 func openSQLiteSpendConn(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -111,12 +113,12 @@ func openSQLiteSpendConn(t *testing.T) *sql.DB {
 	return conn
 }
 
-// newSQLiteSpendSeeder owns the raw INSERT shape for each source. origin
-// is 'manual' so the runs_origin_requires_parents CHECK (which only constrains
-// origin='blueprint') is satisfied without a blueprint/task/prompt graph. Empty
-// CreatorUserID / ActorAgentID and a nil Cost serialize to SQL NULL. The two
-// agent arms plant one assistant ledger row each and return ITS id — the
-// view's source_id.
+// newSQLiteSpendSeeder owns the raw INSERT shape for each source. origin is
+// 'manual' so the conversations_origin_requires_parents CHECK (which only
+// constrains origin='blueprint') is satisfied without a
+// blueprint/task/prompt graph. Empty CreatorUserID / ActorAgentID and a nil
+// Cost serialize to SQL NULL. The two agent arms plant one assistant ledger
+// row each and return ITS id — the view's source_id.
 func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
 	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
 		t.Helper()
@@ -138,7 +140,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 		return strconv.FormatInt(id, 10)
 	}
 	return dbtest.SpendSeeder{
-		Run: func(t *testing.T, f dbtest.RunSpendFixture) string {
+		Conversation: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
 			if _, err := conn.Exec(`
@@ -149,7 +151,7 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
 				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, f.Status, f.StartedAt,
 			); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			return seedLedgerRow(t, id, f.Model, costArg(f.Cost), f.Tokens, f.StartedAt)
 		},
@@ -223,7 +225,7 @@ func costArg(c *float64) any {
 // the shipped baseline chain via a real goose Migrate (not the cached test
 // bundle) and that the view is queryable. Empty DB → empty view, no error.
 func TestSpendView_SQLite_MigrationApplies(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

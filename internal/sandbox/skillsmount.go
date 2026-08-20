@@ -41,7 +41,7 @@ import (
 const TrustedSkillsDestination = "/opt/tf/skills"
 
 // skillStagingBasename is the directory per-run step-skill staging dirs live
-// under inside os.TempDir(): os.TempDir()/triagefactory-skills/<runID>. A
+// under inside os.TempDir(): os.TempDir()/triagefactory-skills/<conversationID>. A
 // deliberate sibling of runTreeBasename's triagefactory-runs, with the opposite
 // ownership contract: a run tree is handed to the sandbox uid at launch, a
 // staging dir is NEVER chowned and never appears on the host inside anything
@@ -54,7 +54,7 @@ func SkillStagingBase() string {
 	return filepath.Join(os.TempDir(), skillStagingBasename)
 }
 
-// TrustedSkillsSourcePath returns the host path of runID's own step-skill
+// TrustedSkillsSourcePath returns the host path of conversationID's own step-skill
 // staging dir — both what the orchestrator stages into and what the broker
 // requires a TrustedSkillsDestination mount's source to resolve to. (The broker
 // re-derives it from the symlink-resolved SkillStagingBase so the per-run
@@ -62,6 +62,6 @@ func SkillStagingBase() string {
 // the run id (a blueprint step's own conversation id, which is distinct per
 // step) is what makes "step N sees only its own SKILL.md" true by construction:
 // each launch mounts a directory holding exactly one skill.
-func TrustedSkillsSourcePath(runID string) string {
-	return filepath.Join(SkillStagingBase(), runID)
+func TrustedSkillsSourcePath(conversationID string) string {
+	return filepath.Join(SkillStagingBase(), conversationID)
 }

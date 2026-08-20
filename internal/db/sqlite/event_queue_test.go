@@ -58,7 +58,7 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.EventQueue.ListForEntity(ctx, bogusOrg, "e"); err == nil {
 		t.Errorf("ListForEntity with non-local orgID should error")
 	}
-	if _, err := stores.EventQueue.ListFailedEvents(ctx, bogusOrg, 0); err == nil {
+	if _, _, err := stores.EventQueue.ListFailedEvents(ctx, bogusOrg, db.ListOpts{Limit: 50}); err == nil {
 		t.Errorf("ListFailedEvents with non-local orgID should error")
 	}
 	// Non-empty ids: the guard must run before the early "nothing to do"
@@ -70,7 +70,7 @@ func TestEventQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 
 func newSQLiteForEventQueueTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}
@@ -104,7 +104,7 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 		// Local is one process, so the claim's clock and the sweep's clock
 		// are the same one — rewind it in Go the way the store does.
 		res, err := conn.Exec(`UPDATE event_queue SET claimed_at = ? WHERE id = ?`,
-			time.Now().Add(-age), queueID)
+			time.Now().UTC().Add(-age), queueID)
 		if err != nil {
 			t.Fatalf("backdate claimed_at: %v", err)
 		}

@@ -54,9 +54,9 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 	// this asserts the identity rather than let a mis-claim pass silently.
 	claimTurnAs := func(t *testing.T, h CuratorHarness, convID, executorID string, bootEpoch int64) string {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, executorID, bootEpoch, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, executorID, bootEpoch, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != convID {
-			t.Fatalf("ClaimNextRun = (%+v, %v), want a claim on conversation %s", got, err, convID)
+			t.Fatalf("ClaimNextConversation = (%+v, %v), want a claim on conversation %s", got, err, convID)
 		}
 		return got.ClaimID
 	}
@@ -69,9 +69,9 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 	// derived answer to "another engagement owns it" / "the turn is gone".
 	claimTurnRefused := func(t *testing.T, h CuratorHarness, convID string) {
 		t.Helper()
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "exec-1", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "exec-1", 1, db.ClaimPlacement{})
 		if err != nil {
-			t.Fatalf("ClaimNextRun: %v", err)
+			t.Fatalf("ClaimNextConversation: %v", err)
 		}
 		if got != nil && got.ID == convID {
 			t.Fatalf("conversation %s was claimable; want it refused", convID)
@@ -238,7 +238,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// surfaced for the history synthesizer.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -261,6 +261,44 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 	})
 
+	t.Run("Transcript_LimitKeepsTheNewestRowsOldestFirst", func(t *testing.T) {
+		// The history read is bounded so a months-old conversation isn't a
+		// whole-transcript scan per page load. The bound has to keep the NEWEST
+		// rows and still hand them back oldest-first — an ASC read with a LIMIT
+		// would return the oldest N and call it the transcript.
+		h := mk(t)
+		projectID := h.SeedProject(t, "tail-bound")
+		convID, _ := seedTurn(t, h, projectID, "turn 1")
+		for _, body := range []string{"turn 2", "turn 3", "turn 4"} {
+			withClaims(t, h, func(ts db.TxStores) error {
+				_, err := ts.Curator.EnqueueUserMessage(ctx, h.OrgID, convID, h.UserID, body)
+				return err
+			})
+		}
+
+		var all, tail []domain.Message
+		withClaims(t, h, func(ts db.TxStores) error {
+			a, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
+			if err != nil {
+				return err
+			}
+			all = a
+			tl, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 2)
+			tail = tl
+			return err
+		})
+		if len(all) != 4 {
+			t.Fatalf("unbounded read = %d rows, want 4", len(all))
+		}
+		if len(tail) != 2 {
+			t.Fatalf("limit=2 read = %d rows, want 2", len(tail))
+		}
+		if tail[0].Content != "turn 3" || tail[1].Content != "turn 4" {
+			t.Errorf("tail = %q/%q, want the last two turns oldest-first (turn 3, turn 4)",
+				tail[0].Content, tail[1].Content)
+		}
+	})
+
 	t.Run("Release_NothingStreamed_SettlesOnUserRow", func(t *testing.T) {
 		// A turn that delivered but streamed nothing still settles its lump:
 		// BeginTurn stamped the user row with the claim, so that row is the
@@ -278,7 +316,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -330,7 +368,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -361,7 +399,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -443,7 +481,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 				return err
 			}
 			claims = cs
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -558,7 +596,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -714,7 +752,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// The audit row was deleted by the revert.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -766,7 +804,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		// transcript keeps only delivered history.
 		var msgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, convID, 0)
 			msgs = ms
 			return err
 		})
@@ -871,7 +909,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 
 		// Un-homed: claimable by anyone (the local/role=all shape — one
 		// process, nothing to home to).
-		got, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-1", 1, db.ClaimPlacement{})
 		if err != nil || got == nil || got.ID != convID {
 			t.Fatalf("un-homed claim = (%+v, %v), want conversation %s", got, err, convID)
 		}
@@ -890,13 +928,13 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		// Homed elsewhere: invisible to this executor, claimable by the home.
-		if err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
+		if _, err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
 			t.Fatalf("home upsert: %v", err)
 		}
-		if other, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
+		if other, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
 			t.Fatalf("non-home claim = (%+v, %v), want nothing", other, err)
 		}
-		if mine, err := h.Stores.RunQueue.ClaimNextRun(ctx, "home-1", 1, db.ClaimPlacement{}); err != nil || mine == nil || mine.ID != convID {
+		if mine, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-1", 1, db.ClaimPlacement{}); err != nil || mine == nil || mine.ID != convID {
 			t.Fatalf("home claim = (%+v, %v), want conversation %s", mine, err, convID)
 		}
 	})
@@ -944,9 +982,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		h := mk(t)
 		projectID := h.SeedProject(t, "session")
 		convID, msgID := seedTurn(t, h, projectID, "hello")
+		var written domain.Conversation
 		withClaims(t, h, func(ts db.TxStores) error {
-			return ts.Curator.SetSDKSession(ctx, h.OrgID, convID, "sess-123")
+			c, err := ts.Curator.SetSDKSession(ctx, h.OrgID, convID, "sess-123")
+			if c != nil {
+				written = *c
+			}
+			return err
 		})
+		if written.SessionID != "sess-123" {
+			t.Fatalf("SetSDKSession returned = %+v, want sess-123", written)
+		}
 		var live *domain.Conversation
 		withClaims(t, h, func(ts db.TxStores) error {
 			c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
@@ -956,6 +1002,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if live == nil || live.SessionID != "sess-123" {
 			t.Fatalf("conversation session = %+v, want sess-123", live)
 		}
+		AssertWriteReturnedStoredRow(t, "SetSDKSession", written, func() (*domain.Conversation, error) {
+			var got *domain.Conversation
+			err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+				c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+				got = c
+				return err
+			})
+			return got, err
+		})
 		claimTurn(t, h, convID)
 		var start *db.CuratorTurnStart
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -965,6 +1020,17 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		})
 		if start.SDKSessionID != "sess-123" {
 			t.Errorf("BeginTurn session = %q, want sess-123", start.SDKSessionID)
+		}
+	})
+
+	t.Run("SDKSession_MissingConversationReportsErrNoSuch", func(t *testing.T) {
+		h := mk(t)
+		err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+			_, err := ts.Curator.SetSDKSession(ctx, h.OrgID, uuid.New().String(), "sess-ghost")
+			return err
+		})
+		if !errors.Is(err, db.ErrNoSuchCuratorConversation) {
+			t.Errorf("SetSDKSession on an unknown conversation = %v, want db.ErrNoSuchCuratorConversation", err)
 		}
 	})
 
@@ -1001,8 +1067,12 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 			{ConversationID: conv.ID, UserID: h.UserID, Role: "assistant", Content: "imported compaction",
 				Delivered: &delivered, WindowState: domain.MessageWindowInactive, Seq: &seq},
 		}
-		if err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs); err != nil {
+		imported, err := h.Stores.Curator.ImportConversationStateSystem(ctx, h.OrgID, conv, []domain.Claim{claim}, msgs)
+		if err != nil {
 			t.Fatalf("import: %v", err)
+		}
+		if imported == nil || imported.ID != conv.ID || imported.SessionID != "sess-imported" {
+			t.Fatalf("ImportConversationStateSystem returned = %+v, want %s with sess-imported", imported, conv.ID)
 		}
 
 		var live *domain.Conversation
@@ -1014,6 +1084,15 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		if live == nil || live.ID != conv.ID || live.SessionID != "sess-imported" {
 			t.Fatalf("imported conversation = %+v, want %s with sess-imported", live, conv.ID)
 		}
+		AssertWriteReturnedStoredRow(t, "ImportConversationStateSystem", *imported, func() (*domain.Conversation, error) {
+			var got *domain.Conversation
+			err := h.Stores.Tx.SyntheticClaimsWithTx(ctx, h.OrgID, h.UserID, func(ts db.TxStores) error {
+				c, err := ts.Curator.GetLiveConversation(ctx, h.OrgID, projectID, h.UserID)
+				got = c
+				return err
+			})
+			return got, err
+		})
 		var claims []domain.Claim
 		var gotMsgs []domain.Message
 		withClaims(t, h, func(ts db.TxStores) error {
@@ -1022,7 +1101,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 				return err
 			}
 			claims = cs
-			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, conv.ID)
+			ms, err := ts.Curator.ListConversationMessages(ctx, h.OrgID, conv.ID, 0)
 			gotMsgs = ms
 			return err
 		})

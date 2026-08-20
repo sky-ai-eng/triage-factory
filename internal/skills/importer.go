@@ -16,12 +16,28 @@ import (
 
 // ImportResult summarizes what happened during an import run.
 type ImportResult struct {
-	Scanned  int      `json:"scanned"`
-	Imported int      `json:"imported"`
-	Skipped  int      `json:"skipped"`
-	Errors   []string `json:"errors,omitempty"`
+	Scanned  int             `json:"scanned"`
+	Imported int             `json:"imported"`
+	Skipped  int             `json:"skipped"`
+	Failed   []ImportFailure `json:"failed"`
+	// Errors carries scan-level problems that belong to no single file — an
+	// unreadable search directory, a glob that wouldn't expand, a cancelled
+	// run. Per-file failures live in Failed, so the accounting invariant below
+	// holds regardless of what is in here.
+	Errors []string `json:"errors,omitempty"`
 }
 
+// ImportFailure is one file the scan could not import, and why. Structured
+// rather than a formatted string so a caller can name the file it belongs to.
+type ImportFailure struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+// The accounting invariant: every file the scan turns up lands in exactly one
+// of imported / skipped / failed, and Scanned is their sum. Result.Errors is
+// separate — it holds the scan-level problems that belong to no file.
+//
 // ImportAll discovers and imports Claude Code skill files from both
 // personal (~/.claude/skills/) and project-scoped (./.claude/skills/) locations.
 //
@@ -42,11 +58,12 @@ type ImportResult struct {
 // Anyone lifting the local-mode gate has to port them first.
 //
 // ctx flows through every DB call and the per-file processing loop,
-// so the request-triggered import (POST /api/skills/import) cancels
+// so the request-triggered import (POST /api/prompts/from-disk) cancels
 // promptly if the HTTP client disconnects or the request times out.
 // Startup callers pass context.Background.
 func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) ImportResult {
-	var result ImportResult
+	// Non-nil so the wire shape is [] rather than null when nothing failed.
+	result := ImportResult{Failed: []ImportFailure{}}
 
 	// ~/.claude/skills is Claude Code user state keyed to the real HOME,
 	// not TF state — it stays home-relative and does not route through
@@ -93,21 +110,25 @@ func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) Im
 			}
 			normalizedPath, err := normalizePath(path)
 			if err != nil {
-				result.Errors = append(result.Errors, fmt.Sprintf("normalize file %s: %v", path, err))
+				result.Scanned++
+				result.Failed = append(result.Failed, ImportFailure{Path: path, Message: "normalize path: " + err.Error()})
 				continue
 			}
+			// Every file the glob turned up is scanned, including one already
+			// seen under another search root — it used to be skipped without
+			// being counted, so scanned and the buckets disagreed.
+			result.Scanned++
 			if _, ok := seenFiles[normalizedPath]; ok {
 				result.Skipped++
 				continue
 			}
 			seenFiles[normalizedPath] = struct{}{}
 
-			result.Scanned++
 			if err := importSkillFile(ctx, database, prompts, path, normalizedPath); err != nil {
 				if err == errSkillUnchanged || err == errSkillDuplicate {
 					result.Skipped++
 				} else {
-					result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", path, err))
+					result.Failed = append(result.Failed, ImportFailure{Path: path, Message: err.Error()})
 				}
 			} else {
 				result.Imported++
@@ -157,7 +178,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		if existing.Body == meta.Body && existing.Name == meta.Name && existing.AllowedTools == meta.AllowedTools {
 			return errSkillUnchanged
 		}
-		if err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrgID, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
+		if _, err := prompts.UpdateImported(ctx, runmode.LocalDefaultOrgID, id, meta.Name, meta.Body, meta.AllowedTools); err != nil {
 			return err
 		}
 		skillsLog.Info("updated skill", "name", meta.Name, "path", path)
@@ -185,7 +206,7 @@ func importSkillFile(ctx context.Context, database *sql.DB, prompts db.PromptSto
 		AllowedTools: meta.AllowedTools,
 	}
 
-	if err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, prompt); err != nil {
+	if _, err := prompts.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, prompt); err != nil {
 		return err
 	}
 
@@ -476,7 +497,7 @@ func hideDuplicateImportedPrompts(ctx context.Context, database *sql.DB, prompts
 
 	hiddenCount := 0
 	for _, id := range idsToHide {
-		if err := prompts.Hide(ctx, runmode.LocalDefaultOrgID, id); err != nil {
+		if _, err := prompts.Hide(ctx, runmode.LocalDefaultOrgID, id); err != nil {
 			return hiddenCount, err
 		}
 		hiddenCount++

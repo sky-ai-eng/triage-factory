@@ -112,7 +112,7 @@ type client struct {
 	sid string
 	// viewing + visible are the client's self-reported presence (TFAC-392),
 	// updated from inbound "presence" control frames in readPump. viewing is
-	// "board", "run:<runID>", or "other" (the latter for any non-answer-capable
+	// "board", "run:<conversationID>", or "other" (the latter for any non-answer-capable
 	// surface); visible mirrors the Page Visibility / focus state of the tab.
 	// Both are guarded by the hub mutex (written in readPump under h.mu, read in
 	// PresentFor under the RLock). Zero value ("", false) is "not on an
@@ -399,7 +399,7 @@ func (h *Hub) readPump(c *client) {
 }
 
 // PresentFor reports whether any connected client is "present" for a prompt
-// raised by runID in orgID (TFAC-392): an answer-capable, focused tab. A client
+// raised by conversationID in orgID (TFAC-392): an answer-capable, focused tab. A client
 // qualifies iff it is in the run's org (or unscoped, matching Broadcast's
 // tolerance for pre-auth / test clients) AND its tab is visible/focused AND it
 // is viewing the board or this run's own detail page. A backgrounded tab, or a
@@ -408,11 +408,11 @@ func (h *Hub) readPump(c *client) {
 // Nil-receiver-safe (returns false) so the hub-less test spawner and any
 // conditionally-wired caller read as "nobody present" without guarding the call
 // site, consistent with Broadcast.
-func (h *Hub) PresentFor(orgID, runID string) bool {
+func (h *Hub) PresentFor(orgID, conversationID string) bool {
 	if h == nil {
 		return false
 	}
-	runView := "run:" + runID
+	runView := "run:" + conversationID
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.clients {

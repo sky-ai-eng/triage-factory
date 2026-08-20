@@ -41,12 +41,12 @@ func blueprintWrappingPromptForSkills(t *testing.T, database *sql.DB, promptID s
 	store := sqlitestore.New(database).Blueprints
 	ctx := context.Background()
 	if existing, _ := store.Get(ctx, runmode.LocalDefaultOrgID, blueprintID); existing == nil {
-		if err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+		if _, err := store.Create(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 			ID: blueprintID, Name: blueprintID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 		}); err != nil {
 			t.Fatalf("blueprintWrappingPromptForSkills create %s: %v", blueprintID, err)
 		}
-		if err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, runmode.LocalDefaultOrgID, blueprintID, []string{promptID}, nil); err != nil {
 			t.Fatalf("blueprintWrappingPromptForSkills steps %s: %v", blueprintID, err)
 		}
 	}
@@ -67,7 +67,7 @@ func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.Even
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPromptForSkills(t, database, trig.BlueprintID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
 	}
 }

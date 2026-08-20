@@ -6,8 +6,8 @@ import type { MeResponse, TeamMember } from '../types'
 /** IdentityListField is the editor for `author_in` / `reviewer_in` /
  *  `commenter_in` (GitHub) and `assignee_in` / `reporter_in` /
  *  `commenter_in` (Jira) predicate fields. Two variants based
- *  on the active user's team size, derived from the /api/team/members
- *  roster:
+ *  on the acting team's size, derived from the team roster
+ *  (POST /api/teams/{team_id}/members/list):
  *
  *  - Variant A (solo team — local mode or a multi-mode team with one
  *    member): a single "Match my <actor>" toggle. ON →
@@ -49,9 +49,9 @@ export default function IdentityListField({
   }
 
   // /api/me is the load-bearing call here — without it the editor has
-  // no current_user identity to scope filters against. /api/team/members
-  // is best-effort: a missing roster collapses to Variant A (toggle
-  // only), which matches today's multi-mode degraded behavior.
+  // no current_user identity to scope filters against. The roster is
+  // best-effort: a missing one collapses to Variant A (toggle only),
+  // which matches today's multi-mode degraded behavior.
   if (meError || !me) {
     return (
       <div

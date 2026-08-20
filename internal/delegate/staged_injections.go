@@ -5,9 +5,10 @@
 //   - Live run (a warm, steerable process): StageOrDeliverInjection steers a single
 //     <system-note> into it immediately, fire-and-forget (deliverInjectionLive).
 //   - Terminal / paused run: the bare injection is persisted to the durable
-//     staged_agent_injections queue (db.StagedInjectionStore) and flushed — bundled into
-//     one <system-note> ahead of the user's message — on the next resume
-//     (stagedInjectionsForResume, wired into SendMessage).
+//     staged-injection queue (db.StagedInjectionStore, backed by undelivered
+//     messages rows) and flushed — bundled into one <system-note> ahead of the
+//     user's message — on the next resume (stagedInjectionsForResume, wired
+//     into SendMessage).
 //
 // Unlike the artifact-change ledger (which DERIVES its terminal injections from the
 // artifact rows, so it needs no queue), a producer here has no durable row of its
@@ -46,8 +47,8 @@ import (
 // tolerates a drop because its news is self-renewing — the next head advance is a
 // fresh transition carrying a fresh injection. Nothing re-delivers THIS one, so a
 // producer whose news does not recur must not copy that posture.
-func (s *Spawner) StageOrDeliverInjection(orgID, runID, producer, body string) (delivered bool) {
-	delivered, _, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
+func (s *Spawner) StageOrDeliverInjection(orgID, conversationID, producer, body string) (delivered bool) {
+	delivered, _, _ = s.stageOrDeliverInjection(orgID, conversationID, producer, body)
 	return delivered
 }
 
@@ -57,13 +58,16 @@ func (s *Spawner) StageOrDeliverInjection(orgID, runID, producer, body string) (
 // apart from "dropped" (both false — no live process, AND the durable
 // append itself failed: the store isn't wired, or AppendSystem errored).
 // HandlePRNewCommits and any other bare-bool producer keep calling
-// StageOrDeliverInjection unchanged and tolerate a drop (the next signal
-// re-stages); the additive gate can't tolerate one — a dropped additive
+// StageOrDeliverInjection unchanged and tolerate a drop as permanent for
+// that injection — acceptable for HandlePRNewCommits because its news is
+// self-renewing (see the doc above), not because a drop is retried; a
+// producer whose news doesn't recur must not copy that posture. The
+// additive gate can't tolerate one either way — a dropped additive
 // event has no durable row to fall back on, so it must fall through to
 // pending_firings instead. Same side effects and body/producer semantics
 // as StageOrDeliverInjection; the two share stageOrDeliverInjection.
-func (s *Spawner) StageOrDeliverInjectionResult(orgID, runID, producer, body string) (delivered, staged bool) {
-	delivered, staged, _ = s.stageOrDeliverInjection(orgID, runID, producer, body)
+func (s *Spawner) StageOrDeliverInjectionResult(orgID, conversationID, producer, body string) (delivered, staged bool) {
+	delivered, staged, _ = s.stageOrDeliverInjection(orgID, conversationID, producer, body)
 	return delivered, staged
 }
 
@@ -73,28 +77,28 @@ func (s *Spawner) StageOrDeliverInjectionResult(orgID, runID, producer, body str
 // if its post-stage resumability recheck decides against delivery, since
 // every other caller here tolerates a staged-but-never-flushed row as
 // business as usual.
-func (s *Spawner) stageOrDeliverInjection(orgID, runID, producer, body string) (delivered, staged bool, stagedID string) {
+func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body string) (delivered, staged bool, stagedID string) {
 	if body == "" {
 		return false, false, ""
 	}
-	if s.getProc(runID) != nil {
-		s.deliverInjectionLive(orgID, runID, domain.WrapSystemNote(body))
+	if s.getProc(conversationID) != nil {
+		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body))
 		return true, false, ""
 	}
 	if s.stagedInjections == nil {
-		delegateLog.Warn("stage injection dropped: no staged-injection store wired", "run", runID, "producer", producer)
+		delegateLog.Warn("stage injection dropped: no staged-injection store wired", "conversation", conversationID, "producer", producer)
 		return false, false, ""
 	}
-	n := &domain.StagedInjection{
-		RunID:    runID,
-		Producer: producer,
-		Body:     body,
-	}
-	if err := s.stagedInjections.AppendSystem(context.Background(), orgID, n); err != nil {
-		delegateLog.Warn("stage injection: append failed (the producer's next signal re-stages)", "run", runID, "producer", producer, "error", err)
+	stored, err := s.stagedInjections.AppendSystem(context.Background(), orgID, domain.StagedInjection{
+		ConversationID: conversationID,
+		Producer:       producer,
+		Body:           body,
+	})
+	if err != nil {
+		delegateLog.Warn("stage injection: append failed (dropped for good; only a later transition from a self-renewing producer might stage fresh news)", "conversation", conversationID, "producer", producer, "error", err)
 		return false, false, ""
 	}
-	return false, true, n.ID
+	return false, true, stored.ID
 }
 
 // stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and
@@ -108,13 +112,13 @@ func (s *Spawner) stageOrDeliverInjection(orgID, runID, producer, body string) (
 // artifactLedgerForResume — SendMessage prepends both, so a resume that has both
 // a resolved artifact and a staged injection carries two <system-note> blocks ahead of
 // the user's text.
-func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, runID string) string {
+func (s *Spawner) stagedInjectionsForResume(ctx context.Context, orgID, conversationID string) string {
 	if s.stagedInjections == nil {
 		return ""
 	}
-	injections, err := s.stagedInjections.FlushPendingSystem(ctx, orgID, runID)
+	injections, err := s.stagedInjections.FlushPendingSystem(ctx, orgID, conversationID)
 	if err != nil {
-		delegateLog.Warn("staged-injection flush failed; resuming without the block", "run", runID, "error", err)
+		delegateLog.Warn("staged-injection flush failed; resuming without the block", "conversation", conversationID, "error", err)
 		return ""
 	}
 	return domain.StagedInjectionBlock(injections)

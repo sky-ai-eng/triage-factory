@@ -24,7 +24,7 @@ import (
 func TestTaskStore_SQLite(t *testing.T) {
 	dbtest.RunTaskStoreConformance(t, func(t *testing.T) (db.TaskStore, string, string, string, string, dbtest.TaskSeeder, dbtest.TeamSeeder) {
 		t.Helper()
-		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
 			t.Fatalf("open in-memory db: %v", err)
 		}
@@ -37,7 +37,7 @@ func TestTaskStore_SQLite(t *testing.T) {
 		}
 		// The local-default agent + user sentinels are seeded by the
 		// migration's defaults, but the agents row itself isn't —
-		// production seeds it via BootstrapLocalAgent. Replicate that
+		// production seeds it via BootstrapAgentForOrg. Replicate that
 		// shape inline so claim methods that FK into agents resolve.
 		if _, err := conn.Exec(
 			`INSERT OR IGNORE INTO agents (id, org_id, display_name) VALUES (?, ?, 'Test Bot')`,
@@ -113,7 +113,7 @@ func seedSQLiteTaskChain(t *testing.T, conn *sql.DB, suffix string) (entityID, e
 // conformance suite already exercises the happy path; this test
 // pins the SQLite-specific rejection.
 func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -125,11 +125,11 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 	}
 	store := sqlitestore.New(conn).Tasks
 
-	// Queued must refuse non-LocalDefaultOrgID even though the underlying
+	// List must refuse non-LocalDefaultOrgID even though the underlying
 	// SQL would happily run — the guard is the only place that catches
 	// a "I think I'm in multi mode" caller.
-	if _, err := store.Queued(t.Context(), "some-other-org", nil); err == nil {
-		t.Error("Queued accepted non-LocalDefaultOrgID without error")
+	if _, _, err := store.List(t.Context(), "some-other-org", db.TaskListFilter{}, db.ListOpts{Limit: 50}); err == nil {
+		t.Error("List accepted non-LocalDefaultOrgID without error")
 	}
 }
 
@@ -138,7 +138,7 @@ func TestTaskStore_SQLite_AssertLocalOrg(t *testing.T) {
 // of slack:message events on its entity, and the source gate keeps it zero for
 // non-Slack tasks.
 func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
 // refuses on a stale expectation, an unrelated target, an unclaimed/bot-
 // claimed task, or a terminal row.
 func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 		if ok, err := store.ClaimQueuedForUser(ctx, runmode.LocalDefaultOrgID, taskID, userA); err != nil || !ok {
 			t.Fatalf("seed claim: ok=%v err=%v", ok, err)
 		}
-		if err := store.Close(ctx, runmode.LocalDefaultOrgID, taskID, "test", ""); err != nil {
+		if _, err := store.Close(ctx, runmode.LocalDefaultOrgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err := store.ReassignClaimToUser(ctx, runmode.LocalDefaultOrgID, taskID, userA, userB)
@@ -373,7 +373,7 @@ func TestTaskStore_SQLite_ReassignClaimToUser(t *testing.T) {
 // IGNORE no-op the way calling RecordEventSystem(..., "injected") a second
 // time on the same PK silently did.
 func TestTaskStore_SQLite_MarkEventInjectedSystem(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

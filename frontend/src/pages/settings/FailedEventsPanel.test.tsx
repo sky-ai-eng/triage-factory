@@ -53,8 +53,8 @@ function installFetch() {
     const [path] = url.split('?')
     const method = init?.method ?? 'GET'
 
-    if (path === '/api/events/failed' && method === 'GET') {
-      return jsonResponse({ events: parked, count: parked.length })
+    if (path === '/api/events/failed/list' && method === 'POST') {
+      return jsonResponse({ items: parked, next_page_token: '', total_count: parked.length })
     }
     if (path === '/api/events/failed/requeue' && method === 'POST') {
       const body = JSON.parse(init!.body as string) as { ids: number[] }

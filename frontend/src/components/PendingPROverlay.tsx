@@ -5,23 +5,26 @@ import type { FileData } from 'react-diff-view'
 import DiffFile from './DiffFile'
 import PendingPRSummary from './PendingPRSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
-// PRArtifact mirrors the JSON shape internal/server/artifacts_handler.go returns
-// for a pull_request artifact. title/body are the LIVE PR values (fetched from
-// GitHub via GetPR), not a local snapshot — the draft PR is a real GitHub object
-// now, edited 1:1.
+// PRArtifact mirrors GET /api/artifacts/{id} for a pull_request artifact: the
+// shared artifact envelope, with the PR-shaped payload under `details`.
+// title/body there are the LIVE PR values (fetched from GitHub via GetPR), not
+// a local snapshot — the draft PR is a real GitHub object now, edited 1:1.
 interface PRArtifact {
   id: string
-  conversation_id?: string
-  owner: string
-  repo: string
-  number: number
-  head_branch: string
-  base_branch: string
-  title: string
-  body: string
+  kind: string
   url: string
   state: string
+  details: {
+    owner: string
+    repo: string
+    number: number
+    head_branch: string
+    base_branch: string
+    title: string
+    body: string
+  }
 }
 
 interface Props {
@@ -88,15 +91,10 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       // without the PR, so it lands in `error` (the full-screen error state).
       let prData: PRArtifact
       try {
-        const prRes = await fetch(`/api/artifacts/${artifactId}`)
-        if (!prRes.ok) {
-          const data = await prRes.json().catch(() => ({}))
-          throw new Error(data.error || `Failed to load PR (${prRes.status})`)
-        }
-        prData = await prRes.json()
+        prData = await apiJSON<PRArtifact>(`/api/artifacts/${artifactId}`)
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the pull request.'))
           setLoading(false)
         }
         return
@@ -107,21 +105,18 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       // Diff fetch — isolated: its failure must not block editing/approving, so
       // it lands in diffError (an inline banner), never the full-screen error.
       try {
-        const diffRes = await fetch(`/api/artifacts/${artifactId}/diff`)
-        if (!diffRes.ok) {
-          // Server returns JSON {"error": "..."} on failure. Surface that body
-          // verbatim so the user sees the actual reason instead of a generic
-          // "Failed to load diff" — the backend already produces an actionable
-          // message, no point swallowing it.
-          const data = await diffRes.json().catch(() => ({}))
-          throw new Error(data.error || `Failed to load diff (${diffRes.status})`)
-        }
+        // The diff endpoint answers with the patch text, not JSON, and the
+        // truncation flag rides on a header — so this reads the Response. Its
+        // FAILURE body is JSON, and httpErrorMessage surfaces that `error`
+        // verbatim: the backend already produces an actionable message, no
+        // point swallowing it behind a generic "Failed to load diff".
+        const diffRes = await apiFetch(`/api/artifacts/${artifactId}/diff`)
         const diffText = await diffRes.text()
         if (cancelled) return
         setFiles(parseDiff(diffText))
         setTruncationNote(diffRes.headers.get('X-Diff-Truncated'))
       } catch (err) {
-        if (!cancelled) setDiffError(err instanceof Error ? err.message : String(err))
+        if (!cancelled) setDiffError(httpErrorMessage(err, 'Could not load the diff.'))
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -143,14 +138,16 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
   // than showing a green "saved" over a write GitHub rejected.
   const patchPR = useCallback(
     async (body: object) => {
-      const res = await fetch(`/api/artifacts/${artifactId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || `Save failed (${res.status})`)
+      try {
+        await apiFetch(`/api/artifacts/${artifactId}/pr`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        })
+      } catch (err) {
+        // Rethrown as a clean message: PendingPRSummary renders it and stays in
+        // edit mode, so an HttpError's raw body must not reach it.
+        throw new Error(httpErrorMessage(err, 'Could not save the pull request.'))
       }
     },
     [artifactId],
@@ -162,7 +159,9 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       const p = patchPR({ title: normalizedTitle })
       lastSavePromise.current = p
       await p
-      setPR((prev) => (prev ? { ...prev, title: normalizedTitle } : prev))
+      setPR((prev) =>
+        prev ? { ...prev, details: { ...prev.details, title: normalizedTitle } } : prev,
+      )
     },
     [patchPR],
   )
@@ -172,7 +171,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
       const p = patchPR({ body })
       lastSavePromise.current = p
       await p
-      setPR((prev) => (prev ? { ...prev, body } : prev))
+      setPR((prev) => (prev ? { ...prev, details: { ...prev.details, body } } : prev))
     },
     [patchPR],
   )
@@ -195,19 +194,15 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
           /* failed save already surfaced to the user; drop it and approve live state */
         }
       }
-      const res = await fetch(`/api/artifacts/${artifactId}/approve`, {
+      await apiFetch(`/api/artifacts/${artifactId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       })
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}))
-        throw new Error(data.error || 'Open PR failed')
-      }
       onClose()
     } catch (err) {
       // Inline (not full-screen): keep the editor visible so the user can retry
       // "Open PR" in place — a partial failure is safely re-runnable.
-      setSubmitError(err instanceof Error ? err.message : String(err))
+      setSubmitError(httpErrorMessage(err, 'Could not open the pull request.'))
     } finally {
       setSubmitting(false)
     }
@@ -259,7 +254,7 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
                 </h1>
                 {pr && (
                   <span className="text-ui text-ink-3 font-mono">
-                    {pr.owner}/{pr.repo} #{pr.number}
+                    {pr.details.owner}/{pr.details.repo} #{pr.details.number}
                   </span>
                 )}
               </div>
@@ -296,14 +291,14 @@ export default function PendingPROverlay({ artifactId, open, onClose }: Props) {
               ) : pr ? (
                 <div className="p-6 space-y-4 max-w-5xl mx-auto">
                   <PendingPRSummary
-                    owner={pr.owner}
-                    repo={pr.repo}
-                    number={pr.number}
-                    headBranch={pr.head_branch}
-                    baseBranch={pr.base_branch}
+                    owner={pr.details.owner}
+                    repo={pr.details.repo}
+                    number={pr.details.number}
+                    headBranch={pr.details.head_branch}
+                    baseBranch={pr.details.base_branch}
                     url={pr.url}
-                    title={pr.title}
-                    body={pr.body}
+                    title={pr.details.title}
+                    body={pr.details.body}
                     onUpdateTitle={handleUpdateTitle}
                     onUpdateBody={handleUpdateBody}
                     onSubmit={handleSubmit}

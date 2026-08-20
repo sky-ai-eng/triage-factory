@@ -21,9 +21,7 @@ func newDashboardStore(q queryer) db.DashboardStore { return &dashboardStore{q: 
 
 var _ db.DashboardStore = (*dashboardStore)(nil)
 
-func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinceDays int) (*domain.DashboardStats, error) {
-	since := time.Now().AddDate(0, 0, -sinceDays)
-
+func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, since time.Time) (*domain.DashboardStats, error) {
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT snapshot_json FROM entities
 		WHERE org_id = $1 AND source = 'github' AND snapshot_json IS NOT NULL
@@ -55,7 +53,7 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 				mergedAt, err := time.Parse(time.RFC3339, snap.MergedAt)
 				if err == nil && mergedAt.After(since) {
 					stats.Merged++
-					mergedByDay[mergedAt.Format("2006-01-02")]++
+					mergedByDay[mergedAt.UTC().Format("2006-01-02")]++
 				}
 			case snap.State == "CLOSED":
 				closedAt, err := time.Parse(time.RFC3339, snap.ClosedAt)
@@ -89,18 +87,35 @@ func (s *dashboardStore) Stats(ctx context.Context, orgID, username string, sinc
 	return stats, nil
 }
 
-func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]domain.PRSummaryRow, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT snapshot_json FROM entities
+// PRs pages the caller's authored PRs. The author predicate is `snapshot_json
+// ->> 'author'`, matching idx_entities_github_author — the Go-side filter it
+// replaced read every GitHub entity in the org on every dashboard load, and a
+// window over that scan would have paged the wrong set (LIMIT applies before
+// the filter, so page 2 could be empty while page 3 has rows).
+func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts db.ListOpts) ([]domain.PRSummaryRow, int, error) {
+	const where = `
 		WHERE org_id = $1 AND source = 'github' AND snapshot_json IS NOT NULL
-		ORDER BY last_polled_at DESC NULLS LAST
-	`, orgID)
+		  AND snapshot_json ->> 'author' = $2`
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, orgID, username).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `SELECT snapshot_json FROM entities` + where + `
+		ORDER BY last_polled_at DESC NULLS LAST, id`
+	args := []any{orgID, username}
+	if opts.Limit > 0 {
+		query += ` LIMIT $3 OFFSET $4`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
-	var prs []domain.PRSummaryRow
+	prs := []domain.PRSummaryRow{}
 	for rows.Next() {
 		var snapJSON []byte
 		if err := rows.Scan(&snapJSON); err != nil {
@@ -113,50 +128,24 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string) ([]dom
 		if err := json.Unmarshal(snapJSON, &snap); err != nil {
 			continue
 		}
-		if snap.Author != username {
-			continue
-		}
-
-		state := dashboardStateToLower(snap.State)
-		if snap.Merged {
-			state = "merged"
-		}
-		prs = append(prs, domain.PRSummaryRow{
-			Number:    snap.Number,
-			Title:     snap.Title,
-			Repo:      snap.Repo,
-			Author:    snap.Author,
-			State:     state,
-			Draft:     snap.IsDraft,
-			Labels:    snap.Labels,
-			CreatedAt: snap.CreatedAt,
-			UpdatedAt: snap.UpdatedAt,
-			HTMLURL:   snap.URL,
-		})
+		prs = append(prs, domain.PRSummaryFromSnapshot(snap))
 	}
-	return prs, rows.Err()
+	return prs, total, rows.Err()
 }
 
-// dashboardStateToLower is the per-D2 mirror of the SQLite helper.
-// Lives in this package (vs a shared internals package) because
-// duplicating four lines is cheaper than introducing a "shared
-// helpers" import dependency for one trivial mapping.
-func dashboardStateToLower(s string) string {
-	switch s {
-	case "OPEN":
-		return "open"
-	case "CLOSED":
-		return "closed"
-	case "MERGED":
-		return "merged"
-	default:
-		return s
-	}
-}
-
+// buildDashboardTimeline reshapes the per-day count map into a
+// continuous `days`-bucket slice ending today, filling zeros for
+// quiet days. Frontend renders 14 fixed buckets so the sparkline
+// stays the same width regardless of activity.
+//
+// The bucket keys are UTC days, because that is what the counting side
+// produces: the merged-at timestamps come off the snapshot as UTC. Built in
+// the process's local zone instead, the two sides name different days for
+// every instant within the offset of midnight, and the sparkline silently
+// reads zero for activity it counted.
 func buildDashboardTimeline(buckets map[string]int, days int) []domain.DashboardPoint {
 	points := make([]domain.DashboardPoint, 0, days)
-	now := time.Now()
+	now := time.Now().UTC()
 	for i := days - 1; i >= 0; i-- {
 		key := now.AddDate(0, 0, -i).Format("2006-01-02")
 		points = append(points, domain.DashboardPoint{Date: key, Count: buckets[key]})

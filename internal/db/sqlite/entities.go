@@ -146,6 +146,63 @@ func (s *entityStore) ListUnclassified(ctx context.Context, orgID string) ([]dom
 	return out, rows.Err()
 }
 
+// ListBackfillCandidates — see the interface doc, and the Postgres impl for
+// why the slug/key matches are escaped LIKE patterns.
+func (s *entityStore) ListBackfillCandidates(ctx context.Context, orgID string, f db.BackfillCandidateFilter, opts db.ListOpts) ([]domain.Entity, int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, 0, err
+	}
+	args := []any{}
+	where := ` WHERE state = 'active'`
+	if f.ExcludeProjectID != "" {
+		args = append(args, f.ExcludeProjectID)
+		where += " AND (project_id IS NULL OR project_id <> ?)"
+	}
+
+	githubArm := "source = 'github'"
+	if len(f.GitHubRepos) > 0 {
+		var arms []string
+		for _, repo := range f.GitHubRepos {
+			args = append(args, repo, db.LikeEscape(repo)+"#%")
+			arms = append(arms, `source_id = ? OR source_id LIKE ? ESCAPE '\'`)
+		}
+		githubArm = "source = 'github' AND (" + strings.Join(arms, " OR ") + ")"
+	}
+	jiraArm := "source = 'jira'"
+	if f.JiraProjectKey != "" {
+		args = append(args, f.JiraProjectKey, db.LikeEscape(f.JiraProjectKey)+"-%")
+		jiraArm = `source = 'jira' AND (source_id = ? OR source_id LIKE ? ESCAPE '\')`
+	}
+	where += " AND ((" + githubArm + ") OR (" + jiraArm + "))"
+
+	var total int
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `SELECT ` + entitySelectCols + ` FROM entities` + where +
+		` ORDER BY source ASC, last_polled_at ASC NULLS LAST, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []domain.Entity{}
+	for rows.Next() {
+		e, err := scanEntityFromRows(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, *e)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -184,19 +241,30 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 	return s.ListActive(ctx, orgID, "jira")
 }
 
-func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error) {
+func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string, opts db.ListOpts) ([]domain.ProjectPanelEntity, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	rows, err := s.q.QueryContext(ctx, `
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM entities WHERE project_id = ? AND state = 'active'
+	`, projectID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	query := `
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
 		       state, COALESCE(classification_rationale, ''), created_at, last_polled_at
 		FROM entities
 		WHERE project_id = ? AND state = 'active'
-		ORDER BY last_polled_at DESC NULLS LAST
-	`, projectID)
+		ORDER BY last_polled_at DESC NULLS LAST, id`
+	args := []any{projectID}
+	if opts.Limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -205,11 +273,11 @@ func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID str
 		var e domain.ProjectPanelEntity
 		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
 			&e.State, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // --- Mutation ---
@@ -227,7 +295,7 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 	}
 
 	id := uuid.New().String()
-	now := time.Now()
+	now := time.Now().UTC()
 	_, err = s.q.ExecContext(ctx, `
 		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at)
 		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)
@@ -256,43 +324,59 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 	}, true, nil
 }
 
-func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// scanWrittenEntity decodes an id-keyed UPDATE … RETURNING. scanEntityRow maps
+// a scanned-nothing to (nil, nil) — the read convention — so the write layer
+// turns that back into sql.ErrNoRows, this store's miss sentinel for an id a
+// caller resolved and then wrote against.
+func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
+	e, err := scanEntityRow(row)
+	if err != nil {
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	if e == nil {
+		return domain.Entity{}, sql.ErrNoRows
+	}
+	return *e, nil
+}
+
+func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.Entity{}, err
+	}
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET snapshot_json = ?, last_polled_at = ? WHERE id = ?
-	`, snapshotJSON, time.Now(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		snapshotJSON, time.Now().UTC(), id))
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
+func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET snapshot_json = ? WHERE id = ?`, snapshotJSON, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = ? WHERE id = ? RETURNING `+entitySelectCols,
+		snapshotJSON, id))
 }
 
-func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) error {
+func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET title = ? WHERE id = ?`, title, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET title = ? WHERE id = ? RETURNING `+entitySelectCols, title, id))
 }
 
-func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, description string) error {
+func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, description string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET description = ? WHERE id = ?`, description, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET description = ? WHERE id = ? RETURNING `+entitySelectCols, description, id))
 }
 
-func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
 	var projectArg any
 	if projectID != nil && *projectID != "" {
@@ -302,51 +386,40 @@ func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, proje
 	if rationale != "" {
 		rationaleArg = rationale
 	}
-	res, err := s.q.ExecContext(ctx, `
+	// RETURNING answers "did this land" and "what does the row say now" in one
+	// statement, which retires the rows-affected probe and the existence
+	// SELECT that used to follow it.
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities
 		SET project_id = ?,
 		    classification_rationale = ?,
 		    classified_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, projectArg, rationaleArg, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		var exists int
-		err := s.q.QueryRowContext(ctx, `SELECT 1 FROM entities WHERE id = ?`, id).Scan(&exists)
-		if err == sql.ErrNoRows {
-			return sql.ErrNoRows
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+		RETURNING `+entitySelectCols,
+		projectArg, rationaleArg, id))
 }
 
-func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) error {
+func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?
-	`, time.Now(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		time.Now().UTC(), id))
 }
 
-func (s *entityStore) Close(ctx context.Context, orgID, id string) error {
+// Close returns nil when the state='active' guard declined — the entity was
+// already closed, or no row carries the id. Both are the idempotent no-op the
+// method exists for, and neither is an error.
+func (s *entityStore) Close(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanEntityRow(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
-	`, time.Now(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		time.Now().UTC(), id))
 }
 
 func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, error) {
@@ -470,7 +543,7 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 		UPDATE entities
 		SET snapshot_json = ?, last_polled_at = ?, poll_seq = poll_seq + 1
 		WHERE id = ? AND poll_seq = ?
-	`, snapshotJSON, time.Now(), id, expectedPollSeq)
+	`, snapshotJSON, time.Now().UTC(), id, expectedPollSeq)
 	if err != nil {
 		return false, err
 	}
@@ -484,20 +557,85 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 // MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
 // bump. See the interface doc: it records that the row was read from the
 // source without anything having been diffed off it.
+// MarkPolledSystem is exempt from the returned-row rule; see the interface doc.
 func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	_, err := s.q.ExecContext(ctx,
-		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now(), id)
+		`UPDATE entities SET last_polled_at = ? WHERE id = ?`, time.Now().UTC(), id)
 	return err
 }
 
-func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
+func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (string, bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return "", false, err
+	}
+	var survivor string
+	merged := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := q.QueryRowContext(ctx, `SELECT id FROM entities WHERE source = (SELECT source FROM entities WHERE id = ?) AND source_id = ?`, id, newSourceID).Scan(&survivor); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id = ?, project_id = NULL, classification_rationale = NULL, classified_at = NULL, last_polled_at = ? WHERE id = ?`, newSourceID, time.Now().UTC(), id)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n != 1 {
+				return sql.ErrNoRows
+			}
+			survivor = id
+			return nil
+		}
+		if survivor == id {
+			return nil
+		}
+		merged = true
+		// Dismiss active tasks whose dedup slot is already occupied on the survivor.
+		if _, err := q.ExecContext(ctx, `UPDATE tasks SET status='dismissed', closed_at=?, close_reason='duplicate_entity_merged' WHERE entity_id=? AND status NOT IN ('done','dismissed') AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id=? AND s.event_type=tasks.event_type AND s.dedup_key=tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`, time.Now().UTC(), id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=1 WHERE status='running' AND cancel_requested=0 AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.entity_id=? AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND (c.status IS NULL OR c.status NOT IN ('completed','failed')))`, id); err != nil {
+			return err
+		}
+		for _, stmt := range []string{
+			`UPDATE tasks SET entity_id=? WHERE entity_id=?`, `UPDATE events SET entity_id=? WHERE entity_id=?`, `UPDATE event_queue SET entity_id=? WHERE entity_id=?`, `UPDATE pending_firings SET entity_id=? WHERE entity_id=?`, `UPDATE conversation_memory SET entity_id=? WHERE entity_id=?`,
+		} {
+			if _, err := q.ExecContext(ctx, stmt, survivor, id); err != nil {
+				return err
+			}
+		}
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO conversation_memory_entities(org_id,conversation_id,entity_id,role,created_at) SELECT org_id,conversation_id,?,role,created_at FROM conversation_memory_entities WHERE entity_id=?`, survivor, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id=?`, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE (from_entity_id=? OR to_entity_id=?) AND (CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END)=(CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END)`, id, id, id, survivor, id, survivor); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO entity_links(from_entity_id,to_entity_id,kind,origin,created_at,org_id) SELECT CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END,CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END,kind,origin,created_at,org_id FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, survivor, id, survivor, id, id); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, id); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id=?`, id)
+		return err
+	})
+	return survivor, merged, err
+}
+
+func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }
 
-func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error {
+func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error) {
 	return s.UpdateDescription(ctx, orgID, id, description)
 }
 
@@ -505,26 +643,26 @@ func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, de
 // (see the interface doc) — SQLite has one connection and no auth concept,
 // so this is inlined here rather than delegating to a shared non-System
 // method the way the other `...System` variants in this file do.
-func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) error {
+func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET url = ? WHERE id = ?`, url, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET url = ? WHERE id = ? RETURNING `+entitySelectCols, url, id))
 }
 
-func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
 	return s.AssignProject(ctx, orgID, id, projectID, rationale)
 }
 
-func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) error {
+func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error) {
 	return s.MarkClosed(ctx, orgID, id)
 }
 
 // CloseSystem mirrors Close (active→closed transition). The router's
 // entity-lifecycle path consumes this through the admin pool in
 // Postgres; SQLite collapses to the non-System variant.
-func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) error {
+func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	return s.Close(ctx, orgID, id)
 }
 

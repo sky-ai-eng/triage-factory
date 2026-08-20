@@ -87,26 +87,26 @@ func (b *Backplane) heartbeatOnce(ctx context.Context) {
 }
 
 // PresentFor reports whether anyone is present for a prompt raised by
-// runID in orgID (TFAC-392's unattended-prompt fast-deny), checking THIS
+// conversationID in orgID (TFAC-392's unattended-prompt fast-deny), checking THIS
 // pod's local sockets first (websocket.Hub.PresentFor — cheap, no DB
 // round trip) and falling back to the fleet-wide ws_presence table so a
 // reviewer connected to a DIFFERENT pod than the one running the
 // permission check still counts. A row qualifies under the exact same
 // rule Hub.PresentFor applies locally: visible AND (viewing == "board" OR
-// viewing == "run:<runID>"), with last_seen inside the live window
+// viewing == "run:<conversationID>"), with last_seen inside the live window
 // (default 45s, TF_WS_PRESENCE_TTL_SECONDS).
 //
 // A DB read failure logs and reports absent — the safe default for a
 // fast-deny gate is to fail toward requiring an explicit answer, not
 // toward silently approving unattended.
-func (b *Backplane) PresentFor(ctx context.Context, orgID, runID string) bool {
-	if b.hub.PresentFor(orgID, runID) {
+func (b *Backplane) PresentFor(ctx context.Context, orgID, conversationID string) bool {
+	if b.hub.PresentFor(orgID, conversationID) {
 		return true
 	}
 	readCtx, cancel := context.WithTimeout(ctx, presenceReadTimeout)
 	defer cancel()
 
-	runView := "run:" + runID
+	runView := "run:" + conversationID
 	// The live window is measured against the DB clock (now()), not this
 	// pod's: last_seen is stamped with the server's now() on every heartbeat,
 	// so a pod whose clock runs ahead would otherwise judge genuinely-present
@@ -122,7 +122,7 @@ func (b *Backplane) PresentFor(ctx context.Context, orgID, runID string) bool {
 		)
 	`, orgID, runView, PresenceLiveWindowFromEnv().Seconds()).Scan(&exists)
 	if err != nil {
-		backplaneLog.Warn("ws_presence: read failed; treating as absent for this check", "org", orgID, "run", runID, "error", err)
+		backplaneLog.Warn("ws_presence: read failed; treating as absent for this check", "org", orgID, "conversation", conversationID, "error", err)
 		return false
 	}
 	return exists

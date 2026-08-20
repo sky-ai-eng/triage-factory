@@ -28,7 +28,7 @@ type Store struct {
 func New(conn *sql.DB) db.Stores {
 	s := &Store{conn: conn}
 	// Two-pool constructors exist on EntityStore /
-	// RepoStore / UsersStore / AgentStore so the Postgres impl can
+	// RepositoryStore / UsersStore / AgentStore so the Postgres impl can
 	// route `...System` admin-pool variants distinctly. SQLite has
 	// one connection — both args collapse to conn here.
 	users := newUsersStore(conn, conn)
@@ -53,7 +53,7 @@ func New(conn *sql.DB) db.Stores {
 		Conversations:  newConversationStore(conn),
 		Artifacts:      newArtifactStore(conn),
 		Entities:       newEntityStore(conn, conn),
-		Repos:          newRepoStore(conn, conn),
+		Repos:          newRepositoryStore(conn, conn),
 		PendingFirings: newPendingFiringsStore(conn),
 		Projects:       newProjectStore(conn, conn),
 		// Events wires both args to conn — SQLite has one connection
@@ -62,17 +62,17 @@ func New(conn *sql.DB) db.Stores {
 		// EventQueue holds the connection directly (it self-manages the
 		// Enqueue transaction); single-worker drain in local mode.
 		EventQueue: newEventQueueStore(conn),
-		// RunQueue holds the connection directly; single-worker dispatcher
+		// ConversationQueue holds the connection directly; single-worker dispatcher
 		// in local mode (no claim contention, so a plain claim suffices).
-		RunQueue: newRunQueueStore(conn),
+		ConversationQueue: newConversationQueueStore(conn),
 		// TaskMemory wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
 		TaskMemory: newTaskMemoryStore(conn, conn),
-		// RunWorktrees wires both args to conn — SQLite has one
+		// ConversationWorktrees wires both args to conn — SQLite has one
 		// connection so the dual-pool constructor collapses; the
 		// `...System` variants forward to the non-System bodies.
-		RunWorktrees: newRunWorktreeStore(conn, conn),
+		ConversationWorktrees: newConversationWorktreeStore(conn, conn),
 		// Orgs is dual-pool in Postgres; SQLite collapses to the one
 		// connection. Callers are background services iterating the
 		// active org set, settings reads/writes from request handlers,
@@ -95,7 +95,7 @@ func New(conn *sql.DB) db.Stores {
 		// the `...System` variants forward to the non-System bodies.
 		TeamGitHubGroups: newTeamGitHubGroupsStore(conn, conn),
 		// TeamGitHubRepos is dual-pool in Postgres; SQLite collapses to
-		// the one connection. ReplaceForTeam's repo_profiles reconcile
+		// the one connection. ReplaceForTeam's repositories reconcile
 		// runs in the same tx as the team-row write here.
 		TeamGitHubRepos: newTeamGitHubReposStore(conn, conn),
 		// Curator: the session goroutine wraps each turn's message writes in
@@ -104,7 +104,16 @@ func New(conn *sql.DB) db.Stores {
 		// claim writes and sweeps, which collapse onto the one connection.
 		Curator:    newCuratorStore(conn),
 		GitHubApps: newGitHubAppsStore(conn, secrets),
-		JiraApps:   newJiraAppsStore(conn),
+		// ReachableRepos: the reachable-repo cache. Admin-pool-only in
+		// Postgres; one connection here. Wired in local mode too — the refresh
+		// that maintains it is by-pull in both modes, which is the only shape
+		// that works where no webhook ever arrives.
+		ReachableRepos: newReachableReposStore(conn),
+		// GitHubDeliveries is admin-pool-only in Postgres; SQLite collapses to
+		// the one connection. Wired in local mode too — a local install GitHub
+		// can reach runs the same pre-auth receiver.
+		GitHubDeliveries: newGitHubDeliveryStore(conn),
+		JiraApps:         newJiraAppsStore(conn),
 		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.
@@ -153,14 +162,14 @@ func New(conn *sql.DB) db.Stores {
 		// suite, not because a local run has a cgroup.
 		SandboxStats: newSandboxStatStore(conn),
 		Operators:    newOperatorStore(conn),
-		// RunSignals is Postgres-only (TFAC-585): this is a stub returning
+		// ConversationSignals is Postgres-only (TFAC-585): this is a stub returning
 		// ErrNotApplicableInLocal from every method — local mode is always
 		// its own run's owner, so no code path may reach it.
-		RunSignals: newRunSignalStore(),
-		// RunPendingInput is dual-dialect (unlike RunSignals): local mode's
+		ConversationSignals: newConversationSignalStore(),
+		// ConversationPendingInput is dual-dialect (unlike ConversationSignals): local mode's
 		// dispatcher claims its own resumed runs through the identical
 		// queue path.
-		RunPendingInput: newRunPendingInputStore(conn),
+		ConversationPendingInput: newConversationPendingInputStore(conn),
 		// Permissions is split-pool in Postgres; SQLite collapses to the one
 		// connection (N=1, no RLS). This is the arm production uses — the
 		// browser permission round-trip is reached only by an unsandboxed
@@ -179,11 +188,16 @@ func New(conn *sql.DB) db.Stores {
 		// mode — the one process is always its own home — but present for
 		// store-interface + conformance symmetry. See spec §6.3.
 		CuratorHomes: newCuratorHomeStore(conn),
-		// RunCredentials is admin-pool only in Postgres; SQLite collapses
+		// ClaimCredentials is admin-pool only in Postgres; SQLite collapses
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for
 		// store-interface + conformance-test symmetry. See TFAC-614.
-		RunCredentials: newRunCredentialsStore(conn),
+		ClaimCredentials: newClaimCredentialsStore(conn),
+		// WorkspaceSnapshots collapses to the one connection (N=1, no RLS).
+		// Live in local mode, unlike ClaimCredentials: the single process parks
+		// and snapshots through the same writer, so the lifecycle row is
+		// recorded here exactly as it is on an executor.
+		WorkspaceSnapshots: newWorkspaceSnapshotStore(conn),
 		// Enterprise Edition SSO stubs attach via Ext (multi-mode stores live
 		// in ee/sso/store; the sqlite stubs there return ErrNotApplicableInLocal).
 		Ext: db.BuildStoreExtensions("sqlite", conn, conn),

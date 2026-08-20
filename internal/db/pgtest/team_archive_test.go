@@ -8,27 +8,28 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
-// seedRunOnTeam inserts a minimal non-blueprint run owned by teamID with the
-// given status, via the admin pool. origin='manual' sidesteps the
-// runs_origin_requires_parents CHECK (no blueprint_run/task/prompt needed);
-// trigger_type='manual' pairs with a non-NULL creator per
-// runs_creator_matches_trigger_type.
-func seedRunOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
+// seedConversationOnTeam inserts a minimal non-blueprint conversation owned
+// by teamID with the given status, via the admin pool. origin='manual'
+// sidesteps the conversations_origin_requires_parents CHECK (no
+// blueprint_run/task/prompt needed); trigger_type='manual' pairs with a
+// non-NULL creator per conversations_creator_matches_trigger_type.
+func seedConversationOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
 	t.Helper()
 	var id string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO conversations (org_id, creator_user_id, team_id, trigger_type, origin, status, model)
 		VALUES ($1, $2, $3, 'manual', 'manual', $4, 'm') RETURNING id
 	`, orgID, creatorID, teamID, status).Scan(&id); err != nil {
-		t.Fatalf("seed %s run on team %s: %v", status, teamID, err)
+		t.Fatalf("seed %s conversation on team %s: %v", status, teamID, err)
 	}
 	return id
 }
 
 // TestConversationStore_Postgres_ActiveIDsForTeamSystem pins the team-archive
-// force-stop enumeration on Postgres (TFAC-448): only active runs owned by the
-// queried team are returned — terminal runs are excluded, and
-// a sibling team's active run is not picked up (the team_id WHERE clause).
+// force-stop enumeration on Postgres (TFAC-448): only active conversations
+// owned by the queried team are returned — terminal conversations are
+// excluded, and a sibling team's active conversation is not picked up (the
+// team_id WHERE clause).
 func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
@@ -36,10 +37,10 @@ func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
 	teamB := SeedTeam(t, h, orgA, "teamB")
 
-	running := seedRunOnTeam(t, h, orgA, alice, teamA, "running")
-	open := seedRunOnTeam(t, h, orgA, alice, teamA, "open")
-	seedRunOnTeam(t, h, orgA, alice, teamA, "completed")
-	seedRunOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
+	running := seedConversationOnTeam(t, h, orgA, alice, teamA, "running")
+	open := seedConversationOnTeam(t, h, orgA, alice, teamA, "open")
+	seedConversationOnTeam(t, h, orgA, alice, teamA, "completed")
+	seedConversationOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, SecretKey)
 	ids, err := stores.Conversations.ActiveIDsForTeamSystem(context.Background(), orgA, teamA)
@@ -51,7 +52,7 @@ func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 		got[id] = true
 	}
 	if len(ids) != 2 || !got[running] || !got[open] {
-		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly teamA's running + open runs (%s, %s)", ids, running, open)
+		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly teamA's running + open conversations (%s, %s)", ids, running, open)
 	}
 }
 

@@ -14,7 +14,7 @@ const DefaultModel = "sonnet"
 
 // DefaultBranchTemplate is the branch-name convention suggested to delegated
 // agents as envelope guidance (not enforced). The literal "<ticket-id>" is
-// substituted with the run's ticket id at prompt-render time.
+// substituted with the conversation's ticket id at prompt-render time.
 const DefaultBranchTemplate = "tfac/<ticket-id>"
 
 // Review-posting postures — how a delegated agent's finalized review reaches
@@ -61,26 +61,24 @@ var ValidReviewPostures = []string{
 func ValidReviewPosture(s string) bool { return slices.Contains(ValidReviewPostures, s) }
 
 // Base-branch push policies — whether a delegated agent may push to a repo's
-// base / default branch (main, master, the profile's default, the configured
+// base / default branch (main, master, the repository row's default, the configured
 // base). The default refuses, which is right for a team that reviews through
 // pull requests and wrong for trunk-based teams, docs repos, config repos and
 // generated-file bots — hence a setting rather than a hard-coded rule.
 //
 // This is a safety guard against a MISTAKEN agent, not a control against a
-// hostile one. In multi mode it is enforced at the per-run git proxy's ref
-// gate; in local mode at the TF-controlled pre-push hook, which the agent runs
-// as the operator and could bypass (`git push --no-verify`, a rewritten
-// remote). A mistake does not attempt bypass — it runs the naive command — so
-// the guard catches the failure mode that actually occurs. Nothing here makes
-// local mode a security boundary.
+// hostile one. The managed Git path enforces it at the per-run git proxy's ref
+// gate in both modes. A local process can deliberately discard its run-scoped
+// routing and use the operator's machine directly; nothing here makes local
+// mode a security boundary.
 const (
 	// BaseBranchPushNever refuses every push to a protected ref.
 	BaseBranchPushNever = "never"
-	// BaseBranchPushManualOnly permits it only when a human dispatched the run.
-	// An event-triggered run — one minted from a PR body, an issue comment or a
-	// label, all externally authored — is refused.
+	// BaseBranchPushManualOnly permits it only when a human dispatched the
+	// conversation. An event-triggered conversation — one minted from a PR
+	// body, an issue comment or a label, all externally authored — is refused.
 	BaseBranchPushManualOnly = "manual_only"
-	// BaseBranchPushAlways permits it on every run.
+	// BaseBranchPushAlways permits it on every conversation.
 	BaseBranchPushAlways = "always"
 )
 
@@ -104,14 +102,14 @@ func ValidBaseBranchPushPolicy(s string) bool {
 	return slices.Contains(ValidBaseBranchPushPolicies, s)
 }
 
-// MaxConcurrentRunsCeiling is the largest value OrgSettings.MaxConcurrentRuns
+// MaxConcurrentClaimsCeiling is the largest value OrgSettings.MaxConcurrentRuns
 // accepts. It's a sanity bound far beyond any real fleet (per-executor
 // concurrency tops out in the low hundreds; even a large fleet stays in the
 // tens of thousands), chosen so a validated value always fits the Postgres
 // int4 column — an oversized input is rejected with a clean 400 at the handler
 // rather than an "integer out of range" 500 at the DB. The frontend mirrors
 // this bound so Save blocks before the round-trip.
-const MaxConcurrentRunsCeiling = 1_000_000
+const MaxConcurrentClaimsCeiling = 1_000_000
 
 // OrgSettings is the org-scope settings row (org_settings table).
 //
@@ -150,7 +148,7 @@ type OrgSettings struct {
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
 	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
 	// summed across every category) is >= this value, the delegation choke
-	// point refuses all new agent runs. A runaway-spend fuse.
+	// point refuses all new agent conversations. A runaway-spend fuse.
 	MaxDailyCostUSD float64
 
 	// MaxConcurrentRuns is the org-wide ceiling on how many runs the org may
@@ -163,7 +161,7 @@ type OrgSettings struct {
 	//
 	// The store read clamps a stray negative (no DB CHECK guards the column) up
 	// to 0, so callers always see "unlimited" as 0 and never a negative. Writes
-	// are validated in [0, MaxConcurrentRunsCeiling] at the handler.
+	// are validated in [0, MaxConcurrentClaimsCeiling] at the handler.
 	MaxConcurrentRuns int
 
 	// MarketplaceEnabled was originally scoped as a ship-dark toggle for the
@@ -175,6 +173,93 @@ type OrgSettings struct {
 	// instead (TFAC-92 phase 2 / TFAC-539). NOT NULL DEFAULT false on both
 	// backends — no NULL-round-trip subtlety like the fields above.
 	MarketplaceEnabled bool
+
+	// GitHubCredentialClass names which credential system this org's GitHub
+	// access belongs to. See the GitHubCredentialClass type doc for the values
+	// and the invariant.
+	//
+	// READ-ONLY THROUGH THIS STRUCT. UpdateSettings does NOT own the column and
+	// deliberately omits it from its upsert's column lists, so a bulk settings
+	// save leaves whatever the credential transitions wrote. Setting this field
+	// and calling UpdateSettings silently does nothing; the only writer is
+	// OrgsStore.SetGitHubCredentialClass, called from the credential
+	// transitions inside their own transaction.
+	GitHubCredentialClass GitHubCredentialClass
+
+	// Version is the row's optimistic-concurrency token. The settings save is a
+	// read-modify-write over the whole struct, so two admins editing different
+	// sections of one page would otherwise silently overwrite each other; the
+	// API hands this out on the read and requires it on the write, refusing a
+	// write whose token is stale.
+	//
+	// READ-ONLY THROUGH THIS STRUCT, like GitHubCredentialClass above but for a
+	// different reason: the counter belongs to the store, not the caller.
+	// UpdateSettings ignores the field and bumps the stored value; the only way
+	// to assert a version is UpdateSettingsVersioned's explicit argument, which
+	// is what makes the assertion visible at the call site rather than smuggled
+	// in a struct field a caller could forget to carry.
+	//
+	// 0 means "no row" — the value DefaultOrgSettings() carries, and what a
+	// missing-row read hands back. A materialized row is always >= 1.
+	Version int
+}
+
+// GitHubCredentialClass names which credential system an org's GitHub access
+// belongs to. It is a projection of the credential choice the user already
+// made — binding a PAT, registering or importing an App — never a separate
+// setting, and there is no product surface that picks it.
+//
+// It exists because the class cannot be inferred from the presence of an
+// org_github_apps row. A row is absent for a PAT org today, and it would also
+// be absent for an org riding a deployment-level shared App (org_github_apps
+// is keyed one row per org with a UNIQUE app_id, so N orgs cannot each hold a
+// row pointing at one shared app). Reading "no row" as "PAT" is therefore an
+// inference that is right by accident, and every site that makes it would be
+// silently wrong the day a second rowless class exists — degrading an org to a
+// credential it does not have rather than failing where someone would notice.
+//
+// The class names WHICH CREDENTIAL SYSTEM the org is in; org_github_apps.active
+// names WHICH CREDENTIAL IS LIVE. They are orthogonal, and the staged window of
+// a PAT→App switch is where they visibly differ: the class is byo_app from the
+// moment the App is registered, while the PAT stays live until cutover. Do not
+// collapse them.
+//
+// Values are app-validated, not CHECK-constrained — the same convention the
+// other open-set text columns follow (org_settings.max_llm_model_tier,
+// prompts.source), so a new class costs no DDL on either backend.
+//
+// "managed_app" — an org riding the deployment's own shared App — is a reserved
+// future value. Nothing writes it today and it deliberately has no constant
+// here: a constant is a thing a writer can reach for, and the shared App needs
+// a resolver tier, a scoped reconcile, and a static webhook path before any org
+// may legitimately carry the value. Until then it must be unreachable rather
+// than merely unused. That is also why every switch on this type carries an
+// explicit unknown arm that refuses instead of falling through to the pat arm:
+// a build that meets a class it does not know must fail where it is seen.
+type GitHubCredentialClass string
+
+const (
+	// GitHubCredentialClassPAT — the org's GitHub credential is a personal
+	// access token in the secret store. No org_github_apps row exists.
+	GitHubCredentialClassPAT GitHubCredentialClass = "pat"
+
+	// GitHubCredentialClassBYOApp — the org brought its own GitHub App and owns
+	// its private key; an org_github_apps row exists. Set at registration /
+	// import, including while the App is still staged behind a live PAT.
+	GitHubCredentialClassBYOApp GitHubCredentialClass = "byo_app"
+)
+
+// Known reports whether c is a class this build understands. A stored value
+// that isn't — a future class written by a newer peer, a hand-edited row — is
+// never coerced to a default; callers refuse instead, so an org resolves no
+// credential rather than the wrong one.
+func (c GitHubCredentialClass) Known() bool {
+	switch c {
+	case GitHubCredentialClassPAT, GitHubCredentialClassBYOApp:
+		return true
+	default:
+		return false
+	}
 }
 
 // DefaultOrgSettings returns the NOT NULL DEFAULT values from the
@@ -195,6 +280,10 @@ func DefaultOrgSettings() OrgSettings {
 		GitHubPollInterval:  5 * time.Minute,
 		GitHubCloneProtocol: "ssh",
 		JiraPollInterval:    5 * time.Minute,
+		// Matches the column's NOT NULL DEFAULT 'pat'. An org with no
+		// settings row has bound no credential at all, and "the PAT system,
+		// with nothing in it yet" is the state a fresh org is in.
+		GitHubCredentialClass: GitHubCredentialClassPAT,
 	}
 }
 
@@ -237,12 +326,17 @@ type TeamSettings struct {
 	AIPreferenceUpdateInterval int
 	DefaultModel               string // "haiku" | "sonnet" | "opus"
 	AutoDelegateEnabled        bool
+	// AutoModeEnabled starts SDK-runtime delegated conversations in Claude
+	// Code's auto permission mode. Local mode honors the stored team choice;
+	// multi-mode SDK conversations always enable auto mode, and the native
+	// runtime ignores this field entirely.
+	AutoModeEnabled bool
 
 	// PermissionAbsentGraceMS + PermissionAbsentAutodenyEnabled gate the
 	// presence-aware fast auto-deny for unattended permission prompts (TFAC-392).
-	// When the toggle is on and a delegated run raises an off-allowlist tool
-	// prompt with no answer-capable, focused tab present in the run's org, the
-	// backend denies after this grace window (ms) instead of waiting the full
+	// When the toggle is on and a delegated conversation raises an
+	// off-allowlist tool prompt with no answer-capable, focused tab present in
+	// the conversation's org, the backend denies after this grace window (ms) instead of waiting the full
 	// permTimeout(). When off, the prompt keeps the full-timeout behavior exactly.
 	// The grace is clamped at spawn to [1s, permTimeout()) so it can never invert
 	// the "total wait < idleTimeout()" invariant.
@@ -254,7 +348,7 @@ type TeamSettings struct {
 	// 0 ↔ NULL). When today's team spend (UTC calendar day, summed over the
 	// team's own rows — system overhead + non-team curator carry a NULL team_id
 	// and never count) is >= this value AND the governance entitlement is active,
-	// the delegation choke point refuses new agent runs for that team. Org-admin-
+	// the delegation choke point refuses new agent conversations for that team. Org-admin-
 	// configured: a team admin cannot set their own team's cap (the team-settings
 	// write path never touches this field — only the org-admin cap endpoint does),
 	// so a team-admin save round-trips the stored value untouched.
@@ -262,7 +356,7 @@ type TeamSettings struct {
 
 	// BranchTemplate is the team's branch-name convention (TFAC-498), rendered
 	// into the delegated agent's prompt as envelope guidance — it is NOT
-	// enforced. The literal "<ticket-id>" is substituted with the run's ticket
+	// enforced. The literal "<ticket-id>" is substituted with the conversation's ticket
 	// id at prompt-render time. NOT NULL with a schema DEFAULT; defaults to
 	// DefaultBranchTemplate. The write path coalesces an empty string to the
 	// default so a blank never persists.
@@ -274,13 +368,13 @@ type TeamSettings struct {
 	// DefaultReviewPosture ("identity" — derive from the acting credential).
 	// The write path coalesces an empty string to the default so a blank never
 	// persists. Deliberately team-grained, with no per-prompt override: a
-	// prompt author must not be able to opt their runs out of the team's gate.
+	// prompt author must not be able to opt their conversations out of the team's gate.
 	ReviewPosture string
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read
-	// by both enforcement points (the multi-mode git-proxy ref gate and the
-	// local-mode pre-push hook) through internal/pushpolicy. NOT NULL with a
+	// by the per-run git-proxy ref gate (with the pre-push hook as a no-proxy
+	// fallback) through internal/pushpolicy. NOT NULL with a
 	// schema DEFAULT; defaults to DefaultBaseBranchPushPolicy ("never"). The
 	// write path coalesces an empty string to the default so a blank never
 	// persists. Team-grained with no per-prompt override, for the same reason
@@ -308,6 +402,7 @@ func DefaultTeamSettings() TeamSettings {
 		AIPreferenceUpdateInterval:      20,
 		DefaultModel:                    DefaultModel,
 		AutoDelegateEnabled:             true,
+		AutoModeEnabled:                 true,
 		PermissionAbsentGraceMS:         15000,
 		PermissionAbsentAutodenyEnabled: true,
 		BranchTemplate:                  DefaultBranchTemplate,
@@ -391,7 +486,7 @@ func NormalizeTeamGitHubGroups(groups []TeamGitHubGroup) ([]TeamGitHubGroup, err
 // TeamGitHubRepo is one row of team_github_repos — a single GitHub repo
 // (owner + name) a TF team has declared it tracks. The GitHub
 // tracking-scope twin of JiraProjectStatusRules: the per-team selection
-// that the router's team↔repo gate consults and that repo_profiles is
+// that the router's team↔repo gate consults and that repositories is
 // the org-wide UNION of. Distinct from TeamGitHubGroup, which maps
 // CODEOWNERS review-routing teams — this is tracking scope. The Owner is
 // stored as-typed for display fidelity (GitHub logins are
@@ -402,7 +497,7 @@ type TeamGitHubRepo struct {
 	Repo  string
 }
 
-// Slug returns the canonical "owner/repo" form used as the repo_profiles
+// Slug returns the canonical "owner/repo" form used as the repositories
 // id and the shape every repo-list caller passes around.
 func (r TeamGitHubRepo) Slug() string { return r.Owner + "/" + r.Repo }
 
@@ -426,7 +521,7 @@ func (r TrackedRepoTeams) Slug() string { return r.Owner + "/" + r.Repo }
 // with an empty field, and de-duplicates on (owner, repo) — the
 // canonical form persisted by ReplaceForTeam. Unlike the github-team
 // normalizer this keeps the original case (a repo slug round-trips into
-// repo_profiles.id and the GitHub clone URL verbatim), so dedup is
+// repositories.id and the GitHub clone URL verbatim), so dedup is
 // case-sensitive on the full slug. Returns an error only for a
 // half-specified entry (one field populated, the other empty) — a caller
 // bug rather than a value to silently drop. Splitting "owner/repo" slugs
@@ -437,7 +532,7 @@ func NormalizeTeamGitHubRepos(repos []TeamGitHubRepo) ([]TeamGitHubRepo, error) 
 	// Key on the case-folded "owner/repo" — GitHub owners and repo names
 	// are case-insensitive, so Acme/API and acme/api are the same repo.
 	// Storing both would double the row in team_github_repos and, via the
-	// reconcile, in repo_profiles (a double-polled repo). First-seen
+	// reconcile, in repositories (a double-polled repo). First-seen
 	// casing is kept for display.
 	seen := map[string]bool{}
 	for i, r := range repos {

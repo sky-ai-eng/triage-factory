@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import ScreenTranscript from './ScreenTranscript'
 import type { Conversation, Message } from '../../types'
 
-const run = (over: Partial<Conversation> = {}): Conversation =>
+const conversation = (over: Partial<Conversation> = {}): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -33,7 +33,7 @@ describe('ScreenTranscript system-authored rows', () => {
   it('renders a stop note as a marker, never as operator speech', () => {
     render(
       <ScreenTranscript
-        run={run()}
+        conversation={conversation()}
         messages={[
           msg({ content: 'fix the failing build' }),
           msg({
@@ -54,7 +54,7 @@ describe('ScreenTranscript system-authored rows', () => {
   it('renders the engine-written park notice the same way', () => {
     render(
       <ScreenTranscript
-        run={run()}
+        conversation={conversation()}
         messages={[
           msg({
             role: 'user',
@@ -70,7 +70,7 @@ describe('ScreenTranscript system-authored rows', () => {
   it('still renders a mid-work steer as operator speech', () => {
     render(
       <ScreenTranscript
-        run={run()}
+        conversation={conversation()}
         messages={[
           msg({ role: 'user', subtype: 'injection:steer', content: 'also check the tests' }),
         ]}
@@ -85,15 +85,19 @@ describe('ScreenTranscript system-authored rows', () => {
 // verdict block has nothing to render. This is the display half of that
 // contract.
 describe('ScreenTranscript verdict', () => {
-  it('renders no verdict for a settled run with no summary', () => {
-    render(<ScreenTranscript run={run({ Status: 'open' })} messages={[]} />)
+  it('renders no verdict for a settled conversation with no summary', () => {
+    render(<ScreenTranscript conversation={conversation({ Status: 'open' })} messages={[]} />)
     expect(screen.queryByText('IDLE')).not.toBeInTheDocument()
   })
 
-  it('renders the verdict when a run actually concluded with one', () => {
+  it('renders the verdict when a conversation actually concluded with one', () => {
     render(
       <ScreenTranscript
-        run={run({ Status: 'completed', Outcome: 'finish', ResultSummary: 'Opened a PR.' })}
+        conversation={conversation({
+          Status: 'completed',
+          Outcome: 'finish',
+          ResultSummary: 'Opened a PR.',
+        })}
         messages={[]}
       />,
     )

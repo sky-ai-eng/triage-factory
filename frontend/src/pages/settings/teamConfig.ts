@@ -5,14 +5,14 @@
 // no surface grows its own parallel persistence path.
 //
 // Key difference from org: team config spans MULTIPLE endpoints, not the
-// single POST /api/settings/org. The team-settings + Jira rules ride one
-// POST; tracked repos and GitHub-team mappings each have their own PUT.
-// saveTeamConfig sequences all three and surfaces partial failure (so the
-// user never silently lands on a half-saved team), while the per-slice
-// savers let a surface that only touched one slice (e.g. Settings'
-// change-aware save) write just that one.
+// single org-settings PATCH. The team settings row has its own PATCH; the
+// Jira project rules, the tracked repos and the GitHub-team mappings are each
+// a child collection with its own replace-set PUT. saveTeamConfig sequences
+// all four and surfaces partial failure (so the user never silently lands on a
+// half-saved team), while the per-slice savers let a surface that only touched
+// one slice (e.g. Settings' change-aware save) write just that one.
 
-import { readError } from '../../lib/api'
+import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
 import type { SlackChannelsResponse } from '../../types'
@@ -43,6 +43,9 @@ export interface GitHubGroup {
 export interface TeamConfigForm {
   default_model: string
   auto_delegate_enabled: boolean
+  // Claude Code SDK permission posture. Exposed only on the local Settings
+  // page; multi mode is always auto and native conversations ignore it.
+  auto_mode_enabled: boolean
   // Branch-name template suggested (not enforced) to delegated agents when they
   // create a branch (TFAC-498). The `<ticket-id>` literal is replaced with the
   // ticket id at run time. Same key on the GET and POST wire.
@@ -77,7 +80,7 @@ export interface TeamConfigForm {
   github_groups?: GitHubGroup[]
 }
 
-// TeamSettingsData mirrors the GET /api/settings/team/{id} response.
+// TeamSettingsData mirrors the GET /api/teams/{id}/settings response.
 // MemberCount + Role describe the caller's relationship to the team so the
 // frontend can collapse to the flat N=1 layout and gate write-side fields
 // without a second round trip.
@@ -88,6 +91,7 @@ export interface TeamSettingsData {
     AIPreferenceUpdateInterval: number
     DefaultModel: string
     AutoDelegateEnabled: boolean
+    AutoModeEnabled: boolean
     BranchTemplate: string
     ReviewPosture: string
     BaseBranchPushPolicy: string
@@ -105,13 +109,13 @@ export interface TeamSettingsData {
   permission_absent_grace_max_seconds?: number
 }
 
-// TeamReposData mirrors GET /api/settings/team/{id}/repos.
+// TeamReposData mirrors GET /api/teams/{id}/github-repos.
 export interface TeamReposData {
   repos: string[]
   role: string
 }
 
-// TeamGitHubGroupsData mirrors GET /api/settings/team/{id}/github-groups —
+// TeamGitHubGroupsData mirrors GET /api/teams/{id}/github-groups —
 // the saved mappings plus the live org-wide candidate list the checklist
 // renders.
 export interface TeamGitHubGroupsData {
@@ -160,6 +164,7 @@ export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: bo
 export const emptyTeamConfig = (): TeamConfigForm => ({
   default_model: 'sonnet',
   auto_delegate_enabled: true,
+  auto_mode_enabled: true,
   branch_template: 'tfac/<ticket-id>',
   review_posture: 'identity',
   base_branch_push_policy: 'never',
@@ -179,6 +184,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
     default_model: data.team_settings.DefaultModel || 'sonnet',
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
+    auto_mode_enabled: data.team_settings.AutoModeEnabled ?? true,
     branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',
     review_posture: data.team_settings.ReviewPosture || 'identity',
     base_branch_push_policy: data.team_settings.BaseBranchPushPolicy || 'never',
@@ -194,11 +200,13 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   }
 }
 
-const teamPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}`
+// The team resource. Its settings row and its three child collections — the
+// Jira project rules, the tracked GitHub repos, the GitHub-team mappings — all
+// hang off it.
+const teamPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}`
 
 export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsData | null> {
-  const res = await fetch(teamPath(teamId))
-  return res.ok ? ((await res.json()) as TeamSettingsData) : null
+  return apiJSON<TeamSettingsData>(`${teamPath(teamId)}/settings`).catch(() => null)
 }
 
 // fetchTeamRepos returns the team's tracked-repo slugs, or null on failure.
@@ -206,10 +214,9 @@ export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsDat
 // from this must not treat a failed load as "tracks nothing" and then write
 // [] back, wiping the team's repos (the Repos page guards the same way).
 export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
-  const res = await fetch(`${teamPath(teamId)}/repos`)
-  if (!res.ok) return null
-  const data = (await res.json()) as TeamReposData
-  return data.repos ?? []
+  return apiJSON<TeamReposData>(`${teamPath(teamId)}/github-repos`)
+    .then((data) => data.repos ?? [])
+    .catch(() => null)
 }
 
 // fetchTeamGitHubGroups returns just the team's saved GitHub-team mappings (no
@@ -219,79 +226,111 @@ export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
 // as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
 // also re-triggers the server's deletion reconcile, same as the group's fetch.)
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
-  const res = await fetch(`${teamPath(teamId)}/github-groups`)
-  if (!res.ok) return null
-  const data = (await res.json()) as TeamGitHubGroupsData
-  return data.groups ?? []
+  return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
+    .then((data) => data.groups ?? [])
+    .catch(() => null)
 }
 
 export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
 
-// saveTeamSettings persists the team-settings + Jira-rules slice via POST
-// /api/settings/team/{id}. Empty-keyed projects are dropped (a blank row the
-// user added but never filled). `warning` carries the backend's model-cap
+// saveTeamSettings persists the team settings row via
+// PATCH /api/teams/{id}/settings. `warning` carries the backend's model-cap
 // clamp notice on an otherwise-successful save.
-export async function saveTeamSettings(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
-  const projects = form.jira_projects
-    .map((p) => ({ ...p, key: p.key.trim() }))
-    .filter((p) => p.key !== '')
-  const res = await fetch(teamPath(teamId), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      ai_model: form.default_model,
-      ai_auto_delegate_enabled: form.auto_delegate_enabled,
-      branch_template: form.branch_template,
-      review_posture: form.review_posture,
-      base_branch_push_policy: form.base_branch_push_policy,
-      ai_reprioritize_threshold: form.ai_reprioritize_threshold,
-      ai_preference_update_interval: form.ai_preference_update_interval,
-      permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
-      permission_absent_grace_seconds: form.permission_absent_grace_seconds,
-      jira_projects: projects,
-    }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save team settings') }
+//
+// Every field is sent because every field is edited somewhere on this form and
+// the caller passes the whole live form; a surface that edits one field can
+// still send only that key, since absent means keep. The Jira project rules are
+// NOT part of this body — they have their own replace-set write below.
+export async function saveTeamSettings(
+  teamId: string,
+  form: TeamConfigForm,
+  isLocal: boolean,
+): Promise<SaveResult> {
+  try {
+    const body = await apiJSON<{ warning?: string } | null>(`${teamPath(teamId)}/settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ai_model: form.default_model,
+        ai_auto_delegate_enabled: form.auto_delegate_enabled,
+        // Multi mode always uses auto and must not grow a hidden
+        // setup/settings write for this local-only field.
+        ...(isLocal ? { auto_mode_enabled: form.auto_mode_enabled } : {}),
+        branch_template: form.branch_template,
+        review_posture: form.review_posture,
+        base_branch_push_policy: form.base_branch_push_policy,
+        ai_reprioritize_threshold: form.ai_reprioritize_threshold,
+        ai_preference_update_interval: form.ai_preference_update_interval,
+        permission_absent_autodeny_enabled: form.permission_absent_autodeny_enabled,
+        permission_absent_grace_seconds: form.permission_absent_grace_seconds,
+      }),
+    })
+    return { ok: true, warning: body?.warning }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the team settings.') }
   }
-  const body = (await res.json().catch(() => null)) as { warning?: string } | null
-  return { ok: true, warning: body?.warning }
 }
 
-// saveTeamRepos persists the tracked-repo set via PUT /api/settings/team/
-// {id}/repos. Re-PUTting the same set re-triggers profiling, so callers that
-// save unconditionally (vs. only-on-change) should be aware.
-export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
-  const res = await fetch(`${teamPath(teamId)}/repos`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ repos }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save repositories') }
+// saveTeamJiraProjects persists the tracked Jira projects + their status rules
+// via PUT /api/teams/{id}/jira-projects — a full replace-set, like the repos
+// and github-groups siblings. Empty-keyed projects are dropped first (a blank
+// row the user added but never filled).
+export async function saveTeamJiraProjects(
+  teamId: string,
+  projects: JiraProjectConfig[],
+): Promise<SaveResult> {
+  const jira_projects = projects
+    .map((p) => ({ ...p, key: p.key.trim() }))
+    .filter((p) => p.key !== '')
+  try {
+    await apiFetch(`${teamPath(teamId)}/jira-projects`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jira_projects }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Jira projects.') }
   }
-  return { ok: true }
+}
+
+// saveTeamRepos persists the tracked-repo set via
+// PUT /api/teams/{id}/github-repos. Re-PUTting the same set re-triggers
+// profiling, so callers that save unconditionally (vs. only-on-change) should
+// be aware.
+export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
+  try {
+    await apiFetch(`${teamPath(teamId)}/github-repos`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repos }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the repositories.') }
+  }
 }
 
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
-// /api/settings/team/{id}/github-groups (a full replace-set).
+// /api/teams/{id}/github-groups (a full replace-set).
 export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
 ): Promise<SaveResult> {
-  const res = await fetch(`${teamPath(teamId)}/github-groups`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ groups }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save GitHub teams') }
+  try {
+    await apiFetch(`${teamPath(teamId)}/github-groups`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the GitHub teams.') }
   }
-  return { ok: true }
 }
 
 // slackChannelsPath is the ee/slack channel-tracking route — deliberately
-// under /api/slack/* rather than teamPath()'s /api/settings/team/... (see
+// under /api/slack/* rather than teamPath()'s /api/teams/... (see
 // ee/slack/channels_handler.go's package doc: ee-owned routes stay in the
 // slack namespace).
 const slackChannelsPath = (teamId: string) =>
@@ -305,8 +344,7 @@ const slackChannelsPath = (teamId: string) =>
 export async function fetchTeamSlackChannels(
   teamId: string,
 ): Promise<SlackChannelsResponse | null> {
-  const res = await fetch(slackChannelsPath(teamId))
-  return res.ok ? ((await res.json()) as SlackChannelsResponse) : null
+  return apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId)).catch(() => null)
 }
 
 export type SlackSaveResult =
@@ -321,15 +359,16 @@ export async function saveTeamSlackChannels(
   teamId: string,
   channelIds: string[],
 ): Promise<SlackSaveResult> {
-  const res = await fetch(slackChannelsPath(teamId), {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ channel_ids: channelIds }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to save Slack channels') }
+  try {
+    const data = await apiJSON<SlackChannelsResponse>(slackChannelsPath(teamId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channel_ids: channelIds }),
+    })
+    return { ok: true, data }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Slack channels.') }
   }
-  return { ok: true, data: (await res.json()) as SlackChannelsResponse }
 }
 
 // reassignSlackChannelPrimary makes teamId the primary tracker of channelId
@@ -338,15 +377,16 @@ export async function reassignSlackChannelPrimary(
   channelId: string,
   teamId: string,
 ): Promise<SaveResult> {
-  const res = await fetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ team_id: teamId }),
-  })
-  if (!res.ok) {
-    return { ok: false, error: await readError(res, 'Failed to reassign the primary team') }
+  try {
+    await apiFetch(`/api/slack/channels/${encodeURIComponent(channelId)}/primary`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ team_id: teamId }),
+    })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not reassign the primary team.') }
   }
-  return { ok: true }
 }
 
 // partialFailure builds a "<saved> saved, but <failed> did not — <err>"
@@ -361,21 +401,31 @@ function partialFailure(saved: string[], failed: string, err: string): string {
 }
 
 // saveTeamConfig orchestrates the team save across the endpoints, the
-// create-step's "Finish" path. Order is deliberate: team settings first
-// (pure server-side validation — project rules, dup keys — with no external
-// calls, so a bad rule fails before the repos PUT does any reachability work
-// or profiling), then repos, then GitHub-team mappings.
+// create-step's "Finish" path. Order is deliberate: team settings and the Jira
+// rules first (pure server-side validation — project rules, dup keys — with no
+// external calls, so a bad rule fails before the repos PUT does any
+// reachability work or profiling), then repos, then GitHub-team mappings.
 //
 // A slice left `undefined` (never loaded / load failed) is skipped, not
 // written — that's the no-wipe guarantee. On a mid-sequence failure the
 // earlier writes are already committed (separate endpoints, no spanning
 // transaction), so the error names exactly which slices landed.
-export async function saveTeamConfig(teamId: string, form: TeamConfigForm): Promise<SaveResult> {
+export async function saveTeamConfig(
+  teamId: string,
+  form: TeamConfigForm,
+  isLocal: boolean,
+): Promise<SaveResult> {
   const saved: string[] = []
 
-  const settings = await saveTeamSettings(teamId, form)
+  const settings = await saveTeamSettings(teamId, form, isLocal)
   if (!settings.ok) return settings
   saved.push('Team settings')
+
+  const projects = await saveTeamJiraProjects(teamId, form.jira_projects)
+  if (!projects.ok) {
+    return { ok: false, error: partialFailure(saved, 'Jira projects', projects.error) }
+  }
+  saved.push('Jira projects')
 
   if (form.repos !== undefined) {
     const repos = await saveTeamRepos(teamId, form.repos)

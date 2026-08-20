@@ -1,0 +1,151 @@
+import { useCallback, useRef, useState } from 'react'
+import { apiList, httpErrorMessage, HttpError } from '../lib/apiClient'
+import type { ListPage, ListRequest } from '../lib/apiClient'
+
+/** What a paged list surface gets back from the hook.
+ *
+ *  `items` accumulates: `load` replaces it with the first page, `loadMore`
+ *  appends the next one. `total` is what the filters match, so a caller can
+ *  render "12 of 213" without counting anything itself. */
+export interface PagedListOptions {
+  /** HTTP statuses that mean "you have nothing here", not "the read failed".
+   *  A list behind an admin gate answers 403 to a viewer whose role changed
+   *  mid-session; rendering that as an empty panel is honest, while an error
+   *  line alarms about a surface they are simply no longer entitled to. */
+  emptyOnStatus?: number[]
+}
+
+export interface PagedList<T> {
+  items: T[]
+  /** What the filters match across every page, so a caller can render
+   *  "12 of 213" without counting anything itself — or `null` on a proxy list,
+   *  whose upstream reports no total. Render "12" there, not "12 of 0". */
+  total: number | null
+  /** True while a load or loadMore is in flight. */
+  loading: boolean
+  /** The last failure's user-facing message, or '' — the items are left
+   *  untouched on a failure, so a surface can keep painting the stale page
+   *  while it shows this. */
+  error: string
+  /** True when the server minted a token for a further page. */
+  hasMore: boolean
+  /** Fetch the first page for `filters`, replacing whatever is held. Resolves
+   *  to the page, or null if the request failed. */
+  load: (filters: ListRequest) => Promise<ListPage<T> | null>
+  /** Fetch the next page and append it. A no-op when there is no next page or
+   *  a request is already in flight. */
+  loadMore: () => Promise<void>
+  /** Apply a local edit to the held items — an optimistic removal right after
+   *  a gesture, before the next load reconciles. It does not touch `total`:
+   *  the server's count is the server's to correct. */
+  setItems: (update: (prev: T[]) => T[]) => void
+}
+
+/** usePagedList is the one place page tokens are threaded, for every
+ *  `POST /api/<resource>/list` surface.
+ *
+ *  It deliberately does not fetch on mount or on a filter change: which reads
+ *  happen when is the page's business (the board fires five columns at once
+ *  and enriches the result; the triage deck refetches after a swipe), and a
+ *  hook that owned that schedule would need every caller to memoize a body
+ *  object just to avoid a fetch loop. `load` and `loadMore` are stable across
+ *  renders, so they are safe to call from an effect or a ref.
+ *
+ *  The filters passed to `load` are remembered and reused for `loadMore`, so a
+ *  page token never crosses a filter change — the server rejects a token
+ *  minted for a different filter set, and this is what keeps a caller from
+ *  ever producing one.
+ *
+ *  `fallbackError` is the message surfaced when a request fails without a
+ *  server-supplied one; write it as a whole sentence. */
+export function usePagedList<T>(
+  path: string,
+  fallbackError: string,
+  opts: PagedListOptions = {},
+): PagedList<T> {
+  const [items, setItems] = useState<T[]>([])
+  const [total, setTotal] = useState<number | null>(0)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [nextToken, setNextToken] = useState('')
+
+  // The filters the held items were fetched with, and the token that continues
+  // them. Refs rather than state: loadMore must read the latest of both
+  // without being re-created on every page, since callers hold it in effects
+  // and event handlers.
+  //
+  // The two move together, only on a successful load, and that is load-bearing:
+  // a token is valid only for the filter set the server minted it under. If a
+  // failed load left the new filters here beside the previous query's token,
+  // the next loadMore would pair them and earn a 400 — so on failure the pair
+  // stays describing the query whose items are still on screen.
+  const filtersRef = useRef<ListRequest>({})
+  const tokenRef = useRef('')
+  const inFlight = useRef(false)
+
+  const load = useCallback(
+    async (filters: ListRequest): Promise<ListPage<T> | null> => {
+      inFlight.current = true
+      setLoading(true)
+      try {
+        const page = await apiList<T>(path, filters)
+        setItems(page.items)
+        setTotal(page.total_count)
+        setNextToken(page.next_page_token)
+        filtersRef.current = filters
+        tokenRef.current = page.next_page_token
+        setError('')
+        return page
+      } catch (err) {
+        if (isEmptyStatus(err, opts.emptyOnStatus)) {
+          setItems([])
+          setTotal(0)
+          setNextToken('')
+          tokenRef.current = ''
+          setError('')
+          return null
+        }
+        // Keep the items: blanking a column on one failed poll is worse than
+        // showing a slightly stale page, and the next load reconciles.
+        setError(httpErrorMessage(err, fallbackError))
+        return null
+      } finally {
+        inFlight.current = false
+        setLoading(false)
+      }
+    },
+    [path, fallbackError, opts.emptyOnStatus],
+  )
+
+  const loadMore = useCallback(async () => {
+    if (!tokenRef.current || inFlight.current) return
+    inFlight.current = true
+    setLoading(true)
+    try {
+      const page = await apiList<T>(path, {
+        ...filtersRef.current,
+        page_token: tokenRef.current,
+      })
+      setItems((prev) => [...prev, ...page.items])
+      setTotal(page.total_count)
+      setNextToken(page.next_page_token)
+      tokenRef.current = page.next_page_token
+      setError('')
+    } catch (err) {
+      if (!isEmptyStatus(err, opts.emptyOnStatus)) {
+        setError(httpErrorMessage(err, fallbackError))
+      }
+    } finally {
+      inFlight.current = false
+      setLoading(false)
+    }
+  }, [path, fallbackError, opts.emptyOnStatus])
+
+  return { items, total, loading, error, hasMore: nextToken !== '', load, loadMore, setItems }
+}
+
+/** isEmptyStatus reports whether a failed request is one the caller declared
+ *  as "nothing to show" rather than a failure. */
+function isEmptyStatus(err: unknown, statuses: number[] | undefined): boolean {
+  return statuses !== undefined && err instanceof HttpError && statuses.includes(err.status)
+}

@@ -6,7 +6,7 @@ import { metaForKind } from './artifactMeta'
 // ArtifactRow + StateBadge, factored out of ArtifactList.tsx (TFAC-483) so the
 // bot-activity audit feed can render a provided Artifact[] with the SAME row
 // rendering — kind icon + target + state badge + link-out — without the
-// run-scoped fetch or the approval overlay. ArtifactList still owns the fetch;
+// conversation-scoped fetch or the approval overlay. ArtifactList still owns the fetch;
 // the feed renders link-out-only rows (no onOpenApproval handler).
 
 // A single artifact row. A still-ACTIONABLE pull_request / review row (a draft
@@ -25,16 +25,16 @@ export function ArtifactRow({
 }: {
   artifact: Artifact
   onOpenApproval?: (kind: 'review' | 'pr', artifactId: string) => void
-  // In-place dismiss for a row in the run's unresolved set (close the draft PR /
+  // In-place dismiss for a row in the conversation's unresolved set (close the draft PR /
   // discard the pending review without opening its editor). The owner decides
-  // which rows get it — ArtifactList gates on the run projection's authoritative
+  // which rows get it — ArtifactList gates on the conversation projection's authoritative
   // pending ids — so the audit feed and resolved rows never carry an [x].
   onDismiss?: () => void
   dismissing?: boolean
   // Optional trailing context rendered between the target and the state badge —
   // the bot-activity org feed (TFAC-483) passes the owning team chip here so a
   // cross-team row shows which team's bot acted. Undefined elsewhere (the
-  // run-scoped list), so those rows are unchanged.
+  // conversation-scoped list), so those rows are unchanged.
   note?: React.ReactNode
 }) {
   const meta = metaForKind(artifact.kind)

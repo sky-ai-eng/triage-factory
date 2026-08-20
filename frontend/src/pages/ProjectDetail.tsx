@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useParams, useNavigate, Link } from 'react-router'
 import * as Popover from '@radix-ui/react-popover'
 import {
@@ -19,11 +19,12 @@ import Markdown from 'react-markdown'
 import type {
   Project,
   ProjectVisibility,
+  RepoOption,
   KnowledgeFile,
   KnowledgeUploadResult,
   ProjectExportPreview,
 } from '../types'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, apiListAll, HttpError, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
@@ -89,22 +90,17 @@ export default function ProjectDetail() {
     async (signal: AbortSignal) => {
       if (!id) return
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { signal })
-        if (signal.aborted) return
-        if (res.status === 404) {
-          setMissing(true)
-          return
-        }
-        if (!res.ok) {
-          setLoadError(await readError(res, 'Failed to load project'))
-          return
-        }
-        const data: Project = await res.json()
+        const data = await apiJSON<Project>(`/api/projects/${encodeURIComponent(id)}`, { signal })
         if (signal.aborted) return
         setProject(data)
       } catch (err) {
         if (signal.aborted) return
-        setLoadError(`Failed to load project: ${err instanceof Error ? err.message : String(err)}`)
+        // A 404 is this project's own not-found state, not a failed read.
+        if (err instanceof HttpError && err.status === 404) {
+          setMissing(true)
+          return
+        }
+        setLoadError(httpErrorMessage(err, 'Could not load the project.'))
       } finally {
         if (!signal.aborted) setLoading(false)
       }
@@ -179,7 +175,7 @@ export default function ProjectDetail() {
       patchSeq.current += 1
       const mySeq = patchSeq.current
       try {
-        const res = await fetch(`/api/projects/${encodeURIComponent(myID)}`, {
+        const fresh = await apiJSON<Project>(`/api/projects/${encodeURIComponent(myID)}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -188,13 +184,6 @@ export default function ProjectDetail() {
         // rather than the closure's `id` — the closure captured the
         // same value as myID, so `myID === id` would always be true
         // and the guard wouldn't actually protect against navigation.
-        if (!res.ok) {
-          if (myID === currentIDRef.current) {
-            toast.error(await readError(res, 'Failed to update project'))
-          }
-          return false
-        }
-        const fresh: Project = await res.json()
         if (myID === currentIDRef.current && mySeq > lastLandedSeq.current) {
           lastLandedSeq.current = mySeq
           setProject(fresh)
@@ -202,9 +191,7 @@ export default function ProjectDetail() {
         return true
       } catch (err) {
         if (myID === currentIDRef.current) {
-          toast.error(
-            `Failed to update project: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not update the project.'))
         }
         return false
       }
@@ -216,11 +203,7 @@ export default function ProjectDetail() {
     if (!id || !project) return
     if (!confirm(`Delete project "${project.name}"? This can't be undone.`)) return
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      if (!res.ok && res.status !== 204) {
-        toast.error(await readError(res, 'Failed to delete project'))
-        return
-      }
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
       const cleanupWarning = res.headers.get('X-Cleanup-Warning')
       if (cleanupWarning) {
         toast.warning(cleanupWarning)
@@ -229,7 +212,7 @@ export default function ProjectDetail() {
       }
       navigate(orgHref('/projects'))
     } catch (err) {
-      toast.error(`Failed to delete project: ${err instanceof Error ? err.message : String(err)}`)
+      toast.error(httpErrorMessage(err, 'Could not delete the project.'))
     }
   }, [id, project, navigate, orgHref])
 
@@ -344,7 +327,7 @@ export default function ProjectDetail() {
             project={project}
             onPatchName={(name) => patch({ name })}
             onPatchDescription={(description) => patch({ description })}
-            onPatchPinnedRepos={(pinned_repos) => patch({ pinned_repos })}
+            onPatchPinnedRepos={(ids) => patch({ pinned_repository_ids: ids })}
           />
 
           <VisibilityPanel project={project} onPatch={patch} />
@@ -387,7 +370,7 @@ function ProjectHeader({
   project: Project
   onPatchName: (name: string) => Promise<boolean | undefined>
   onPatchDescription: (description: string) => Promise<boolean | undefined>
-  onPatchPinnedRepos: (pinned: string[]) => Promise<boolean | undefined>
+  onPatchPinnedRepos: (repositoryIDs: string[]) => Promise<boolean | undefined>
 }) {
   const [editingName, setEditingName] = useState(false)
   const [editingDesc, setEditingDesc] = useState(false)
@@ -545,7 +528,7 @@ function ProjectHeader({
       <div className="mt-4">
         {project.team_id ? (
           <PinnedReposInline
-            pinned={project.pinned_repos}
+            pinned={project.pinned_repository_ids}
             teamId={project.team_id}
             onChange={onPatchPinnedRepos}
             jiraKey={project.jira_project_key}
@@ -570,6 +553,12 @@ function ProjectHeader({
 // remove the pin (auto-saved), and a trailing "+" button opens a
 // popover that lists remaining configured repos to add.
 //
+// It holds repository ids throughout — `pinned`, `local`, and everything
+// the PATCH sends — and reads a name only to put one on a chip. That is
+// what makes a rename mid-session harmless: the ids the page is holding
+// go on addressing the same repositories, and the names refresh on the
+// next load.
+//
 // The tracker chips render inline but aren't editable here — that's
 // the IntegrationsPanel's job. Co-locating them visually keeps the
 // "this project is X plus these things" narrative tight.
@@ -580,6 +569,7 @@ function PinnedReposInline({
   jiraKey,
   linearKey,
 }: {
+  /** Registry row ids — see Project.pinned_repository_ids. */
   pinned: string[]
   teamId: string
   onChange: (next: string[]) => Promise<boolean | undefined>
@@ -587,7 +577,7 @@ function PinnedReposInline({
   linearKey: string
 }) {
   const orgHref = useOrgHref()
-  const [available, setAvailable] = useState<string[]>([])
+  const [available, setAvailable] = useState<RepoOption[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [adderOpen, setAdderOpen] = useState(false)
@@ -618,14 +608,17 @@ function PinnedReposInline({
     }
   }, [pinned])
 
-  // loadRepos populates `available` from the project's OWN team's
-  // tracked repos — the same set the PATCH validator accepts. Sourcing
-  // the org-wide /api/repos union instead would offer sibling-team repos
-  // this project's team doesn't track, so adding one would 400. Tracks
-  // loadError separately so a transient failure surfaces as a "couldn't
-  // load — try again" hint in the popover instead of the misleading "No
-  // repos configured" empty state, which would route the user to a setup
-  // page they may have already completed.
+  // loadRepos populates `available` with the project's OWN team's tracked
+  // repos — the same set the PATCH validator accepts — carrying the id to
+  // submit and the name to show. It takes both reads because the two facts
+  // live apart: tracking is name-shaped (it is the edge that mints a
+  // registry row), and the registry is what carries the ids. Offering the
+  // registry alone would include sibling teams' repos this project's team
+  // doesn't track, so adding one would 400. Tracks loadError separately so
+  // a transient failure surfaces as a "couldn't load — try again" hint in
+  // the popover instead of the misleading "No repos configured" empty
+  // state, which would route the user to a setup page they may have
+  // already completed.
   const loadRepos = useCallback(
     async (signal: AbortSignal) => {
       setLoadError(null)
@@ -633,7 +626,7 @@ function PinnedReposInline({
       // visibility project has no team) — the caller (ProjectHeader) only
       // mounts this component when project.team_id is set, so this guard
       // is unreachable in practice. It stays as defense in depth: fetching
-      // `/api/settings/team//repos` would 404 and bury the real cause
+      // `/api/teams//github-repos` would 404 and bury the real cause
       // behind a generic load error if that invariant is ever violated.
       if (!teamId) {
         setLoadError('This project has no team — pinned repos are unavailable.')
@@ -641,20 +634,22 @@ function PinnedReposInline({
         return
       }
       try {
-        const res = await fetch(`/api/settings/team/${teamId}/repos`, { signal })
+        const [team, registry] = await Promise.all([
+          apiJSON<{ repos?: string[] }>(`/api/teams/${teamId}/github-repos`, { signal }),
+          apiListAll<RepoOption>('/api/repos/list', {}, { signal }),
+        ])
         if (signal.aborted) return
-        if (!res.ok) {
-          const message = await readError(res, 'load repos')
-          setLoadError(message)
-          toast.error(message)
-          return
-        }
-        const data: { repos?: string[] } = await res.json()
-        if (signal.aborted) return
-        setAvailable(data.repos ?? [])
+        // Fold both sides: GitHub names are case-insensitive and the two
+        // tables can hold different casings of one repository.
+        const tracked = new Set((team.repos ?? []).map((slug) => slug.toLowerCase()))
+        setAvailable(
+          registry
+            .filter((r) => tracked.has(r.slug.toLowerCase()))
+            .sort((a, b) => a.slug.localeCompare(b.slug)),
+        )
       } catch (err) {
         if (signal.aborted) return
-        const message = err instanceof Error ? err.message : 'Failed to load repos'
+        const message = httpErrorMessage(err, 'Could not load the tracked repos.')
         setLoadError(message)
         toast.error(message)
       } finally {
@@ -700,13 +695,13 @@ function PinnedReposInline({
     }
   }
 
-  const remove = (slug: string) => {
-    applyChange(local.filter((s) => s !== slug))
+  const remove = (id: string) => {
+    applyChange(local.filter((pinnedID) => pinnedID !== id))
   }
 
-  const add = (slug: string) => {
-    if (local.includes(slug)) return
-    applyChange([...local, slug].sort())
+  const add = (id: string) => {
+    if (local.includes(id)) return
+    applyChange([...local, id])
     // Close the picker optimistically — the PATCH may still be
     // in flight, but the user's intent ("add this") is captured
     // in pendingTarget and the chip already shows in `local`.
@@ -714,18 +709,36 @@ function PinnedReposInline({
     setSearch('')
   }
 
+  // Chips read their name out of the offered set. An id with no entry is a
+  // repo the team stopped tracking since it was pinned: it still renders,
+  // so the user can see and remove it, labelled with the id because that
+  // is the only thing about it this component knows.
+  const nameByID = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of available) m.set(r.id, r.slug)
+    return m
+  }, [available])
+  // Sorted by what the user reads, not by the opaque id.
+  const chips = useMemo(
+    () =>
+      local
+        .map((id) => ({ id, slug: nameByID.get(id) ?? id }))
+        .sort((a, b) => a.slug.localeCompare(b.slug)),
+    [local, nameByID],
+  )
+
   const addable = available.filter(
-    (slug) =>
-      !local.includes(slug) &&
-      (!search.trim() || slug.toLowerCase().includes(search.trim().toLowerCase())),
+    (r) =>
+      !local.includes(r.id) &&
+      (!search.trim() || r.slug.toLowerCase().includes(search.trim().toLowerCase())),
   )
 
   return (
     <div className="flex flex-wrap items-center gap-1.5">
       {jiraKey && <Chip label={`Jira: ${jiraKey}`} tone="accent" />}
       {linearKey && <Chip label={`Linear: ${linearKey}`} tone="accent" />}
-      {local.map((slug) => (
-        <RepoChip key={slug} slug={slug} onRemove={() => remove(slug)} />
+      {chips.map((r) => (
+        <RepoChip key={r.id} slug={r.slug} onRemove={() => remove(r.id)} />
       ))}
       <Popover.Root open={adderOpen} onOpenChange={setAdderOpen}>
         <Popover.Trigger asChild>
@@ -799,18 +812,18 @@ function PinnedReposInline({
                     : 'No matches.'}
                 </div>
               ) : (
-                addable.map((slug) => (
+                addable.map((r) => (
                   <button
-                    key={slug}
+                    key={r.id}
                     type="button"
-                    onClick={() => add(slug)}
+                    onClick={() => add(r.id)}
                     className="
                       w-full text-left px-2 py-1.5 rounded-md
                       text-ui text-ink-1
                       hover:bg-tint-3 transition-colors
                     "
                   >
-                    {slug}
+                    {r.slug}
                   </button>
                 ))
               )}
@@ -1073,20 +1086,14 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     refreshSeq.current += 1
     const mySeq = refreshSeq.current
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`)
-      if (mySeq !== refreshSeq.current) return
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to load knowledge base'))
-        return
-      }
-      const data: KnowledgeFile[] = await res.json()
+      const data = await apiJSON<KnowledgeFile[]>(
+        `/api/projects/${encodeURIComponent(projectId)}/knowledge`,
+      )
       if (mySeq !== refreshSeq.current) return
       setFiles(data)
     } catch (err) {
       if (mySeq !== refreshSeq.current) return
-      toast.error(
-        `Failed to load knowledge base: ${err instanceof Error ? err.message : String(err)}`,
-      )
+      toast.error(httpErrorMessage(err, 'Could not load the knowledge base.'))
     }
   }, [projectId])
 
@@ -1137,15 +1144,10 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
       try {
         const form = new FormData()
         for (const f of arr) form.append('file', f)
-        const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/knowledge`, {
-          method: 'POST',
-          body: form,
-        })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Upload failed'))
-          return
-        }
-        const data: { results: KnowledgeUploadResult[] } = await res.json()
+        const data = await apiJSON<{ results: KnowledgeUploadResult[] }>(
+          `/api/projects/${encodeURIComponent(projectId)}/knowledge`,
+          { method: 'POST', body: form },
+        )
         const ok = data.results.filter((r) => !r.error)
         const failed = data.results.filter((r) => r.error)
         if (ok.length > 0) {
@@ -1160,7 +1162,7 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
         }
         await refreshFiles()
       } catch (err) {
-        toast.error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not upload the files.'))
       } finally {
         uploadInflight.current -= 1
         if (uploadInflight.current === 0) setUploading(false)
@@ -1173,18 +1175,14 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     async (file: KnowledgeFile) => {
       if (!confirm(`Remove ${file.path} from the knowledge base?`)) return
       try {
-        const res = await fetch(
+        await apiFetch(
           `/api/projects/${encodeURIComponent(projectId)}/knowledge/${encodeURIComponent(file.path)}`,
           { method: 'DELETE' },
         )
-        if (!res.ok && res.status !== 204) {
-          toast.error(await readError(res, 'Failed to remove file'))
-          return
-        }
         setFiles((prev) => prev.filter((f) => f.path !== file.path))
         if (expanded === file.path) setExpanded(null)
       } catch (err) {
-        toast.error(`Failed to remove file: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not remove the file.'))
       }
     },
     [projectId, expanded],
@@ -1316,19 +1314,13 @@ function ProjectExportModal({
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/projects/${encodeURIComponent(projectId)}/export/preview`)
-      .then(async (res) => {
-        if (!res.ok) {
-          throw new Error(await readError(res, 'Failed to load export preview'))
-        }
-        return (await res.json()) as ProjectExportPreview
-      })
+    apiJSON<ProjectExportPreview>(`/api/projects/${encodeURIComponent(projectId)}/export/preview`)
       .then((data) => {
         if (!cancelled) setPreview(data)
       })
       .catch((err: unknown) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the export preview.'))
         }
       })
       .finally(() => {
@@ -1343,11 +1335,7 @@ function ProjectExportModal({
     setExporting(true)
     setError(null)
     try {
-      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/export`)
-      if (!res.ok) {
-        setError(await readError(res, 'Export failed'))
-        return
-      }
+      const res = await apiFetch(`/api/projects/${encodeURIComponent(projectId)}/export`)
       const blob = await res.blob()
       const fallback = `${projectName || 'project'}.tfproject`
       const filename = extractFilename(res.headers.get('Content-Disposition')) || fallback
@@ -1362,7 +1350,7 @@ function ProjectExportModal({
       toast.success(`Exported "${projectName}"`)
       onClose()
     } catch (err) {
-      setError(`Export failed: ${err instanceof Error ? err.message : String(err)}`)
+      setError(httpErrorMessage(err, 'Could not export the project.'))
     } finally {
       setExporting(false)
     }
@@ -1546,20 +1534,16 @@ function KnowledgeRow({
   useEffect(() => {
     if (!needsLazyFetch) return
     let cancelled = false
-    fetch(rawURL)
-      .then((r) => {
-        if (!r.ok) {
-          throw new Error(`Failed to load file preview (${r.status})`)
-        }
-        return r.text()
-      })
+    // The knowledge endpoint serves the file's own bytes, not JSON — apiFetch
+    // and .text(), not apiJSON.
+    apiFetch(rawURL)
+      .then((r) => r.text())
       .then((text) => {
         if (!cancelled) setLazyContent(text)
       })
       .catch((error: unknown) => {
         if (cancelled) return
-        const msg = error instanceof Error ? error.message : 'Failed to load file preview.'
-        toast.error(msg)
+        toast.error(httpErrorMessage(error, 'Could not load the file preview.'))
         setLazyContent('Failed to load file preview.')
       })
     return () => {

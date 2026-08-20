@@ -14,16 +14,16 @@ import (
 )
 
 // CreateForBranch sets up a worktree on a new feature branch based off
-// a given base, at the run's default location runDir(runID). If
+// a given base, at the run's default location runDir(rootKey). If
 // baseBranch is empty, the repo's default branch is detected from
 // origin/HEAD. Used by the eager GitHub PR delegation path where the
 // run has exactly one repo.
-func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID string, opts ...CloneOption) (string, error) {
-	wtDir, err := makeWorktreeDir(runID)
+func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey string, opts ...CloneOption) (string, error) {
+	wtDir, err := makeWorktreeDir(rootKey)
 	if err != nil {
 		return "", err
 	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, resolveCloneOptions(opts).auth)
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, resolveCloneOptions(opts).auth)
 }
 
 // CreateForBranchInRoot is the lazy-Jira-delegation variant: the worktree
@@ -41,7 +41,7 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 // prescribed-feature-branch variant — exercised by curator_test — for a future
 // caller that needs a named branch checked out up front rather than a detached
 // checkout the agent branches from itself.
-func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, runRoot string) (string, error) {
+func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
 	}
@@ -54,26 +54,30 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	// concern, not the host-side clone path. The shared body is already
 	// auth-capable, so a credential can be threaded through when it wires
 	// the in-sandbox path.
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir, CloneAuth{})
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, CloneAuth{})
 }
 
 // CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
 // worktree-subdir name for a default/--ref checkout. It MUST be a single
 // filesystem-safe path segment that is injective over valid refs (distinct refs
-// → distinct slugs) and disjoint from the reserved "pr-<N>" and "@default"
+// → distinct slugs) and disjoint from the reserved "pr-<N>" and "default"
 // forms. Otherwise one run would treat two different `workspace add --ref`
 // targets — or a branch literally named "pr-42" and PR #42 — as the same
 // worktree: the idempotent re-add hands back the wrong checkout, and the
 // detached worktree the agent branches/pushes from is the wrong one.
 //
-//   - ""         → "@default"      ("@" is disallowed in a validated --ref, so
-//     the default form can't collide with a branch)
+//   - ""         → "default"       (the selector "no ref named → the repo's
+//     default branch"; a plain word, chosen NOT to look like a git revision —
+//     the slug lands in every agent-visible path, and a ref-shaped name there
+//     reads as "the agent is working on the default branch", which a detached
+//     checkout precisely is not)
 //   - "<branch>" → "ref-<branch>"  with every '/' replaced by '~'
 //
 // Two properties make this collision-free:
 //
-//   - The "ref-" namespace keeps branch slugs disjoint from "pr-<N>" (a "ref-"
-//     slug never starts with "pr-") and "@default".
+//   - Every branch slug carries the "ref-" prefix and every PR slug the "pr-"
+//     prefix, so the bare word "default" collides with neither — a branch
+//     literally named "default" slugs to "ref-default".
 //   - A validated --ref's alphabet is [A-Za-z0-9._/-] (see validateGitRef), so
 //     '/' is the only path-unsafe byte AND '~' can never appear literally in the
 //     input. Replacing only '/' → '~' is therefore injective: "feature/foo" →
@@ -86,7 +90,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 // slug CreateForCheckoutInRoot lands the worktree at.
 func CheckoutRefSlug(ref string) string {
 	if ref == "" {
-		return "@default"
+		return "default"
 	}
 	return "ref-" + strings.ReplaceAll(ref, "/", "~")
 }
@@ -94,7 +98,7 @@ func CheckoutRefSlug(ref string) string {
 // CreateForCheckoutInRoot materializes a worktree at filepath.Join(runRoot,
 // owner, repo, ref-slug) checked out — in DETACHED HEAD — at the fresh tip of
 // an existing branch on origin. When ref is empty the repo's default branch is
-// detected and used (slug "@default"). This is the generalized `workspace add`
+// detected and used (slug "default"). This is the generalized `workspace add`
 // / `workspace add --ref <branch>` path (TFAC-498): unlike CreateForBranchInRoot
 // it does NOT mint a prescribed feature branch — it hands back a checkout of the
 // named branch as-is and lets the agent create its own working branch (`git
@@ -118,7 +122,7 @@ func CheckoutRefSlug(ref string) string {
 // multi mode materializes a SELF-CONTAINED clone — the run root is bind-mounted
 // into a sandbox that can't see the shared bare, so a worktree's .git pointer
 // would dangle there (mirrors CreateForPR's mode split).
-func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, runID, runRoot string, opts ...CloneOption) (string, error) {
+func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
 	}
@@ -136,9 +140,9 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ru
 	}
 	auth := resolveCloneOptions(opts).auth
 	if runmode.Current() == runmode.ModeMulti {
-		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 	}
-	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, runID, wtDir, auth)
+	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 }
 
 // checkoutRefPattern restricts a checkout ref to a conservative refname
@@ -186,7 +190,7 @@ func ValidateCheckoutRef(ref string) error {
 // per-repo lock, bare-clone reuse, and exclude-or-rollback with the other
 // Create* helpers; differs in that it never creates or reattaches a local
 // branch — the checkout is detached.
-func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -223,7 +227,7 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 		return "", fmt.Errorf("worktree add (detached %s): %w", ref, err)
 	}
 
-	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
 		return "", err
 	}
 
@@ -242,9 +246,9 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 // The clone ends DETACHED at the fetched tip, preserving the checkout-path
 // invariant: no live branch → the push gate authorizes nothing until the agent
 // creates its own branch. git can only clone a local branch, so a transient
-// run-namespaced branch (triagefactory/<runID>/checkout) carries the tip
+// run-namespaced branch (triagefactory/<rootKey>/checkout) carries the tip
 // through the clone and is deleted from both the clone and the bare afterwards.
-func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runID, wtDir string, auth CloneAuth) (string, error) {
+func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -274,7 +278,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 	// concurrent runs sharing this bare never collide on it. -f overwrites a
 	// stray leftover from a crashed prior create (nothing checks it out — the
 	// clone below copies it and both copies are deleted before the lock drops).
-	tmpBranch := fmt.Sprintf("triagefactory/%s/checkout", runID)
+	tmpBranch := fmt.Sprintf("triagefactory/%s/checkout", rootKey)
 	if err := gitRunCtx(ctx, bareDir, "branch", "-f", tmpBranch, remoteRef); err != nil {
 		return "", fmt.Errorf("stage checkout branch %s: %w", tmpBranch, err)
 	}
@@ -322,7 +326,7 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, runI
 // symbolically points at), or "" when HEAD is detached, the path isn't a git
 // worktree, or HEAD can't be read. The push gate (internal/delegate) uses this
 // to authorize "whatever branch the checkout is currently on" rather than a
-// prescribed conversation_worktrees.FeatureBranch: a detached HEAD — the state a fresh
+// branch prescribed when the worktree was reserved: a detached HEAD — the state a fresh
 // default / --ref `workspace add` lands in — yields "" so no push is authorized
 // until the agent creates its own branch.
 //
@@ -411,7 +415,7 @@ func worktreeGitPaths(root string) (gitDir, commonDir string, ok bool) {
 // This is what the push-authorization gate (internal/delegate) must compare
 // receive-pack commands against: the command block carries the REMOTE ref, and
 // for a PR worktree that differs from the local checkout by construction — the
-// checkout is the run-namespaced triagefactory/<runID>/pr-<n> while
+// checkout is the run-namespaced triagefactory/<rootKey>/pr-<n> while
 // configurePRPushTracking maps it to the PR's real head branch. Authorizing the
 // local name (the old CurrentBranch rule) both broke every PR push (the pushed
 // head ref was never in the allowlist) and authorized a stray run-namespaced
@@ -544,7 +548,7 @@ func gitConfigReadEnv() []string {
 // variants — bare-clone setup, base-branch fetch, `git worktree add`
 // (with branchExists reattach), and exclude-or-rollback. The two
 // public callers differ only in where wtDir lives on disk.
-func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runID, wtDir string, auth CloneAuth) (string, error) {
+func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -592,7 +596,7 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 		}
 	}
 
-	if err := addExcludesOrRollback(runID, wtDir); err != nil {
+	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
 		return "", err
 	}
 	plantSandboxSkillsLink(wtDir)
@@ -607,9 +611,9 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 // it before returning. Without rollback the caller sees an error but
 // has no handle to clean up with, leaking a half-configured worktree
 // and its bare-repo registration.
-func addExcludesOrRollback(runID, wtDir string) error {
+func addExcludesOrRollback(rootKey, wtDir string) error {
 	if err := writeLocalExcludes(wtDir); err != nil {
-		if rmErr := RemoveAt(wtDir, runID); rmErr != nil {
+		if rmErr := RemoveAt(wtDir, rootKey); rmErr != nil {
 			worktreeLog.Warn("rollback after exclude-write failure", "error", rmErr)
 		}
 		return fmt.Errorf("write local git excludes: %w", err)
@@ -629,6 +633,15 @@ func addExcludesOrRollback(runID, wtDir string) error {
 // a collision there means TF writing over, or deleting, tracked content that
 // then rides the agent's next commit.
 const ScratchDir = "_tfac"
+
+// CILogsDir is the subdirectory of ScratchDir that `exec gh actions
+// download-logs` extracts a workflow run's log archive into, one <run_id>
+// subtree per run. It is named here rather than at either use site because two
+// packages have to agree on it: the exec verb writes that tree, and the
+// workspace snapshot skips it as re-downloadable rather than carrying a log
+// archive in the blob. A rename that reached only one of them would silently
+// put GBs of logs back in every snapshot.
+const CILogsDir = "ci-logs"
 
 // legacyScratchDir is what ScratchDir was called before. It survives in two
 // places on purpose: the managed exclude list, so a tree built by an older

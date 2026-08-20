@@ -3,7 +3,13 @@
 // further writes — no "let it finish" branch. Restore flips it back (killed runs
 // do NOT resurrect). Org-admin only, multi-mode only.
 
-import { readError } from './api'
+import { apiFetch, apiJSON, apiList, httpErrorMessage } from './apiClient'
+
+// asError keeps a raw HttpError (message = the whole response body) out of the
+// confirm modal, which renders `err.message` directly.
+function asError(e: unknown, fallback: string): Error {
+  return new Error(httpErrorMessage(e, fallback))
+}
 
 // ArchivePreview is GET /api/teams/{id}/archive/preview — the live-work counts
 // the confirm modal surfaces before the destructive action.
@@ -22,7 +28,7 @@ export interface ArchiveResult {
   cancelled_curator_sessions: number
 }
 
-// ArchivedTeam is one entry of GET /api/teams/archived — the org-admin restore
+// ArchivedTeam is one row of POST /api/teams/archived/list — the org-admin restore
 // surface.
 export interface ArchivedTeam {
   id: string
@@ -32,33 +38,38 @@ export interface ArchivedTeam {
 }
 
 export async function fetchArchivePreview(teamId: string): Promise<ArchivePreview> {
-  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/archive/preview`, {
-    credentials: 'include',
-  })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load archive preview'))
-  return (await res.json()) as ArchivePreview
+  try {
+    return await apiJSON<ArchivePreview>(`/api/teams/${encodeURIComponent(teamId)}/archive/preview`)
+  } catch (e) {
+    throw asError(e, 'Could not load the archive preview.')
+  }
 }
 
 export async function archiveTeam(teamId: string): Promise<ArchiveResult> {
-  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/archive`, {
-    method: 'POST',
-    credentials: 'include',
-  })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to archive team'))
-  return (await res.json()) as ArchiveResult
+  try {
+    return await apiJSON<ArchiveResult>(`/api/teams/${encodeURIComponent(teamId)}/archive`, {
+      method: 'POST',
+    })
+  } catch (e) {
+    throw asError(e, 'Could not archive the team.')
+  }
 }
 
 export async function restoreTeam(teamId: string): Promise<void> {
-  const res = await fetch(`/api/teams/${encodeURIComponent(teamId)}/restore`, {
-    method: 'POST',
-    credentials: 'include',
-  })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to restore team'))
+  try {
+    await apiFetch(`/api/teams/${encodeURIComponent(teamId)}/restore`, { method: 'POST' })
+  } catch (e) {
+    throw asError(e, 'Could not restore the team.')
+  }
 }
 
 export async function fetchArchivedTeams(): Promise<ArchivedTeam[]> {
-  const res = await fetch('/api/teams/archived', { credentials: 'include' })
-  if (!res.ok) throw new Error(await readError(res, 'Failed to load archived teams'))
-  const data = (await res.json()) as { teams?: ArchivedTeam[] }
-  return data.teams ?? []
+  try {
+    // page_size at the route max: the restore surface renders the whole
+    // archived set, which is bounded by how many teams an org ever had.
+    const page = await apiList<ArchivedTeam>('/api/teams/archived/list', { page_size: 200 })
+    return page.items
+  } catch (e) {
+    throw asError(e, 'Could not load the archived teams.')
+  }
 }

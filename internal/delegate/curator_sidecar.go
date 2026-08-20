@@ -34,7 +34,7 @@ import (
 // not Close a nil return.
 //
 // pinnedRepos is the turn's authorized GitHub set ("owner/repo"): it gates the
-// sidecar's git proxy (pinned ∩ tracked) and, carried on RunInfo/AgentHostInfo,
+// sidecar's git proxy (pinned ∩ tracked) and, carried on ConversationInfo/AgentHostInfo,
 // authorizes the agent's exec-gh verbs against the same set. userID is the
 // requesting user; teamID the curated project's owning team.
 func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (*runSidecar, error) {
@@ -42,7 +42,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 		return nil, nil
 	}
 	// Not wired (a test fixture) — degrade like every other nil-store seam here.
-	if s.runCredentials == nil || s.curatorStore == nil {
+	if s.claimCredentials == nil || s.curatorStore == nil {
 		return nil, nil
 	}
 
@@ -57,17 +57,17 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 	if err != nil {
 		return nil, fmt.Errorf("set up curator turn network: %w", err)
 	}
-	sc, err := sandbox.LaunchSidecar(ctx, sandbox.SidecarConfig{RunID: conversationID, SubnetIdx: net.Idx})
+	sc, err := sandbox.LaunchSidecar(ctx, sandbox.SidecarConfig{ConversationID: conversationID, SubnetIdx: net.Idx})
 	if err != nil {
 		_ = net.Close()
 		return nil, fmt.Errorf("launch curator credential sidecar: %w", err)
 	}
 
 	stores, storesSet := s.getStores()
-	info := agenthost.RunInfo{
+	info := agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           userID,
-		RunID:            conversationID,
+		ConversationID:   conversationID,
 		TeamID:           teamID,
 		IsEventTriggered: false,
 		PinnedRepos:      pinnedRepos,
@@ -125,7 +125,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 			OrgID:          info.OrgID,
 			UserID:         info.UserID,
 			TeamID:         info.TeamID,
-			RunID:          info.RunID,
+			ConversationID: info.ConversationID,
 			EventTriggered: info.IsEventTriggered,
 			PinnedRepos:    info.PinnedRepos,
 		},
@@ -147,7 +147,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 		auditHost.SetGitHubCredential(res.GitHubCredential)
 	}
 
-	es := &runSidecar{runID: conversationID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
+	es := &runSidecar{conversationID: conversationID, net: net, proc: sc, conn: conn, res: res, stopRelay: make(chan struct{})}
 	// Same mid-flight refresh relay as a delegated run: the brain re-mints and
 	// re-seals the turn's short-lived credentials into claim_credentials
 	// (keyed by the conversation's active claim), and this goroutine relays
@@ -158,7 +158,7 @@ func (s *Spawner) BringUpCuratorSidecar(ctx context.Context, orgID, conversation
 	// worktrees are seeded ahead of the turn), so nothing here widens the repo
 	// set out of band and the periodic tick is the whole contract.
 	go s.relayCredentialRefreshes(conversationID, func(ctx context.Context) (int64, []byte, bool, error) {
-		b, ok, err := s.runCredentials.Get(ctx, orgID, conversationID)
+		b, ok, err := s.claimCredentials.Get(ctx, orgID, conversationID)
 		return b.BootEpoch, b.Sealed, ok, err
 	}, myBootEpoch, conn, nil, es.stopRelay)
 	return es, nil
@@ -183,7 +183,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		for {
-			b, ok, err := s.runCredentials.Get(provCtx, orgID, conversationID)
+			b, ok, err := s.claimCredentials.Get(provCtx, orgID, conversationID)
 			if err != nil {
 				dispatchLog.Warn("read curator turn credential bundle failed; retrying", "conversation", conversationID, "error", err)
 			} else if ok && b.BootEpoch == myBootEpoch {
@@ -202,7 +202,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 				// costs is bounded by what the phase is for — one re-seal by
 				// the backstop sweep, on a turn a successor is provisioning
 				// anyway.
-				if err := s.agentRuns.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
+				if _, err := s.conversations.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
 					dispatchLog.Warn("clear curator turn awaiting-credentials phase failed",
 						"conversation", conversationID, "error", err)
 				}
@@ -227,7 +227,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 // pinned worktrees are read-only, so no push transits). No TokenSource — the
 // sidecar resolves the real token from its own unsealed bundle. nil when the
 // resolver is unwired.
-func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.RunInfo, stores db.Stores, pinnedRepos []string, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
+func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.ConversationInfo, stores db.Stores, pinnedRepos []string, auditHost *agenthost.LocalClient) *agentproc.GitProxyConfig {
 	s.mu.Lock()
 	resolver := s.ghResolver
 	s.mu.Unlock()
@@ -264,7 +264,7 @@ func (s *Spawner) executorCuratorGitGate(ctx context.Context, info agenthost.Run
 // untracked repo is an admin problem (repo-not-tracked) whether or not it was
 // pinned, and only a tracked-but-unpinned repo is the curator-specific
 // "not attached to this project" (repo-not-attached).
-func curatorGitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.RunInfo, pinnedRepos []string, owner, repo string) (gitproxy.Decision, error) {
+func curatorGitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, pinnedRepos []string, owner, repo string) (gitproxy.Decision, error) {
 	if stores.TeamGitHubRepos == nil {
 		return gitproxy.Decision{Allowed: false}, nil
 	}

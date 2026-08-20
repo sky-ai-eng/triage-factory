@@ -87,14 +87,14 @@ describe('InviteModal', () => {
   })
 
   it('surfaces the 409 already-pending conflict inline', async () => {
-    const create = vi
-      .fn()
-      .mockRejectedValue(
-        new HttpError(
-          409,
-          JSON.stringify({ error: 'an invite for that email is already pending' }),
-        ),
-      )
+    const create = vi.fn().mockRejectedValue(
+      new HttpError(
+        409,
+        JSON.stringify({
+          errors: [{ reason: 'CONFLICT', message: 'an invite for that email is already pending' }],
+        }),
+      ),
+    )
     render(<InviteModal create={create} onClose={vi.fn()} />)
 
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'dupe@example.com' } })

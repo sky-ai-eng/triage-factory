@@ -9,7 +9,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +21,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -32,15 +32,59 @@ import (
 // dir cleanup; the Curator runtime, classifier, and UI all land in
 // later tickets and can hit the same handlers without changes here.
 
+// writeKnowledgePathError shapes resolveKnowledgePath's (status, message)
+// pair: a client-side path fault names the path segment it came from, a
+// server-side resolution failure is a plain 500. The message is already
+// generic — resolveKnowledgePath logs the underlying error, which can carry
+// filesystem layout, and only returns text safe to hand back.
+func writeKnowledgePathError(w http.ResponseWriter, status int, msg string) {
+	if status == http.StatusBadRequest {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidParam, Message: msg, Field: "path",
+		})
+		return
+	}
+	httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: httpx.ReasonInternal, Message: msg})
+}
+
+// writeNotARegularFile answers a knowledge path that resolved to something
+// this endpoint will not stream — a symlink, a directory, a device node.
+func writeNotARegularFile(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason: httpx.ReasonInvalidParam, Message: "not a regular file", Field: "path",
+	})
+}
+
+// writeInvalidVisibility answers the one enum both create and PATCH validate.
+func writeInvalidVisibility(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidField,
+		Message: "visibility must be one of private, team, org",
+		Field:   "visibility",
+	})
+}
+
+// projectIDOr404 guards the {id} path value on every project-scoped route —
+// projects.id is a uuid column on Postgres. See uuidPathOr404. Shared with the
+// curator and knowledge surfaces, which address projects the same way.
+func projectIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
+	return uuidPathOr404(w, r, "id", "project")
+}
+
 // createProjectRequest is the POST body shape. Most fields are
 // optional — a project starts as an empty shell named by the user
 // and gets filled in over time (description, pinned repos, summary).
 type createProjectRequest struct {
-	Name             string   `json:"name"`
-	Description      string   `json:"description"`
-	PinnedRepos      []string `json:"pinned_repos"`
-	JiraProjectKey   string   `json:"jira_project_key"`
-	LinearProjectKey string   `json:"linear_project_key"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// PinnedRepositoryIDs is the pinned set as registry row ids. The field is
+	// named for what it holds rather than reusing the old `pinned_repos`: an
+	// element's meaning changed, and strict decoding turning an old-shaped
+	// body into a loud 400 is the point — the alternative is a body full of
+	// names being accepted and every one of them failing to resolve.
+	PinnedRepositoryIDs []string `json:"pinned_repository_ids"`
+	JiraProjectKey      string   `json:"jira_project_key"`
+	LinearProjectKey    string   `json:"linear_project_key"`
 	// TeamID is the acting team the write picker supplied — the team the
 	// new project (and its pinned-repo / tracker-key validation) is
 	// scoped to. Required in the UI when the caller belongs to ≥2 teams;
@@ -55,13 +99,14 @@ type createProjectRequest struct {
 }
 
 // patchProjectRequest is the PATCH body shape. Pointers distinguish
-// "absent → leave unchanged" from "explicit → overwrite". PinnedRepos
-// uses *[]string so a client can clear it with [] without colliding
-// with the absent case.
+// "absent → leave unchanged" from "explicit → overwrite".
+// PinnedRepositoryIDs uses *[]string so a client can clear it with []
+// without colliding with the absent case.
 type patchProjectRequest struct {
-	Name                      *string   `json:"name"`
-	Description               *string   `json:"description"`
-	PinnedRepos               *[]string `json:"pinned_repos"`
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	// Registry row ids — see createProjectRequest.PinnedRepositoryIDs.
+	PinnedRepositoryIDs       *[]string `json:"pinned_repository_ids"`
 	JiraProjectKey            *string   `json:"jira_project_key"`
 	LinearProjectKey          *string   `json:"linear_project_key"`
 	SpecAuthorshipBlueprintID *string   `json:"spec_authorship_blueprint_id"`
@@ -87,12 +132,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 	var req createProjectRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	jiraKey := strings.TrimSpace(req.JiraProjectKey)
@@ -103,7 +150,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		visibility = domain.ProjectVisibilityTeam
 	}
 	if !domain.ValidProjectVisibility(visibility) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+		writeInvalidVisibility(w)
 		return
 	}
 	// Multi-mode-only feature (TFAC-562): local's N=1 tenancy has no
@@ -131,9 +178,10 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		pinned           []string
 		pinnedErrMsg     string
 		trackerErrMsg    string
+		trackerErrField  string
 		visibilityErrMsg string
 		teamJiraRules    []domain.JiraProjectStatusRules
-		created          *domain.Project
+		created          *projectJSON
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -148,7 +196,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			if e != nil {
 				return e
 			}
-		} else if len(req.PinnedRepos) > 0 || jiraKey != "" || linearKey != "" {
+		} else if len(req.PinnedRepositoryIDs) > 0 || jiraKey != "" || linearKey != "" {
 			// private/org projects have no team to validate these
 			// against in v1 — they start as a bare shell (name +
 			// description + knowledge base); pinning resources requires
@@ -156,7 +204,14 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			visibilityErrMsg = "pinned repos and tracker projects require team visibility"
 			return nil
 		}
-		pinned, pinnedErrMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, teamID, req.PinnedRepos)
+		var pinnedErr error
+		pinned, pinnedErrMsg, pinnedErr = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, teamID, req.PinnedRepositoryIDs)
+		if pinnedErr != nil {
+			// A store fault, not a verdict on the body — out through the
+			// error path so it lands as a 500, never as "your pins are
+			// invalid".
+			return fmt.Errorf("validate pinned repos: %w", pinnedErr)
+		}
 		if pinnedErrMsg != "" {
 			return nil // surfaced as 400 below; nothing written
 		}
@@ -167,7 +222,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if jiraKey != "" || linearKey != "" {
-			jiraKey, linearKey, trackerErrMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
+			jiraKey, linearKey, trackerErrField, trackerErrMsg = validateTrackerKeys(teamJiraRules, jiraKey, linearKey)
 			if trackerErrMsg != "" {
 				return nil // surfaced as 400 below; nothing written
 			}
@@ -191,7 +246,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 				specBlueprintID = def.ID
 			}
 		}
-		id, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
+		row, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
 			Name:                      name,
 			Description:               req.Description,
 			PinnedRepos:               pinned,
@@ -203,22 +258,29 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		if createErr != nil {
 			return createErr
 		}
-		var getErr error
-		created, getErr = tx.Projects.Get(r.Context(), orgID, id)
-		return getErr
+		rendered, renderErr := projectToJSON(r.Context(), tx.Repos, orgID, row, nil)
+		if renderErr != nil {
+			return renderErr
+		}
+		created = &rendered
+		return nil
 	}); err != nil {
 		// teamscope.ErrNoTeam gets a project-flavored message (mentioning the
 		// private/org escape hatch) ahead of WriteIfSelectionError's generic
 		// one; ErrRequired/ErrForbidden fall through to that generic 400.
 		if errors.Is(err, teamscope.ErrNoTeam) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "join a team to create a team-visibility project, or choose private/org visibility"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "join a team to create a team-visibility project, or choose private/org visibility",
+				Field:   "visibility",
+			})
 			return
 		}
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
 		if errors.Is(err, db.ErrVisibilityForbidden) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to create a project with that visibility"})
+			forbidden(w, "you don't have permission to create a project with that visibility")
 			return
 		}
 		projectsLog.Error("create failed", "error", err)
@@ -226,36 +288,70 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if visibilityErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": visibilityErrMsg})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: visibilityErrMsg, Field: "visibility",
+		})
 		return
 	}
 	if pinnedErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": pinnedErrMsg})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: pinnedErrMsg, Field: pinnedRepoIDsField,
+		})
 		return
 	}
-	if trackerErrMsg != "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": trackerErrMsg})
+	if trackerErrField != "" {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: trackerErrMsg, Field: trackerErrField,
+		})
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// projectListRequest is the body of POST /api/projects/list. The resource is
+// "the projects I can see", which RLS decides; the body carries no filters.
+type projectListRequest struct {
+	httpx.PageRequest
+}
+
+// POST /api/projects/list
 func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	var projects []domain.Project
+
+	var req projectListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		projects []projectJSON
+		total    int
+	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		projects, e = tx.Projects.List(r.Context(), orgID)
+		rows, count, e := tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		if e != nil {
+			return e
+		}
+		total = count
+		// Rendered inside the read's own transaction: the pin ids come from
+		// the same registry the pin names were joined out of, so the two
+		// halves of one row cannot be read a rename apart.
+		projects, e = projectsToJSON(r.Context(), tx.Repos, orgID, rows)
 		return e
 	}); err != nil {
 		internalError(w, "projects", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	httpx.WriteList(w, page, projects, total)
 }
 
 func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
@@ -264,12 +360,22 @@ func (s *Server) handleProjectGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
-	var project *domain.Project
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
+	var project *projectJSON
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		project, e = tx.Projects.Get(r.Context(), orgID, id)
-		return e
+		row, e := tx.Projects.Get(r.Context(), orgID, id)
+		if e != nil || row == nil {
+			return e
+		}
+		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
+		if e != nil {
+			return e
+		}
+		project = &rendered
+		return nil
 	}); err != nil {
 		internalError(w, "projects", err)
 		return
@@ -318,7 +424,10 @@ func (s *Server) handleProjectExportPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	preview, err := projectbundle.Preview(r.Context(), s.tx, s.kb, orgID, userID, id)
 	if err != nil {
 		if errors.Is(err, projectbundle.ErrProjectNotFound) {
@@ -337,7 +446,10 @@ func (s *Server) handleProjectExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -376,7 +488,9 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, projectBundleMaxUploadBytes)
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "multipart parse: " + err.Error(),
+		})
 		return
 	}
 	defer func() {
@@ -387,18 +501,24 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 
 	file, _, err := r.FormFile("bundle")
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bundle file is required (form field 'bundle')"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "bundle file is required (form field 'bundle')", Field: "bundle",
+		})
 		return
 	}
 	defer file.Close()
 
 	size, err := file.Seek(0, io.SeekEnd)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to determine bundle size"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "failed to determine bundle size", Field: "bundle",
+		})
 		return
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to rewind bundle"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "failed to rewind bundle", Field: "bundle",
+		})
 		return
 	}
 
@@ -438,31 +558,60 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var dupNameErr *projectbundle.DuplicateNameError
 		if errors.As(err, &dupNameErr) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":   "duplicate_name",
-				"message": "rename or delete the existing project first",
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonDuplicateName,
+				Message: dupNameErr.Error() + " — rename or delete the existing project first",
 			})
 			return
 		}
 		var missingReposErr *projectbundle.MissingReposError
 		if errors.As(err, &missingReposErr) {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":         "missing_repos",
-				"missing_repos": missingReposErr.Missing,
-			})
+			// One item per unreachable repo, each carrying the probe's own
+			// reason: the envelope reports every failure, so the uploader
+			// sees the whole list instead of the first name.
+			items := make([]httpx.ErrorItem, 0, len(missingReposErr.Missing))
+			for _, m := range missingReposErr.Missing {
+				items = append(items, httpx.ErrorItem{
+					Reason:  httpx.ReasonNotFound,
+					Message: "pinned repo " + m.Repo + " is unreachable with this workspace's GitHub credentials: " + m.Error,
+					Field:   "pinned_repos",
+				})
+			}
+			httpx.WriteErrors(w, http.StatusConflict, items...)
 			return
 		}
-		var unsupported *projectbundle.UnsupportedFormatError
-		if errors.As(err, &unsupported) || errors.Is(err, projectbundle.ErrManifestMissing) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		if errors.Is(err, projectbundle.ErrPermissionDenied) {
+			// Visible resource, refused action: adding to the team's tracked
+			// set is an admin write. Surfaced as a 500 before this.
+			forbidden(w, err.Error())
+			return
+		}
+		if projectbundle.IsClientFault(err) {
+			// Malformed zip, unparseable manifest, an entry past the
+			// extraction budget, a path that escapes the tree: all properties
+			// of the uploaded file, all previously answered 500.
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidBody, Message: err.Error(), Field: "bundle",
+			})
 			return
 		}
 		internalError(w, "projects", err)
 		return
 	}
 
+	// The import returns the domain row; the response carries the same wire
+	// shape every other project read does, pins included as registry ids.
+	var rendered projectJSON
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		rendered, e = projectToJSON(r.Context(), tx.Repos, orgID, *project, nil)
+		return e
+	}); err != nil {
+		internalError(w, "projects", fmt.Errorf("render imported project %s: %w", project.ID, err))
+		return
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"project":  project,
+		"project":  rendered,
 		"warnings": warnings,
 	})
 }
@@ -500,9 +649,12 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var req patchProjectRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -540,7 +692,9 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Name != nil {
 		trimmed := strings.TrimSpace(*req.Name)
 		if trimmed == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name cannot be empty"})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: "name cannot be empty", Field: "name",
+			})
 			return
 		}
 		updated.Name = trimmed
@@ -548,7 +702,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Description != nil {
 		updated.Description = *req.Description
 	}
-	if req.PinnedRepos != nil {
+	if req.PinnedRepositoryIDs != nil {
 		// Validate against the project's OWN team, not the org default — a
 		// non-default-team project's pins must be tracked by that team.
 		// existing.TeamID is populated by Projects.Get; the store preserves
@@ -556,22 +710,29 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// private/org-visibility project has no team), not a malformed row —
 		// pinned repos just aren't available for one in v1.
 		if existing.TeamID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "this project has no team — pinned repos aren't available for a private/org visibility project",
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "this project has no team — pinned repos aren't available for a private/org visibility project",
+				Field:   pinnedRepoIDsField,
 			})
 			return
 		}
 		var pinned []string
 		var errMsg string
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			pinned, errMsg = validatePinnedRepos(r.Context(), tx.TeamGitHubRepos, existing.TeamID, *req.PinnedRepos)
-			return nil
+			var e error
+			pinned, errMsg, e = validatePinnedRepos(r.Context(), tx.Repos, tx.TeamGitHubRepos, orgID, existing.TeamID, *req.PinnedRepositoryIDs)
+			return e
 		}); err != nil {
+			// A store fault reaches here; a rejection travels in errMsg and is
+			// answered as a 400 just below.
 			internalError(w, "projects", err)
 			return
 		}
 		if errMsg != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: pinnedRepoIDsField,
+			})
 			return
 		}
 		updated.PinnedRepos = pinned
@@ -603,8 +764,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// since TFAC-562 (a private/org-visibility project has no
 			// team) — a tracker key just isn't available for one in v1.
 			if existing.TeamID == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": "this project has no team — a tracker project key isn't available for a private/org visibility project",
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "this project has no team — a tracker project key isn't available for a private/org visibility project",
+					Field:   "jira_project_key",
 				})
 				return
 			}
@@ -614,13 +777,14 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 				teamRules, rerr = tx.JiraStatusRules.ListForTeam(r.Context(), existing.TeamID)
 				return rerr
 			}); err != nil {
-				projectsLog.Error("patch: jira rules load failed", "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load Jira rules"})
+				internalError(w, "projects", fmt.Errorf("load jira rules for project %s: %w", existing.ID, err))
 				return
 			}
-			jiraKey, _, errMsg := validateTrackerKeys(teamRules, *req.JiraProjectKey, "")
+			jiraKey, _, errField, errMsg := validateTrackerKeys(teamRules, *req.JiraProjectKey, "")
 			if errMsg != "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason: httpx.ReasonInvalidField, Message: errMsg, Field: errField,
+				})
 				return
 			}
 			updated.JiraProjectKey = jiraKey
@@ -632,9 +796,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// explicit. When the Linear integration ships, this branch will
 		// need its own rule lookup — but only when the input is
 		// non-empty, mirroring the Jira pattern above.
-		_, linearKey, errMsg := validateTrackerKeys(nil, "", *req.LinearProjectKey)
+		_, linearKey, errField, errMsg := validateTrackerKeys(nil, "", *req.LinearProjectKey)
 		if errMsg != "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": errMsg})
+			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+				Reason: httpx.ReasonInvalidField, Message: errMsg, Field: errField,
+			})
 			return
 		}
 		updated.LinearProjectKey = linearKey
@@ -655,19 +821,24 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			// project has no team) — a blueprint override just isn't
 			// available for one in v1.
 			if existing.TeamID == "" {
-				writeJSON(w, http.StatusBadRequest, map[string]string{
-					"error": "this project has no team — a spec-authorship blueprint override isn't available for a private/org visibility project",
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "this project has no team — a spec-authorship blueprint override isn't available for a private/org visibility project",
+					Field:   "spec_authorship_blueprint_id",
 				})
 				return
 			}
 			var visible []domain.Blueprint
 			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 				var e error
-				visible, e = tx.Blueprints.List(r.Context(), orgID, existing.TeamID)
+				// Unwindowed (ListOpts zero Limit): this is a membership
+				// check over the team's blueprints, not a browse, and a page
+				// would make "is this blueprint in my team" depend on where it
+				// sorted.
+				visible, _, e = tx.Blueprints.List(r.Context(), orgID, db.BlueprintListFilter{TeamID: existing.TeamID}, db.Unwindowed)
 				return e
 			}); err != nil {
-				projectsLog.Error("patch: blueprint list failed", "project", existing.ID, "error", err)
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "load blueprint" + localDetail(err)})
+				internalError(w, "projects", fmt.Errorf("list blueprints for project %s: %w", existing.ID, err))
 				return
 			}
 			found := false
@@ -680,7 +851,11 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 			if !found {
 				// Same 400 for "unknown" and "other team's" — don't leak the
 				// existence of another team's blueprint by id.
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "spec_authorship_blueprint_id references unknown blueprint"})
+				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+					Reason:  httpx.ReasonInvalidField,
+					Message: "spec_authorship_blueprint_id references unknown blueprint",
+					Field:   "spec_authorship_blueprint_id",
+				})
 				return
 			}
 		}
@@ -689,7 +864,7 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Visibility != nil {
 		v := strings.TrimSpace(*req.Visibility)
 		if !domain.ValidProjectVisibility(v) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "visibility must be one of private, team, org"})
+			writeInvalidVisibility(w)
 			return
 		}
 		// Multi-mode-only (TFAC-562) — mirrors the create-path guard.
@@ -703,17 +878,26 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// created private/org with no team can't become team-visibility
 		// without recreating it. existing.TeamID never changes here (no
 		// PATCH field sets it), so this only fires for that teamless case.
-		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "this project has no team — team visibility isn't available for it",
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "this project has no team — team visibility isn't available for it",
+			Field:   "visibility",
 		})
 		return
 	}
 
+	var stored domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Projects.Update(r.Context(), orgID, updated)
+		var e error
+		stored, e = tx.Projects.Update(r.Context(), orgID, updated)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrVisibilityForbidden) {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "you don't have permission to change this project to that visibility"})
+			forbidden(w, "you don't have permission to change this project to that visibility")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			notFound(w, "project")
 			return
 		}
 		internalError(w, "projects", err)
@@ -730,14 +914,20 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// the worst case is the agent missing one delta on its next turn (which
 	// a follow-up PATCH or the user's next message itself can correct).
 	queuePendingContextChanges(r.Context(), s.curatorStore, orgID, *existing, updated)
-	var fresh *domain.Project
+	// Rendered from the row the write returned, not from `updated` — the merged
+	// struct is missing everything the statement decided (the restamped
+	// updated_at, the reconciled pin set) — and not from a second read, which
+	// could answer for a row that moved after the write.
+	var fresh *projectJSON
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		fresh, e = tx.Projects.Get(r.Context(), orgID, id)
-		return e
+		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, stored, nil)
+		if e != nil {
+			return e
+		}
+		fresh = &rendered
+		return nil
 	}); err != nil {
-		projectsLog.Error("patch: read-back after update failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "updated but read-back failed" + localDetail(err)})
+		internalError(w, "projects", fmt.Errorf("render project %s after update: %w", id, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)
@@ -749,7 +939,10 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Take the same per-project lock that PATCH uses. Without this,
 	// an in-flight autosave (holding the lock, mid read-merge-write)
@@ -893,78 +1086,174 @@ func splitOwnerRepo(slug string) (owner, repo string, ok bool) {
 	return "", "", false
 }
 
-// validatePinnedRepoShape checks the "owner/repo" slug format and
-// returns the normalized (trimmed) slice. Pure — does not touch the
-// DB — so it stays cheap to test in isolation and stays usable in
-// any future code path that just needs to canonicalize slug input.
+// pinnedRepoIDsField is the body field every pinned-repo fault is attributed
+// to. Named once so the create and PATCH arms cannot disagree about it.
+const pinnedRepoIDsField = "pinned_repository_ids"
+
+// validatePinnedRepoShape checks that each pinned entry is a non-empty
+// repository id and returns the normalized (trimmed) slice. Pure — does not
+// touch the DB — so it stays cheap to test in isolation.
 //
-// The trim-then-persist step matters: without it, " owner/repo "
-// would pass validation (the validator trims internally) but get
-// stored padded, breaking subsequent lookups by slug.
+// The trim-then-resolve step matters: an id with surrounding whitespace would
+// otherwise reach the lookup verbatim and miss, reporting "not a repository in
+// this workspace" for a repository that is one.
+//
+// Deliberately no format check beyond non-empty. A registry id is an opaque
+// handle this server minted, and the only question worth asking about one is
+// whether a row answers to it — which validatePinnedRepos asks next. A
+// shape rule here would be a second, weaker copy of that answer.
 //
 // Returns (normalized, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepoShape(repos []string) ([]string, string) {
-	out := make([]string, len(repos))
-	for i, r := range repos {
+func validatePinnedRepoShape(repoIDs []string) ([]string, string) {
+	out := make([]string, len(repoIDs))
+	for i, r := range repoIDs {
 		trimmed := strings.TrimSpace(r)
 		if trimmed == "" {
-			return nil, "pinned_repos[" + strconv.Itoa(i) + "] is empty"
-		}
-		// Require exactly one '/' with non-empty owner and repo.
-		// Anything else (no slash, leading/trailing slash, multiple
-		// slashes) is rejected — the slug shape is "owner/repo".
-		parts := strings.Split(trimmed, "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			return nil, "pinned_repos[" + strconv.Itoa(i) + "] must be 'owner/repo'"
+			return nil, pinnedRepoIDsField + "[" + strconv.Itoa(i) + "] is empty"
 		}
 		out[i] = trimmed
 	}
 	return out, ""
 }
 
-// validatePinnedRepos composes shape validation with the must-be-tracked
-// existence check: every slug must be a repo the project's *team* tracks
-// (team_github_repos). Repos are per-team, so pinning is
-// gated on the team's set rather than the org-wide union — a repo another
-// team tracks (and that therefore exists in the shared repo_profiles
-// cache) is still rejected here if the project's own team doesn't track
-// it. This pins the UX contract — the frontend presents pinned_repos as a
-// multi-select over the team's tracked repos, so an untracked slug
-// arriving here is a stale client or a hand-crafted curl. Rejecting it up
-// front keeps the Curator from later trying to materialize a worktree for
-// a repo the team can't authenticate against.
+// validatePinnedRepos resolves the wire's repository ids and composes that
+// with the must-be-tracked check: every id must name a registry row, and that
+// row must be a repo the project's *team* tracks (team_github_repos). Repos
+// are per-team, so pinning is gated on the team's set rather than the org-wide
+// union — a repo another team tracks (and that therefore has a row in the
+// shared registry) is still rejected here if the project's own team doesn't
+// track it. This pins the UX contract — the frontend presents the pin picker
+// as a multi-select over the team's tracked repos, so an untracked id arriving
+// here is a stale client or a hand-crafted curl. Rejecting it up front keeps
+// the Curator from later trying to materialize a worktree for a repo the team
+// can't authenticate against.
 //
-// Runs under the caller's claims (team_github_repos_select RLS), so it
-// must be invoked inside a WithTx for the requesting user. Returns
-// (normalized, "") on success and (nil, errMsg) on failure.
-func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore, teamID string, slugs []string) ([]string, string) {
-	out, errMsg := validatePinnedRepoShape(slugs)
+// It returns what the store persists: each pin as the provider's current name
+// (see domain.Project.PinnedRepos). The translation lives here, at the edge,
+// and nowhere else.
+//
+// Runs under the caller's claims (repositories + team_github_repos_select
+// RLS), so it must be invoked inside a WithTx for the requesting user.
+//
+// The two failure kinds are returned separately and are not interchangeable.
+// errMsg is a REJECTION — a statement about the body, safe to put in a 400 and
+// show a user. err is a store fault: the request cannot be judged at all, so
+// the caller must 500 rather than tell the client its input was invalid. They
+// were one return value before, which made a store outage answer "that is not
+// a repository in this workspace" with a driver string appended.
+func validatePinnedRepos(ctx context.Context, repos db.RepositoryStore, teamRepos db.TeamGitHubReposStore, orgID, teamID string, repoIDs []string) (names []string, errMsg string, err error) {
+	ids, errMsg := validatePinnedRepoShape(repoIDs)
 	if errMsg != "" {
-		return nil, errMsg
+		return nil, errMsg, nil
 	}
-	if len(out) == 0 {
-		return out, ""
+	if len(ids) == 0 {
+		return []string{}, "", nil
 	}
 
 	tracked, err := teamRepos.ListForTeam(ctx, teamID)
 	if err != nil {
-		return nil, "failed to load tracked repos: " + err.Error()
+		return nil, "", fmt.Errorf("list tracked repos for team %s: %w", teamID, err)
 	}
 	// Key both sides case-insensitively: GitHub owner/repo names are
 	// case-insensitive and the rest of the codebase folds case (TracksRepoSystem,
-	// newlyAddedRepos, the reconcile). A repo re-saved into team_github_repos
-	// with different capitalization than the incoming pin is the same repo,
-	// so an exact-string match would wrongly reject an otherwise-valid pin.
+	// newlyAddedRepos, the registry's own identity index). A repo re-saved into
+	// team_github_repos with different capitalization than the registry row's
+	// is the same repo, so an exact-string match would wrongly reject an
+	// otherwise-valid pin.
 	known := make(map[string]struct{}, len(tracked))
 	for _, t := range tracked {
 		known[strings.ToLower(t.Slug())] = struct{}{}
 	}
-	for _, slug := range out {
-		if _, ok := known[strings.ToLower(slug)]; !ok {
-			return nil, "pinned_repos: " + slug + " is not a repo this team tracks (add it on the GitHub config page first)"
+
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		row, err := repos.Get(ctx, orgID, id)
+		if errors.Is(err, db.ErrNoSuchRepository) {
+			// The id is the caller's to get right, so this is a rejection and
+			// not a server fault. It reports the id back rather than a name,
+			// because a name is not what was sent.
+			return nil, pinnedRepoIDsField + ": " + id + " is not a repository in this workspace", nil
 		}
+		if err != nil {
+			// Anything else is the store failing, not the id being wrong.
+			return nil, "", fmt.Errorf("read repository %s: %w", id, err)
+		}
+		if _, ok := known[strings.ToLower(row.Slug())]; !ok {
+			return nil, pinnedRepoIDsField + ": " + row.Slug() + " is not a repo this team tracks (add it on the GitHub config page first)", nil
+		}
+		out = append(out, row.Slug())
 	}
-	return out, ""
+	return out, "", nil
+}
+
+// projectJSON is a project's wire shape: the domain row, with its pinned
+// repositories rendered as registry row ids.
+//
+// The embedding is what keeps this from becoming a second copy of the domain
+// struct that drifts from it — every other field is the domain's own and stays
+// so. domain.Project.PinnedRepos carries `json:"-"` for exactly this reason:
+// the one field whose wire form differs is replaced here rather than shadowed,
+// so a project serialized anywhere else cannot quietly put names back on the
+// wire.
+type projectJSON struct {
+	domain.Project
+	// PinnedRepositoryIDs is the pinned set as registry row ids, in the
+	// project's own pin order — the same ids /api/repos serves and the same
+	// ids a PATCH sends back. The repository's name is a display property the
+	// client reads off the repo, never a key it round-trips through here.
+	PinnedRepositoryIDs []string `json:"pinned_repository_ids"`
+}
+
+// projectToJSON renders one project for the wire, resolving its stored pin
+// names back to registry ids through repos.
+//
+// memo may be nil; a caller rendering a page of projects passes one so a repo
+// pinned by several of them is looked up once.
+func projectToJSON(ctx context.Context, repos db.RepositoryStore, orgID string, p domain.Project, memo map[string]string) (projectJSON, error) {
+	ids := make([]string, 0, len(p.PinnedRepos))
+	for _, slug := range p.PinnedRepos {
+		owner, repo, ok := splitOwnerRepo(slug)
+		if !ok {
+			return projectJSON{}, fmt.Errorf("project %s pins a malformed repo name %q", p.ID, slug)
+		}
+		key := strings.ToLower(slug)
+		if id, hit := memo[key]; hit {
+			ids = append(ids, id)
+			continue
+		}
+		row, err := repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		if err != nil {
+			return projectJSON{}, fmt.Errorf("resolve pinned repo %s of project %s: %w", slug, p.ID, err)
+		}
+		if row == nil {
+			// Not reachable, and not silently survivable either. The store
+			// builds these names by joining project_pinned_repos to
+			// repositories, so a name with no row would mean the join and this
+			// lookup disagreed inside one transaction. Dropping the pin would
+			// hand the client a short list it would then PATCH back, unpinning
+			// a repo nobody asked to unpin.
+			return projectJSON{}, fmt.Errorf("project %s pins %s, which resolves to no repository row", p.ID, slug)
+		}
+		if memo != nil {
+			memo[key] = row.ID
+		}
+		ids = append(ids, row.ID)
+	}
+	return projectJSON{Project: p, PinnedRepositoryIDs: ids}, nil
+}
+
+// projectsToJSON is projectToJSON over a page, sharing one memo across it.
+func projectsToJSON(ctx context.Context, repos db.RepositoryStore, orgID string, ps []domain.Project) ([]projectJSON, error) {
+	memo := make(map[string]string)
+	out := make([]projectJSON, len(ps))
+	for i, p := range ps {
+		j, err := projectToJSON(ctx, repos, orgID, p, memo)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = j
+	}
+	return out, nil
 }
 
 // validateTrackerKeys validates jira_project_key and linear_project_key
@@ -973,7 +1262,7 @@ func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore,
 // linear_project_key is rejected outright until the Linear integration
 // ships. The Jira key is normalized via normalizeJiraProjectKey
 // (TrimSpace + ToUpper) to match the canonical form persisted by
-// handleSettingsPost — without ToUpper, a stored "SKY" would silently
+// handleTeamJiraProjectsPut — without ToUpper, a stored "SKY" would silently
 // fail to match an inbound "sky".
 //
 // Takes the team's rules as a parameter so the function is testable in
@@ -982,7 +1271,11 @@ func validatePinnedRepos(ctx context.Context, teamRepos db.TeamGitHubReposStore,
 //
 // Returns the normalized values and an empty error string on success,
 // or two empty strings and an error message on failure.
-func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, linearKey string) (string, string, string) {
+// validateTrackerKeys returns the normalized keys plus, on rejection, the
+// body field at fault and its message — the field travels with the message so
+// the envelope can attribute the error instead of leaving the client to parse
+// a "jira_project_key: ..." prefix out of the prose.
+func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, linearKey string) (jira, linear, errField, errMsg string) {
 	jiraNorm := normalizeJiraProjectKey(jiraKey)
 	linearNorm := strings.TrimSpace(linearKey)
 
@@ -992,18 +1285,18 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 		// the frontend renders a disabled Linear picker, so a
 		// non-empty value arriving here is a bypass attempt or a
 		// stale client.
-		return "", "", "linear_project_key: Linear integration is not configured"
+		return "", "", "linear_project_key", "Linear integration is not configured"
 	}
 
 	if jiraNorm == "" {
-		return "", "", ""
+		return "", "", "", ""
 	}
 	for _, p := range teamRules {
 		if p.ProjectKey == jiraNorm {
-			return jiraNorm, "", ""
+			return jiraNorm, "", "", ""
 		}
 	}
-	return "", "", "jira_project_key: " + jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
+	return "", "", "jira_project_key", jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
 }
 
 // queuePendingContextChanges diffs the project's pre-PATCH state against the
@@ -1145,53 +1438,94 @@ const knowledgeMaxRequestBytes = 25 * 1024 * 1024
 // home dir, which would otherwise leak filesystem layout to the
 // browser. Detail goes to the server log where the operator can find
 // it; the client gets a stable string.
+// knowledgeListRequest is the body of POST /api/projects/{id}/knowledge/list.
+// The project is the path id and the knowledge base has no filters, so the
+// body is paging alone.
+type knowledgeListRequest struct {
+	httpx.PageRequest
+}
+
+// POST /api/projects/{id}/knowledge/list
+//
+// The rows keep the 256KB inline-content rule per file (knowledgeInlineMaxBytes):
+// a text-shaped file under the cap carries its body, anything larger carries
+// metadata and is fetched by path. Paging does not change that — the cap is
+// about one file, the page is about how many files.
+//
+// The window is applied in Go rather than at the source. Both backends
+// enumerate a flat directory (or its blob-store equivalent) as a unit and
+// neither offers a windowed listing, so a page here is a slice of an
+// already-complete answer — which is also why total_count is exact.
 func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
+
+	var req knowledgeListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge list: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
 		notFound(w, "project")
 		return
 	}
+
+	var files []knowledgeFile
 	// Multi mode: the blob store is the KB source of truth (control's own disk
 	// hosts no KB). Local mode keeps the byte-identical on-disk read below.
 	if runmode.Current() == runmode.ModeMulti {
-		files, err := s.listKnowledgeFromStore(r.Context(), orgID, id)
+		var err error
+		files, err = s.listKnowledgeFromStore(r.Context(), orgID, id)
 		if err != nil {
-			projectsLog.Error("knowledge list: store list failed", "project", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
+			internalError(w, "projects", fmt.Errorf("list knowledge from store for project %s: %w", id, err))
 			return
 		}
-		writeJSON(w, http.StatusOK, files)
-		return
+	} else {
+		root, err := curator.KnowledgeDir(orgID, id)
+		if err != nil {
+			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
+			return
+		}
+		kbDir := filepath.Join(root, "knowledge-base")
+		files, err = readKnowledgeFiles(kbDir)
+		if err != nil {
+			internalError(w, "projects", fmt.Errorf("read knowledge dir %s: %w", kbDir, err))
+			return
+		}
 	}
-	root, err := curator.KnowledgeDir(orgID, id)
-	if err != nil {
-		projectsLog.Error("knowledge list: resolve dir failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
-		return
+	httpx.WriteList(w, page, windowSlice(files, page), len(files))
+}
+
+// windowSlice takes the page's slice of an already-materialized list. An
+// offset past the end yields an empty page rather than a panic, which is the
+// same answer a store gives for a window past its result set.
+func windowSlice[T any](all []T, page httpx.Page) []T {
+	if page.Offset >= len(all) {
+		return nil
 	}
-	kbDir := filepath.Join(root, "knowledge-base")
-	files, err := readKnowledgeFiles(kbDir)
-	if err != nil {
-		projectsLog.Error("knowledge list: read dir failed", "dir", kbDir, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read knowledge base"})
-		return
-	}
-	writeJSON(w, http.StatusOK, files)
+	end := min(page.Offset+page.Limit, len(all))
+	return all[page.Offset:end]
 }
 
 // readKnowledgeFiles walks one level of the knowledge-base directory
@@ -1390,11 +1724,21 @@ func sanitizeKnowledgeFilename(raw string) (string, string) {
 // resolveKnowledgePath maps a URL path parameter to an absolute file
 // path inside the project's knowledge-base directory and validates
 // that the resolved path stays within. Two layers of defense:
-//  1. URL-decode + sanitize via sanitizeKnowledgeFilename, which
-//     rejects "..", path separators, and leading dots.
+//  1. sanitizeKnowledgeFilename, which rejects "..", path separators,
+//     and leading dots.
 //  2. Resolve to absolute via filepath.Join(kbDir, name) and re-check
 //     the result has kbDir as its prefix. Belt-and-suspenders against
 //     anything the sanitizer might miss on a future filesystem.
+//
+// rawPath is r.PathValue("path"), which the mux has ALREADY
+// percent-decoded — so it is the filename, verbatim, and decoding it
+// again here would be a second decode the client never encoded for.
+// That mismatch put the listing and the per-file routes at odds: a
+// file listed as "notes%20final.md", correctly requested as
+// "notes%2520final.md", second-decoded into a different name and
+// 404'd, and "100%.md" failed the second decode outright as a 400.
+// The listing's names are the names; a client encodes each exactly
+// once.
 //
 // Errors that include filesystem detail (KnowledgeDir's UserHomeDir
 // failure, etc.) are logged server-side; the returned message is
@@ -1414,13 +1758,18 @@ func resolveKnowledgePath(orgID, projectID, rawPath string) (string, string, int
 		return "", "", http.StatusInternalServerError, "failed to resolve knowledge dir"
 	}
 	kbDir := filepath.Join(root, "knowledge-base")
-	decoded, err := url.PathUnescape(rawPath)
-	if err != nil {
-		return "", "", http.StatusBadRequest, "invalid path encoding"
-	}
-	name, errMsg := sanitizeKnowledgeFilename(decoded)
+	name, errMsg := sanitizeKnowledgeFilename(rawPath)
 	if errMsg != "" {
 		return "", "", http.StatusBadRequest, errMsg
+	}
+	// The sanitizer strips path components (its upload callers need that for
+	// browser multipart filenames), but here the delivered value must already
+	// BE the name: the knowledge base is flat and the listing never emits a
+	// name with a separator in it. Refuse anything the sanitizer had to
+	// rewrite — an encoded separator ("a%2Fb.md", which the mux hands over as
+	// "a/b.md") would otherwise quietly serve a file the request never named.
+	if name != rawPath {
+		return "", "", http.StatusBadRequest, "filename cannot contain path separators"
 	}
 	full := filepath.Join(kbDir, name)
 	rel, err := filepath.Rel(kbDir, full)
@@ -1450,15 +1799,17 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 	var project *domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge fetch: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1467,7 +1818,7 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 	}
 	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
-		writeJSON(w, status, map[string]string{"error": errMsg})
+		writeKnowledgePathError(w, status, errMsg)
 		return
 	}
 	// Multi mode: stream from the blob store with single-range support (video
@@ -1483,12 +1834,11 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge fetch: lstat failed", "path", full, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("lstat knowledge file %s: %w", full, err))
 		return
 	}
 	if linfo.Mode()&os.ModeSymlink != 0 || !linfo.Mode().IsRegular() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+		writeNotARegularFile(w)
 		return
 	}
 	// O_NOFOLLOW closes the TOCTOU window between Lstat and Open:
@@ -1509,12 +1859,12 @@ func (s *Server) handleProjectKnowledgeFile(w http.ResponseWriter, r *http.Reque
 		// 500 so the operator can spot them — collapsing all
 		// failures to "not a regular file" 400 would mask real
 		// production issues behind a misleading client error.
-		projectsLog.Error("knowledge fetch: open failed", "path", full, "error", err)
 		if isSymlinkRejection(err) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "not a regular file"})
+			projectsLog.Error("knowledge fetch: open failed", "path", full, "error", err)
+			writeNotARegularFile(w)
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
+		internalError(w, "projects", fmt.Errorf("open knowledge file %s: %w", full, err))
 		return
 	}
 	defer f.Close()
@@ -1552,7 +1902,10 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Parse the multipart body BEFORE taking the per-project lock.
 	// ParseMultipartForm reads the whole request off the wire — the
@@ -1568,7 +1921,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	// file doesn't poison siblings that were within budget.
 	r.Body = http.MaxBytesReader(w, r.Body, knowledgeMaxRequestBytes)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "multipart parse: " + err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidBody, Message: "multipart parse: " + err.Error(),
+		})
 		return
 	}
 	defer func() {
@@ -1580,7 +1935,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	}()
 	files := r.MultipartForm.File["file"]
 	if len(files) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no files in upload (use form field 'file')"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "no files in upload (use form field 'file')", Field: "file",
+		})
 		return
 	}
 
@@ -1609,8 +1966,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge upload: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1625,14 +1981,12 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	if !multi {
 		root, err := curator.KnowledgeDir(orgID, id)
 		if err != nil {
-			projectsLog.Error("knowledge upload: resolve dir failed", "project", id, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to resolve knowledge dir"})
+			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
 			return
 		}
 		kbDir = filepath.Join(root, "knowledge-base")
 		if err := os.MkdirAll(kbDir, 0o755); err != nil {
-			projectsLog.Error("knowledge upload: mkdir failed", "dir", kbDir, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create knowledge dir"})
+			internalError(w, "projects", fmt.Errorf("create knowledge dir %s: %w", kbDir, err))
 			return
 		}
 	}
@@ -1817,7 +2171,10 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := projectIDOr404(w, r)
+	if !ok {
+		return
+	}
 
 	// Same per-project lock as upload + project PATCH/DELETE.
 	// Holding the lock keeps the file remove + updated_at bump
@@ -1838,8 +2195,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		project, e = tx.Projects.Get(r.Context(), orgID, id)
 		return e
 	}); err != nil {
-		projectsLog.Error("knowledge delete: db get failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load project"})
+		internalError(w, "projects", fmt.Errorf("load project %s: %w", id, err))
 		return
 	}
 	if project == nil {
@@ -1848,7 +2204,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 	}
 	_, full, status, errMsg := resolveKnowledgePath(orgID, id, r.PathValue("path"))
 	if errMsg != "" {
-		writeJSON(w, status, map[string]string{"error": errMsg})
+		writeKnowledgePathError(w, status, errMsg)
 		return
 	}
 	multi := runmode.Current() == runmode.ModeMulti
@@ -1859,8 +2215,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		name := filepath.Base(full)
 		exists, err := s.kb.Exists(r.Context(), orgID, id, name)
 		if err != nil {
-			projectsLog.Error("knowledge delete: store exists failed", "project", id, "file", name, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			internalError(w, "projects", fmt.Errorf("check knowledge file %s in store: %w", name, err))
 			return
 		}
 		if !exists {
@@ -1868,8 +2223,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.kb.Delete(r.Context(), orgID, id, name); err != nil {
-			projectsLog.Error("knowledge delete: store delete failed", "project", id, "file", name, "error", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+			internalError(w, "projects", fmt.Errorf("delete knowledge file %s from store: %w", name, err))
 			return
 		}
 	} else if err := os.Remove(full); err != nil {
@@ -1877,15 +2231,13 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 			notFound(w, "file")
 			return
 		}
-		projectsLog.Error("knowledge delete: remove failed", "path", full, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to remove file"})
+		internalError(w, "projects", fmt.Errorf("remove knowledge file %s: %w", full, err))
 		return
 	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Projects.BumpUpdatedAt(r.Context(), orgID, id)
 	}); err != nil {
-		projectsLog.Error("knowledge delete: bump updated_at failed", "project", id, "error", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update project state"})
+		internalError(w, "projects", fmt.Errorf("bump updated_at for project %s: %w", id, err))
 		return
 	}
 	if multi {

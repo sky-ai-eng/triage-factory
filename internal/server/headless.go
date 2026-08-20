@@ -24,7 +24,7 @@ import (
 //   - Local mode only. The app gates the call on a.local() && HeadlessEnabled();
 //     none of these env vars can reach a multi-mode org.
 //   - One-time seed. Everything below is applied only on the boot that
-//     provisions the tenant (justProvisioned), and each item additionally
+//     provisions the tenant, and each item additionally
 //     guards on its target being empty, so a restart never overwrites config
 //     the operator later edited in the UI. The DB is authoritative once
 //     populated; the env is the initial seed, not a competing store.
@@ -223,7 +223,8 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	//    around a token the host rejects. Validating first means fixing the token
 	//    and restarting recovers cleanly; provisioning an empty tenant first would
 	//    trip the never-overwrite gate and the seed would never run.
-	if _, err := auth.ValidateGitHub(ctx, creds.GitHubURL, creds.GitHubPAT); err != nil {
+	botIdentity, err := auth.CaptureGitHubIdentity(ctx, creds.GitHubURL, creds.GitHubPAT)
+	if err != nil {
 		headlessLog.Warn("GitHub bot credential failed validation; skipping bootstrap", "host", ghWeb, "error", err)
 		return nil
 	}
@@ -232,14 +233,14 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	//    holds only DB writes (mirrors the HTTP handlers' validate-then-write).
 	//    We're here only when not yet provisioned (fresh or crash-recovery), so
 	//    these always run.
-	var githubIdentityLogin string
+	var githubIdentity auth.GitHubUser
 	switch {
 	case cfg.githubUserPAT != "":
-		login, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
+		ghUser, verr := validateGitHubIdentityPAT(ctx, ghWeb, cfg.githubUserPAT)
 		if verr != nil {
 			headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT failed validation; GitHub identity not bound (you'll be asked to Connect)", "host", ghWeb, "error", verr)
 		} else {
-			githubIdentityLogin = login
+			githubIdentity = ghUser
 		}
 	default:
 		// The GitHub identity gate is a hard redirect in local mode, so a
@@ -313,7 +314,10 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 			orgSet.JiraBaseURL = creds.JiraURL
 		}
 		orgSet.GitHubCloneProtocol = cfg.cloneProtocol
-		if uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
+		if _, uerr := tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, orgSet); uerr != nil {
+			return uerr
+		}
+		if uerr := persistOrgGitHubIdentity(ctx, tx, runmode.LocalDefaultOrgID, botIdentity.Login, botIdentity.PrimaryEmail); uerr != nil {
 			return uerr
 		}
 
@@ -343,7 +347,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 					return terr
 				}
 				teamSet.JiraProjects = cfg.jiraProjects
-				if uerr := tx.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, teamSet); uerr != nil {
+				if _, uerr := tx.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, teamSet); uerr != nil {
 					return uerr
 				}
 				if rerr := tx.JiraStatusRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, headlessJiraRules(cfg)); rerr != nil {
@@ -354,16 +358,16 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		}
 
 		// GitHub identity (only if none bound for this user+host yet).
-		if githubIdentityLogin != "" {
+		if githubIdentity.Login != "" {
 			cur, gierr := tx.Users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, ghWeb)
 			if gierr != nil {
 				return gierr
 			}
 			if cur == "" {
-				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentityLogin, "pat"); uerr != nil {
+				if uerr := tx.Users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, ghWeb, githubIdentity.Login, githubIdentity.UserID(), githubIdentity.PrimaryEmail, "pat"); uerr != nil {
 					return uerr
 				}
-				boundGitHubLogin = githubIdentityLogin
+				boundGitHubLogin = githubIdentity.Login
 			}
 		}
 

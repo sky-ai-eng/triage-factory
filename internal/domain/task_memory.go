@@ -2,11 +2,11 @@ package domain
 
 import "time"
 
-// TaskMemory is a durable per-run narrative of what an agent tried on a task
+// TaskMemory is a durable per-conversation narrative of what an agent tried on a task
 // and why. The agent writes it to the one fixed path `./_tfac/memory.md` in
 // its run root; the orchestrator reads it at termination and ingests it into
 // the `conversation_memory` table before worktree teardown. Materialized back
-// into future runs' worktrees under `_tfac/entity-memory/` so iterations on
+// into future conversations' worktrees under `_tfac/entity-memory/` so iterations on
 // the same entity can read what prior attempts tried — and so the sibling steps
 // of one blueprint run can read each other's memory as their handoff.
 //
@@ -15,9 +15,9 @@ import "time"
 // denormalized `blueprint_run_id` that groups one blueprint run's files.
 type TaskMemory struct {
 	ID             string
-	RunID          string
-	EntityID       string // denormalized from run→task→entity for fast entity-scoped queries
-	BlueprintRunID string // denormalized from the run; empty for a standalone (non-blueprint) run
+	ConversationID string
+	EntityID       string // denormalized from conversation→task→entity for fast entity-scoped queries
+	BlueprintRunID string // denormalized from the conversation; empty for a standalone (non-blueprint) conversation
 	Content        string
 	CreatedAt      time.Time
 

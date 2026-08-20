@@ -38,6 +38,7 @@ import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../
 import GitHubAppImportForm from '../GitHubAppImportForm'
 import { appImportedPatch } from '../../setup/githubAppImported'
 import { GitHubAppInstallView } from '../GitHubAppInstallView'
+import GitHubWebhookHealthNotice from '../GitHubWebhookHealthNotice'
 import { useGitHubAppInstall } from '../../../hooks/useGitHubAppInstall'
 import {
   cutoverPreflight,
@@ -69,6 +70,20 @@ type Phase =
   | { kind: 'to-pat-token' }
   | { kind: 'to-pat-diff'; diff: AccessDiff; login: string; pat: string }
   | { kind: 'to-pat-success'; settingsUrl: string; login: string }
+
+// What an App buys, shared by the two branches of the no-live-App paragraph
+// below — they differ only in the lead-in verb ("Switch to a GitHub App to …"
+// when a PAT is connected, "Register a GitHub App to …" when nothing is). One
+// fragment rather than one copy per branch: a sentence duplicated across a
+// ternary is one edit away from two divergent claims about what an App buys,
+// and the claim about GitHub enforcing the scope is the load-bearing half.
+const appPitch = (
+  <>
+    poll under a bot identity of its own — one that doesn&rsquo;t leave with the person who set it
+    up — and to have GitHub itself scope each team&rsquo;s access to the repositories that team
+    tracks
+  </>
+)
 
 export default function GitHubAccessControl({
   ctx,
@@ -278,9 +293,10 @@ export default function GitHubAccessControl({
           title="Replace your personal access token"
           detail={
             <>
-              Enter the new token, with <code className="text-ink-2">repo</code> and{' '}
-              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it and show
-              what it can reach before your current token is replaced.
+              Enter the new token, with <code className="text-ink-2">repo</code>,{' '}
+              <code className="text-ink-2">read:org</code>, and{' '}
+              <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
+              show what it can reach before your current token is replaced.
             </>
           }
           busy={busy}
@@ -528,6 +544,17 @@ export default function GitHubAccessControl({
             installation
             {installCount === 1 ? '' : 's'}.
           </p>
+          {/* Whether GitHub is actually delivering this App's webhooks here.
+              Renders nothing until the backend's probe has an answer — the
+              installation mirror is what a hookless App silently costs, and
+              this is the only place that says so. */}
+          {orgId && (
+            <GitHubWebhookHealthNotice
+              orgId={orgId}
+              health={installStatus?.webhook_health ?? null}
+              isLocal={ctx.isLocal}
+            />
+          )}
           <button
             type="button"
             onClick={() => setPhase({ kind: 'to-pat-token' })}
@@ -565,11 +592,13 @@ export default function GitHubAccessControl({
                     <span className="font-medium text-ink-2">@{s.githubPatLogin}</span>
                   </>
                 ) : null}
-                . Switch to a GitHub App to poll under its own bot identity with support for
-                multiple installations.
+                . Switch to a GitHub App to {appPitch}.
               </>
             ) : (
-              'GitHub access isn’t configured for this workspace yet. Register a GitHub App to poll under its own bot identity with support for multiple installations.'
+              <>
+                GitHub access isn&rsquo;t configured for this workspace yet. Register a GitHub App
+                to {appPitch}.
+              </>
             )}
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -700,9 +729,10 @@ function TokenScreen({
         <p className="text-body leading-relaxed text-ink-3">
           {detail ?? (
             <>
-              Enter a token with <code className="text-ink-2">repo</code> and{' '}
-              <code className="text-ink-2">read:org</code> scopes. We&rsquo;ll validate it and show
-              which repositories it can reach before anything changes.
+              Enter a token with <code className="text-ink-2">repo</code>,{' '}
+              <code className="text-ink-2">read:org</code>, and{' '}
+              <code className="text-ink-2">user:email</code> scopes. We&rsquo;ll validate it and
+              show which repositories it can reach before anything changes.
             </>
           )}
         </p>

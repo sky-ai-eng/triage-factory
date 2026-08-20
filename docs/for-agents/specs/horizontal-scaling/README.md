@@ -7,7 +7,7 @@ Postgres. Same binary, same mechanism from N=1 self-host to an N-pod
 fleet; no k8s, no service mesh, no pod-to-pod RPC, no shared filesystem.
 
 Status: **accepted design** (this is the "dedicated design session" the
-epic called for). Tracked as **TFAC-71**. Builds on the run-queue /
+epic called for). Tracked as **TFAC-71**. Builds on the conversation-queue /
 live-run / steering line (TFAC-13 → TFAC-305 → TFAC-309), the memory
 guardrail (TFAC-552), the curator storage design (TFAC-60/61), and the
 sandbox-fleet profiles spec (`docs/for-agents/specs/sandbox-fleet/`).
@@ -43,7 +43,7 @@ Fleet capacity once built:
 
 ```
 fleet concurrent runs ≈ Σ over executors of
-    min( TF_MAX_CONCURRENT_RUNS,  (RAM_MB − 12288) / 512,  256 )
+    min( TF_MAX_CONCURRENT_CLAIMS,  (RAM_MB − 12288) / 512,  256 )
 ```
 
 e.g. three 64 GB executors ≈ ~300 concurrent runs, with the control
@@ -80,19 +80,19 @@ of what this design **reuses rather than builds**:
 
 | Piece | Where | State |
 | --- | --- | --- |
-| Durable run queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/run_queue.go` (`ClaimNextRun`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
-| `Delegate()` = pure DB enqueue | `internal/delegate/delegate.go` → `EnqueueRun` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the enqueue site. |
+| Durable conversation queue, `FOR UPDATE SKIP LOCKED` claim | `internal/db/postgres/conversation_queue.go` (`ClaimNextConversation`), `internal/delegate/dispatch.go` | Built (TFAC-13). Claim is already N-worker-safe; the dispatcher loop is per-process. |
+| `Delegate()` = pure DB enqueue | `internal/delegate/delegate.go` → `EnqueueConversation` | Built. Manual + auto delegation already work cross-machine unchanged — no spawner needed at the enqueue site. |
 | Durable event queue for router-bound events | `internal/ingest/ingest.go`, `internal/db/postgres/event_queue.go` | Built. Single drain worker; `SKIP LOCKED` claim exists. |
-| `runs.executor_id` ownership column | pg baseline (`runs`), stamped by `stampExecutor` (`process_registry.go`) | Written, consumed by nothing — the intended lease hook. |
+| Executor-ownership stamp (the active claim's `claims.executor_id`/`boot_epoch`) | pg baseline (`claims`), stamped by `stampExecutor` (`process_registry.go`) | Written, consumed by nothing — the intended lease hook. |
 | `RunController` indirection for cancel/steer/interrupt/permission | `internal/delegate/process_registry.go` | Built (TFAC-305). In-process impl resolves `s.procs`/`s.cancels`/`s.permPending`; the seam exists precisely so a DB-signaling impl can slot in. |
 | Durable workspace snapshots + cross-host rehydrate | `internal/storage` (S3: `<org>/<blueprint_run>/workspace.tar`), `ensureWorkspace`/`workspaceRecoverable` (`resume.go`) | Built. A parked run can resume on a different machine today. |
 | Self-contained multi-mode runs | TFAC-545: per-run clone with App installation token; per-run `llmproxy`/`gitproxy`/`egressproxy` on the veth IP; agenthost socket per run | Built. **Credentials and toolchain co-locate with whichever host executes the run** — nothing about a run's execution needs the API box. |
-| Local admission control | `internal/hostmem` + `TF_DISPATCH_MEM_FLOOR_MB` (TFAC-552); `TF_MAX_CONCURRENT_RUNS` clamped to 256 | Built, per-process — exactly the right shape per-executor. Contract to preserve: **gating never mutates queue state**; a tight host simply stops claiming and work flows to headroom with zero coordination. |
+| Local admission control | `internal/hostmem` + `TF_DISPATCH_MEM_FLOOR_MB` (TFAC-552); `TF_MAX_CONCURRENT_CLAIMS` clamped to 256 | Built, per-process — exactly the right shape per-executor. Contract to preserve: **gating never mutates queue state**; a tight host simply stops claiming and work flows to headroom with zero coordination. |
 | Replica-safe auth | RS256 JWKS verify (`internal/auth/verify`) + DB-backed sessions (`internal/sessions`) | Built. Any API replica can serve any browser; no sticky sessions. |
 | Replica-safe delegation fences | `blueprint_runs_event_trigger_fence` UNIQUE `(triggering_event_id, trigger_id)`; task dedup partial index; `pending_firings` dedup index | Built. Two processes firing the same event/trigger produce exactly one run. |
 | Advisory-lock precedents | `auth_provision.go`, `team_github_repos.go`, ee/slack | Built for single-operation correctness (not leadership). |
 | Poll cursors + conditional-request state in DB | `poller_state`, repo pulls-poll-state (ETags) | Built. Poll position survives a process swap; a cold handoff re-lists as free 304s. |
-| Cost/usage accounting + quotas | `llm_spend` view, `/api/usage/*`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
+| Cost/usage accounting + quotas | `llm_spend` view, the `…/usage` reads under `/api/me`, `/api/orgs/{org_id}` and `/api/teams/{team_id}`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
 | Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60); shared-RO curator worktrees (TFAC-61) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
 | Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
 | Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built, with an **in-process** resume point. A cycle cut short by `ErrRateLimited` saves a round-robin repo cursor on the poller (`Manager.ghCursor`, `internal/poller/manager.go`), so the next cycle **on that same process** resumes at the first unrefreshed repo instead of starving the tail of a large tracked set. The cursor is in-memory by TFAC-571's explicit v1 allowance: a leader handoff (or a restart) loses it and the successor starts at the head. What makes that benign is the row above, not this one — the durable per-repo ETag state means a cold re-list is mostly free 304s (§3). |
@@ -102,7 +102,7 @@ And the inverse — what at design time **assumed exactly one process**
 2026-07-08):
 
 1. ✅ **Boot recovery was global, not ownership-scoped.** Any process
-   boot ran `ResetProcessingRuns` and `event_queue.ResetProcessing`,
+   boot ran `ResetProcessingConversations` and `event_queue.ResetProcessing`,
    flipping **all** in-flight rows back to queued — a second replica
    booting re-queued work the first was still running. Closed by
    TFAC-578 (+ #624's resume-path stamp and the one-time upgrade
@@ -265,7 +265,7 @@ What a request might need, and how each need is location-independent:
 | authentication | JWKS verify is stateless; sessions are DB rows (§1) |
 | state reads/writes | Postgres is the one truth; RLS context is per-tx |
 | to create work (delegate, wake a parked run) | it's an enqueue — executors claim it; the receiving pod is irrelevant (§4.2, §5.2) |
-| to control a live run (steer/cancel/interrupt/permission) | resolved via `runs.executor_id` → `run_signals` to the owner; local short-circuit only if this pod happens to own it (§5.2) |
+| to control a live run (steer/cancel/interrupt/permission) | resolved via the active claim's `claims.executor_id` → `conversation_signals` to the owner; local short-circuit only if this pod happens to own it (§5.2) |
 | to poke a brain singleton (PollSoon, re-profile, trigger) | `tf_ctl` trigger relay → whichever pod holds the lease (§5.3) |
 | live events pushed to the browser | the pod holding *your* socket fans in everything via `tf_ws`, filtered per `(org, user)` — producers don't matter (§5.1) |
 | inbound WS frames (presence) | the socket-owning pod writes `ws_presence` rows — globally visible (§5.1) |
@@ -444,9 +444,9 @@ Mechanically:
    writes them (a 4s renewal loop that reset `draining=false` would
    un-drain an instance within one tick of the operator draining it).
 3. **Claims stamp the pair.** (✅ shipped — the column is
-   `runs.boot_epoch` / `event_queue.boot_epoch`, not the
-   `claimed_epoch` name earlier drafts used.) `runs` and event-queue
-   claims record the epoch next to `executor_id`, atomically in the
+   `claims.boot_epoch` / `event_queue.boot_epoch`, not the
+   `claimed_epoch` name earlier drafts used.) Conversation claims and
+   event-queue claims record the epoch next to `executor_id`, atomically in the
    claim statement; **resumes re-stamp in the same statement that
    flips the row to 'running'** (a parked run resumed on instance A
    must not spend its rehydrate+spawn window wearing instance B's
@@ -483,7 +483,7 @@ restart.
 
 The registry is deliberately named for what it holds — **every TF
 process in the deployment**, not just executors ("instance" is already
-the shipped vocabulary: `runs.executor_id` stamps "a constant instance
+the shipped vocabulary: `claims.executor_id` stamps "a constant instance
 id"). "Executor" stays what it is everywhere else: a *role*. The
 capacity/admission columns are meaningful only for executor-capable
 roles and stay NULL/zero on pure-control rows.
@@ -525,7 +525,7 @@ The dispatcher loop is unchanged in shape (mem-gate → semaphore →
 claim → execute); three additions to the claim:
 
 1. **Ownership-scoped recovery** (✅ shipped — TFAC-578, fixes hazard
-   #1 even at N=1): `ResetProcessingRuns` / `ResetProcessing` are
+   #1 even at N=1): `ResetProcessingConversations` / `ResetProcessing` are
    "reset rows where `executor_id = me AND boot_epoch < my current
    epoch`" — a booting process only sweeps *its own* orphans, and the
    reset clears the stamp on the way out. The released-upgrade
@@ -542,7 +542,7 @@ claim → execute); three additions to the claim:
    moves to the **leader reaper**: runs whose executor's heartbeat is
    stale past a threshold are requeued (`attempts`-capped, then failed
    with `failure_kind='executor_lost'`).
-2. **Cross-process wake**: `EnqueueRun` also `NOTIFY tf_wake` so idle
+2. **Cross-process wake**: `EnqueueConversation` also `NOTIFY tf_wake` so idle
    executors claim within milliseconds instead of the poll interval
    (which remains as backstop).
 3. **Affinity preference** (§6) and later **per-org fairness** (§9 P3)
@@ -560,7 +560,7 @@ claim → execute); three additions to the claim:
   A re-claimed *mid-flight* run restarts its step from the beginning on
   the new executor (fresh self-contained clone; the crashed attempt's
   session transcript died with the host). `attempts` caps this
-  (`TF_RUN_MAX_ATTEMPTS`, default 2 — consecutive losses, not
+  (`TF_MAX_CLAIM_ATTEMPTS`, default 2 — consecutive losses, not
   lifetime claims; decision 4). Residual risk, accepted and
   documented: a run that had already
   performed external writes (pushed a branch, posted a comment) before
@@ -576,7 +576,7 @@ claim → execute); three additions to the claim:
   threshold — same discipline as leader demotion, §3) **kills its
   live sandboxes, stops its sinks, and stops claiming** before the
   reaper may requeue its runs. It forfeits nothing by doing so — a
-  partitioned executor can't write `run_messages` or heartbeats
+  partitioned executor can't write `messages` or heartbeats
   anyway — and without it, a requeued run and a zombie sandbox could
   both finish and double their external writes.
 - **The DB refuses a slipped zombie's writes.** The self-fence above is
@@ -696,7 +696,7 @@ ones.
 
 One rule governs every channel: **NOTIFY is a doorbell — never the
 data, and never the only path.** A notification means "scan your
-backing table now": `tf_ctl` consumers scan `run_signals` for unacked
+backing table now": `tf_ctl` consumers scan `conversation_signals` for unacked
 rows on every (re)connect and on a slow backstop poll; `tf_wake`
 consumers keep their claim-poll interval as the backstop; so a dropped
 LISTEN connection *delays* work, it cannot *lose* it. The one
@@ -720,8 +720,8 @@ order of weight:
    strongest broker candidate here — a single small Go binary — but it
    only softens this point; it doesn't touch the next three.)
 2. **Every signal we send is *about* a row, and co-commit deletes a
-   whole race class.** A run message NOTIFY rides the same commit as
-   its `run_messages` INSERT; a `run_signals` doorbell rides the
+   whole race class.** A conversation-message NOTIFY rides the same commit as
+   its `messages` INSERT; a `conversation_signals` doorbell rides the
    signal row's insert — the listener can never observe a doorbell
    whose row isn't visible, and a crash can never emit one without the
    other. With an external broker, every one of these becomes a
@@ -754,7 +754,7 @@ target scale, and a deployment big enough to approach it (thousands of
 concurrent runs, each costing real LLM spend) gets re-benched long
 before then. Queue-table hygiene is the other classic Postgres-queue
 failure mode (dead-tuple bloat under high churn); our rows churn in
-minutes, not milliseconds — autovacuum health on `runs`/`event_queue`
+minutes, not milliseconds — autovacuum health on `conversations`/`event_queue`
 goes in the P1 ops docs, and that's all it needs. This is also the
 well-trodden boring path now (River/Oban/pgmq/Graphile Worker;
 Rails 8 shipped DB-backed Solid Queue/Cache as its default,
@@ -797,7 +797,7 @@ underlying write so a reader can always fetch what the ref points to);
 every control pod LISTENs and fans-in remote events to its local
 sockets through the existing per-`(org,user)` scope filter. Origin-pod
 id in the envelope prevents double-delivery to the producer's own
-clients. Per-connection NOTIFY ordering keeps per-run message order.
+clients. Per-connection NOTIFY ordering keeps per-conversation message order.
 
 (Run sentinels deliberately do **not** ride this channel — they are
 brain-bound, not socket-bound; see §5.3 and the `tf_bus` channel.)
@@ -823,10 +823,10 @@ between worlds.
 `RunController` gets its intended second implementation. New outbox:
 
 ```sql
-run_signals (
+conversation_signals (
   id           bigserial PRIMARY KEY,
   org_id       uuid NOT NULL,
-  run_id       text NOT NULL,
+  conversation_id text NOT NULL,
   kind         text NOT NULL,      -- cancel | interrupt | steer | permission | inject
   payload      jsonb,              -- steer text, permission decision, injection body, ...
   target       text NOT NULL,      -- executor id owning the run
@@ -837,12 +837,12 @@ run_signals (
 
 The fifth kind, `inject`, exists because TFAC-594's additive-event
 injection is a routed operation wearing a queued API: its live path is
-`getProc(runID)` — a process-local map hit — and its fallback durably
+`getProc(conversationID)` — a process-local map hit — and its fallback durably
 stages for the next resume. On one process that's correct. Across the
 split, the router (brain) misses `getProc` for every run executing on
 an executor, so every additive event would silently degrade to
 staged-and-probably-never-delivered (active auto-runs usually
-terminate without another resume). Under `run_signals`, the owner
+terminate without another resume). Under `conversation_signals`, the owner
 delivers into its live process; the staged fallback remains for
 genuinely parked runs.
 
@@ -851,7 +851,8 @@ Control-pod handler logic (`message` / `interrupt` / `cancel` /
 
 1. Local process registry hit? → in-process controller, exactly today's
    path (keeps `TF_ROLE=all` latency identical).
-2. Else resolve `runs.executor_id` + executor liveness: live → insert
+2. Else resolve the active claim's `claims.executor_id` + executor
+   liveness: live → insert
    signal + `NOTIFY tf_ctl`; owner LISTENs, applies via *its* local
    registry (including resolving `permPending`), acks.
 3. No live owner → today's DB-only paths (`MarkCancelledIfActive`, 409
@@ -863,7 +864,7 @@ with a [Correlation Identifier](https://www.enterpriseintegrationpatterns.com/pa
 (Hohpe & Woolf, *Enterprise Integration Patterns*) carried over
 pub/sub — the same shape as CI approval gates, Temporal signals, and
 multi-server websocket backplanes. The permission `tool_call_id` and
-`run_signals.id` are the correlation identifiers.
+`conversation_signals.id` are the correlation identifiers.
 
 **Parked/open runs stop being a control-plane special case entirely**:
 `ResumeOpenRun` becomes *resume-by-enqueue* — a message to a hibernated
@@ -875,7 +876,7 @@ above, which do keep a local short-circuit. The rule that separates
 them: **operations on live processes are routed; creation of work is
 queued.** Steer/interrupt/permission act on an in-memory process
 handle that exists in exactly one process, so they are deliverable
-from any pod at any N — `run_signals` finds the owner and delivers,
+from any pod at any N — `conversation_signals` finds the owner and delivers,
 one NOTIFY hop (~ms) each way, no leader involvement — but they can
 never be *claimed* by an arbitrary worker the way queue work can; the
 local short-circuit is merely the degenerate route when the caller
@@ -893,13 +894,13 @@ truth" true at N=1 — no class of running work exists that never
 appeared as a queued row.
 
 State-machine shape, settled here: the user message is recorded first
-(`run_messages` + pending-input on the run), then the **same `runs`
-row** transitions back to queued and is claimed like any other (its
+(`messages` + pending-input on the conversation), then the **same
+`conversations` row** transitions back to queued and is claimed like any other (its
 original enqueue time makes it oldest-first, so wakes claim
 promptly); the claiming executor's resume path rehydrates, spawns
 with `--resume <session_id>`, and delivers the recorded message as
 the turn input. No second runs row, and — keeping the standing
-invariant — no new run status.
+invariant — no new conversation status.
 
 Acked signal rows are purged after 24 h (audit convenience window);
 stale unacked signals expire harmlessly (the reaper owns the run's fate if the
@@ -1045,18 +1046,21 @@ should be the cheapest self-healing thing available:
 
 ### 6.2 Mechanics
 
-- Control stamps `runs.preferred_executor_id` at enqueue: the
+- Control stamps `conversations.preferred_executor_id` at enqueue: the
   enqueuing pod computes the rendezvous winner over live registry
   members and writes it onto the row, so tier-1 claims are an indexed
   equality instead of per-claim hash evaluation. The stamp is a
   snapshot of membership and can go stale if the fleet changes while
   the run waits — but a run waits seconds-to-minutes while membership
-  changes hours-to-days apart, and the two row classes that *do*
-  outlive their stamp (reaper requeues, whose stamped executor is
-  likely the dead one; resumes of long-parked runs) are **re-stamped
-  against current membership on requeue**. Net invariant: no stamp is
-  ever older than one queue dwell, and a stale one costs a warm cache
-  via the aging tier, never correctness.
+  changes hours-to-days apart, and the row classes that *do* outlive
+  their stamp are **re-stamped as they re-enter the queue**: a reaper
+  requeue clears it (its stamped executor is likely the dead one, and
+  nothing about the corpse is worth chasing), while a **resume stamps
+  the executor of the conversation's newest claim** — at resume time
+  the last engagement's executor is better than a fresh hash, because
+  that machine still holds the workspace tree `worktree_path` names.
+  Net invariant: no stamp is ever older than one queue dwell, and a
+  stale one costs a warm cache via the aging tier, never correctness.
 - Claim is two-tier: **(1)** my queued runs (`preferred = me`), **(2)**
   anyone's queued runs older than an aging threshold (~15–30 s) or
   whose preferred executor is dead/gated/draining. Tier 2 is the
@@ -1092,7 +1096,7 @@ are exactly what "counts + memory" fails to capture:
 - **Admission becomes budget-based the day two resource classes
   exist.** Today's `max_runs` and the ~512 MB/run rule assume uniform
   runs; a browser profile is several × that. The profile carries a
-  `mem_budget_mb`, the run row is stamped with it at enqueue, the
+  `mem_budget_mb`, the conversation row is stamped with it at enqueue, the
   claim admits on `reserved_mb + budget ≤ capacity` (keeping
   `max_runs` as an absolute ceiling and the TFAC-552 floor as the
   actual-memory backstop), and the heartbeat reports `reserved_mb`
@@ -1253,7 +1257,7 @@ capacity envelope is per-host and work-source-agnostic: a curator turn
 executing on its home is admitted through the same memory guardrail and
 concurrency semaphore as a dispatched run
 (`Spawner.AcquireTurnSlot`), so heartbeat occupancy reports the host's
-true sandbox load, not just the run queue's share of it.
+true sandbox load, not just the conversation queue's share of it.
 
 ---
 
@@ -1305,7 +1309,7 @@ Node invocation** — a plain Go web tier that runs anywhere,
 managed-k8s included. `syslimit` survives unchanged (the jobs stay
 leader-only and in-process; exactly one process still runs them);
 what disappears is the per-job sandbox cost, not their placement. The
-original alternative — generalize the run queue with a job class so
+original alternative — generalize the conversation queue with a job class so
 system jobs become claimable executor work — is retired: it moved the
 sandbox dependency around instead of deleting it, and its secondary
 payoffs (fleet-wide accounting, fairness for system jobs) don't bind
@@ -1337,15 +1341,17 @@ gracefully at the choke point rather than erroring into agents).
   fleet by being operators of that deployment. Same code, same API,
   zero drift.
 - **The scheduler's bookkeeping is the telemetry.** The registry
-  (§4.1), the runs table's existing timing columns, and one small
-  sample table are the entire data model — no parallel pipeline.
+  (§4.1), the existing timing columns on `conversations` and
+  `claims`, and one small sample table are the entire data model —
+  no parallel pipeline.
 
 ### 8.2 Data model
 
-Already present on `runs`: `started_at` (enqueue), `claimed_at`,
-`completed_at`, `parked_at`, `duration_ms`, `num_turns`,
-`total_cost_usd`, four token columns, `status/outcome/failure_kind`,
-`executor_id`, `attempts`. Queue wait = `claimed_at − started_at`.
+Already present on `conversations`: `started_at` (enqueue), `queued_at`,
+`completed_at`, `parked_at`, `status/outcome/failure_kind`. `claimed_at`,
+`duration_ms`, `num_turns`, `executor_id`, and `attempts` live on (or derive
+from) `claims`, and cost + the four token totals are derived from `messages`.
+Queue wait = `claimed_at − started_at`.
 `event_queue`/`pending_firings` carry full timing. `llm_spend` covers
 money. Net-new:
 
@@ -1478,7 +1484,7 @@ cross-clamp. The sections above carry the per-item deltas.)
 8. WS backplane `tf_ws` + `ws_outbox` + presence table + cross-pod
    user-kick; `tf_bus` brain-bound sentinel relay (TFAC-592, §5.3 —
    leader-only LISTEN, lease-scoped). (L)
-9. `run_signals` cross-pod control (cancel/interrupt/steer/permission)
+9. `conversation_signals` cross-pod control (cancel/interrupt/steer/permission)
    + resume-by-enqueue for parked runs. (L)
 10. Fleet reaper (dead-executor requeue, attempts-capped) + drain flag +
     `tf_wake`. (M)
@@ -1495,7 +1501,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     (TFAC-587): `internal/placement` (pure capacity-weighted rendezvous +
     resolver), the enqueue stamp (control computes the winner over live
     registry members; re-stamped each blueprint-step advance; cleared to NULL
-    on every requeue/reset/reaper/resume path), the two-tier `ClaimNextRun`
+    on every requeue/reset/reaper path, and re-stamped to the last
+    engagement's executor on resume), the two-tier `ClaimNextConversation`
     (tier 1 = `preferred_executor_id = me`, tier 2 = aged past
     `TF_PLACEMENT_AGING_SEC` or preferred dead/gated/draining), the
     `placement_overrides` table (pin / hot-key `replicas=K`), and the
@@ -1577,7 +1584,7 @@ pass (2026-07-08). Reopening conditions noted per entry.
    is removed (exact ties → unassigned), curator homes to executors —
    retiring the job-class endgame entirely rather than pulling it
    forward.
-4. **Executor-loss retry** — `TF_RUN_MAX_ATTEMPTS` default 2, counted
+4. **Executor-loss retry** — `TF_MAX_CLAIM_ATTEMPTS` default 2, counted
    in *consecutive loss episodes* rather than lifetime claims (the
    dispatcher's episode doctrine: any claim that recorded a real
    outcome ends the episode, so a stopped-and-resumed conversation
@@ -1589,7 +1596,7 @@ pass (2026-07-08). Reopening conditions noted per entry.
    real fleet (§4.3).
 5. **Fabric knobs** — defaults, all env-tunable: NOTIFY inline
    payload ≤ 6 KB, larger via outbox ref; `ws_outbox` TTL 60 s; acked
-   `run_signals` purged after 24 h; registry tombstone GC at 7 days
+   `conversation_signals` purged after 24 h; registry tombstone GC at 7 days
    heartbeat-stale. Tuning under real load is routine ops, not open
    design (§5).
 6. **TFAC-408 image keying** — two-layer, name → recipe → content

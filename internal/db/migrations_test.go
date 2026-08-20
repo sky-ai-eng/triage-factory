@@ -15,7 +15,7 @@ import (
 // for you) — these tests exercise Migrate itself.
 func openMigrationsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite memory: %v", err)
 	}
@@ -233,11 +233,11 @@ func TestMigrate_MessagesAreTheOnlyAccountingLedger(t *testing.T) {
 // runs. Driven through goose directly so we can land the pre-migration
 // fixture between the prior migration and the new one.
 func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
-	// Foreign keys off (plain :memory:) so the fixture needs no entity /
-	// task / prompt / blueprint scaffolding — the backfill is pure SQL over
+	// TestDSNMemoryNoForeignKeys so the fixture needs no entity / task /
+	// prompt / blueprint scaffolding — the backfill is pure SQL over
 	// runs ⋈ run_messages and doesn't care about FK targets. The CHECK
 	// constraints still apply, so the run carries origin='blueprint' parents.
-	database, err := sql.Open("sqlite", ":memory:")
+	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -301,10 +301,10 @@ func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
 // was on disk all along, so historical curator spend is recovered, not just
 // going-forward.
 func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
-	// Foreign keys off (plain :memory:) so the fixture needs no projects
+	// TestDSNMemoryNoForeignKeys so the fixture needs no projects
 	// scaffolding — the backfill is pure SQL over
 	// curator_requests ⋈ curator_messages and doesn't care about FK targets.
-	database, err := sql.Open("sqlite", ":memory:")
+	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 // backfills, and the view reads the project's team for team-visible projects and
 // NULL otherwise.
 func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
 // (which reads the fully-migrated view); here we assert the migration applies on
 // existing data, the new column appears, and the curator arm stays intact.
 func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -536,15 +536,15 @@ func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
 	}
 }
 
-// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step runs
+// TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step conversations
 // minted while enqueueBlueprintStep dropped the firing trigger (trigger_type =
 // 'event' with a NULL trigger_id — the shape every autonomous run carried
 // after the blueprint orchestrator unification) are healed from their parent
 // blueprint_run's frozen trigger_id, so historical autonomous spend regains
-// its by-rule attribution in llm_spend. Manual step runs (parent carries no
+// its by-rule attribution in llm_spend. Manual step conversations (parent carries no
 // trigger) stay NULL.
 func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -568,10 +568,10 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 		t.Fatalf("seed event types: %v", err)
 	}
 
-	// Minimal FK chain for two step runs: one under an event-fired
+	// Minimal FK chain for two step conversations: one under an event-fired
 	// blueprint_run (trigger frozen on the parent only — the bug shape), one
 	// under a manual blueprint_run. The sentinel user satisfies
-	// runs.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
+	// conversations.creator_user_id's FK (pure-goose DBs carry no tenant rows); the
 	// event_type FKs reuse the catalog rows seeded above.
 	const userID = "00000000-0000-0000-0000-000000000100"
 	for _, stmt := range []string{
@@ -674,7 +674,7 @@ func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
 // with dollars but zero messages loses the stamp by design (accepted
 // residue).
 func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:")
+	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -743,10 +743,10 @@ func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
 	if err := database.QueryRow(
 		`SELECT COUNT(*) FROM messages WHERE conversation_id = 'r-cost' AND cost_usd IS NOT NULL`,
 	).Scan(&n); err != nil {
-		t.Fatalf("count stamped run rows: %v", err)
+		t.Fatalf("count stamped conversation rows: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("stamped run rows = %d, want 1 (one lump, no proration)", n)
+		t.Errorf("stamped conversation rows = %d, want 1 (one lump, no proration)", n)
 	}
 	assertCost("run total via SUM",
 		`SELECT SUM(cost_usd) FROM messages WHERE conversation_id = 'r-cost'`, 1.5)
@@ -772,7 +772,7 @@ func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
 // exactly-once delivery contract transfers to the messages table, nothing
 // silently drops.
 func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:")
+	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -843,7 +843,7 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 // its phase — so the boot sweep still sees claimed work and the display
 // coalesce still renders the setup sub-state.
 func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
-	database, err := sql.Open("sqlite", ":memory:")
+	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // dashboardHandler serves the personal dashboard endpoints: PR stats, the
@@ -39,10 +41,30 @@ func (dh *dashboardHandler) kickBackfill(orgID, userID, login, host string) {
 	}
 }
 
-// handleDashboardStats returns aggregated PR statistics from entity snapshots.
+// dashboardStatsWindowDays is the trailing window /api/dashboard/stats
+// aggregates over when the caller names none. It is the same 30 days the store
+// used to hardcode; the difference is that a caller can now say otherwise, and
+// the panel's label and the query it describes come from the same place.
+const dashboardStatsWindowDays = 30
+
+// handleDashboardStats returns aggregated PR statistics from entity snapshots
+// over the ?since window (RFC3339 or YYYY-MM-DD; default: the last 30 days).
 func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
+		return
+	}
+	var v httpx.Validation
+	since := time.Now().AddDate(0, 0, -dashboardStatsWindowDays)
+	if raw := strings.TrimSpace(r.URL.Query().Get("since")); raw != "" {
+		t, err := parseUsageTime(raw)
+		if err != nil {
+			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
+		} else {
+			since = t
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
@@ -80,7 +102,7 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 			return nil
 		}
 		var e error
-		stats, e = tx.Dashboard.Stats(r.Context(), orgID, username, 30)
+		stats, e = tx.Dashboard.Stats(r.Context(), orgID, username, since)
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
@@ -95,10 +117,31 @@ func (dh *dashboardHandler) handleDashboardStats(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, stats)
 }
 
-// handleDashboardPRs returns open PRs from entity snapshots.
+// handleDashboardPRs returns one page of the caller's PRs from entity
+// snapshots, newest polled first.
+//
+// The response is the standard list envelope even in the unbound-identity case
+// (no GitHub host configured, or no identity bound for it): an empty page with
+// total 0, not a bare `[]` and not a 404. The dashboard is a personal view, so
+// "you have no PRs here yet" and "your GitHub identity isn't bound" are the
+// same empty list to a client — the panel decides what to say about it from
+// /api/me, which is where identity state actually lives.
+//
+// POST /api/dashboard/prs/list
 func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
+		return
+	}
+	var req httpx.PageRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	// The only filter is the caller's own identity, which the body cannot
+	// name — so every request for this route fingerprints the same.
+	page := httpx.ResolvePage(&v, req, httpx.FilterFingerprint("dashboard-prs"), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
@@ -106,6 +149,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 		host     string
 		username string
 		prs      []domain.PRSummaryRow
+		total    int
 	)
 	if err := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Host from org_settings, not a PAT credential — see handleDashboardStats
@@ -131,41 +175,52 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		var e error
-		prs, e = tx.Dashboard.PRs(r.Context(), orgID, username)
+		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID, username, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)
 		return
 	}
 	if username == "" {
-		writeJSON(w, http.StatusOK, []domain.PRSummaryRow{})
+		httpx.WriteList(w, page, []domain.PRSummaryRow{}, 0)
 		return
 	}
 	dh.kickBackfill(orgID, userID, username, host)
-	if prs == nil {
-		prs = []domain.PRSummaryRow{}
+	httpx.WriteList(w, page, prs, total)
+}
+
+// dashboardPRRef strictly parses the {owner}/{repo}/{number} triple the live
+// per-PR routes address a pull request by, reporting every fault at once.
+//
+// All three segments are path, not query. A pull request is identified by all
+// three — a bare number names nothing — so the address should carry all three,
+// and a caller that omits one should fail to route rather than reach a handler
+// that then has to invent the missing-parameter error itself. The ?repo= half
+// this replaced also let "owner/" and "/repo" through as a two-element split.
+func dashboardPRRef(w http.ResponseWriter, r *http.Request) (owner, repo string, number int, ok bool) {
+	var v httpx.Validation
+	owner, repo = r.PathValue("owner"), r.PathValue("repo")
+	if owner == "" || repo == "" {
+		// Unreachable through the mux (an empty segment doesn't match the
+		// pattern), but the handler is called directly in tests and the
+		// contract shouldn't depend on the router to hold.
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "owner and repo are required"})
 	}
-	writeJSON(w, http.StatusOK, prs)
+	number, err := strconv.Atoi(r.PathValue("number"))
+	if err != nil || number <= 0 {
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidID, Message: "PR number must be a positive integer"})
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return "", "", 0, false
+	}
+	return owner, repo, number, true
 }
 
 // handleDashboardPRStatus fetches live CI/review status for a single PR.
 // This stays as a live API call since it's on-demand detail, not aggregated data.
 func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *http.Request) {
-	numberStr := r.PathValue("number")
-	number, err := strconv.Atoi(numberStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid PR number"})
-		return
-	}
-
-	repoParam := r.URL.Query().Get("repo")
-	if repoParam == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo query parameter required (owner/repo)"})
-		return
-	}
-	parts := strings.SplitN(repoParam, "/", 2)
-	if len(parts) != 2 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/repo format"})
+	owner, repo, number, ok := dashboardPRRef(w, r)
+	if !ok {
 		return
 	}
 
@@ -176,20 +231,20 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 
 	// Repo-scoped read: decide the credential tier on the whole owner/repo,
 	// not just the owner. A "Selected repositories" App install mints a token
-	// for any repo under parts[0] but 403s on repos outside the grant, so a
+	// for any repo under owner but 403s on repos outside the grant, so a
 	// bare-owner resolve would skip the PAT that would have worked. ClientForRepo
 	// falls through to the PAT when the App doesn't cover this repo.
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub not configured")
 			return
 		}
 		// Real DB/vault/RLS failure — internalError redacts in multi-mode + logs detail.
 		internalError(w, "dashboard", err)
 		return
 	}
-	status, err := client.GetPRStatus(r.Context(), parts[0], parts[1], number)
+	status, err := client.GetPRStatus(r.Context(), owner, repo, number)
 	if err != nil {
 		internalError(w, "dashboard", err)
 		return
@@ -199,30 +254,27 @@ func (dh *dashboardHandler) handleDashboardPRStatus(w http.ResponseWriter, r *ht
 }
 
 func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *http.Request) {
-	numberStr := r.PathValue("number")
-	number, err := strconv.Atoi(numberStr)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid PR number"})
+	owner, repo, number, ok := dashboardPRRef(w, r)
+	if !ok {
 		return
 	}
 
-	repoParam := r.URL.Query().Get("repo")
-	if repoParam == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo query parameter required (owner/repo)"})
-		return
-	}
-	parts := strings.SplitN(repoParam, "/", 2)
-	if len(parts) != 2 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo must be owner/repo"})
-		return
-	}
-
+	// Draft is a pointer so an absent field is distinguishable from an
+	// explicit false: with a plain bool, {} would zero-value into "not a
+	// draft" and silently mark the PR ready.
 	var body struct {
-		Draft bool `json:"draft"`
+		Draft *bool `json:"draft"`
 	}
-	if !decodeJSON(w, r, &body, "") {
+	if !httpx.DecodeJSONStrict(w, r, &body) {
 		return
 	}
+	if body.Draft == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "draft is required", Field: "draft",
+		})
+		return
+	}
+	draft := *body.Draft
 
 	// requireOrg must run BEFORE the GitHub mutation below — a 409 after
 	// the external draft flip would have already changed the PR on
@@ -238,20 +290,20 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
-	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, parts[0], parts[1])
+	client, err := dh.ghResolver.ClientForRepo(r.Context(), orgID, owner, repo)
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "GitHub not configured"})
+			writeNotConfigured(w, "GitHub not configured")
 			return
 		}
 		internalError(w, "dashboard", err)
 		return
 	}
 
-	if body.Draft {
-		err = client.ConvertPRToDraft(r.Context(), parts[0], parts[1], number)
+	if draft {
+		err = client.ConvertPRToDraft(r.Context(), owner, repo, number)
 	} else {
-		err = client.MarkPRReady(r.Context(), parts[0], parts[1], number)
+		err = client.MarkPRReady(r.Context(), owner, repo, number)
 	}
 	if err != nil {
 		internalError(w, "dashboard", err)
@@ -259,26 +311,27 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 
 	// Audit the org-credential board-drag draft toggle (TFAC-483): a
-	// human-authorized, org-executed GitHub write. No run (a direct dashboard
-	// action, not an agent's) and no team (an org-wide PR with no team context),
-	// so it surfaces in the org governance feed, not a team feed. Best-effort in
-	// its own tx after the pessimistic GitHub write — never fails the toggle.
+	// human-authorized, org-executed GitHub write. No conversation (a direct
+	// dashboard action, not an agent's) and no team (an org-wide PR with no
+	// team context), so it surfaces in the org governance feed, not a team
+	// feed. Best-effort in its own tx after the pessimistic GitHub write —
+	// never fails the toggle.
 	draftAction := domain.ActionPRMarkedReady
 	draftFrom, draftTo := domain.ArtifactStatePRDraft, domain.ArtifactStatePROpen
-	if body.Draft {
+	if draft {
 		draftAction = domain.ActionPRConvertedToDraft
 		draftFrom, draftTo = domain.ArtifactStatePROpen, domain.ArtifactStatePRDraft
 	}
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
 		Provider:    domain.ArtifactProviderGitHub,
 		Action:      draftAction,
-		Target:      fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number),
+		Target:      fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID:  strconv.Itoa(number),
-		URL:         domain.GitHubPullURL(parts[0]+"/"+parts[1], number),
+		URL:         domain.GitHubPullURL(owner+"/"+repo, number),
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,
-		Credential:  githubCredentialFor(r.Context(), dh.ghResolver, orgID, parts[0], parts[1]),
+		Credential:  githubCredentialFor(r.Context(), dh.ghResolver, orgID, owner, repo),
 	})
 
 	// Patch the local entity snapshot to match the state we just pushed to
@@ -291,14 +344,14 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// signal and a second event would race the next poll's diff and confuse
 	// the audit trail. Revisit if a user reports "my trigger didn't fire
 	// when I dragged the card."
-	sourceID := fmt.Sprintf("%s/%s#%d", parts[0], parts[1], number)
+	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, body.Draft)
+		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, draft)
 	}); patchErr != nil {
 		dashboardLog.Warn("failed to patch snapshot after draft toggle", "source_id", sourceID, "error", patchErr)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"draft": body.Draft})
+	writeJSON(w, http.StatusOK, map[string]any{"draft": draft})
 }
 
 // patchPRSnapshotDraft flips the is_draft field on an entity's PR snapshot
@@ -330,5 +383,6 @@ func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID, s
 	if err != nil {
 		return err
 	}
-	return entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched))
+	_, e := entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched))
+	return e
 }

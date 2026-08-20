@@ -4,22 +4,38 @@ import { ChevronDown, GitBranch, Plus, RotateCw, AlertTriangle } from 'lucide-re
 import { Link } from 'react-router'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useApiOrgId } from '../hooks/useApiOrgId'
+import { useTeams } from '../hooks/useTeams'
+import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
 // Repo tracking is per-team; writes go to the team's repos
-// endpoint. This page is pre-team-context, so it targets the org's
-// default team — a future change will thread the selected team here.
-// The default team's repo *tracking* set — read to seed the selection and
+// endpoint. This page is pre-team-context, so it pins one team — a
+// future change will thread the selected team here.
+// That team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
-// (the org-wide repo_profiles union): in a multi-team org that union
+// (the org-wide repositories union): in a multi-team org that union
 // includes sibling teams' repos, and writing it back here would pull them
-// into the default team's tracked set and past the router gate.
-const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
+// into the pinned team's tracked set and past the router gate.
+// The {team_id} segment takes the "default" alias only in local mode;
+// multi addresses the caller's OLDEST TEAM MEMBERSHIP by uuid, resolved
+// from the (membership-scoped, created_at-ordered) teams list before the
+// tracked-set read runs. That is not always the org-wide oldest team the
+// local alias resolves — deliberately: a member-visible team is the only
+// kind this page's reads and writes are authorized against.
+const teamReposPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}/github-repos`
 
-interface RepoProfile {
+interface Repository {
+  /** The registry row id. Identity: the React key, the websocket merge
+   *  key, and the path segment every repo route is addressed by. GitHub
+   *  cannot change it, so a rename mid-session neither strands a card nor
+   *  404s a save. */
   id: string
+  /** "owner/repo" — the display name, and only that. The server renders
+   *  it (domain.Repository.Slug()); this page reads it. */
+  slug: string
   owner: string
   repo: string
   description?: string
@@ -42,7 +58,7 @@ interface RepoProfile {
   // no settings shortcut).
   clone_error_kind?: 'ssh' | 'other'
   // Whether this caller may change the repo's settings. The server
-  // decides — a repo profile is org-wide, so writing it takes an org
+  // decides — a repository row is org-wide, so writing it takes an org
   // admin or a team admin of a team tracking it, and only the server
   // knows which of the tracking teams the caller administers. Never
   // re-derive this from the viewer's role. Absent (older server) reads
@@ -54,7 +70,7 @@ interface RepoProfile {
 // The branch a run actually targets: an explicit base_branch override,
 // else the profiler-derived default, else GitHub's own fallback. Shared
 // by the editable picker and the read-only label so the two can't drift.
-function effectiveBranch(profile: RepoProfile): string {
+function effectiveBranch(profile: Repository): string {
   return profile.base_branch || profile.default_branch || 'main'
 }
 
@@ -68,7 +84,7 @@ function BranchPicker({
   profile,
   onSave,
 }: {
-  profile: RepoProfile
+  profile: Repository
   onSave: (branch: string) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -117,13 +133,14 @@ function BranchPicker({
 
       setLoading(true)
       try {
-        const res = await fetch(
-          `/api/repos/${profile.owner}/${profile.repo}/branches?q=${encodeURIComponent(q)}`,
+        // One page is what the picker shows: it is a type-to-filter box, and
+        // the filter is what narrows the list, not scrolling it.
+        const page = await apiList<{ name: string }>(
+          `/api/repos/${encodeURIComponent(profile.id)}/branches/list`,
+          { q, page_size: 30 },
           { signal: controller.signal },
         )
-        if (res.ok && mountedRef.current) {
-          setBranches((await res.json()) as string[])
-        }
+        if (mountedRef.current) setBranches(page.items.map((b) => b.name))
       } catch (err) {
         // AbortError is expected when a newer request supersedes this one;
         // the superseding call already set loading=true and will handle
@@ -138,7 +155,7 @@ function BranchPicker({
         }
       }
     },
-    [profile.owner, profile.repo],
+    [profile.id],
   )
 
   const handleOpenChange = (next: boolean) => {
@@ -249,7 +266,7 @@ function BranchPicker({
 // Deliberately not a disabled <button>: there's no action to offer, and a
 // dead button invites the click that would 403.
 
-function BranchLabel({ profile }: { profile: RepoProfile }) {
+function BranchLabel({ profile }: { profile: Repository }) {
   return (
     <span
       title="Only an org admin, or a team admin of a team tracking this repo, can change the base branch"
@@ -349,7 +366,7 @@ function StatusDot({ state }: { state: DotState }) {
 // text is short enough to display verbatim and the user is the right
 // audience to interpret git/curl/connection errors.
 
-function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
+function CloneFailedBadge({ profile }: { profile: Repository }) {
   const [open, setOpen] = useState(false)
   const orgHref = useOrgHref()
   const isSSH = profile.clone_error_kind === 'ssh'
@@ -358,7 +375,7 @@ function CloneFailedBadge({ profile }: { profile: RepoProfile }) {
       <Popover.Trigger asChild>
         <button
           type="button"
-          aria-label={`Clone failed for ${profile.id}`}
+          aria-label={`Clone failed for ${profile.slug}`}
           className="
             inline-flex items-center gap-1 rounded-full
             border border-[var(--color-alarm)]/30
@@ -434,7 +451,7 @@ function RepoCard({
   onBranchChange,
   webBaseURL,
 }: {
-  profile: RepoProfile
+  profile: Repository
   onBranchChange: (branch: string) => void
   webBaseURL: string | undefined
 }) {
@@ -488,7 +505,9 @@ function RepoCard({
       {/* Header row */}
       <header className="relative flex items-center gap-3">
         <StatusDot state={state} />
-        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate">{profile.id}</h3>
+        <h3 className="text-body font-semibold tracking-tight text-ink-1 truncate">
+          {profile.slug}
+        </h3>
         {profile.clone_status === 'failed' && <CloneFailedBadge profile={profile} />}
         <div className="ml-auto flex items-center gap-3">
           {profile.can_edit ? (
@@ -518,7 +537,7 @@ function RepoCard({
               <button
                 type="button"
                 onClick={() => setExpanded(true)}
-                aria-label={`Show full profile for ${profile.id}`}
+                aria-label={`Show full profile for ${profile.slug}`}
                 aria-expanded={false}
                 className="mt-1 text-reported font-medium text-warm/80 hover:text-warm transition-colors"
               >
@@ -529,7 +548,7 @@ function RepoCard({
               <button
                 type="button"
                 onClick={() => setExpanded(false)}
-                aria-label={`Collapse profile for ${profile.id}`}
+                aria-label={`Collapse profile for ${profile.slug}`}
                 aria-expanded={true}
                 className="mt-2 text-reported font-medium text-ink-3 hover:text-ink-2 transition-colors"
               >
@@ -611,7 +630,7 @@ function DocChip({ label, present, href }: { label: string; present: boolean; hr
 // user to a wrong destination.
 function docURL(
   webBaseURL: string | undefined,
-  profile: RepoProfile,
+  profile: Repository,
   filename: string,
 ): string | undefined {
   if (!webBaseURL) return undefined
@@ -655,14 +674,25 @@ function formatAge(iso: string): string {
 // --- Page ------------------------------------------------------------------
 
 export default function Repos() {
-  const [profiles, setProfiles] = useState<RepoProfile[]>([])
+  const apiOrgId = useApiOrgId()
+  // useOptionalAuth is null in local mode (no AuthProvider) — the arm that
+  // addresses the sole team through the "default" alias. Multi resolves the
+  // caller's oldest team membership from the teams list (see teamReposPath);
+  // teamId is '' until it lands, and teamsSettled releases the first fetch
+  // once the list has resolved either way — so an unresolved team renders as
+  // the paused selection (writes disabled) rather than a wrong-team read.
+  const isLocal = useOptionalAuth() === null
+  const { teams, loaded: teamsLoaded, error: teamsError, refresh: refreshTeams } = useTeams()
+  const teamId = isLocal ? 'default' : (teams[0]?.id ?? '')
+  const teamsSettled = isLocal || teamsLoaded || !!teamsError
+  const [profiles, setProfiles] = useState<Repository[]>([])
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
   const [selectedRepos, setSelectedRepos] = useState<string[]>([])
   // True when the default team's tracked-set fetch failed. selectedRepos
   // stays [] on failure, which is indistinguishable from "genuinely tracks
   // nothing" — without this flag a transient failure would let Re-profile
-  // PUT an empty array and wipe the team's repos (+ GC repo_profiles).
+  // PUT an empty array and wipe the team's repos (+ GC `repositories`).
   const [teamLoadFailed, setTeamLoadFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   // Starts unset — we don't know the right host until settings load. Doc
@@ -673,20 +703,24 @@ export default function Repos() {
 
   const fetchData = async () => {
     try {
-      // Two distinct lists: the cards show the org-wide repo_profiles union
-      // (GET /api/repos), but the *selection* — what Save/Re-profile writes
-      // back to the default team — must come from the default team's own
-      // tracked set, never the union (see TEAM_REPOS_PATH).
-      const [profilesRes, teamRes] = await Promise.all([
-        fetch('/api/repos'),
-        fetch(TEAM_REPOS_PATH),
+      // Two distinct lists: the cards show the org-wide repositories union
+      // (the registry list), but the *selection* — what Save/Re-profile writes
+      // back to the first team — must come from that team's own
+      // tracked set, never the union (see teamReposPath).
+      // Each settles on its own: the cards are worth painting even when the
+      // team read fails — or the team never resolved — and a failed team read
+      // must not be mistaken for an empty tracked set (see setTeamLoadFailed
+      // below).
+      const [profiles, team] = await Promise.all([
+        apiList<Repository>('/api/repos/list', { page_size: 200 })
+          .then((page) => page.items)
+          .catch(() => null),
+        teamId
+          ? apiJSON<{ repos?: string[] }>(teamReposPath(teamId)).catch(() => null)
+          : Promise.resolve(null),
       ])
-      if (profilesRes.ok) {
-        const data: RepoProfile[] = await profilesRes.json()
-        setProfiles(data)
-      }
-      if (teamRes.ok) {
-        const team: { repos?: string[] } = await teamRes.json()
+      if (profiles) setProfiles(profiles)
+      if (team) {
         setSelectedRepos(team.repos ?? [])
         setTeamLoadFailed(false)
       } else {
@@ -703,9 +737,17 @@ export default function Repos() {
   }
 
   useEffect(() => {
+    // Hold the first fetch until the team resolution settles: fetching
+    // sooner would paint the failed-selection warning for a team that is
+    // merely still resolving.
+    if (!teamsSettled) return
     fetchData()
-    fetch('/api/settings/org')
-      .then((r) => (r.ok ? r.json() : null))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiOrgId, teamId, teamsSettled])
+
+  useEffect(() => {
+    if (!apiOrgId) return
+    apiJSON<{ github_base_url?: string }>(`/api/orgs/${encodeURIComponent(apiOrgId)}/settings`)
       .then((data) => {
         const url = data?.github_base_url
         if (typeof url === 'string' && url) {
@@ -716,47 +758,23 @@ export default function Repos() {
         // If settings fetch fails, webBaseURL stays undefined and doc
         // chips render as non-clickable — no silent wrong-destination links.
       })
-  }, [])
+  }, [apiOrgId])
 
-  // Live updates from profiling pipeline
+  // Live updates from the profiling pipeline + clone-result hook. All
+  // three producers (doc scan, AI profiler, clone status) share one
+  // sparse-diff event: merge whichever fields are present rather than
+  // overwriting — a clone-status diff must not blank the AI profile_text
+  // and vice versa.
   useWebSocket((event) => {
-    if (event.type === 'repo_docs_updated') {
-      const d = event.data as {
-        id: string
-        has_readme: boolean
-        has_claude_md: boolean
-        has_agents_md: boolean
-      }
-      setProfiles((prev) =>
-        prev.map((p) =>
-          p.id === d.id
-            ? {
-                ...p,
-                has_readme: d.has_readme,
-                has_claude_md: d.has_claude_md,
-                has_agents_md: d.has_agents_md,
-              }
-            : p,
-        ),
-      )
-    }
-    if (event.type === 'repo_profile_updated') {
-      // Two producers share this event type: the AI profiler (sends
-      // profile_text) and main.go's clone-result hook (sends
-      // clone_status / clone_error / clone_error_kind). Merge whichever
-      // fields are present rather than overwriting — a clone-status
-      // event must not blank the AI profile_text and vice versa.
-      const d = event.data as {
-        id: string
-        profile_text?: string
-        clone_status?: 'ok' | 'failed' | 'pending'
-        clone_error?: string
-        clone_error_kind?: 'ssh' | 'other'
-      }
+    if (event.type === 'repository_updated') {
+      const d = event.data
       setProfiles((prev) =>
         prev.map((p) => {
           if (p.id !== d.id) return p
-          const next: RepoProfile = { ...p }
+          const next: Repository = { ...p }
+          if (d.has_readme !== undefined) next.has_readme = d.has_readme
+          if (d.has_claude_md !== undefined) next.has_claude_md = d.has_claude_md
+          if (d.has_agents_md !== undefined) next.has_agents_md = d.has_agents_md
           if (d.profile_text !== undefined) next.profile_text = d.profile_text
           if (d.clone_status !== undefined) next.clone_status = d.clone_status
           if (d.clone_error !== undefined) next.clone_error = d.clone_error
@@ -768,22 +786,22 @@ export default function Repos() {
   })
 
   const handleSaveRepos = async (repos: string[]) => {
+    // The picker can't open while the selection is failed/unresolved (the
+    // Edit button gates on teamLoadFailed); this is the defense-in-depth
+    // guard against writing with no team to address.
+    if (!teamId) return
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_PATH, {
+      await apiFetch(teamReposPath(teamId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to save repositories'))
-      } else {
-        toast.success('Repositories updated — profiling will run shortly')
-        setSelectedRepos(repos)
-        setTimeout(fetchData, 5000)
-      }
+      toast.success('Repositories updated — profiling will run shortly')
+      setSelectedRepos(repos)
+      setTimeout(fetchData, 5000)
     } catch (err) {
-      toast.error(`Could not save repositories: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not save the repositories.'))
     } finally {
       setSaving(false)
       setPickerOpen(false)
@@ -795,45 +813,40 @@ export default function Repos() {
     // selection is empty or its load failed — that would clear the team's
     // tracked repos. The button is also disabled in these states; this is
     // the defense-in-depth guard.
-    if (teamLoadFailed || selectedRepos.length === 0) {
+    if (!teamId || teamLoadFailed || selectedRepos.length === 0) {
       return
     }
     setSaving(true)
     try {
-      const res = await fetch(TEAM_REPOS_PATH, {
+      await apiFetch(teamReposPath(teamId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: selectedRepos }),
       })
-      if (res.ok) {
-        toast.success('Re-profiling started')
-        setTimeout(fetchData, 8000)
-      } else {
-        toast.error(await readError(res, 'Failed to start re-profile'))
-      }
+      toast.success('Re-profiling started')
+      setTimeout(fetchData, 8000)
     } catch (err) {
-      toast.error(`Could not start re-profile: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not start the re-profile.'))
     } finally {
       setSaving(false)
     }
   }
 
-  const handleBranchChange = (profile: RepoProfile) => async (branch: string) => {
+  const handleBranchChange = (profile: Repository) => async (branch: string) => {
     try {
-      const res = await fetch(`/api/repos/${profile.owner}/${profile.repo}`, {
+      // The PATCH answers with the updated row, so the card renders what the
+      // server stored rather than what this call sent — and without a refetch
+      // of the whole list to find out. The two are the same for base_branch
+      // today; they are not for a field the write normalizes, and the row is
+      // the half that is true either way.
+      const updated = await apiJSON<Repository>(`/api/repos/${encodeURIComponent(profile.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ base_branch: branch || null }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to update base branch'))
-        return
-      }
-      setProfiles((prev) =>
-        prev.map((p) => (p.id === profile.id ? { ...p, base_branch: branch } : p)),
-      )
+      setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)))
     } catch (err) {
-      toast.error(`Failed to update base branch: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not update the base branch.'))
     }
   }
 
@@ -875,7 +888,16 @@ export default function Repos() {
               overwriting it.{' '}
               <button
                 type="button"
-                onClick={() => fetchData()}
+                onClick={() => {
+                  // The failed read may be the teams list itself (multi,
+                  // team unresolved): re-resolve it first — the fetch effect
+                  // refires once the team lands.
+                  if (!teamId) {
+                    void refreshTeams()
+                    return
+                  }
+                  void fetchData()
+                }}
                 className="underline hover:text-warm"
               >
                 Retry

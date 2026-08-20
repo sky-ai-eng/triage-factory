@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -105,9 +106,9 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// ETag persisted for conditional re-poll next cycle.
-	etag, polledAt, err := stores.Repos.GetPullsPollStateSystem(ctx, org, "octo/repo")
+	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("octo/repo"))
 	if err != nil {
-		t.Fatalf("GetPullsPollStateSystem: %v", err)
+		t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
 	}
 	if etag != `"etag-1"` {
 		t.Errorf("persisted etag = %q; want %q", etag, `"etag-1"`)
@@ -137,7 +138,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 
 func newMigratedSQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}

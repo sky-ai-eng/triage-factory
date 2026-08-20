@@ -11,7 +11,7 @@ import (
 // defaults sit inside spec §6.2's stated windows: a ~15-30s tier-2 aging
 // delay, and a liveness window a few heartbeats wide (heartbeat is ~4s).
 const (
-	// DefaultAging is the tier-2 spillover delay — how long a queued run
+	// DefaultAging is the tier-2 spillover delay — how long a queued conversation
 	// waits for its preferred owner before any executor may claim it.
 	DefaultAging = 20 * time.Second
 
@@ -19,7 +19,8 @@ const (
 	// preferred executor is treated as dead (immediate spillover, no aging
 	// wait). Wider than one heartbeat so a single missed beat doesn't
 	// prematurely abandon affinity, narrower than the reaper's 30s so a
-	// genuinely dead owner's runs spill before the reaper even requeues them.
+	// genuinely dead owner's conversations spill before the reaper even
+	// requeues them.
 	DefaultLiveness = 12 * time.Second
 )
 

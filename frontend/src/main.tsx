@@ -158,7 +158,7 @@ function LocalRoutes() {
         <Route path="/overview" element={<Overview />} />
         <Route path="/triage" element={<Cards />} />
         <Route path="/board" element={<Board />} />
-        <Route path="/runs/:runID" element={<RunDetail />} />
+        <Route path="/runs/:conversationID" element={<RunDetail />} />
         <Route path="/prs" element={<PRDashboard />} />
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
@@ -245,7 +245,7 @@ function MultiRoutes() {
             <Route path="overview" element={<Overview />} />
             <Route path="triage" element={<Cards />} />
             <Route path="board" element={<Board />} />
-            <Route path="runs/:runID" element={<RunDetail />} />
+            <Route path="runs/:conversationID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
             {/* Prompts is its own destination. It used to redirect into a tab
                 on /team, which is where the editor lived before the rail gave

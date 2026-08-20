@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // TestDefaultedCloneProtocolView_ModeAware pins the API GET view:
@@ -182,9 +183,9 @@ func TestJiraProjectKeyRe(t *testing.T) {
 // isn't tested here because it'd write to the real keychain;
 // those invariants are covered by the unit tests above.
 
-// teamPostBodyWithProject builds a request that exercises validation
-// of a single project's rules via the team settings endpoint.
-func teamPostBodyWithProject(key string, pickup, inProgress, done jiraStatusRule) map[string]any {
+// teamProjectsBodyWith builds a replace-set body carrying a single project, to
+// exercise validation of that project's rules through the jira-projects PUT.
+func teamProjectsBodyWith(key string, pickup, inProgress, done jiraStatusRule) map[string]any {
 	return map[string]any{
 		"jira_projects": []map[string]any{
 			{
@@ -209,90 +210,83 @@ func validPickup() jiraStatusRule {
 	return jiraStatusRule{Members: []string{"To Do"}}
 }
 
-func TestTeamSettingsPost_PickupCanonical_Rejected(t *testing.T) {
+func TestTeamJiraProjectsPut_PickupCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := teamPostBodyWithProject("SKY",
+	body := teamProjectsBodyWith("SKY",
 		jiraStatusRule{Members: []string{"To Do"}, Canonical: "To Do"},
 		validInProgress(),
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
+	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if !strings.Contains(resp["error"], "canonical must be empty") {
-		t.Errorf("error should mention pickup canonical invariant, got: %q", resp["error"])
+	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical must be empty") {
+		t.Errorf("error should mention pickup canonical invariant, got: %q", msg)
 	}
 }
 
-func TestTeamSettingsPost_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
+func TestTeamJiraProjectsPut_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := teamPostBodyWithProject("SKY",
+	body := teamProjectsBodyWith("SKY",
 		validPickup(),
 		jiraStatusRule{Members: []string{"In Progress"}, Canonical: "Doing"},
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
+	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
-func TestTeamSettingsPost_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
+func TestTeamJiraProjectsPut_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := teamPostBodyWithProject("SKY",
+	body := teamProjectsBodyWith("SKY",
 		validPickup(),
 		jiraStatusRule{Members: []string{"In Progress"}},
 		validDone(),
 	)
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
+	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "canonical is required") {
-		t.Errorf("error should mention canonical required, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "canonical is required") {
+		t.Errorf("error should mention canonical required, got: %q", resp)
 	}
 }
 
-func TestTeamSettingsPost_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
+func TestTeamJiraProjectsPut_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
 	s := newTestServer(t)
-	body := teamPostBodyWithProject("SKY",
+	body := teamProjectsBodyWith("SKY",
 		validPickup(),
 		validInProgress(),
 		jiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Done"},
 	)
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
+	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "not in members") {
-		t.Errorf("error should mention canonical not in members, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "not in members") {
+		t.Errorf("error should mention canonical not in members, got: %q", resp)
 	}
 }
 
-// TestSettingsPost_PerProjectRules_RoundTrip verifies the core
+// TestSettingsPatch_PerProjectRules_RoundTrip verifies the core
 // contract: two projects in the same team can carry different rules,
 // and saving → loading preserves each project's rules independently.
 // Exercises the JiraStatusRulesStore directly (the HTTP handler's
 // keychain write isn't available in the test env).
-func TestSettingsPost_PerProjectRules_RoundTrip(t *testing.T) {
+func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	s := newTestServer(t)
 	ctx := t.Context()
 	teamID := runmode.LocalDefaultTeamID
@@ -371,11 +365,11 @@ func TestSettingsPost_PerProjectRules_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSettingsPost_DuplicateProjectKey_Rejected verifies that the
+// TestSettingsPatch_DuplicateProjectKey_Rejected verifies that the
 // handler rejects two entries with the same key — the rules table
 // keys on (team_id, project_key) and a duplicate would silently
 // last-write-win.
-func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
+func TestTeamJiraProjectsPut_DuplicateProjectKey_Rejected(t *testing.T) {
 	s := newTestServer(t)
 	body := map[string]any{
 		"jira_projects": []map[string]any{
@@ -383,14 +377,13 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 			{"key": "SKY", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},
 		},
 	}
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", body)
+	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 on duplicate project key, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "duplicate project key") {
-		t.Errorf("error should mention duplicate, got: %q", resp["error"])
+	resp := firstErrorMessage(t, rec)
+	if !strings.Contains(resp, "duplicate project key") {
+		t.Errorf("error should mention duplicate, got: %q", resp)
 	}
 }
 
@@ -401,7 +394,7 @@ func TestTeamSettingsPost_DuplicateProjectKey_Rejected(t *testing.T) {
 func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 	s := newTestServer(t)
 
-	orgRec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	orgRec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if orgRec.Code != http.StatusOK {
 		t.Fatalf("GET /api/settings/org: %d: %s", orgRec.Code, orgRec.Body.String())
 	}
@@ -415,7 +408,7 @@ func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 		t.Errorf("org member_count = %d, want 1 (local mode is single-member)", org.MemberCount)
 	}
 
-	teamRec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	teamRec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if teamRec.Code != http.StatusOK {
 		t.Fatalf("GET /api/settings/team/default: %d: %s", teamRec.Code, teamRec.Body.String())
 	}
@@ -440,35 +433,39 @@ func TestSettingsGet_MemberCountAndRole(t *testing.T) {
 // the handler wiring: the cap never blocks a save, it just surfaces a
 // warning so the admin/team know the effective model differs from the input.
 
-func postJSONResp(t *testing.T, s *Server, path string, body any) map[string]string {
+// patchTeamSettingsOK PATCHes the team settings row and hands back the decoded
+// settings resource — which is what the PATCH answers with, including any
+// advisory `warning`.
+func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[string]any {
 	t.Helper()
-	rec := doJSON(t, s, "POST", path, body)
+	path := teamSettingsPath(teamID)
+	rec := doJSON(t, s, http.MethodPatch, path, body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("POST %s: %d: %s", path, rec.Code, rec.Body.String())
+		t.Fatalf("PATCH %s: %d: %s", path, rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode %s response: %v", path, err)
 	}
 	return resp
 }
 
-// TestOrgSettingsPost_BlankGitHubURLWithApp_409 closes the settings-route half
+// TestOrgSettingsPatch_BlankGitHubURLWithApp_409 closes the settings-route half
 // of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
 // unbind: githubBaseFor falls org_settings → github_url secret → github.com, so
 // blanking the column while an App is registered silently sends a GHES org's
 // App to github.com. The config route refuses instead of skipping, because here
 // the clear is the request itself, not a side effect of one.
-func TestOrgSettingsPost_BlankGitHubURLWithApp_409(t *testing.T) {
+func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 	const host = "https://github.example.com"
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 	seedLocalApp(t, s, false) // staged is enough — the App resolves against this host either way
 
-	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"github_base_url": ""})
+	rec := patchOrgSettings(t, s, map[string]any{"github_base_url": nil})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -487,16 +484,16 @@ func TestOrgSettingsPost_BlankGitHubURLWithApp_409(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_BlankGitHubURLWithoutApp_OK is the other half: with no App
+// TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK is the other half: with no App
 // to strand, clearing the host is an ordinary config edit and stays allowed. The
 // guard above must not turn into a blanket ban on emptying the field.
-func TestOrgSettingsPost_BlankGitHubURLWithoutApp_OK(t *testing.T) {
+func TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://github.example.com"})
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://github.example.com"})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": nil})
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
@@ -509,17 +506,17 @@ func TestOrgSettingsPost_BlankGitHubURLWithoutApp_OK(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_RetargetGitHubURLWithApp_OK: moving an App org to a
+// TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK: moving an App org to a
 // different non-empty host is a legitimate GHES domain change and stays
 // allowed. The guard is aimed at the silent-default case, not at host edits.
-func TestOrgSettingsPost_RetargetGitHubURLWithApp_OK(t *testing.T) {
+func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://old.example.com"})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
 	seedLocalApp(t, s, true)
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": "https://new.example.com"})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://new.example.com"})
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
@@ -532,7 +529,7 @@ func TestOrgSettingsPost_RetargetGitHubURLWithApp_OK(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity asserts the
+// TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity asserts the
 // access/identity decoupling: clearing the org's GitHub URL is an
 // access change (PAT_1), and it must NOT touch the user's per-user GitHub
 // identity (PAT_2). Identity is owned solely by its own capture surface (the
@@ -540,7 +537,7 @@ func TestOrgSettingsPost_RetargetGitHubURLWithApp_OK(t *testing.T) {
 // effect of an org-credential save. A leftover row is durable + harmless (the
 // runtime tolerates absent/stale identity) and is still valid if GitHub is
 // reconnected to the same host.
-func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
+func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
 	ctx := t.Context()
@@ -549,7 +546,7 @@ func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "pat"); err != nil {
+	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 	if login, _ := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host); login != "octocat" {
@@ -557,7 +554,7 @@ func TestOrgSettingsPost_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 
 	// Disconnect the org's GitHub access: clear the GitHub URL.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": ""})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": nil})
 
 	login, err := s.users.GetGitHubLogin(ctx, runmode.LocalDefaultUserID, host)
 	if err != nil {
@@ -600,7 +597,7 @@ func TestJiraConnect_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "pat": "org_pat"})
+		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -634,7 +631,7 @@ func TestJiraConnect_Cloud_StoresAPITokenCredential(t *testing.T) {
 	t.Cleanup(jiraStub.Close)
 
 	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -705,7 +702,7 @@ func TestJiraConnect_Cloud_MismatchHint(t *testing.T) {
 	t.Cleanup(jiraStub.Close)
 
 	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
+		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "tok"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
 	}
@@ -734,7 +731,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 
 	// 1) Connect as Data Center (PAT).
 	rec := doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "pat": "dc_pat"})
+		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -745,7 +742,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 
 	// 2) Reconnect the same org as Cloud (email + API token).
 	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
+		map[string]any{"deployment": "cloud", "url": jiraStub.URL, "email": "bot@acme.com", "token": "cloud_tok"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("Cloud connect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -763,7 +760,7 @@ func TestJiraConnect_SchemeSwitch_ClearsStaleCredential(t *testing.T) {
 	// 3) Switch back to Data Center — the Cloud pair must now be gone, leaving
 	//    exactly the DC scheme.
 	rec = doJSON(t, s, "PUT", jiraCredentialRoute(),
-		map[string]any{"url": jiraStub.URL, "pat": "dc_pat_2"})
+		map[string]any{"deployment": "data_center", "url": jiraStub.URL, "pat": "dc_pat_2"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DC reconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
@@ -796,7 +793,7 @@ func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 
 	rec := doJSON(t, s, "PUT", jiraCredentialRoute(), map[string]any{
-		"url": jiraStub.URL, "pat": "org_pat",
+		"deployment": "data_center", "url": jiraStub.URL, "pat": "org_pat",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("jira bind = %d, body=%s", rec.Code, rec.Body.String())
@@ -811,11 +808,11 @@ func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity is the disconnect
+// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity is the disconnect
 // mirror of the GitHub URL-clear test: clearing the org's Jira URL is an
 // access change (PAT_1) and must NOT wipe the user's now-independent Jira
 // identity. Per-user Jira access is cleared only by its own surface.
-func TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity(t *testing.T) {
+func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -830,7 +827,7 @@ func TestOrgSettingsPost_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	}
 
 	// Disconnect the org's Jira access: clear the Jira URL.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_base_url": ""})
+	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": nil})
 
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, host)
 	if err != nil {
@@ -879,33 +876,40 @@ func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	}
 }
 
-func TestTeamSettingsPost_ModelExceedsOrgCap_Warns(t *testing.T) {
-	s := newTestServer(t)
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
+// settingsWarning reads the advisory prose off a settings response, or "" when
+// the save carried none (omitempty drops the key).
+func settingsWarning(resp map[string]any) string {
+	w, _ := resp["warning"].(string)
+	return w
+}
 
-	resp := postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "opus"})
-	if !strings.Contains(resp["warning"], "exceeds the org cap") {
-		t.Errorf("expected org-cap warning, got warning=%q", resp["warning"])
+func TestTeamSettingsPatch_ModelExceedsOrgCap_Warns(t *testing.T) {
+	s := newTestServer(t)
+	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
+
+	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "opus"})
+	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the org cap") {
+		t.Errorf("expected org-cap warning, got warning=%q", w)
 	}
 }
 
-func TestTeamSettingsPost_ModelWithinOrgCap_NoWarning(t *testing.T) {
+func TestTeamSettingsPatch_ModelWithinOrgCap_NoWarning(t *testing.T) {
 	s := newTestServer(t)
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "opus"})
+	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "opus"})
 
-	resp := postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "sonnet"})
-	if resp["warning"] != "" {
-		t.Errorf("expected no warning when team default is within cap, got %q", resp["warning"])
+	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "sonnet"})
+	if w := settingsWarning(resp); w != "" {
+		t.Errorf("expected no warning when team default is within cap, got %q", w)
 	}
 }
 
-func TestOrgSettingsPost_CapBelowTeamDefault_Warns(t *testing.T) {
+func TestOrgSettingsPatch_CapBelowTeamDefault_Warns(t *testing.T) {
 	s := newTestServer(t)
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "opus"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "opus"})
 
-	resp := postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
-	if !strings.Contains(resp["warning"], "exceeds the new cap") {
-		t.Errorf("expected cap-downgrade warning, got warning=%q", resp["warning"])
+	resp := patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
+	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the new cap") {
+		t.Errorf("expected cap-downgrade warning, got warning=%q", w)
 	}
 }
 
@@ -914,9 +918,9 @@ func TestOrgSettingsPost_CapBelowTeamDefault_Warns(t *testing.T) {
 // orgDailyCap reads the org settings GET and returns max_daily_cost_usd.
 func orgDailyCap(t *testing.T, s *Server) float64 {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/org: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		MaxDailyCostUSD float64 `json:"max_daily_cost_usd"`
@@ -927,54 +931,69 @@ func orgDailyCap(t *testing.T, s *Server) float64 {
 	return resp.MaxDailyCostUSD
 }
 
-// TestOrgSettingsPost_DailyCostCap_RoundTrip pins the GET/POST wire round-trip:
-// POSTing a positive cap reflects it on the next GET, and POSTing 0 clears it
-// back to "no cap".
-func TestOrgSettingsPost_DailyCostCap_RoundTrip(t *testing.T) {
+// TestOrgSettingsPatch_DailyCostCap_RoundTrip pins the wire round-trip: a
+// positive cap reflects on the next GET, and null clears it back to "no cap".
+func TestOrgSettingsPatch_DailyCostCap_RoundTrip(t *testing.T) {
 	s := newTestServer(t)
 
 	if got := orgDailyCap(t, s); got != 0 {
 		t.Fatalf("fresh org daily cap = %v, want 0 (no cap by default)", got)
 	}
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 25.5})
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 25.5})
 	if got := orgDailyCap(t, s); got != 25.5 {
-		t.Errorf("after POST 25.5, GET max_daily_cost_usd = %v, want 25.5", got)
+		t.Errorf("after setting 25.5, GET max_daily_cost_usd = %v, want 25.5", got)
 	}
 
-	// 0 clears the cap.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 0})
+	// null clears the cap — the one clearing convention.
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": nil})
 	if got := orgDailyCap(t, s); got != 0 {
-		t.Errorf("after POST 0, GET max_daily_cost_usd = %v, want 0 (cleared)", got)
+		t.Errorf("after null, GET max_daily_cost_usd = %v, want 0 (cleared)", got)
 	}
 }
 
-// TestOrgSettingsPost_DailyCostCap_OmittedFieldUntouched pins the pointer-nil
-// semantics: a save that omits max_daily_cost_usd must leave a previously-set
-// cap intact (an unrelated org save can't stomp the cap).
-func TestOrgSettingsPost_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
+// TestOrgSettingsPatch_DailyCostCap_ZeroRejected: "no cap" has exactly one
+// spelling, and it is null. An explicit 0 is refused rather than quietly read as
+// "no cap" — capping at $0 and having no cap are different intents, and a caller
+// who means the second one already has a way to say it.
+func TestOrgSettingsPatch_DailyCostCap_ZeroRejected(t *testing.T) {
 	s := newTestServer(t)
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_daily_cost_usd": 40})
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 12})
+
+	rec := patchOrgSettings(t, s, map[string]any{"max_daily_cost_usd": 0})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("explicit 0 should 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_daily_cost_usd")
+	if got := orgDailyCap(t, s); got != 12 {
+		t.Errorf("the refused save changed the cap: got %v, want 12", got)
+	}
+}
+
+// TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched pins the absent-means-
+// keep half of the convention: a save that omits max_daily_cost_usd must leave a
+// previously-set cap intact (an unrelated org save can't stomp the cap).
+func TestOrgSettingsPatch_DailyCostCap_OmittedFieldUntouched(t *testing.T) {
+	s := newTestServer(t)
+	patchOrgSettingsOK(t, s, map[string]any{"max_daily_cost_usd": 40})
 
 	// A save touching only the model tier omits the cap → it must survive.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
+	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
 	if got := orgDailyCap(t, s); got != 40 {
 		t.Errorf("omitting max_daily_cost_usd cleared the cap: got %v, want 40 preserved", got)
 	}
 }
 
-// TestOrgSettingsPost_DailyCostCap_NegativeRejected pins the >= 0 validation.
-func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
+// TestOrgSettingsPatch_DailyCostCap_NegativeRejected pins the range check. A
+// well-formed number outside the band a field honors is semantic, not a shape
+// fault, so it answers 422 OUT_OF_RANGE.
+func TestOrgSettingsPatch_DailyCostCap_NegativeRejected(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"max_daily_cost_usd": -1})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("negative cap should 400, got %d: %s", rec.Code, rec.Body.String())
+	rec := patchOrgSettings(t, s, map[string]any{"max_daily_cost_usd": -1})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("negative cap should 422, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_daily_cost_usd must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
-	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_daily_cost_usd")
 }
 
 // --- TFAC-638 concurrent-run limit -----------------------------------------
@@ -982,9 +1001,9 @@ func TestOrgSettingsPost_DailyCostCap_NegativeRejected(t *testing.T) {
 // orgConcurrentRuns reads the org settings GET and returns max_concurrent_runs.
 func orgConcurrentRuns(t *testing.T, s *Server) int {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/settings/org", nil)
+	rec := doJSON(t, s, "GET", orgSettingsPath(), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/org: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s: %d: %s", orgSettingsPath(), rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		MaxConcurrentRuns int `json:"max_concurrent_runs"`
@@ -995,76 +1014,74 @@ func orgConcurrentRuns(t *testing.T, s *Server) int {
 	return resp.MaxConcurrentRuns
 }
 
-// TestOrgSettingsPost_ConcurrentRuns_RoundTrip pins the GET/POST wire round-trip:
-// POSTing a positive limit reflects it on the next GET, and POSTing 0 clears it
-// back to "unlimited".
-func TestOrgSettingsPost_ConcurrentRuns_RoundTrip(t *testing.T) {
+// TestOrgSettingsPatch_ConcurrentRuns_RoundTrip pins the wire round-trip: a
+// positive limit reflects on the next GET, and null clears it to "unlimited".
+func TestOrgSettingsPatch_ConcurrentRuns_RoundTrip(t *testing.T) {
 	s := newTestServer(t)
 
 	if got := orgConcurrentRuns(t, s); got != 0 {
 		t.Fatalf("fresh org concurrent-run limit = %v, want 0 (unlimited by default)", got)
 	}
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 8})
+	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 8})
 	if got := orgConcurrentRuns(t, s); got != 8 {
-		t.Errorf("after POST 8, GET max_concurrent_runs = %v, want 8", got)
+		t.Errorf("after setting 8, GET max_concurrent_runs = %v, want 8", got)
 	}
 
-	// 0 clears the limit.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 0})
+	// null clears the limit — the same convention as the cost cap above.
+	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": nil})
 	if got := orgConcurrentRuns(t, s); got != 0 {
-		t.Errorf("after POST 0, GET max_concurrent_runs = %v, want 0 (cleared)", got)
+		t.Errorf("after null, GET max_concurrent_runs = %v, want 0 (cleared)", got)
 	}
+
+	// An explicit 0 is refused, exactly as on the cost cap: "unlimited" is null.
+	rec := patchOrgSettings(t, s, map[string]any{"max_concurrent_runs": 0})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("explicit 0 should 422, got %d: %s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
 }
 
-// TestOrgSettingsPost_ConcurrentRuns_OmittedFieldUntouched pins the pointer-nil
-// semantics: a save that omits max_concurrent_runs must leave a previously-set
-// limit intact (an unrelated org save can't stomp it).
-func TestOrgSettingsPost_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
+// TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched pins the absent-
+// means-keep half: a save that omits max_concurrent_runs must leave a
+// previously-set limit intact (an unrelated org save can't stomp it).
+func TestOrgSettingsPatch_ConcurrentRuns_OmittedFieldUntouched(t *testing.T) {
 	s := newTestServer(t)
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_concurrent_runs": 5})
+	patchOrgSettingsOK(t, s, map[string]any{"max_concurrent_runs": 5})
 
 	// A save touching only the model tier omits the limit → it must survive.
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"max_llm_model_tier": "sonnet"})
+	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
 	if got := orgConcurrentRuns(t, s); got != 5 {
 		t.Errorf("omitting max_concurrent_runs cleared the limit: got %v, want 5 preserved", got)
 	}
 }
 
-// TestOrgSettingsPost_ConcurrentRuns_NegativeRejected pins the >= 0 validation.
-func TestOrgSettingsPost_ConcurrentRuns_NegativeRejected(t *testing.T) {
+// TestOrgSettingsPatch_ConcurrentRuns_NegativeRejected pins the range check.
+func TestOrgSettingsPatch_ConcurrentRuns_NegativeRejected(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, "POST", "/api/settings/org", map[string]any{"max_concurrent_runs": -1})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("negative limit should 400, got %d: %s", rec.Code, rec.Body.String())
+	rec := patchOrgSettings(t, s, map[string]any{"max_concurrent_runs": -1})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("negative limit should 422, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be >= 0") {
-		t.Errorf("expected >= 0 validation message, got: %q", resp["error"])
-	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
 }
 
-// TestOrgSettingsPost_ConcurrentRuns_OversizedRejected pins the upper bound: a
+// TestOrgSettingsPatch_ConcurrentRuns_OversizedRejected pins the upper bound: a
 // value beyond the ceiling 400s at the handler rather than overflowing the
 // Postgres int4 column into a 500.
-func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
+func TestOrgSettingsPatch_ConcurrentRuns_OversizedRejected(t *testing.T) {
 	s := newTestServer(t)
-	rec := doJSON(t, s, "POST", "/api/settings/org",
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling + 1})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("oversized limit should 400, got %d: %s", rec.Code, rec.Body.String())
+	rec := patchOrgSettings(t, s,
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling + 1})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("oversized limit should 422, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
-	if !strings.Contains(resp["error"], "max_concurrent_runs must be at most") {
-		t.Errorf("expected upper-bound validation message, got: %q", resp["error"])
-	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "max_concurrent_runs")
 	// The ceiling itself is accepted.
-	postJSONResp(t, s, "/api/settings/org",
-		map[string]any{"max_concurrent_runs": domain.MaxConcurrentRunsCeiling})
-	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentRunsCeiling {
-		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentRunsCeiling)
+	patchOrgSettingsOK(t, s,
+		map[string]any{"max_concurrent_runs": domain.MaxConcurrentClaimsCeiling})
+	if got := orgConcurrentRuns(t, s); got != domain.MaxConcurrentClaimsCeiling {
+		t.Errorf("ceiling value should round-trip, got %v want %v", got, domain.MaxConcurrentClaimsCeiling)
 	}
 }
 
@@ -1074,9 +1091,9 @@ func TestOrgSettingsPost_ConcurrentRuns_OversizedRejected(t *testing.T) {
 // the advertised min/max second bounds that drive the UI slider's range.
 func teamGrace(t *testing.T, s *Server) (graceMS, minS, maxS int) {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		TeamSettings struct {
@@ -1107,34 +1124,34 @@ func TestTeamSettingsGet_GraceBoundsAdvertised(t *testing.T) {
 	}
 }
 
-// TestTeamSettingsPost_GraceClampedToBand pins the POST-side clamp: an
-// over-ceiling value snaps to the max, an under-floor value to the min, and an
-// in-band value round-trips verbatim — so the persisted ms always matches the
-// honored band (and what the slider can express).
-func TestTeamSettingsPost_GraceClampedToBand(t *testing.T) {
+// TestTeamSettingsPatch_GraceOutOfBandRejected pins the write-side band check: a
+// value outside [min, max] is REJECTED, and an in-band one round-trips
+// verbatim. It used to clamp, which answered "saved" for a grace the caller
+// never asked for — invisible to an API client, since the UI slider can only
+// express in-band values in the first place. A well-formed number outside the
+// band it honors is semantic rather than a shape fault, so it answers 422.
+func TestTeamSettingsPatch_GraceOutOfBandRejected(t *testing.T) {
 	s := newTestServer(t)
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 99999,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMaxSeconds*1000 {
-		t.Errorf("after POST 99999s, stored grace = %dms, want %dms (clamped to max)",
-			ms, delegate.AbsentGraceMaxSeconds*1000)
+	before, _, _ := teamGrace(t, s)
+	for _, secs := range []int{99999, 0, -1} {
+		rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{
+			"permission_absent_grace_seconds": secs,
+		})
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("grace %ds = %d, want 422; body=%s", secs, rec.Code, rec.Body.String())
+		}
+		assertFirstError(t, rec, httpx.ReasonOutOfRange, "permission_absent_grace_seconds")
+		if ms, _, _ := teamGrace(t, s); ms != before {
+			t.Errorf("rejected grace %ds still moved the stored value to %dms", secs, ms)
+		}
 	}
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
-		"permission_absent_grace_seconds": 0,
-	})
-	if ms, _, _ := teamGrace(t, s); ms != delegate.AbsentGraceMinSeconds*1000 {
-		t.Errorf("after POST 0s, stored grace = %dms, want %dms (clamped to min)",
-			ms, delegate.AbsentGraceMinSeconds*1000)
-	}
-
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{
+	patchTeamSettingsOK(t, s, "default", map[string]any{
 		"permission_absent_grace_seconds": 20,
 	})
 	if ms, _, _ := teamGrace(t, s); ms != 20000 {
-		t.Errorf("after POST 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
+		t.Errorf("after saving 20s, stored grace = %dms, want 20000ms (in-band, verbatim)", ms)
 	}
 }
 
@@ -1152,9 +1169,9 @@ func jiraCredentialRoute() string {
 // key is the Go field name.
 func teamReviewPosture(t *testing.T, s *Server) string {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		TeamSettings struct {
@@ -1167,13 +1184,14 @@ func teamReviewPosture(t *testing.T, s *Server) string {
 	return resp.TeamSettings.ReviewPosture
 }
 
-// TestTeamSettingsPost_ReviewPosture pins the posture's write path: it defaults
-// to the identity-derived value, accepts each known posture, coalesces a blank
-// to the default, is left untouched by a save that omits the key (the pointer
-// field's whole purpose — an unrelated save must not silently re-gate a team's
-// reviews), and rejects an unknown value rather than storing something that
-// would quietly resolve to "stage everything".
-func TestTeamSettingsPost_ReviewPosture(t *testing.T) {
+// TestTeamSettingsPatch_ReviewPosture pins the posture's write path: it defaults
+// to the identity-derived value, accepts each known posture, resets to the
+// default on an explicit null, is left untouched by a save that omits the key
+// (an unrelated save must not silently re-gate a team's reviews), and rejects an
+// unknown value rather than storing something that would quietly resolve to
+// "stage everything". A blank string is NOT a spelling of the reset any more —
+// null is the one clearing convention, and "" is just an unknown posture.
+func TestTeamSettingsPatch_ReviewPosture(t *testing.T) {
 	s := newTestServer(t)
 
 	if got := teamReviewPosture(t, s); got != domain.DefaultReviewPosture {
@@ -1181,26 +1199,31 @@ func TestTeamSettingsPost_ReviewPosture(t *testing.T) {
 	}
 
 	for _, p := range domain.ValidReviewPostures {
-		postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": p})
+		patchTeamSettingsOK(t, s, "default", map[string]any{"review_posture": p})
 		if got := teamReviewPosture(t, s); got != p {
-			t.Errorf("after POST %q, stored posture = %q", p, got)
+			t.Errorf("after saving %q, stored posture = %q", p, got)
 		}
 	}
 
 	// An unrelated save leaves the stored posture alone.
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": domain.ReviewPostureAuto})
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "haiku"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"review_posture": domain.ReviewPostureAuto})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "haiku"})
 	if got := teamReviewPosture(t, s); got != domain.ReviewPostureAuto {
 		t.Errorf("an unrelated save clobbered the posture: got %q, want %q", got, domain.ReviewPostureAuto)
 	}
 
-	// A blank coalesces to the default rather than persisting an empty column.
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"review_posture": ""})
+	// null resets to the default rather than persisting an empty column.
+	patchTeamSettingsOK(t, s, "default", map[string]any{"review_posture": nil})
 	if got := teamReviewPosture(t, s); got != domain.DefaultReviewPosture {
-		t.Errorf("blank posture stored as %q, want the %q default", got, domain.DefaultReviewPosture)
+		t.Errorf("null posture stored as %q, want the %q default", got, domain.DefaultReviewPosture)
 	}
 
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{"review_posture": "yolo"})
+	// ...and a blank string is refused, not read as the reset.
+	if rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{"review_posture": ""}); rec.Code != http.StatusBadRequest {
+		t.Errorf("blank posture = %d, want 400 (null is the reset); body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{"review_posture": "yolo"})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown posture = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
@@ -1215,9 +1238,9 @@ func TestTeamSettingsPost_ReviewPosture(t *testing.T) {
 // (same wholesale-serialized shape as the posture above).
 func teamBasePushPolicy(t *testing.T, s *Server) string {
 	t.Helper()
-	rec := doJSON(t, s, "GET", "/api/settings/team/default", nil)
+	rec := doJSON(t, s, "GET", teamSettingsPath("default"), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/team/default: %d: %s", rec.Code, rec.Body.String())
+		t.Fatalf("GET %s: %d: %s", teamSettingsPath("default"), rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		TeamSettings struct {
@@ -1230,13 +1253,13 @@ func teamBasePushPolicy(t *testing.T, s *Server) string {
 	return resp.TeamSettings.BaseBranchPushPolicy
 }
 
-// TestTeamSettingsPost_BaseBranchPushPolicy pins the policy's write path, same
+// TestTeamSettingsPatch_BaseBranchPushPolicy pins the policy's write path, same
 // contract as the review posture: defaults to refusing, accepts each known
-// value, coalesces a blank to the default, survives an unrelated save
-// untouched (an unrelated save must never re-open base-branch pushes, nor
-// silently close them on a team that opted in), and rejects an unknown value —
-// which would otherwise resolve as "never" forever and read as a bug.
-func TestTeamSettingsPost_BaseBranchPushPolicy(t *testing.T) {
+// value, resets to the default on null, survives an unrelated save untouched
+// (an unrelated save must never re-open base-branch pushes, nor silently close
+// them on a team that opted in), and rejects an unknown value — which would
+// otherwise resolve as "never" forever and read as a bug.
+func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	s := newTestServer(t)
 
 	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
@@ -1244,24 +1267,27 @@ func TestTeamSettingsPost_BaseBranchPushPolicy(t *testing.T) {
 	}
 
 	for _, p := range domain.ValidBaseBranchPushPolicies {
-		postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": p})
+		patchTeamSettingsOK(t, s, "default", map[string]any{"base_branch_push_policy": p})
 		if got := teamBasePushPolicy(t, s); got != p {
-			t.Errorf("after POST %q, stored policy = %q", p, got)
+			t.Errorf("after saving %q, stored policy = %q", p, got)
 		}
 	}
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": domain.BaseBranchPushAlways})
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"ai_model": "haiku"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"base_branch_push_policy": domain.BaseBranchPushAlways})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "haiku"})
 	if got := teamBasePushPolicy(t, s); got != domain.BaseBranchPushAlways {
 		t.Errorf("an unrelated save clobbered the policy: got %q, want %q", got, domain.BaseBranchPushAlways)
 	}
 
-	postJSONResp(t, s, "/api/settings/team/default", map[string]any{"base_branch_push_policy": ""})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"base_branch_push_policy": nil})
 	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
-		t.Errorf("blank policy stored as %q, want the %q default", got, domain.DefaultBaseBranchPushPolicy)
+		t.Errorf("null policy stored as %q, want the %q default", got, domain.DefaultBaseBranchPushPolicy)
+	}
+	if rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{"base_branch_push_policy": ""}); rec.Code != http.StatusBadRequest {
+		t.Errorf("blank policy = %d, want 400 (null is the reset); body=%s", rec.Code, rec.Body.String())
 	}
 
-	rec := doJSON(t, s, "POST", "/api/settings/team/default", map[string]any{"base_branch_push_policy": "sometimes"})
+	rec := doJSON(t, s, "PATCH", teamSettingsPath("default"), map[string]any{"base_branch_push_policy": "sometimes"})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("unknown policy = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}

@@ -13,6 +13,14 @@ import (
 // user to cancel first.
 var ErrCuratorInFlight = errors.New("curator request in flight")
 
+// ErrNoSuchCuratorConversation means an id-keyed write on a curator
+// conversation named no live row — the miss SetSDKSession maps sql.ErrNoRows
+// to. Scoped to this store (rather than a package-wide conversations
+// sentinel) because CuratorStore projects the table through its own
+// narrower shape; ConversationStore's delegation-side writes answer with
+// their own projection and, if they need one, their own miss sentinel.
+var ErrNoSuchCuratorConversation = errors.New("no curator conversation with that id")
+
 // CuratorTurnStart is what BeginTurn returns: everything the dispatch needs
 // to run one turn, read/written inside a single transaction so the
 // pending-changes diff is computed against project state consistent with the
@@ -68,7 +76,7 @@ type CuratorStore interface {
 	// for the project, minting one when none exists: type='curator',
 	// visibility='private', origin='curator', trigger_type='manual', status
 	// NULL, team_id snapshotted from the project row (point-in-time, like
-	// runs.team_id — curator spend attributes to the project's team via the
+	// conversations.team_id — curator spend attributes to the project's team via the
 	// llm_spend view).
 	GetOrCreateConversation(ctx context.Context, orgID, projectID, creatorUserID string) (*domain.Conversation, error)
 
@@ -95,7 +103,13 @@ type CuratorStore interface {
 	// the user row itself when nothing streamed). Withdrawn-pending rows
 	// (delivered=false AND window_state='inactive') are excluded — withdrawn
 	// means "never happened".
-	ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error)
+	//
+	// limit > 0 returns the NEWEST limit rows, still oldest-first: a chat
+	// history is read from its tail, and an unbounded read of a
+	// months-old conversation is a whole-transcript scan on every page load.
+	// limit <= 0 is the whole conversation, for the callers that genuinely
+	// need it — the bundle exporter, which is serializing the transcript.
+	ListConversationMessages(ctx context.Context, orgID, conversationID string, limit int) ([]domain.Message, error)
 
 	// ListClaims returns the conversation's claims oldest-first. App pool —
 	// tf_app has SELECT on claims and the RLS policy composes through the
@@ -171,8 +185,14 @@ type CuratorStore interface {
 	DeadLetterTurnSystem(ctx context.Context, orgID, conversationID string, messageID int64, errMsg string) (matched bool, err error)
 
 	// SetSDKSession persists the SDK resume handle captured from the agent's
-	// init event onto the conversation.
-	SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) error
+	// init event onto the conversation, and returns the row it wrote —
+	// sourced from RETURNING on the UPDATE itself, projected through
+	// CuratorStore's own conversation shape (the one GetLiveConversation
+	// already reads; a curator conversation has no task/blueprint/claim-derived
+	// fields to join in, so it stays this store's own narrower projection
+	// rather than ConversationStore's fuller one). ErrNoSuchCuratorConversation
+	// when the id names no row.
+	SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error)
 
 	// ReleaseActiveTurnSystem stamps the conversation's active claim
 	// released: released_at, outcome ('completed'|'failed'|'cancelled'),
@@ -190,12 +210,18 @@ type CuratorStore interface {
 	// A row whose change_type meanwhile gained a NEWER undelivered injection
 	// is NOT resurrected — the replacement row already carries the pending
 	// delta, and flipping the stale one back would double it.
+	//
+	// Exempt from the returned-row standard: this reverts up to len(consumed)
+	// messages rows (a conditional UPDATE per entry) plus an optional DELETE
+	// of the audit row — a batch, not a single-row write, so there is no one
+	// row to answer with. Its only caller (internal/curator's failed/cancelled
+	// turn path) needs success or failure, nothing rendered from a row.
 	RevertTurnContext(ctx context.Context, orgID, conversationID string, consumed []domain.CuratorContextChange, auditMessageID int64) error
 
 	// --- Boot sweeps (admin pool) ---
 	//
 	// Finding a claimable curator turn is NOT here: one claim loop scans
-	// every surface (RunQueueStore.ClaimNextRun), and a curator conversation
+	// every surface (ConversationQueueStore.ClaimNextConversation), and a curator conversation
 	// holding an undelivered user message is simply one of the shapes its
 	// needs-driving predicate matches.
 
@@ -235,13 +261,21 @@ type CuratorStore interface {
 	// metadata. One-pending-per-type: an existing undelivered row of the
 	// same change_type for the conversation is replaced. No live
 	// conversations = a no-op (nothing has a session to notify).
+	//
+	// Exempt from the returned-row standard: this fans one delta out across
+	// every live curator conversation of the project — 0 to N rows, one
+	// replace-or-insert per conversation, not a single row a caller is
+	// asking about. The bulk/fan-out bucket, the same shape as SetConfigured.
+	// Its only caller (internal/server/projects.go's queuePendingContextChanges)
+	// logs and continues on error; nothing downstream renders a row from
+	// this call.
 	QueueContextChangeSystem(ctx context.Context, orgID, projectID, changeType, baselineJSON string) error
 
 	// --- Per-turn credentials (multi only; admin pool) ---
 
 	// PublishTurnCredPubKeySystem parks the conversation's ACTIVE claim in
 	// phase='awaiting_credentials' with the per-turn credential sidecar's
-	// pubkey — the same park RunQueueStore.MarkAwaitingCredentials writes for
+	// pubkey — the same park ConversationQueueStore.MarkAwaitingCredentials writes for
 	// a delegated run, which is what lets ONE brain-side scan
 	// (ListAwaitingCredentials) serve both surfaces. Postgres also fires the
 	// tf_ctl curator_cred_request doorbell (payload keyed by the conversation
@@ -267,5 +301,12 @@ type CuratorStore interface {
 	// already remapped by the caller. Admin pool because claims have no
 	// app-pool write door; runs after the import's main tx committed the
 	// project row.
-	ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error
+	//
+	// Returns the inserted conversation row, sourced from RETURNING on the
+	// INSERT INTO conversations itself — the plausible single row of the
+	// three tables this touches, the way Complete answers for its own
+	// three-table write. The claims and messages ride along uncounted; the
+	// caller (internal/projectbundle's import) only needs to know the
+	// restore landed before it commits to the imported project.
+	ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) (*domain.Conversation, error)
 }

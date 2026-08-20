@@ -57,20 +57,22 @@ var ErrTeamMemberExists = errors.New("db: user is already a member of this team"
 //     reads by team membership (via memberships) and writes by team
 //     admin; the request-handler caller has set the JWT claims via
 //     the TxRunner.
-//   - The roster methods (TFAC-444) split like
-//     OrgMembershipsStore: the membership read + the AddMember /
-//     ChangeMemberRole / RemoveMember mutations run on the app pool
-//     (memberships_select / _insert / _update / _delete RLS gate read
-//     by org access and writes by team-admin-or-org-admin), with the
-//     tf.guard_team_admins trigger the sole authority on the last-admin
-//     invariant; ListMembers' cross-member GitHub/Jira identity
-//     enrichment runs on the admin pool (the self-only identity RLS
-//     can't express it, scoped back to the team by a membership join).
+//   - The roster methods split like OrgMembershipsStore: the membership
+//     read + the AddMember / ChangeMemberRole / RemoveMember mutations
+//     run on the app pool (memberships_select / _insert / _update /
+//     _delete RLS gate read by org access and writes by
+//     team-admin-or-org-admin), with the tf.guard_team_admins trigger
+//     the sole authority on the last-admin invariant; ListMembers'
+//     cross-member GitHub/Jira identity enrichment runs on the admin
+//     pool (the self-only identity RLS can't express it, scoped back to
+//     the team by a membership join).
 //
 // SQLite collapses the pool split to one connection; the `...System`
-// variants delegate to their non-System counterparts. The roster
-// methods are multi-mode only (the team-roster handlers 404 in local);
-// the SQLite impls are stubs returning ErrNotApplicableInLocal.
+// variants delegate to their non-System counterparts. ListMembers is
+// implemented in both dialects — local mode reads its own roster, which
+// is one member — while the roster WRITES are multi-mode only (the
+// mutating handlers 404 in local) and their SQLite impls are stubs
+// returning ErrNotApplicableInLocal.
 type TeamsStore interface {
 	// GetDefaultForOrg returns the ID of the org's default team —
 	// defined as the oldest team row by created_at. Same shape as
@@ -123,7 +125,11 @@ type TeamsStore interface {
 	// read-modify-write and never sets the cap from its request body, so a
 	// team-admin save round-trips the org-admin-configured cap untouched
 	// (TFAC-482) — the cap is *changed* only by SetDailyCostCapSystem.
-	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
+	//
+	// Returns the persisted settings, read off RETURNING on the write
+	// statement itself rather than from a follow-up SELECT and projecting
+	// GetSettings' column list and scanner.
+	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) (domain.TeamSettings, error)
 
 	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
 	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-
@@ -134,16 +140,23 @@ type TeamsStore interface {
 	// RequireOrgAdminRole gate authorizes this System path. It touches only the
 	// cap column (the other settings are never clobbered) and creates the row from
 	// schema defaults when none exists. SQLite is N=1 / no RLS and writes directly.
-	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error
+	//
+	// Returns the whole persisted settings row, which is the point: the write
+	// touches one column and the row it lands in may have just been created
+	// from schema defaults, so nothing the caller holds describes it. Two
+	// admins racing on the same cap each get the value that actually landed
+	// rather than an echo of their own request.
+	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error)
 
-	// ListForUser returns the requesting user's active teams in the org,
-	// ordered oldest-first (the same created_at tiebreak the default-
-	// team pick uses, so teams[0] is the org's default team). This is
-	// the data source for the multi-team selectors: the frontend
-	// renders a team control only when the count is ≥2. Archived teams
-	// (deleted_at IS NOT NULL) are filtered out — the request-facing read
-	// filter that makes an archived team vanish from every selector (TFAC-448);
-	// the archive/restore lifecycle paths use the unfiltered ...System reads.
+	// ListForUser returns one page of the requesting user's active teams in
+	// the org plus the unpaged total, ordered oldest-first (the same
+	// created_at tiebreak the default-team pick uses, with an id tiebreaker
+	// so the order is total and the pages partition it). This is the data
+	// source for the multi-team selectors: the frontend renders a team
+	// control only when the count is ≥2. Archived teams (deleted_at IS NOT
+	// NULL) are filtered out — the request-facing read filter that makes an
+	// archived team vanish from every selector (TFAC-448); the
+	// archive/restore lifecycle paths use the unfiltered ...System reads.
 	//
 	// Postgres joins memberships under the caller's claims — teams_select
 	// RLS alone returns *every* team in the org (it gates on org access,
@@ -151,7 +164,21 @@ type TeamsStore interface {
 	// result to the teams the user actually belongs to. SQLite is N=1
 	// (single synthetic user) and returns every team in the org, which
 	// is the same set. Routes through the app pool in Postgres.
-	ListForUser(ctx context.Context, orgID string) ([]domain.Team, error)
+	ListForUser(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
+
+	// Get returns a single team by id under the caller's claims, or (nil,
+	// nil) when no row matches. Role carries the CALLER's membership role and
+	// is empty when they are not on the team — teams_select RLS gates on org
+	// access rather than membership, so an org admin reads a team they never
+	// joined and gets an empty role rather than a 404. Description and
+	// DeletedAt are populated: this is the canonical single read, and the
+	// description column had no reader at all before it (only the PATCH
+	// response echoed it back).
+	//
+	// App pool in Postgres, so a cross-org id is invisible and answers
+	// not-found. SQLite is N=1 and reports the sole user as 'admin', matching
+	// ListForUser.
+	Get(ctx context.Context, orgID, teamID string) (*domain.Team, error)
 
 	// TeamIDsForUserInOrgSystem returns the ids of every team in orgID
 	// that userID belongs to (memberships ⋈ teams WHERE teams.org_id =
@@ -211,7 +238,13 @@ type TeamsStore interface {
 	// handler. Postgres routes through the app pool: teams_update RLS gates the
 	// write to team-admin-or-org-admin, and the handler additionally restricts to
 	// org-admin (TFAC-448).
-	Archive(ctx context.Context, teamID string) error
+	//
+	// Returns the archived row — carrying the deleted_at it stamped — so the
+	// handler answers with the team the write produced rather than patching
+	// the tombstone onto a copy it read beforehand. Team.Role is left empty:
+	// it is the *caller's* membership role, which Get joins on and no column
+	// of the teams row carries, so it is not part of what a write returns.
+	Archive(ctx context.Context, teamID string) (domain.Team, error)
 
 	// Restore clears teamID's deleted_at (back to NULL), but only when the team
 	// is currently archived (deleted_at IS NOT NULL). Returns ErrTeamNotFound when
@@ -219,7 +252,9 @@ type TeamsStore interface {
 	// deliberately does NOT resurrect the runs / curator sessions that archive
 	// force-stopped — those stay terminal. App pool: teams_update RLS (org-admin
 	// via the handler gate).
-	Restore(ctx context.Context, teamID string) error
+	//
+	// Returns the restored row, with the same Role caveat as Archive.
+	Restore(ctx context.Context, teamID string) (domain.Team, error)
 
 	// GetSystem returns a single team by id WITHOUT the request-facing
 	// deleted_at read filter (so an archived team resolves), or nil when no row
@@ -230,12 +265,14 @@ type TeamsStore interface {
 	// the WHERE clause as defense in depth.
 	GetSystem(ctx context.Context, orgID, teamID string) (*domain.Team, error)
 
-	// ListArchivedForOrgSystem returns the org's archived teams (deleted_at IS
-	// NOT NULL), most-recently-archived first, with DeletedAt populated. Admin pool / org-scoped:
-	// the org-admin "Archived teams" restore surface enumerates them even for
-	// teams the admin never joined (the per-user membership join ListForUser uses
-	// would hide those). Empty slice when the org has no archived teams.
-	ListArchivedForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+	// ListArchivedForOrgSystem returns one page of the org's archived teams
+	// (deleted_at IS NOT NULL) plus the unpaged total, most-recently-archived
+	// first with an id tiebreaker, with DeletedAt populated. Admin pool /
+	// org-scoped: the org-admin "Archived teams" restore surface enumerates
+	// them even for teams the admin never joined (the per-user membership join
+	// ListForUser uses would hide those). Empty slice when the org has no
+	// archived teams.
+	ListArchivedForOrgSystem(ctx context.Context, orgID string, opts ListOpts) ([]domain.Team, int, error)
 
 	// ListActiveForOrgSystem returns the org's ACTIVE teams (deleted_at IS NULL),
 	// ordered by name, on the admin pool — the org-scoped sibling of
@@ -245,6 +282,20 @@ type TeamsStore interface {
 	// the per-user-scoped ListForUser would hide those. Empty slice for a teamless
 	// org (a bootstrap bug). DeletedAt is left nil (all rows are active).
 	ListActiveForOrgSystem(ctx context.Context, orgID string) ([]domain.Team, error)
+
+	// ListActiveCapsForOrgSystem returns one page of the org's active teams
+	// with each one's configured per-team daily cost cap, ordered by name with
+	// an id tiebreaker, plus the total. Admin pool, org-scoped: the governance
+	// cap editor crosses teams its org admin may not belong to.
+	//
+	// The cap is joined, not looked up per team. The editor used to call
+	// ListActiveForOrgSystem and then GetSettingsSystem once per row, so the
+	// query count grew with the org's team count on every render of one panel
+	// — and a page of that list would have been a page of teams with a full
+	// scan of settings behind it. A missing team_settings row means the team
+	// has never been configured, which is a nil cap (no cap), the same answer
+	// the per-team read's ErrNoRows default gave.
+	ListActiveCapsForOrgSystem(ctx context.Context, orgID string, opts ListOpts) ([]domain.TeamCap, int, error)
 
 	// NamesForIDsSystem resolves id->name for exactly the given team IDs
 	// (deduped; blanks ignored), on the admin pool — the narrow cross-team
@@ -258,26 +309,42 @@ type TeamsStore interface {
 	// map without a query.
 	NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error)
 
-	// ListMembers returns every member of teamID with their team role and
-	// host-scoped identity readiness, ordered by display name then user id
-	// for a stable roster — the team-tier sibling of
-	// OrgMembershipsStore.ListWithIdentity. githubBaseURL / jiraBaseURL are
-	// the org's configured hosts (raw, read from org_settings by the caller);
-	// the impl resolves them to the host identities are keyed under
+	// ListMembers returns one page of teamID's members with their team role
+	// and host-scoped identity readiness, plus the unpaged total, ordered by
+	// display name then user id for a stable roster — the team-tier sibling of
+	// OrgMembershipsStore.ListWithIdentity. The user-id tiebreaker is what
+	// makes offset paging total: display names collide freely, and a partial
+	// order drops and repeats rows across pages. githubBaseURL / jiraBaseURL
+	// are the org's configured hosts (raw, read from org_settings by the
+	// caller); the impl resolves them to the host identities are keyed under
 	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com;
 	// NormalizeJiraHost: an unset jira_base_url matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
-	// host. The roster reads under the app pool (memberships_select RLS — any
-	// org member may read a team-in-org's roster); the identity enrichment
+	// host.
+	//
+	// Postgres: the roster reads under the app pool (memberships_select RLS —
+	// any org member may read a team-in-org's roster); the identity enrichment
 	// reads under the admin pool (the self-only identity RLS can't express a
 	// cross-member read, scoped back to the team by a membership join).
-	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error)
+	// SQLite is N=1 — one implicit user, enrolled on the sole team by the
+	// local tenant seed — so the same query shape answers with that single
+	// synthetic member. Local mode runs the roster's own consumers (the
+	// assignee picker, the predicate editor's variant choice), so this is a
+	// read both dialects owe an answer to.
+	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts ListOpts) ([]domain.TeamMember, int, error)
 
 	// AddMember enrolls userID on teamID with role ("admin" | "member" |
 	// "viewer"). App pool: memberships_insert RLS gates the write to team
 	// admins or org admins. Returns ErrTeamMemberExists when the user is
 	// already on the team (the PK collides). Callers validate role against the
 	// allowed set and confirm the target is an org member before calling.
+	//
+	// Exempt from the returned-row rule: memberships is exposed here only
+	// through ListMembers, an identity-enriched roster read that joins two
+	// other tables per member — there is no plain row read whose column list
+	// and scanner a RETURNING could share, and the enrichment is not something
+	// an insert can produce. ErrTeamMemberExists already answers "did this
+	// land".
 	AddMember(ctx context.Context, teamID, userID, role string) error
 
 	// ChangeMemberRole sets userID's team role on teamID and returns the prior
@@ -294,5 +361,7 @@ type TeamsStore interface {
 	// (self-leave, any role) or, as a team/org admin, anyone. Returns
 	// ErrLastTeamAdminGuard when removing the team's last admin (guard
 	// trigger), and ErrTeamMemberNotFound when no row matches.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	RemoveMember(ctx context.Context, teamID, userID string) error
 }

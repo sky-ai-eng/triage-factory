@@ -21,7 +21,7 @@ import EventBadge from './EventBadge'
 import TaskRuleEditor from './TaskRuleEditor'
 import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiListAll, httpErrorMessage } from '../lib/apiClient'
 
 interface TaskRulesPanelProps {
   open: boolean
@@ -51,14 +51,13 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true)
 
-    fetch('/api/event-handlers?kind=rule')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      })
-      .then((data) => {
+    // Walked to completion: the panel reorders rules by drag, and a reorder
+    // write must name the caller's ENTIRE visible rule set — a partial list
+    // would submit a partial order.
+    apiListAll<RuleHandler>('/api/event-handlers/list', { kind: 'rule' })
+      .then((loaded) => {
         if (!cancelled) {
-          setRules(Array.isArray(data) ? data : [])
+          setRules(loaded)
           setLoading(false)
         }
       })
@@ -79,18 +78,14 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
     setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: !prev } : r)))
 
     try {
-      const res = await fetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
+      await apiFetch(`/api/event-handlers/${encodeURIComponent(rule.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !prev }),
       })
-      if (!res.ok) {
-        setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-        toast.error(await readError(res, 'Failed to toggle rule'))
-      }
     } catch (err) {
       setRules((rs) => rs.map((r) => (r.id === rule.id ? { ...r, enabled: prev } : r)))
-      toast.error(`Failed to toggle rule: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not toggle the rule.'))
     }
   }, [])
 
@@ -106,18 +101,16 @@ export default function TaskRulesPanel({ open, onClose }: TaskRulesPanelProps) {
       setRules(reordered) // Optimistic
 
       try {
-        const res = await fetch('/api/event-handlers/reorder', {
+        // ids must name the caller's ENTIRE visible rule set, in the new
+        // order — the server refuses a subset rather than applying half of it.
+        await apiFetch('/api/event-handlers/reorder', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(reordered.map((r) => r.id)),
+          body: JSON.stringify({ ids: reordered.map((r) => r.id) }),
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to reorder rules'))
-          refresh() // Revert on failure
-        }
       } catch (err) {
-        toast.error(`Failed to reorder rules: ${(err as Error).message}`)
-        refresh()
+        toast.error(httpErrorMessage(err, 'Could not reorder the rules.'))
+        refresh() // Revert on failure
       }
     },
     [rules, refresh],

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { X } from 'lucide-react'
 import type { Project, ProjectVisibility } from '../types'
-import { readError } from '../lib/api'
+import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from './Toast/toastStore'
 import RepoMultiSelect from './RepoMultiSelect'
@@ -25,7 +25,7 @@ interface Props {
 export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
-  const [pinnedRepos, setPinnedRepos] = useState<string[]>([])
+  const [pinnedRepositoryIDs, setPinnedRepositoryIDs] = useState<string[]>([])
   const [jiraKey, setJiraKey] = useState('')
   const [linearKey, setLinearKey] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -81,7 +81,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
   // can't be submitted under another (the Jira picker also refetches its
   // options for the new team from its own teamId-keyed effect).
   useEffect(() => {
-    setPinnedRepos([])
+    setPinnedRepositoryIDs([])
     setJiraKey('')
   }, [team, showTeamScopedFields])
   // Holds the in-flight POST's AbortController so the close path
@@ -123,13 +123,13 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
       const controller = new AbortController()
       abortRef.current = controller
       try {
-        const res = await fetch('/api/projects', {
+        const created = await apiJSON<Project>('/api/projects', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             name: name.trim(),
             description: description.trim(),
-            pinned_repos: pinnedRepos,
+            pinned_repository_ids: pinnedRepositoryIDs,
             jira_project_key: jiraKey,
             linear_project_key: linearKey,
             team_id: team,
@@ -137,11 +137,6 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           }),
           signal: controller.signal,
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to create project'))
-          return
-        }
-        const created: Project = await res.json()
         // Sync the cache to the team this write landed on (the backend
         // resolver has already persisted it as the last-written default).
         if (team) noteWrittenTeam(team)
@@ -151,13 +146,13 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         // Ignore abort — the close path that triggered it is
         // responsible for any user-facing feedback.
         if ((err as { name?: string })?.name === 'AbortError') return
-        toast.error(`Failed to create project: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not create the project.'))
       } finally {
         abortRef.current = null
         setSubmitting(false)
       }
     },
-    [name, description, pinnedRepos, jiraKey, linearKey, team, visibility, onCreated],
+    [name, description, pinnedRepositoryIDs, jiraKey, linearKey, team, visibility, onCreated],
   )
 
   // Backdrop click closes only when no submit is in flight. If a
@@ -266,8 +261,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
             <>
               <Field label="Pinned repos">
                 <RepoMultiSelect
-                  value={pinnedRepos}
-                  onChange={setPinnedRepos}
+                  value={pinnedRepositoryIDs}
+                  onChange={setPinnedRepositoryIDs}
                   teamId={team}
                   disabled={!repoPickerReady}
                 />

@@ -5,13 +5,13 @@ import { resolveAllSummary } from '../lib/approval'
 
 interface Props {
   open: boolean
-  /** Unresolved draft-PR count, from the run projection's unresolved-artifact
+  /** Unresolved draft-PR count, from the conversation projection's unresolved-artifact
    *  derivation (the same set the backend teardown force-resolves). */
   prCount: number
   /** Unresolved ready-review count, same source. */
   reviewCount: number
-  /** True when the run is still executing — the teardown also cancels it, so the
-   *  copy adds a "the run will be cancelled" note. */
+  /** True when the conversation is still executing — the teardown also cancels it, so the
+   *  copy adds an "in-progress run will be cancelled" note. */
   isLive: boolean
   /** The gesture's verb, e.g. "Return to queue" / "Mark done" — the confirm
    *  button label, so the dialog reads as the action it gates. */
@@ -24,11 +24,11 @@ interface Props {
 
 // ResolveAllConfirm is the second gesture's gate (TFAC-384 §4): dragging a task
 // to Done or back to the queue *force-resolves every unresolved artifact* (the
-// generalized teardown) and, if the run is live, cancels it. Because that closes
+// generalized teardown) and, if the conversation is live, cancels it. Because that closes
 // real GitHub draft PRs and discards pending reviews, it's destructive enough to
 // confirm — parameterized by the actual set ("Close 2 draft PRs and discard 1
 // pending review? Pushed branches are kept."). Pure + instant: the counts come
-// from the caller's run projection, so there's no fetch/loading state in the
+// from the caller's conversation projection, so there's no fetch/loading state in the
 // dialog. The per-item resolve (approve/dismiss one) is the OTHER gesture and is
 // never routed through here — do not conflate them.
 export default function ResolveAllConfirm({

@@ -178,7 +178,7 @@ func Run(cfg RunConfig) (*Result, error) {
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
 
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -190,7 +190,17 @@ func Run(cfg RunConfig) (*Result, error) {
 	}
 
 	stores := sqlitestore.New(database)
-	if err := stores.Repos.SetConfigured(ctx, orgID, ds.RepoNames()); err != nil {
+	// Track the repos on the local default team: the poller enumerates the
+	// tracked set, and a registry row on its own is not tracking.
+	tracked := make([]domain.TeamGitHubRepo, 0, len(ds.RepoNames()))
+	for _, name := range ds.RepoNames() {
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok {
+			return nil, fmt.Errorf("bench repo %q is not an owner/repo slug", name)
+		}
+		tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, runmode.LocalDefaultTeamID, tracked); err != nil {
 		return nil, fmt.Errorf("configure repos: %w", err)
 	}
 

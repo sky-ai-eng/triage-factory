@@ -166,8 +166,8 @@ func readFrame(r io.Reader, dst any) error {
 // format lives in one place. Adding a method = appending one struct
 // here + one case in dispatch.go + one method on IPCClient.
 
-type lookupRunResult struct {
-	Info RunInfo `json:"info"`
+type lookupConversationResult struct {
+	Info ConversationInfo `json:"info"`
 }
 
 type finalizeReviewDraftArgs struct {
@@ -185,8 +185,8 @@ type finalizeReviewDraftResult struct {
 	URL    string `json:"url,omitempty"`
 }
 
-type agentRunResult struct {
-	Run *domain.Conversation `json:"run,omitempty"`
+type getConversationResult struct {
+	Conversation *domain.Conversation `json:"conversation,omitempty"`
 }
 
 type getTaskArgs struct {
@@ -198,7 +198,7 @@ type taskResult struct {
 }
 
 type reposResult struct {
-	Repos []domain.RepoProfile `json:"repos"`
+	Repos []domain.Repository `json:"repos"`
 }
 
 type getRepoArgs struct {
@@ -206,7 +206,7 @@ type getRepoArgs struct {
 }
 
 type repoResult struct {
-	Repo *domain.RepoProfile `json:"repo,omitempty"`
+	Repo *domain.Repository `json:"repo,omitempty"`
 }
 
 type teamTracksRepoArgs struct {
@@ -218,29 +218,29 @@ type teamTracksRepoResult struct {
 	Tracks bool `json:"tracks"`
 }
 
-type runWorktreeByRepoRefArgs struct {
+type conversationWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
 	Ref    string `json:"ref"`
 }
 
-type runWorktreeResult struct {
-	Worktree *domain.RunWorktree `json:"worktree,omitempty"`
+type conversationWorktreeResult struct {
+	Worktree *domain.ConversationWorktree `json:"worktree,omitempty"`
 }
 
-type runWorktreesResult struct {
-	Worktrees []domain.RunWorktree `json:"worktrees"`
+type conversationWorktreesResult struct {
+	Worktrees []domain.ConversationWorktree `json:"worktrees"`
 }
 
-type insertRunWorktreeArgs struct {
-	Row domain.RunWorktree `json:"row"`
+type insertConversationWorktreeArgs struct {
+	Row domain.ConversationWorktree `json:"row"`
 }
 
-type insertRunWorktreeResult struct {
+type insertConversationWorktreeResult struct {
 	Inserted    bool   `json:"inserted"`
 	WinningPath string `json:"winning_path"`
 }
 
-type deleteRunWorktreeByRepoRefArgs struct {
+type deleteConversationWorktreeByRepoRefArgs struct {
 	RepoID string `json:"repo_id"`
 	Ref    string `json:"ref"`
 }
@@ -255,7 +255,7 @@ type workspaceRootsResult struct {
 }
 
 // createWorkspaceCheckoutArgs deliberately carries NO clone URLs — the daemon
-// re-derives them from the stored repo profile / its own PR fetch so a
+// re-derives them from the stored repository row / its own PR fetch so a
 // sandboxed caller can't steer the host's credential at an arbitrary repo.
 type createWorkspaceCheckoutArgs struct {
 	Owner string `json:"owner"`
@@ -492,7 +492,7 @@ type githubReviewIDResult struct {
 }
 
 // resetReviewDraftArgs carries the PR coordinates `start-review --fresh` resets
-// the run's local draft for.
+// the conversation's local draft for.
 type resetReviewDraftArgs struct {
 	githubRepoRef
 	Number int `json:"number"`
@@ -507,8 +507,8 @@ type resetReviewDraftResult struct {
 }
 
 // updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one
-// comment on the run's review draft by its TF-local id (not a repo-scoped op —
-// the host resolves the owning draft from the run's artifacts).
+// comment on the conversation's review draft by its TF-local id (not a repo-scoped op —
+// the host resolves the owning draft from the conversation's artifacts).
 type updateStagedReviewCommentArgs struct {
 	CommentID string `json:"comment_id"`
 	Body      string `json:"body"`
@@ -606,7 +606,7 @@ type callExtensionResult struct {
 }
 
 // emptyArgs is the args type for methods that take no parameters
-// (LookupRun, GetConversation, ListRunWorktrees, ListRepos). Using an empty
+// (LookupConversation, GetConversation, ListConversationWorktrees, ListRepos). Using an empty
 // struct rather than json.RawMessage(nil)
 // lets the daemon-side dispatch use the same json.Unmarshal call shape
 // for every method without a nil-check.
@@ -628,26 +628,33 @@ type memoryLoadResult struct {
 	Result *MemoryLoadResult `json:"result"`
 }
 
-// methodCallNames are the wire-name constants. Used by both client
-// and server so a rename here is the only edit needed to propagate.
+// The method* constants are the wire names, used by both client and
+// server, so a rename here is the only edit needed to propagate. That is
+// safe because both ends of this socket are one binary generation for any
+// given engagement: the sidecar hosting the Server is spawned by the
+// orchestrator at bring-up, the jailed client is a bind-mount of the
+// broker's own running executable (sandbox.TrustedTFBinaryPath), and a
+// restart takes the supervision stream, the cell, and the engagement with
+// it — the reaper requeues the row rather than a new orchestrator
+// adopting a live cell.
 const (
-	methodLookupRun                  = "LookupRun"
-	methodFinalizeReviewDraft        = "FinalizeReviewDraft"
-	methodResetReviewDraft           = "ResetReviewDraft"
-	methodUpdateStagedReviewComment  = "UpdateStagedReviewComment"
-	methodDeleteStagedReviewComment  = "DeleteStagedReviewComment"
-	methodGetConversation            = "GetConversation"
-	methodGetTask                    = "GetTask"
-	methodListRepos                  = "ListRepos"
-	methodGetRepo                    = "GetRepo"
-	methodTeamTracksRepo             = "TeamTracksRepo"
-	methodGetRunWorktreeByRepoRef    = "GetRunWorktreeByRepoRef"
-	methodListRunWorktrees           = "ListRunWorktrees"
-	methodInsertRunWorktree          = "InsertRunWorktree"
-	methodDeleteRunWorktreeByRepoRef = "DeleteRunWorktreeByRepoRef"
-	methodWorkspaceRoots             = "WorkspaceRoots"
-	methodCreateWorkspaceCheckout    = "CreateWorkspaceCheckout"
-	methodBuildAgentFooter           = "BuildAgentFooter"
+	methodLookupConversation                  = "LookupConversation"
+	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"
+	methodResetReviewDraft                    = "ResetReviewDraft"
+	methodUpdateStagedReviewComment           = "UpdateStagedReviewComment"
+	methodDeleteStagedReviewComment           = "DeleteStagedReviewComment"
+	methodGetConversation                     = "GetConversation"
+	methodGetTask                             = "GetTask"
+	methodListRepos                           = "ListRepos"
+	methodGetRepo                             = "GetRepo"
+	methodTeamTracksRepo                      = "TeamTracksRepo"
+	methodGetConversationWorktreeByRepoRef    = "GetConversationWorktreeByRepoRef"
+	methodListConversationWorktrees           = "ListConversationWorktrees"
+	methodInsertConversationWorktree          = "InsertConversationWorktree"
+	methodDeleteConversationWorktreeByRepoRef = "DeleteConversationWorktreeByRepoRef"
+	methodWorkspaceRoots                      = "WorkspaceRoots"
+	methodCreateWorkspaceCheckout             = "CreateWorkspaceCheckout"
+	methodBuildAgentFooter                    = "BuildAgentFooter"
 
 	methodUpsertArtifact = "UpsertArtifact"
 

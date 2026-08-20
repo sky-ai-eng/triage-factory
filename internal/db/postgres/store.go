@@ -88,7 +88,7 @@ func New(admin, app *sql.DB, secretKey aead.Key) db.Stores {
 // db.ErrSecretStoreUnavailable's disabled SecretStore instead of a real
 // decrypting one (TFAC-614). For TF_ROLE=executor only: an executor never
 // holds TF_SECRET_ENCRYPTION_KEY at boot — all per-run credential material
-// arrives pre-resolved via sealed run_credentials bundles instead — so it
+// arrives pre-resolved via sealed claim_credentials bundles instead — so it
 // must never construct a real, key-bearing SecretStore, not even one
 // pointed at a throwaway key.
 func NewWithoutSecrets(admin, app *sql.DB) db.Stores {
@@ -114,8 +114,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// IncrementUsageSystem) run on the admin pool for claims-less
 		// delegation goroutines, every other method on the app pool. The
 		// impl picks per-method internally.
-		Prompts:   newPromptStore(app, admin),
-		Swipes:    newSwipeStore(app),
+		Prompts: newPromptStore(app, admin),
+		// Swipes needs both pools: UndoLastSwipe's guard reads swipe_events
+		// rows the requesting user did not write, which RLS hides, so that
+		// one method runs on the admin pool. Everything else stays on app.
+		Swipes:    newSwipeStore(app, admin),
 		Dashboard: newDashboardStore(app),
 		// Secrets needs both pools. Put/Get/Delete + the per-user trio
 		// run on the app pool against public.org_secrets — RLS gates the
@@ -138,13 +141,13 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// trigger_type (event → admin with NULL creator, manual → app
 		// with COALESCE fallback), mirroring ConversationStore.Create. The
 		// `...System` variants on the read/write methods (ListSteps,
-		// MarkRunStatus, RunsForBlueprint) give the blueprint orchestrator
+		// MarkRunStatus, ConversationsForBlueprint) give the blueprint orchestrator
 		// goroutine an admin-pool route for its detached-context work.
 		Blueprints: newBlueprintStore(app, admin),
 		// Agents.Create routes through admin (bootstrap has no JWT
 		// claims and the agents_insert policy gates on
 		// tf.user_is_org_admin); every other method on app. Same
-		// pool-split pattern as PromptStore + TaskRuleStore.
+		// pool-split pattern as PromptStore + EventHandlerStore.
 		Agents: newAgentStore(app, admin),
 		// TeamAgents.AddForTeam routes through admin for the same
 		// bootstrap reason; SetEnabled/Overrides/Remove/Get run on
@@ -199,11 +202,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// equivalent consumers (repos/settings/projects handlers,
 		// curator) and admin for the `...System` variants the
 		// poller bootstrap + startup clone-status writes use. RLS
-		// policy repo_profiles_all gates on (org_id = current_org_id()
+		// policy repositories_all gates on (org_id = current_org_id()
 		// AND user_has_org_access) on the app side; admin bypasses
 		// RLS, and org_id stays in every WHERE clause as defense
 		// in depth.
-		Repos: newRepoStore(app, admin),
+		Repos: newRepositoryStore(app, admin),
 		// PendingFirings wires admin — the router has no per-user
 		// identity (system service) and the drain sweeper runs as a
 		// background goroutine, so impersonating any one user via
@@ -230,10 +233,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the admin *sql.DB directly. event_queue_all RLS is
 		// defense-in-depth (admin bypasses it).
 		EventQueue: newEventQueueStore(admin),
-		// RunQueue is admin-pool only: the dispatcher is a system worker with
+		// ConversationQueue is admin-pool only: the dispatcher is a system worker with
 		// no JWT-claims context. The claim uses FOR UPDATE SKIP LOCKED so a
 		// future multi-worker dispatcher never double-claims a queued run.
-		RunQueue: newRunQueueStore(admin),
+		ConversationQueue: newConversationQueueStore(admin),
 		// TaskMemory wires both pools: app for request-handler
 		// equivalents (review/PR submit, swipe-discard cleanup,
 		// factory + run-summary reads) and admin for the delegate
@@ -241,15 +244,15 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// teardown's UpsertAgentMemorySystem and the run-start
 		// GetMemoriesForEntitySystem both fire without a JWT-claims
 		// context. conversation_memory_all RLS gates the app side via an
-		// EXISTS subquery against runs; admin bypasses RLS, and
+		// EXISTS subquery against conversations; admin bypasses RLS, and
 		// org_id stays in every WHERE clause as defense in depth.
 		TaskMemory: newTaskMemoryStore(app, admin),
-		// RunWorktrees wires both pools: app for cmd/exec workspace
+		// ConversationWorktrees wires both pools: app for cmd/exec workspace
 		// callers (a separate cmd/exec auth pass owns the
 		// synthetic-claims wrap) and admin for the delegate spawner
 		// cleanup defers. org_id stays bound everywhere as defense
 		// in depth.
-		RunWorktrees: newRunWorktreeStore(app, admin),
+		ConversationWorktrees: newConversationWorktreeStore(app, admin),
 		// Orgs holds both pools: admin for ListActiveSystem +
 		// GetSettingsSystem (background services iterating the active
 		// org set / reading per-org settings without JWT claims) and
@@ -284,7 +287,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// team-row write inside ReplaceForTeam (RLS gates by team admin)
 		// and admin for ListForTeamSystem + ListForOrgSystem +
 		// TracksRepoSystem (router gate, no JWT claims) + the
-		// repo_profiles reconcile (org-wide union, commits autonomously).
+		// repositories reconcile (org-wide union, commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
 		// Curator holds both pools: app for the claims-bound send/history/
 		// dispatch message writes (the per-project goroutine wraps each
@@ -300,6 +303,15 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// no-claims reads the webhook receiver + backfill need; secrets
 		// for the backfill's App-PEM GetSystem read.
 		GitHubApps: newGitHubAppsStore(app, admin, secrets),
+		// ReachableRepos: admin pool only. The reachable-repo cache carries the
+		// same RLS posture as the installation rows its App half hangs off —
+		// app-pool members read it, every app-pool write is denied — so the
+		// refresh is the sole writer and there is no app-pool caller to wire.
+		ReachableRepos: newReachableReposStore(admin),
+		// GitHubDeliveries: admin pool only. The webhook receiver is pre-auth,
+		// and github_webhook_deliveries has RLS enabled with no policy at all,
+		// so there is no app-pool caller to wire.
+		GitHubDeliveries: newGitHubDeliveryStore(admin),
 		// JiraApps: app pool for request-handler reads/writes (RLS-gated);
 		// admin pool for the no-claims read the OAuth-app resolver needs.
 		JiraApps: newJiraAppsStore(app, admin),
@@ -359,7 +371,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		Marketplace: newMarketplaceStore(app, admin),
 		// Instances is admin-pool only: a fleet member isn't tenant data, so
 		// there's no org to scope an app-pool policy on — same admin-only
-		// shape as SystemLLMRuns/PendingFirings/EventQueue/RunQueue. Fleet
+		// shape as SystemLLMRuns/PendingFirings/EventQueue/ConversationQueue. Fleet
 		// membership registry every TF process registers into at boot and
 		// refreshes via periodic heartbeat.
 		Instances: newInstanceStore(admin),
@@ -372,16 +384,16 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// sampler writes with no request identity in hand.
 		SandboxStats: newSandboxStatStore(admin),
 		Operators:    newOperatorStore(admin),
-		// RunSignals is admin-pool only, same posture as Instances: the
+		// ConversationSignals is admin-pool only, same posture as Instances: the
 		// cross-pod run-control outbox (TFAC-585), never read under a
 		// user's RLS context.
-		RunSignals: newRunSignalStore(admin),
-		// RunPendingInput on the top-level store is the admin-pool handle the
+		ConversationSignals: newConversationSignalStore(admin),
+		// ConversationPendingInput on the top-level store is the admin-pool handle the
 		// dispatcher's claim path uses for Consume (a goroutine with no request
 		// context). Store is reached through the claims-tx handle
-		// (TxStores.RunPendingInput, see tx.go) so the resume write commits
+		// (TxStores.ConversationPendingInput, see tx.go) so the resume write commits
 		// atomically with the status flip.
-		RunPendingInput: newRunPendingInputStore(admin),
+		ConversationPendingInput: newConversationPendingInputStore(admin),
 		// Permissions is split-pool like Artifacts: the pending read runs on
 		// the app pool under RLS (the policy composes through the
 		// conversation, mirroring claims), every write on the admin pool —
@@ -402,10 +414,15 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the (org, project) -> home executor map for curator homing (spec
 		// §6.3), coordination state read/written for an explicit orgID.
 		CuratorHomes: newCuratorHomeStore(admin),
-		// RunCredentials is admin-pool only, same posture as Instances/
-		// RunSignals: the sealed per-run credential bundle channel
+		// ClaimCredentials is admin-pool only, same posture as Instances/
+		// ConversationSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
-		RunCredentials: newRunCredentialsStore(admin),
+		ClaimCredentials: newClaimCredentialsStore(admin),
+		// WorkspaceSnapshots is admin-pool only, same posture as
+		// ClaimCredentials: the workspace-snapshot lifecycle record is written
+		// by an executor's teardown and read by the resume path and the
+		// retention reaper, never by a request handler.
+		WorkspaceSnapshots: newWorkspaceSnapshotStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),
@@ -414,7 +431,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 	return s.stores
 }
 
-// Connection openers (OpenAdmin, OpenApp) are NOT defined here — this
+// The admin/app connection openers are NOT defined here — this
 // package deliberately doesn't register the pgx stdlib driver as a
 // side-effect import. internal/app/stores.go owns opening the admin and
 // app *sql.DB handles (sql.Open("pgx", ...) against the admin/app DSNs)
@@ -442,7 +459,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 	return db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newTxPromptStore(tx),
-		Swipes:        newSwipeStore(tx),
+		Swipes:        newSwipeStore(tx, tx),
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx, tx, secretKey),
 		EventHandlers: newTxEventHandlerStore(tx),
@@ -458,37 +475,38 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// `...System` methods that bypass RLS in
 		// production) need the production WithTx wiring instead,
 		// which gets the real admin pool via Store.admin.
-		Conversations:    newConversationStore(tx, tx),
-		Artifacts:        newArtifactStore(tx, tx),
-		Entities:         newEntityStore(tx, tx),
-		Repos:            newRepoStore(tx, tx),
-		PendingFirings:   newPendingFiringsStore(tx),
-		Projects:         newProjectStore(tx, tx),
-		Events:           newEventStore(tx, tx),
-		TaskMemory:       newTaskMemoryStore(tx, tx),
-		RunWorktrees:     newRunWorktreeStore(tx, tx),
-		Orgs:             newOrgsStore(tx, tx),
-		OrgMemberships:   newOrgMembershipsStore(tx, tx),
-		Teams:            newTeamsStore(tx, tx),
-		JiraStatusRules:  newJiraStatusRulesStore(tx, tx),
-		TeamGitHubGroups: newTeamGitHubGroupsStore(tx, tx),
-		TeamGitHubRepos:  newTeamGitHubReposStore(tx, tx),
-		Curator:          newCuratorStore(tx, tx),
+		Conversations:         newConversationStore(tx, tx),
+		Artifacts:             newArtifactStore(tx, tx),
+		Entities:              newEntityStore(tx, tx),
+		Repos:                 newRepositoryStore(tx, tx),
+		PendingFirings:        newPendingFiringsStore(tx),
+		Projects:              newProjectStore(tx, tx),
+		Events:                newEventStore(tx, tx),
+		TaskMemory:            newTaskMemoryStore(tx, tx),
+		ConversationWorktrees: newConversationWorktreeStore(tx, tx),
+		Orgs:                  newOrgsStore(tx, tx),
+		OrgMemberships:        newOrgMembershipsStore(tx, tx),
+		Teams:                 newTeamsStore(tx, tx),
+		JiraStatusRules:       newJiraStatusRulesStore(tx, tx),
+		TeamGitHubGroups:      newTeamGitHubGroupsStore(tx, tx),
+		TeamGitHubRepos:       newTeamGitHubReposStore(tx, tx),
+		Curator:               newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
-		GitHubApps:      newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
-		JiraApps:        newJiraAppsStore(tx, tx),
-		ShippedDefaults: newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
-		Invites:         newInvitesStore(tx, tx),
-		SystemLLMRuns:   newSystemLLMRunStore(tx),
-		AccessChangeLog: newAccessChangeLogStore(tx, tx),
-		ExternalActions: newExternalActionStore(tx, tx),
-		Spend:           newSpendStore(tx, tx),
-		AuthEvents:      newAuthEventStore(tx),
-		Marketplace:     newMarketplaceStore(tx, tx),
-		Instances:       newInstanceStore(tx),
-		RunPendingInput: newRunPendingInputStore(tx),
-		Ext:             db.BuildStoreExtensions("postgres", tx, tx),
+		GitHubApps:               newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
+		JiraApps:                 newJiraAppsStore(tx, tx),
+		ShippedDefaults:          newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
+		Invites:                  newInvitesStore(tx, tx),
+		SystemLLMRuns:            newSystemLLMRunStore(tx),
+		AccessChangeLog:          newAccessChangeLogStore(tx, tx),
+		ExternalActions:          newExternalActionStore(tx, tx),
+		Spend:                    newSpendStore(tx, tx),
+		AuthEvents:               newAuthEventStore(tx),
+		Marketplace:              newMarketplaceStore(tx, tx),
+		Instances:                newInstanceStore(tx),
+		StagedInjections:         newStagedInjectionStore(tx),
+		ConversationPendingInput: newConversationPendingInputStore(tx),
+		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

@@ -16,7 +16,7 @@ import (
 )
 
 // fleetFixture mints a full org/team/task/prompt/blueprint chain and one
-// EnqueueRun'd runs row against real Postgres — the two-Spawner harness
+// EnqueueConversation'd conversations row against real Postgres — the two-Spawner harness
 // TFAC-586 calls for ("the reaper needs it anyway"): boot-overlap,
 // reaper-requeue, fence, and drain scenarios all start from the same
 // realistic shape, then diverge in how they manipulate/observe it.
@@ -24,7 +24,7 @@ type fleetFixture struct {
 	stores                 db.Stores
 	orgID, userID, teamID  string
 	taskID, promptID, brID string
-	runID                  string
+	conversationID         string
 }
 
 func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
@@ -70,18 +70,18 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'running', $6, now(), '[]')
 	`, blueprintRunID, orgID, userID, blueprintID, taskID, "/tmp/wt-"+blueprintRunID)
 
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.RunQueue.EnqueueRun(ctx, orgID, domain.Conversation{
-		ID: runID, TaskID: taskID, PromptID: promptID, Model: "m",
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {
-		t.Fatalf("EnqueueRun: %v", err)
+		t.Fatalf("EnqueueConversation: %v", err)
 	}
 
 	return fleetFixture{
 		stores: stores, orgID: orgID, userID: userID, teamID: teamID,
-		taskID: taskID, promptID: promptID, brID: blueprintRunID, runID: runID,
+		taskID: taskID, promptID: promptID, brID: blueprintRunID, conversationID: conversationID,
 	}
 }
 
@@ -153,14 +153,14 @@ func TestFleet_BootOverlap_TwoInstancesRegisterConcurrently(t *testing.T) {
 	}
 }
 
-// TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor is the ticket's
+// TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor is the ticket's
 // headline acceptance criterion end to end: instance A claims the fixture's
 // run, goes silent (heartbeat backdated past the threshold — standing in
 // for `kill -9`), the leader reaper requeues its row, and instance B — a
 // SEPARATE Spawner against the SAME Postgres — successfully claims and
 // would complete it. Exactly one live owner at a time; the dead owner's
 // claim never resurfaces.
-func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
+func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	fx := seedFleetFixture(t, h)
@@ -171,8 +171,8 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	sB := newFleetSpawner(t, h, fx, idB)
 
 	execA, epochA := sA.executorIdentity()
-	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execA, epochA, db.ClaimPlacement{})
-	if err != nil || claimed == nil || claimed.ID != fx.runID {
+	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execA, epochA, db.ClaimPlacement{})
+	if err != nil || claimed == nil || claimed.ID != fx.conversationID {
 		t.Fatalf("A claims: claimed=%v err=%v", claimed, err)
 	}
 
@@ -190,8 +190,8 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	}
 
 	execB, epochB := sB.executorIdentity()
-	claimedByB, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB, db.ClaimPlacement{})
-	if err != nil || claimedByB == nil || claimedByB.ID != fx.runID {
+	claimedByB, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{})
+	if err != nil || claimedByB == nil || claimedByB.ID != fx.conversationID {
 		t.Fatalf("B claims after reap: claimed=%v err=%v", claimedByB, err)
 	}
 	if claimedByB.Attempts != 2 {
@@ -199,7 +199,7 @@ func TestFleet_ReaperRequeue_DeadExecutorRunClaimedBySurvivor(t *testing.T) {
 	}
 
 	var executorID string
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.runID).Scan(&executorID); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT executor_id FROM claims WHERE conversation_id = $1 AND released_at IS NULL`, fx.conversationID).Scan(&executorID); err != nil {
 		t.Fatalf("read back owner: %v", err)
 	}
 	if executorID != execB {
@@ -256,7 +256,7 @@ func TestFleet_Fence_SupersededInstanceStopsClaimingAndKillsSandboxes(t *testing
 		t.Fatal("B must not be affected by A's supersession")
 	}
 	execB, epochB := sB.executorIdentity()
-	claimed, err := fx.stores.RunQueue.ClaimNextRun(ctx, execB, epochB, db.ClaimPlacement{})
+	claimed, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{})
 	if err != nil || claimed == nil {
 		t.Fatalf("B claims after A's fence: claimed=%v err=%v", claimed, err)
 	}
@@ -288,21 +288,21 @@ func TestFleet_Drain_DrainedInstanceStopsClaimingSurvivorDoesNot(t *testing.T) {
 		t.Fatal("A must read back draining=true from its own heartbeat")
 	}
 
-	sA.drainRunQueue(ctx)
+	sA.drainConversationQueue(ctx)
 	var claims int
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID).Scan(&claims); err != nil {
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
 		t.Fatalf("read back run: %v", err)
 	}
 	if claims != 0 {
-		t.Fatalf("claims = %d after A's (drained) drainRunQueue, want 0 — A must not claim", claims)
+		t.Fatalf("claims = %d after A's (drained) drainConversationQueue, want 0 — A must not claim", claims)
 	}
 
 	// B was never drained and claims normally.
-	sB.drainRunQueue(ctx)
-	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.runID).Scan(&claims); err != nil {
-		t.Fatalf("read back run after B's drainRunQueue: %v", err)
+	sB.drainConversationQueue(ctx)
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE conversation_id = $1`, fx.conversationID).Scan(&claims); err != nil {
+		t.Fatalf("read back run after B's drainConversationQueue: %v", err)
 	}
 	if claims != 1 {
-		t.Fatalf("claims = %d after B's drainRunQueue, want 1 — an undrained sibling must claim normally", claims)
+		t.Fatalf("claims = %d after B's drainConversationQueue, want 1 — an undrained sibling must claim normally", claims)
 	}
 }

@@ -95,6 +95,8 @@ func (a *App) registerSubscribers() {
 		Filter: []string{domain.EventGitHubPRNewCommits},
 		Handle: a.spawner.HandlePRNewCommits,
 	})
+	// TODO(TFAC-851): Also inject CI failures, CI passes, and merge conflicts
+	// without absorbing any task routing those events independently trigger.
 }
 
 // brainHolderOnly wraps a subscriber handler so it fires only while this
@@ -134,7 +136,7 @@ func (a *App) handleReconcilerPoll(evt domain.Event) {
 // completion for backward compatibility.
 func (a *App) broadcastEvent(evt domain.Event) {
 	// system:conversation:* sentinels (TFAC-592) are EE-observable bus mirrors of
-	// the agent_run_update/agent_message websocket events the spawner's
+	// the conversation_update/message websocket events the spawner's
 	// two broadcast choke points already emit — forwarding them here
 	// would double every tool call on the wire in a second shape. This
 	// is also defense-in-depth for tenant isolation: broadcastEvent fans

@@ -113,7 +113,7 @@ func (h *Homer) Resolve(ctx context.Context, orgID, projectID string) (home stri
 		}
 	}
 
-	if err := h.homes.Upsert(ctx, orgID, projectID, winner, eligible[winner]); err != nil {
+	if _, err := h.homes.Upsert(ctx, orgID, projectID, winner, eligible[winner]); err != nil {
 		// Persisting the mapping failed, but the placement decision stands —
 		// route this turn to the winner anyway; the next turn re-attempts the
 		// upsert. Worst case is a cold clone if the winner changes meanwhile.

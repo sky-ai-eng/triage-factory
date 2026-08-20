@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
+	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -20,6 +21,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -92,9 +94,10 @@ func (a *App) buildAI() {
 			//
 			// WithoutCancel, not Background: the cycle that scheduled this
 			// returns immediately (and its ctx dies with it), but the work
-			// this fires — deferred triggers, runs, claims — must finish,
-			// while the cycle's values stay attached so the re-derive is
-			// still recognizably part of the scoring that caused it.
+			// this fires — deferred triggers, conversations, claims — must
+			// finish, while the cycle's values stay attached so the
+			// re-derive is still recognizably part of the scoring that
+			// caused it.
 			if a.router != nil {
 				go a.router.ReDeriveAfterScoring(context.WithoutCancel(ctx), orgID, taskIDs)
 			}
@@ -133,8 +136,16 @@ func (a *App) buildAI() {
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
 	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
+	// Multi only: scope repository_updated delivery to each repo's REST
+	// visibility (org admins + tracking-team members), resolved per
+	// emission — the hub has no team axis, so an unscoped broadcast would
+	// stream every team's repo profiles to the whole org. Local keeps the
+	// org-wide broadcast: N=1, no team boundary.
+	if !a.local() {
+		a.profiler.SetRecipients(a.stores.TeamGitHubRepos.RepoUpdateRecipientsSystem)
+	}
 	// Chain bare-clone warming off profile-cycle completion: profiling
-	// populates repo_profiles.clone_url, which bootstrapBareClones reads.
+	// populates repositories.clone_url, which bootstrapBareClones reads.
 	// Local-only — the warm on-disk bare cache is an N=1 affordance; multi
 	// clones per-run inside the sandbox, so there's nothing to warm here.
 	if a.local() {
@@ -178,6 +189,37 @@ func (a *App) buildAI() {
 		a.marketplaceStats = marketplacestats.NewManager(marketplacestats.NewAggregator(a.stores.Marketplace))
 		aiLog.Info("marketplace stats manager ready (per-org runners)")
 	}
+
+	// The App-installation grant reconcile, built here because two callers need
+	// the same instance: buildRouting hands its RunOrg to the poller (once per
+	// org per GitHub cycle, no TTL) and the reachable-cache refresher below
+	// makes it the App tier's refresh (TTL-gated, forceable). One reconcile
+	// object, two cadences — rather than a second enumeration path that could
+	// disagree with the first about what an installation reaches.
+	a.grantReconciler = grantmirror.NewReconciler(a.stores.GitHubApps, a.stores.ReachableRepos, a.ghResolver)
+
+	// Reachable-repo cache: per-org Runners refreshing the mirror the repository
+	// picker and the team-repos write gate both read. Sibling to the profiler in
+	// shape (TTL + force, per-org single flight) and deliberately NOT a
+	// system:poll: subscriber: its PAT arm is a full account enumeration, and
+	// hanging that off every poll completion would spend the rate-limit budget
+	// the pollers themselves need. It is kicked by the reads that care —
+	// a stale-mirror picker open — and forced by every credential change.
+	//
+	// The class resolver is built from the same two stores the server builds its
+	// own from: it is stateless, so two copies are two callers of one pair of
+	// reads rather than two answers, and keeping the definition in one type is
+	// what stops writer and reader from keying an org differently.
+	a.reachCache = reachcache.NewManager(reachcache.NewRefresher(
+		reachcache.NewClassResolver(a.stores.Orgs, a.stores.GitHubApps),
+		a.stores.ReachableRepos, a.ghResolver, a.grantReconciler.RunOrg, a.wsHub,
+	))
+	// SetReachTrigger: same relay-wrapper reasoning as SetScorerTrigger above —
+	// the picker read and the refresh control may land on a standby control pod,
+	// which builds a Manager (buildAI runs on every brain-capable role) that
+	// nothing would ever drive.
+	a.srv.SetReachTrigger(a.triggerReach)
+	reachLog.Info("reachable-repo cache manager ready (per-org runners)", "ttl", reachcache.TTL)
 }
 
 // buildExecution constructs the delegation spawner and the curator runtime,
@@ -195,18 +237,18 @@ func (a *App) buildExecution() error {
 	a.spawner.SetEventPublisher(a.bus)
 	// Replace the constructor's random per-boot uuid with the persistent
 	// instance-registry identity registerInstance minted above —
-	// runs.executor_id on claimed rows must equal the registry id, and
+	// claims.executor_id on claimed rows must equal the registry id, and
 	// RunInstanceHeartbeat's fenced renewal needs the matching boot_epoch.
 	a.spawner.SetExecutorID(a.identity.ID, a.bootEpoch)
 	// Dispatcher concurrency is a deployment decision: the default of 8 fits
 	// ordinary hardware, while a provisioned multi-mode host handles
-	// far more (memory-bound; see the TF_MAX_CONCURRENT_RUNS guidance in
+	// far more (memory-bound; see the TF_MAX_CONCURRENT_CLAIMS guidance in
 	// .env.example for the sizing numbers). Resolved before RunDispatcher
 	// starts — resizing later would strand semaphore tokens.
-	rawMaxConcurrentRuns := os.Getenv("TF_MAX_CONCURRENT_RUNS")
-	capRuns := delegate.DefaultMaxConcurrentRuns
-	if n, clamped, err := delegate.ParseMaxConcurrentRuns(rawMaxConcurrentRuns); err != nil {
-		appLog.Warn("max concurrent runs", "error", err)
+	rawMaxConcurrentClaims := os.Getenv("TF_MAX_CONCURRENT_CLAIMS")
+	capRuns := delegate.DefaultMaxConcurrentClaims
+	if n, clamped, err := delegate.ParseMaxConcurrentClaims(rawMaxConcurrentClaims); err != nil {
+		appLog.Warn("max concurrent claims", "error", err)
 	} else if clamped {
 		// Distinct from the effective-cap log below: an operator asked for more
 		// than the sandbox subnet allocator can ever honor, not just a value
@@ -214,24 +256,34 @@ func (a *App) buildExecution() error {
 		// set 256 would log identically and the operator sizing for a bigger
 		// host would never see their setting got capped.
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
-		appLog.Warn("max concurrent runs requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentRuns, "cap", n)
-	} else if n != delegate.DefaultMaxConcurrentRuns {
+		a.spawner.SetMaxConcurrentClaims(n)
+		appLog.Warn("max concurrent claims requested above sandbox ceiling; clamped", "requested", rawMaxConcurrentClaims, "cap", n)
+	} else if n != delegate.DefaultMaxConcurrentClaims {
 		capRuns = n
-		a.spawner.SetMaxConcurrentRuns(n)
+		a.spawner.SetMaxConcurrentClaims(n)
 	}
 	// Always name the effective cap, default included and in both modes — a
 	// burst of delegations queues behind this number, and "runs sit queued"
 	// must trace back to it from the boot log alone (local mode skips the
 	// multi-only capacity advertisement below entirely).
-	appLog.Info("run concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_RUNS")
+	appLog.Info("claim concurrency cap", "cap", capRuns, "env", "TF_MAX_CONCURRENT_CLAIMS")
 	// Memory guardrail companion to the cap above: the cap bounds how many
-	// runs may execute, the floor stops new claims when the host is out of
+	// engagements may execute, the floor stops new claims when the host is out of
 	// headroom regardless of the cap. Fails open off-Linux and when the
 	// probe can't read /proc/meminfo. Resolved before the capacity warning
 	// below so that warning can say whether the floor is actually armed,
 	// rather than asserting a guardrail that TF_DISPATCH_MEM_FLOOR_MB=0
 	// may have disabled.
+	// How long a cold resume waits on a workspace persist that is still in
+	// flight before falling back. Resolved here beside the other dispatcher
+	// knobs; the default is the hung-writer backstop rather than an expected
+	// wait, so an operator normally never touches it.
+	if wait, werr := delegate.ParseSnapshotWaitTimeout(os.Getenv("TF_SNAPSHOT_WAIT_SEC")); werr != nil {
+		appLog.Warn("workspace snapshot wait", "error", werr)
+	} else if wait != delegate.DefaultSnapshotWait {
+		a.spawner.SetSnapshotWaitTimeout(wait)
+		appLog.Info("workspace snapshot wait configured", "wait", wait, "env", "TF_SNAPSHOT_WAIT_SEC")
+	}
 	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
 	a.spawner.SetDispatchMemFloor(floor)
 	if err != nil {
@@ -262,13 +314,13 @@ func (a *App) buildExecution() error {
 				appLog.Warn("platform reserve", "error", rerr)
 			}
 			derived := delegate.DerivedRunCapacityWithReserve(total, reserve)
-			appLog.Info("host run capacity",
+			appLog.Info("host claim capacity",
 				"mem_total_mb", total,
-				"budget_per_run_mb", delegate.DefaultRunMemoryBudgetMB,
+				"budget_per_claim_mb", delegate.DefaultClaimMemoryBudgetMB,
 				"platform_reserve_mb", reserve,
 				"derived_capacity", derived)
 			if capRuns > derived {
-				msg := "max concurrent runs exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
+				msg := "max concurrent claims exceeds derived host capacity; the host may not have enough RAM to run the cap concurrently"
 				if floor > 0 {
 					msg += " (the dispatch memory floor may throttle before the cap is reached, but is not guaranteed to be the first limiter)"
 				} else {
@@ -320,14 +372,14 @@ func (a *App) buildExecution() error {
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
 	// of conversation_signals writes — s.controller stays the plain
-	// inProcessController unless SetRunSignals is called, and it is only
+	// inProcessController unless SetConversationSignals is called, and it is only
 	// ever called here, behind this mode check. Wired for every role in
 	// multi mode (not just dispatcher-capable ones): a control pod's HTTP
 	// handlers need the cross-pod controller to reach a run living on an
 	// executor just as much as an executor needs it to apply signals
 	// targeting itself.
 	if runmode.Current() == runmode.ModeMulti {
-		a.spawner.SetRunSignals(a.stores.RunSignals, a.database)
+		a.spawner.SetConversationSignals(a.stores.ConversationSignals, a.database)
 		if ackTimeout, terr := delegate.ParseSignalAckTimeout(os.Getenv("TF_SIGNAL_ACK_TIMEOUT")); terr != nil {
 			appLog.Warn("signal ack timeout", "error", terr)
 		} else if ackTimeout != delegate.DefaultSignalAckTimeout {
@@ -420,7 +472,7 @@ func (a *App) buildCuratorRuntime() error {
 	a.curator = curator.New(a.stores, a.wsHub, "")
 	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
 	// Dead-letter cap for poisoned turns, resolved the same way the reaper's
-	// TF_RUN_MAX_ATTEMPTS is: parsed once at wiring, a malformed value fails
+	// TF_MAX_CLAIM_ATTEMPTS is: parsed once at wiring, a malformed value fails
 	// boot rather than silently running with a default.
 	turnMaxAttempts, err := curator.ParseTurnMaxAttempts(os.Getenv("TF_CURATOR_TURN_MAX_ATTEMPTS"))
 	if err != nil {
@@ -441,11 +493,12 @@ func (a *App) buildCuratorRuntime() error {
 	}
 
 	// One claim loop drives both surfaces: the dispatcher claims a curator
-	// conversation exactly as it claims a delegated run, then hands it here.
-	// Capacity comes with that — the loop holds its concurrency slot for the
-	// whole turn, so a curator turn passes the same memory guardrail and
-	// occupies the same semaphore (and the same heartbeat occupancy
-	// snapshot) a delegated run does, with no separate admission gate.
+	// conversation exactly as it claims a delegated conversation, then hands
+	// it here. Capacity comes with that — the loop holds its concurrency
+	// slot for the whole turn, so a curator turn passes the same memory
+	// guardrail and occupies the same semaphore (and the same heartbeat
+	// occupancy snapshot) a delegated run does, with no separate admission
+	// gate.
 	a.spawner.SetCuratorTurnDriver(a.curator.DriveClaimedTurn)
 	// And the local doorbell: an enqueued turn nudges this pod's claim loop
 	// instead of waiting out its backstop tick.
@@ -561,6 +614,14 @@ func (a *App) buildRouting() {
 	// TFAC-573: GET /readyz's poller-alive hard check + per-org poll-
 	// staleness soft signal read through this method.
 	a.srv.SetPollerManager(a.pollerMgr.Health)
+	// The App-installation grant mirror, refreshed by pull at the head of every
+	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
+	// profiler / classifier / reconciler: those all hang off a poll COMPLETION,
+	// and a cycle that finds no installations never emits one — so a subscriber
+	// would go silent for precisely the org whose mirror needs correcting. Its
+	// leader gating is the poller's own, which is the same brain lease every
+	// other timer-driven pass sits behind.
+	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors
@@ -605,7 +666,7 @@ func (a *App) buildRouting() {
 	a.router.SetEventPublisher(a.bus)
 	// Ownership-scoped boot recovery (TFAC-578): the router's event_queue
 	// self-sweep needs the same persistent instance-registry identity the
-	// spawner's run-queue self-sweep already uses (registerInstance minted it
-	// at boot, above).
+	// spawner's conversation-queue self-sweep already uses (registerInstance
+	// minted it at boot, above).
 	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
 }

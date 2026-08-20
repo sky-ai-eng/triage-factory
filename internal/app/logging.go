@@ -20,6 +20,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/logging"
 //	repoprofile    repo-profiling manager construction
 //	sandbox        orphan-sandbox reap at boot (multi mode)
 //	reconcile      artifact-reconciler manager construction + poll gating
+//	reachcache     reachable-repo cache manager construction
 var (
 	aiLog          = logging.Component("ai")
 	classifyLog    = logging.Component("classify")
@@ -35,4 +36,5 @@ var (
 	repoprofileLog = logging.Component("repoprofile")
 	sandboxLog     = logging.Component("sandbox")
 	reconcileLog   = logging.Component("reconcile")
+	reachLog       = logging.Component("reachcache")
 )

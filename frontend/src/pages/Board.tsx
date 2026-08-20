@@ -1,27 +1,29 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
-import { TERMINAL_RUN_STATUSES } from '../types'
-import type {
-  Task,
-  Conversation,
-  Message,
-  WSEvent,
-  TeamMembersResponse,
-  TeamMember,
-  TeamBot,
-} from '../types'
+import { TERMINAL_CONVERSATION_STATUSES } from '../types'
+import type { Task, Conversation, Message, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
-  isActiveRun,
+  isActiveConversation,
   isActiveStatus,
   isFailedStatus,
   isPermissionTerminalStatus,
   isTerminalStatus,
-} from '../lib/runStatus'
+} from '../lib/conversationStatus'
 import { approvalCounts, hasUnresolvedArtifacts } from '../lib/approval'
-import { appendToFeed, feedFromMessages, EMPTY_FEED, type RunCardFeed } from '../lib/runFeed'
+import {
+  appendToFeed,
+  feedFromMessages,
+  EMPTY_FEED,
+  type ConversationCardFeed,
+} from '../lib/conversationFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
+import { useTeamMembers } from '../hooks/useDeploymentConfig'
+import { usableBot } from '../lib/teamRoster'
+import { usePagedList } from '../hooks/usePagedList'
+import type { PagedList } from '../hooks/usePagedList'
+import { TASK_LIST_PATH, doneListBody, queueListBody, statusListBody } from '../lib/taskList'
 import { useOrgRole } from '../hooks/useOrgRole'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import ZeroTeamState from '../components/ZeroTeamState'
@@ -33,7 +35,7 @@ import PendingPROverlay from '../components/PendingPROverlay'
 import ResolveAllConfirm from '../components/ResolveAllConfirm'
 import AssigneePicker from '../components/board/AssigneePicker'
 import { toast } from '../components/Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiErrors, apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import BoardColumn, { CollapsedColumn } from '../components/board/BoardColumn'
 import {
   applyColumnFilter,
@@ -152,60 +154,83 @@ function loadCollapsed(userID: string): CollapseMap {
 }
 
 export default function Board() {
-  // One bucket per column. Bot/user auto-routing keeps these
-  // disjoint at the backend, so a task only appears in one list.
-  const [queued, setQueued] = useState<Task[]>([])
-  const [claimed, setClaimed] = useState<Task[]>([])
-  const [inProgress, setInProgress] = useState<Task[]>([])
-  const [inReview, setInReview] = useState<Task[]>([])
-  const [done, setDone] = useState<Task[]>([])
+  // One paged list per column — five filter sets over the one tasks list
+  // route. Bot/user auto-routing keeps them disjoint at the backend, so a task
+  // only appears in one column. Each holds its own page token, so a deep
+  // column pages independently of the others.
+  const queuedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the queue.')
+  const claimedList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the claimed tasks.')
+  const inProgressList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the in-progress tasks.')
+  const inReviewList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the in-review tasks.')
+  const doneList = usePagedList<Task>(TASK_LIST_PATH, 'Could not load the finished tasks.')
+  const queued = queuedList.items
+  const claimed = claimedList.items
+  const inProgress = inProgressList.items
+  const inReview = inReviewList.items
+  const done = doneList.items
+  // The loaders are stable across renders; the list objects around them are
+  // not. fetchTasks closes over these rather than the lists so its own
+  // identity stays stable — the WS refresh and the mount effect both key off
+  // it, and a per-render identity would refetch the board on every render.
+  const loadQueued = queuedList.load
+  const loadClaimed = claimedList.load
+  const loadInProgress = inProgressList.load
+  const loadInReview = inReviewList.load
+  const loadDone = doneList.load
   const [loading, setLoading] = useState(true)
 
   // Presence (TFAC-392): the board is an answer-capable surface for permission
   // prompts (it renders + answers them inline), so report it while mounted and
-  // fall back to 'other' on unmount so an unattended run fast-denies once the
+  // fall back to 'other' on unmount so an unattended conversation fast-denies once the
   // operator leaves the board.
   useEffect(() => {
     setPresenceView('board')
     return () => setPresenceView('other')
   }, [])
 
-  // Agent run state — runs render on cards regardless of which column
+  // Agent conversation state — conversations render on cards regardless of which column
   // the card is in (a user-claimed in_progress task can also have a
-  // run; a bot-claimed in_review task definitely has one).
-  const [agentRuns, setAgentRuns] = useState<Record<string, Conversation>>({})
-  // Per-run card feed (running stats + last few ticker lines), keyed by run
-  // ID. Bounded by construction — the board used to accumulate every run's
+  // conversation; a bot-claimed in_review task definitely has one).
+  const [conversations, setConversations] = useState<Record<string, Conversation>>({})
+  // Per-conversation card feed (running stats + last few ticker lines), keyed by conversation
+  // ID. Bounded by construction — the board used to accumulate every conversation's
   // full message array here, growing without limit for the lifetime of the
   // page while each card re-derived its stats from scratch per render.
-  const [runFeeds, setRunFeeds] = useState<Record<string, RunCardFeed>>({})
-  const [chainStepRuns, setChainStepRuns] = useState<Record<string, Conversation[]>>({})
-  const chainStepRunsRef = useRef(chainStepRuns)
+  const [conversationFeeds, setConversationFeeds] = useState<Record<string, ConversationCardFeed>>(
+    {},
+  )
+  const [chainStepConversations, setChainStepConversations] = useState<
+    Record<string, Conversation[]>
+  >({})
+  const chainStepConversationsRef = useRef(chainStepConversations)
   useEffect(() => {
-    chainStepRunsRef.current = chainStepRuns
-  }, [chainStepRuns])
+    chainStepConversationsRef.current = chainStepConversations
+  }, [chainStepConversations])
 
-  // Tool-permission prompts for every run on the board, keyed by run ID. The
-  // shared queue core (same one useRunDetail uses) owns dedup + per-prompt TTL
-  // timers; the board ingests `permission_request` and drops a run's queue when
+  // Tool-permission prompts for every conversation on the board, keyed by conversation ID. The
+  // shared queue core (same one useConversationDetail uses) owns dedup + per-prompt TTL
+  // timers; the board ingests `permission_request` and drops a conversation's queue when
   // it finishes or leaves the board. A queuesRef mirrors the map so the
   // leave-the-board reconciliation effect can read it without re-running on
   // every ingest (which would race a just-ingested prompt against its
-  // not-yet-seeded run).
+  // not-yet-seeded conversation).
   const {
     queues: permQueueMap,
     refresh: refreshPermissions,
     resolve: resolvePermission,
-    dropRun: dropPermissionRun,
+    dropConversation: dropPermissionConversation,
   } = usePermissionQueues()
   const queuesRef = useRef(permQueueMap)
   useEffect(() => {
     queuesRef.current = permQueueMap
   }, [permQueueMap])
 
-  // Team roster for the assignee picker. Includes bot when enabled.
-  const [members, setMembers] = useState<TeamMember[]>([])
-  const [bot, setBot] = useState<TeamBot | null>(null)
+  // Team roster for the assignee picker, on the team the board is acting as
+  // (the same one the write pickers seed to) rather than the org's default.
+  // The bot is filtered to the one the delegate handlers would accept: a
+  // disabled bot is not an assignable option.
+  const { members, bot: rosterBot } = useTeamMembers()
+  const bot = useMemo(() => usableBot(rosterBot), [rosterBot])
   const [currentUserID, setCurrentUserID] = useState<string>('')
 
   // multi-team. teamFilter is the per-page read scope (threaded
@@ -291,20 +316,20 @@ export default function Board() {
   // Delegate flow
   const [showPromptPicker, setShowPromptPicker] = useState(false)
   const pendingDelegateTask = useRef<Task | null>(null)
-  // Tracks bot-claimed tasks where the delegate run failed
-  // to fire. Cleared when a run for the task lands.
+  // Tracks bot-claimed tasks where the delegate conversation failed
+  // to fire. Cleared when a conversation for the task lands.
   const [delegateFailures, setDelegateFailures] = useState<Record<string, string>>({})
 
   // Per-item approval overlay (open one unresolved artifact's editor).
   const [approvalCtx, setApprovalCtx] = useState<{
-    runID: string
+    conversationID: string
     kind: 'review' | 'pr'
     artifactId: string
   } | null>(null)
 
   // Resolve-all confirmation (TFAC-384 §4): drag-to-Done (complete) and
   // Return-to-queue (requeue) force-resolve every unresolved artifact and cancel
-  // a live run. When the target task has unresolved artifacts we stash the
+  // a live conversation. When the target task has unresolved artifacts we stash the
   // intended action here and gate the request behind the confirmation modal.
   const [confirmResolve, setConfirmResolve] = useState<{
     taskId: string
@@ -316,32 +341,30 @@ export default function Board() {
   const [confirmBusy, setConfirmBusy] = useState(false)
 
   // Fetches a blueprint run's step structure and pads it into a length-N
-  // array of step runs — synthetic 'pending' placeholders for steps without
-  // a run yet — the shape the chain rail renders. Pure: returns the array
+  // array of step conversations — synthetic 'pending' placeholders for steps without
+  // a conversation yet — the shape the chain rail renders. Pure: returns the array
   // (null on error / empty) and writes no state, so fetchTasks can resolve
-  // many chains in parallel and apply them in one batched setChainStepRuns.
-  const fetchChainStepRuns = useCallback(
-    async (chainRunID: string): Promise<Conversation[] | null> => {
+  // many chains in parallel and apply them in one batched setChainStepConversations.
+  const fetchChainStepConversations = useCallback(
+    async (blueprintRunID: string): Promise<Conversation[] | null> => {
       try {
-        const res = await fetch(`/api/blueprint-runs/${chainRunID}`)
-        if (!res.ok) return null
-        const data: {
+        const data = await apiJSON<{
           steps?: Array<{ step: { step_index: number }; run?: Conversation | null }>
-        } = await res.json()
+        }>(`/api/blueprint-runs/${blueprintRunID}`)
         const total = data.steps?.length ?? 0
         if (total === 0) return null
         return Array.from({ length: total }, (_, i) => {
           const existing = data.steps?.[i]?.run
           if (existing) return existing
-          // A step with no run yet. Its status is empty rather than a
+          // A step with no conversation yet. Its status is empty rather than a
           // made-up name: the classifiers read an unrecognized value as
           // nothing at all, and inventing one would put a word in the
           // conversation vocabulary that no conversation can carry. The
           // `__pending-` id is what marks the row synthetic.
           return {
-            ID: `__pending-${chainRunID}-${i}`,
+            ID: `__pending-${blueprintRunID}-${i}`,
             Status: '',
-            blueprint_run_id: chainRunID,
+            blueprint_run_id: blueprintRunID,
             blueprint_step_index: i,
           } as unknown as Conversation
         })
@@ -354,148 +377,141 @@ export default function Board() {
     [],
   )
 
-  // Seeds chainStepRuns for one task from its blueprint run. Thin wrapper
-  // over fetchChainStepRuns for the WS handlers (which seed one task at a
-  // time); fetchTasks batches via fetchChainStepRuns directly.
-  const seedChainStepRuns = useCallback(
-    async (taskID: string, chainRunID: string) => {
-      const steps = await fetchChainStepRuns(chainRunID)
-      if (steps) setChainStepRuns((prev) => ({ ...prev, [taskID]: steps }))
+  // Seeds chainStepConversations for one task from its blueprint run. Thin wrapper
+  // over fetchChainStepConversations for the WS handlers (which seed one task at a
+  // time); fetchTasks batches via fetchChainStepConversations directly.
+  const seedChainStepConversations = useCallback(
+    async (taskID: string, blueprintRunID: string) => {
+      const steps = await fetchChainStepConversations(blueprintRunID)
+      if (steps) setChainStepConversations((prev) => ({ ...prev, [taskID]: steps }))
     },
-    [fetchChainStepRuns],
+    [fetchChainStepConversations],
   )
 
-  // Fetch members + bot once at mount. The picker degrades gracefully
-  // if this fails (members=[], bot=null → only the avatar renders,
-  // picker dropdown is empty).
+  // The caller's identity, once at mount. /api/me returns it as `id`, not
+  // `user_id` — the picker uses currentUserID to recognize "claimed by me",
+  // and without this read every click on Me would take the claim path instead
+  // of toggling unclaim. A failure leaves the picker degraded (no "you"
+  // highlight) but the board working, which is why it swallows rather than
+  // rejects; the roster half degrades the same way inside its own hook.
   useEffect(() => {
     void (async () => {
-      try {
-        const [meRes, rosterRes] = await Promise.all([
-          fetch('/api/me').then((r) => (r.ok ? r.json() : null)),
-          fetch('/api/team/members').then((r) => (r.ok ? r.json() : null)),
-        ])
-        // /api/me returns the caller's identity as `id`, not `user_id`
-        // (see auth_handlers.go:514). The picker uses currentUserID to
-        // recognize "claimed by me" — without this read, every click on
-        // Me would take the claim path instead of toggling unclaim.
-        if (meRes && typeof meRes === 'object' && 'id' in meRes) {
-          setCurrentUserID((meRes as { id: string }).id ?? '')
-        }
-        if (rosterRes) {
-          const roster = rosterRes as TeamMembersResponse
-          setMembers(roster.members ?? [])
-          setBot(roster.bot ?? null)
-        }
-      } catch {
-        // Picker degrades; board still works.
+      const meRes = await apiJSON<unknown>('/api/me').catch(() => null)
+      if (meRes && typeof meRes === 'object' && 'id' in meRes) {
+        setCurrentUserID((meRes as { id: string }).id ?? '')
       }
     })()
   }, [])
 
-  // Derive the five column lists from a single /api/tasks
-  // multi-status fetch. /api/queue is still the canonical Queued
-  // source (it handles the snooze-window filter); the others fetch
-  // by status. The done query is backend-capped at 7 days.
+  // Derive the five column lists from five filter sets over the tasks list
+  // route. The Queued column is the queue projection (unclaimed, awake); the
+  // others are their own lane. Done carries its seven-day window explicitly —
+  // the server applies none of its own.
   const fetchTasks = useCallback(async () => {
     try {
       // Thread the per-page team filter into every column
       // fetch. Empty = the union of the viewer's teams (the default).
       const tf = teamFilterRef.current
-      const queueParams = new URLSearchParams()
-      if (showSnoozed) queueParams.set('include_snoozed', 'true')
-      for (const id of tf) queueParams.append('team_id', id)
-      const queueURL = '/api/queue' + (queueParams.toString() ? `?${queueParams.toString()}` : '')
-      const tasksURL = (status: string) => {
-        const p = new URLSearchParams({ status })
-        for (const id of tf) p.append('team_id', id)
-        return `/api/tasks?${p.toString()}`
-      }
-      const [queuedRes, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
-        fetch(queueURL).then((r) => (r.ok ? r.json() : [])),
-        // "claimed" stays a derived pseudo-status (status=queued + a
-        // claim col set) — the backend's ByStatus(claimed) branch
-        // already handles this for back-compat.
-        fetch(tasksURL('claimed')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('in_progress')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('in_review')).then((r) => (r.ok ? r.json() : [])),
-        fetch(tasksURL('done')).then((r) => (r.ok ? r.json() : [])),
+      // A column that fails keeps whatever it was showing rather than taking
+      // the other four down with it — the board is five independent reads,
+      // not one. The hook holds each column's items, so a failed refresh
+      // paints the previous page instead of blanking the lane.
+      //
+      // The queued page is loaded but not read here: an unclaimed task has no
+      // conversation, so it skips the enrichment pass below.
+      const [, claimedRes, inProgressRes, inReviewRes, doneRes] = await Promise.all([
+        loadQueued(queueListBody(tf, showSnoozed)),
+        // "claimed" is the claim axis, not a lifecycle status: a queued task
+        // someone (or the bot) has taken.
+        loadClaimed(statusListBody('claimed', tf)),
+        loadInProgress(statusListBody('in_progress', tf)),
+        loadInReview(statusListBody('in_review', tf)),
+        loadDone(doneListBody(tf)),
       ])
-      setQueued(queuedRes)
-      setClaimed(claimedRes)
-      setInProgress(inProgressRes)
-      setInReview(inReviewRes)
-      setDone(doneRes)
 
-      // Paint the board as soon as the five columns are in state. The agent-run
+      // Paint the board as soon as the five columns are in state. The agent-conversation
       // enrichment below fills cards progressively and must not hold the
       // spinner — it used to: setLoading sat in `finally` after the whole serial
       // loop, so first paint waited on every per-task round-trip (TFAC-98).
       setLoading(false)
 
-      // Agent runs for any task that might carry one — claimed, in_progress,
-      // in_review, done can all have runs attached. Queued never does (claim
-      // cleared = no active run). ONE aggregated call returns every task's runs
-      // plus each task's primary-run transcript, replacing the old per-task
+      // Agent conversations for any task that might carry one — claimed, in_progress,
+      // in_review, done can all have conversations attached. Queued never does (claim
+      // cleared = no active conversation). ONE aggregated call returns every task's conversations
+      // plus each task's primary-conversation transcript, replacing the old per-task
       // serial loop of 2–3 round-trips each (TFAC-98).
-      const withRuns: Task[] = [...claimedRes, ...inProgressRes, ...inReviewRes, ...doneRes]
-      if (withRuns.length === 0) return
-      const aggParams = new URLSearchParams()
-      aggParams.set('task_ids', withRuns.map((t) => t.id).join(','))
-      aggParams.set('include', 'messages')
-      const aggRes = await fetch(`/api/agent/conversations?${aggParams.toString()}`)
-      if (!aggRes.ok) return
-      const agg = (await aggRes.json()) as {
+      const withConversations: Task[] = [
+        ...(claimedRes?.items ?? []),
+        ...(inProgressRes?.items ?? []),
+        ...(inReviewRes?.items ?? []),
+        ...(doneRes?.items ?? []),
+      ]
+      if (withConversations.length === 0) return
+      // The window is over CONVERSATIONS, ordered so a task's conversations stay
+      // contiguous — so a board page's worth of tasks needs a page large
+      // enough to hold all their conversations. The board reads the first page and
+      // paints what it has; a card whose conversation fell past the window fills in on
+      // the next refresh rather than blocking first paint on a second call.
+      const agg = await apiJSON<{
         runs?: Record<string, Conversation[]>
         messages?: Record<string, Message[]>
-      }
-      const runsByTask = agg.runs ?? {}
-      const messagesByRun = agg.messages ?? {}
+      }>('/api/agent/conversations/list', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task_ids: withConversations.map((t) => t.id),
+          include_messages: true,
+          page_size: 200,
+        }),
+      })
+      const conversationsByTask = agg.runs ?? {}
+      const messagesByConversation = agg.messages ?? {}
 
       // Accumulate into plain objects, then commit each map in ONE setState
       // (the old loop fired up to three setState calls per task — a render per
       // iteration). Chains need a second per-chain fetch for their blueprint
       // step structure; resolve those concurrently rather than serially.
-      const nextRuns: Record<string, Conversation> = {}
-      const nextFeeds: Record<string, RunCardFeed> = {}
+      const nextConversations: Record<string, Conversation> = {}
+      const nextFeeds: Record<string, ConversationCardFeed> = {}
       const chainSeeds: Array<Promise<{ taskID: string; steps: Conversation[] } | null>> = []
 
-      for (const task of withRuns) {
-        const runs = runsByTask[task.id]
-        if (!runs || runs.length === 0) continue
-        const latestRun = runs[0]
-        const chainRunID = latestRun.blueprint_run_id
-        if (chainRunID) {
-          const stepRuns = runs
-            .filter((r) => r.blueprint_run_id === chainRunID)
+      for (const task of withConversations) {
+        const taskConversations = conversationsByTask[task.id]
+        if (!taskConversations || taskConversations.length === 0) continue
+        const latestConversation = taskConversations[0]
+        const blueprintRunID = latestConversation.blueprint_run_id
+        if (blueprintRunID) {
+          const stepConversations = taskConversations
+            .filter((r) => r.blueprint_run_id === blueprintRunID)
             .sort((a, b) => (a.blueprint_step_index ?? 0) - (b.blueprint_step_index ?? 0))
           const activeStep =
-            stepRuns.find((r) => isActiveStatus(r.Status)) ?? stepRuns[stepRuns.length - 1]
-          nextRuns[task.id] = activeStep
-          // messagesByRun is keyed by each task's PRIMARY (newest-started) run.
+            stepConversations.find((r) => isActiveStatus(r.Status)) ??
+            stepConversations[stepConversations.length - 1]
+          nextConversations[task.id] = activeStep
+          // messagesByConversation is keyed by each task's PRIMARY (newest-started) conversation.
           // For a sequential chain the most recently started step IS the active
-          // step, so activeStep.ID === runs[0].ID and this lookup hits. If they
+          // step, so activeStep.ID === taskConversations[0].ID and this lookup hits. If they
           // ever differ, the WS `message` handler seeds the active step
           // shortly — keep this keyed by activeStep.ID so it stays aligned.
-          const msgs = messagesByRun[activeStep.ID]
+          const msgs = messagesByConversation[activeStep.ID]
           if (msgs) nextFeeds[activeStep.ID] = feedFromMessages(msgs)
           chainSeeds.push(
-            fetchChainStepRuns(chainRunID).then((steps) =>
+            fetchChainStepConversations(blueprintRunID).then((steps) =>
               steps ? { taskID: task.id, steps } : null,
             ),
           )
         } else {
-          nextRuns[task.id] = latestRun
-          const msgs = messagesByRun[latestRun.ID]
-          if (msgs) nextFeeds[latestRun.ID] = feedFromMessages(msgs)
+          nextConversations[task.id] = latestConversation
+          const msgs = messagesByConversation[latestConversation.ID]
+          if (msgs) nextFeeds[latestConversation.ID] = feedFromMessages(msgs)
         }
       }
 
-      setAgentRuns((prev) => ({ ...prev, ...nextRuns }))
+      setConversations((prev) => ({ ...prev, ...nextConversations }))
       // A fetched feed replaces the incrementally-built one wholesale — the
       // server transcript is authoritative, so any WS/fetch race drift
       // self-corrects here.
-      setRunFeeds((prev) => ({ ...prev, ...nextFeeds }))
+      setConversationFeeds((prev) => ({ ...prev, ...nextFeeds }))
 
       // Apply all chain step rails in one batch once their blueprint fetches
       // settle (concurrent above), so the whole refresh costs ~3 renders, not
@@ -505,7 +521,7 @@ export default function Board() {
           (s): s is { taskID: string; steps: Conversation[] } => s !== null,
         )
         if (seeded.length > 0) {
-          setChainStepRuns((prev) => {
+          setChainStepConversations((prev) => {
             const next = { ...prev }
             for (const { taskID, steps } of seeded) next[taskID] = steps
             return next
@@ -517,7 +533,15 @@ export default function Board() {
     } finally {
       setLoading(false)
     }
-  }, [fetchChainStepRuns, showSnoozed])
+  }, [
+    fetchChainStepConversations,
+    showSnoozed,
+    loadQueued,
+    loadClaimed,
+    loadInProgress,
+    loadInReview,
+    loadDone,
+  ])
 
   useEffect(() => {
     fetchTasks()
@@ -577,23 +601,23 @@ export default function Board() {
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
-        // conversation_update carries a conversation_id for a delegated run and
+        // conversation_update carries a conversation_id for a delegated conversation and
         // a project_id (no conversation_id) for a curator turn — the board only
-        // tracks delegated runs, so it ignores the curator variant.
+        // tracks delegated conversations, so it ignores the curator variant.
         if (event.type === 'conversation_update' && event.conversation_id) {
           const conversationID = event.conversation_id
           const status = event.data.status ?? ''
           let matched = false
-          setAgentRuns((prev) => {
+          setConversations((prev) => {
             const updated = { ...prev }
-            for (const [taskId, run] of Object.entries(updated)) {
-              if (run.ID === conversationID) {
+            for (const [taskId, conversation] of Object.entries(updated)) {
+              if (conversation.ID === conversationID) {
                 matched = true
                 // failure_kind rides the failed-status event so the card's
                 // kind-specific copy lands with the flip, not only after the
-                // full-run refetch below settles.
+                // full-conversation refetch below settles.
                 updated[taskId] = {
-                  ...run,
+                  ...conversation,
                   Status: status,
                   ...(event.data.failure_kind ? { FailureKind: event.data.failure_kind } : {}),
                 }
@@ -602,48 +626,49 @@ export default function Board() {
             }
             return updated
           })
-          fetch(`/api/agent/conversations/${conversationID}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: Conversation | null) => {
-              if (!fullRun) return
-              setAgentRuns((p) => {
-                const existing = p[fullRun.TaskID]
+          apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+            .then((fullConversation) => {
+              setConversations((p) => {
+                const existing = p[fullConversation.TaskID]
                 if (
                   existing &&
-                  existing.ID !== fullRun.ID &&
-                  existing.StartedAt >= fullRun.StartedAt
+                  existing.ID !== fullConversation.ID &&
+                  existing.StartedAt >= fullConversation.StartedAt
                 ) {
                   return p
                 }
-                return { ...p, [fullRun.TaskID]: fullRun }
+                return { ...p, [fullConversation.TaskID]: fullConversation }
               })
-              if (fullRun.blueprint_run_id) {
-                seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
+              if (fullConversation.blueprint_run_id) {
+                seedChainStepConversations(
+                  fullConversation.TaskID,
+                  fullConversation.blueprint_run_id,
+                )
               }
             })
             .catch(() => {})
 
           // A few server paths still mutate task state but
           // only emit conversation_update (review/PR approval flips
-          // task='done', then broadcasts the run completion). Without
+          // task='done', then broadcasts the conversation completion). Without
           // a refetch here the card stays in its old column until a
           // manual refresh. Cheap to re-pull all five buckets — the
           // queries are indexed and short.
           if (isPermissionTerminalStatus(status)) {
-            // The run is no longer running a turn, so any prompt parked on it is
+            // The conversation is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
-            dropPermissionRun(conversationID)
+            dropPermissionConversation(conversationID)
             scheduleFetchTasks()
           }
 
           if (!matched) {
-            // Chain step run that isn't the active step: a new step
-            // started or a prior one changed. Otherwise seed agentRuns
-            // so auto-delegation / cross-tab / swipe responses we
+            // Chain step conversation that isn't the active step: a new step
+            // started or a prior one changed. Otherwise seed conversations
+            // so auto-delegation / cross-tab / delegate responses we
             // haven't tracked yet render immediately.
             let isChainStep = false
-            for (const steps of Object.values(chainStepRunsRef.current)) {
+            for (const steps of Object.values(chainStepConversationsRef.current)) {
               if (steps.some((r) => r.blueprint_run_id && r.ID === conversationID)) {
                 isChainStep = true
                 break
@@ -654,43 +679,42 @@ export default function Board() {
                 scheduleFetchTasks()
               }
             } else {
-              fetch(`/api/agent/conversations/${conversationID}`)
-                .then((r) => (r.ok ? r.json() : null))
-                .then((fullRun: Conversation | null) => {
-                  if (!fullRun) return
-                  setAgentRuns((p) => ({ ...p, [fullRun.TaskID]: fullRun }))
-                  if (fullRun.blueprint_run_id) {
-                    seedChainStepRuns(fullRun.TaskID, fullRun.blueprint_run_id)
+              apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+                .then((fullConversation) => {
+                  setConversations((p) => ({ ...p, [fullConversation.TaskID]: fullConversation }))
+                  if (fullConversation.blueprint_run_id) {
+                    seedChainStepConversations(
+                      fullConversation.TaskID,
+                      fullConversation.blueprint_run_id,
+                    )
                   }
                 })
                 .catch(() => {})
             }
           }
         } else if (event.type === 'artifact_updated') {
-          // Reconciler (TFAC-464): an artifact this run produced changed state
-          // on GitHub. The run's own status is unchanged — only its
+          // Reconciler (TFAC-464): an artifact this conversation produced changed state
+          // on GitHub. The conversation's own status is unchanged — only its
           // artifact-derived surface (pending kind / approval card) — so refetch
-          // the run, with NO optimistic Status write (unlike conversation_update).
-          fetch(`/api/agent/conversations/${event.conversation_id}`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((fullRun: Conversation | null) => {
-              if (!fullRun) return
-              setAgentRuns((p) => {
-                const existing = p[fullRun.TaskID]
+          // the conversation, with NO optimistic Status write (unlike conversation_update).
+          apiJSON<Conversation>(`/api/agent/conversations/${event.conversation_id}`)
+            .then((fullConversation) => {
+              setConversations((p) => {
+                const existing = p[fullConversation.TaskID]
                 if (
                   existing &&
-                  existing.ID !== fullRun.ID &&
-                  existing.StartedAt >= fullRun.StartedAt
+                  existing.ID !== fullConversation.ID &&
+                  existing.StartedAt >= fullConversation.StartedAt
                 ) {
                   return p
                 }
-                return { ...p, [fullRun.TaskID]: fullRun }
+                return { ...p, [fullConversation.TaskID]: fullConversation }
               })
             })
             .catch(() => {})
         } else if (event.type === 'message' && event.conversation_id) {
-          // Live run-log tick. AgentCard renders from the bounded per-run feed
-          // keyed by run.ID; without this, new agent output only surfaces
+          // Live conversation-log tick. AgentCard renders from the bounded per-conversation feed
+          // keyed by conversation ID; without this, new agent output only surfaces
           // after a status-change fetchTasks pass. Folding into the feed
           // (rather than appending to a full message array) keeps board state
           // bounded and the per-event work O(1). appendToFeed returns the same
@@ -698,7 +722,7 @@ export default function Board() {
           // return prev in that case so React skips the board re-render. A
           // curator `message` (project_id, no conversation_id) is ignored here.
           const conversationID = event.conversation_id
-          setRunFeeds((prev) => {
+          setConversationFeeds((prev) => {
             const cur = prev[conversationID]
             const next = appendToFeed(cur, event.data)
             if (next === (cur ?? EMPTY_FEED)) return prev
@@ -720,68 +744,73 @@ export default function Board() {
           // priority_score it writes is what drives ordering here.
           scheduleFetchTasks()
         } else if (event.type === 'permission_request' || event.type === 'permission_resolved') {
-          // A run raised an Allow/Deny prompt, or one it had was answered
+          // A conversation raised an Allow/Deny prompt, or one it had was answered
           // (here or in another tab) / timed out. Either way the frame is only
-          // a hint that this run's pending set moved — re-read it, so the card
+          // a hint that this conversation's pending set moved — re-read it, so the card
           // lights up or clears from the server's view rather than from
           // whichever frames this tab happened to be around for.
           refreshPermissions(event.conversation_id)
         }
       },
-      [scheduleFetchTasks, seedChainStepRuns, refreshPermissions, dropPermissionRun],
+      [
+        scheduleFetchTasks,
+        seedChainStepConversations,
+        refreshPermissions,
+        dropPermissionConversation,
+      ],
     ),
   )
 
   // Cold-load reconstruction: a board opened after a prompt was raised never
-  // saw its frame, so ask for each live run's pending set the first time that
-  // run appears. Without this, a run parked on a human is indistinguishable
-  // from a run that is simply working, until it times out.
+  // saw its frame, so ask for each live conversation's pending set the first time that
+  // conversation appears. Without this, a conversation parked on a human is indistinguishable
+  // from a conversation that is simply working, until it times out.
   //
-  // Bounded to non-terminal runs (a finished run can't be waiting on anyone)
-  // and asked once per run per mount, so a board that refetches its columns on
+  // Bounded to non-terminal conversations (a finished conversation can't be waiting on anyone)
+  // and asked once per conversation per mount, so a board that refetches its columns on
   // every event doesn't turn into a request per card per event.
   const permissionsAskedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
-    for (const run of Object.values(agentRuns)) {
-      if (!run?.ID || isPermissionTerminalStatus(run.Status)) continue
-      if (permissionsAskedRef.current.has(run.ID)) continue
-      permissionsAskedRef.current.add(run.ID)
-      refreshPermissions(run.ID)
+    for (const conversation of Object.values(conversations)) {
+      if (!conversation?.ID || isPermissionTerminalStatus(conversation.Status)) continue
+      if (permissionsAskedRef.current.has(conversation.ID)) continue
+      permissionsAskedRef.current.add(conversation.ID)
+      refreshPermissions(conversation.ID)
     }
-  }, [agentRuns, refreshPermissions])
+  }, [conversations, refreshPermissions])
 
-  // Drop a run's queue when the run leaves the board (its agentRuns entry was
+  // Drop a conversation's queue when the conversation leaves the board (its conversations entry was
   // replaced — e.g. a chain advanced to a new step, or a task got re-delegated).
-  // Keyed on agentRuns only (not the queue map) so a freshly-ingested prompt
-  // isn't dropped in the window before its run's conversation_update seeds
-  // agentRuns. queuesRef gives the latest queue keys without that dependency.
+  // Keyed on conversations only (not the queue map) so a freshly-ingested prompt
+  // isn't dropped in the window before its conversation's conversation_update seeds
+  // conversations. queuesRef gives the latest queue keys without that dependency.
   useEffect(() => {
-    const live = new Set(Object.values(agentRuns).map((r) => r.ID))
-    for (const runID of Object.keys(queuesRef.current)) {
-      if (!live.has(runID)) dropPermissionRun(runID)
+    const live = new Set(Object.values(conversations).map((r) => r.ID))
+    for (const conversationID of Object.keys(queuesRef.current)) {
+      if (!live.has(conversationID)) dropPermissionConversation(conversationID)
     }
-  }, [agentRuns, dropPermissionRun])
+  }, [conversations, dropPermissionConversation])
 
-  // Sort tasks with active runs in a meaningful order. Used for
-  // In Progress and In Review where the run state matters for
+  // Sort tasks with active conversations in a meaningful order. Used for
+  // In Progress and In Review where the conversation state matters for
   // attention. Needs-you (a parked permission prompt or an unresolved
   // artifact) > failed > everything in flight > completed.
-  const sortByRunAttention = useCallback(
+  const sortByConversationAttention = useCallback(
     (tasks: Task[]) => {
       const weight = (t: Task) => {
-        const run = agentRuns[t.id]
-        if (!run) return 2
+        const conversation = conversations[t.id]
+        if (!conversation) return 2
         // A live tool-permission prompt or an unresolved artifact set is the most
         // urgent "needs you" — top weight — so it can't be missed in the column.
-        if ((permQueueMap[run.ID]?.length ?? 0) > 0) return 0
-        if (hasUnresolvedArtifacts(run)) return 0
-        if (isFailedStatus(run.Status)) return 1
-        if (run.Status === 'completed') return 3
+        if ((permQueueMap[conversation.ID]?.length ?? 0) > 0) return 0
+        if (hasUnresolvedArtifacts(conversation)) return 0
+        if (isFailedStatus(conversation.Status)) return 1
+        if (conversation.Status === 'completed') return 3
         return 2
       }
       return [...tasks].sort((a, b) => weight(a) - weight(b))
     },
-    [agentRuns, permQueueMap],
+    [conversations, permQueueMap],
   )
 
   // Resolve a task's claimee to a display name for the claimee sort. Agent
@@ -805,11 +834,35 @@ export default function Board() {
     return {
       queued: applyColumnFilter(queued, filters.queued, opts),
       claimed: applyColumnFilter(claimed, filters.claimed, opts),
-      in_progress: applyColumnFilter(sortByRunAttention(inProgress), filters.in_progress, opts),
-      in_review: applyColumnFilter(sortByRunAttention(inReview), filters.in_review, opts),
+      in_progress: applyColumnFilter(
+        sortByConversationAttention(inProgress),
+        filters.in_progress,
+        opts,
+      ),
+      in_review: applyColumnFilter(sortByConversationAttention(inReview), filters.in_review, opts),
       done: applyColumnFilter(done, filters.done, opts),
     }
-  }, [queued, claimed, inProgress, inReview, done, filters, sortByRunAttention, resolveClaimee])
+  }, [
+    queued,
+    claimed,
+    inProgress,
+    inReview,
+    done,
+    filters,
+    sortByConversationAttention,
+    resolveClaimee,
+  ])
+
+  // Each column's paging state, so a lane deeper than one page can say so and
+  // fetch the rest. Rebuilt per render (the lists change every load) and read
+  // only at the column tail.
+  const paging: Record<ColumnId, PagedList<Task>> = {
+    queued: queuedList,
+    claimed: claimedList,
+    in_progress: inProgressList,
+    in_review: inReviewList,
+    done: doneList,
+  }
 
   const rawByColumn = useMemo<Record<ColumnId, Task[]>>(
     () => ({
@@ -850,24 +903,20 @@ export default function Board() {
 
   // The raw task-level resolve-all requests. complete = drag-to-Done (keep the
   // card in Done); requeue = back to the queue. Both force-resolve every
-  // unresolved artifact server-side and cancel a live run; we only confirm first.
+  // unresolved artifact server-side and cancel a live conversation; we only confirm first.
   const fireComplete = useCallback(
     async (taskId: string) => {
       try {
-        const res = await fetch(`/api/tasks/${taskId}/swipe`, {
-          method: 'POST',
+        // A failure (e.g. a teardown that partially failed) must surface — a
+        // silent fetchTasks would repaint as if the move succeeded.
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'complete', hesitation_ms: 0 }),
+          body: JSON.stringify({ status: 'done' }),
         })
-        if (!res.ok) {
-          // A non-2xx (e.g. a teardown that partially failed) must surface — a
-          // silent fetchTasks would repaint as if the move succeeded.
-          toast.error(await readError(res, 'Failed to mark done'))
-          return
-        }
         fetchTasks()
-      } catch {
-        toast.error('Move failed — please try again')
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not mark the task done.'))
       }
     },
     [fetchTasks],
@@ -876,38 +925,34 @@ export default function Board() {
   const fireRequeue = useCallback(
     async (taskId: string) => {
       try {
-        const res = await fetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to return to queue'))
-          return
-        }
+        await apiFetch(`/api/tasks/${taskId}/requeue`, { method: 'POST' })
         fetchTasks()
-      } catch {
-        toast.error('Return to queue failed — please try again')
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not return the task to the queue.'))
       }
     },
     [fetchTasks],
   )
 
   // requestResolveAll gates a complete/requeue behind the confirmation modal when
-  // the task's run still has unresolved artifacts. Returns true when it deferred
+  // the task's conversation still has unresolved artifacts. Returns true when it deferred
   // to the modal (the caller must NOT fire its own request); false when there's
   // nothing to resolve and the caller should proceed directly.
   const requestResolveAll = useCallback(
     (taskId: string, action: 'complete' | 'requeue'): boolean => {
-      const run = agentRuns[taskId]
-      if (!run || !hasUnresolvedArtifacts(run)) return false
-      const c = approvalCounts(run)
+      const conversation = conversations[taskId]
+      if (!conversation || !hasUnresolvedArtifacts(conversation)) return false
+      const c = approvalCounts(conversation)
       setConfirmResolve({
         taskId,
         prCount: c.pr,
         reviewCount: c.review,
-        isLive: isActiveRun(run),
+        isLive: isActiveConversation(conversation),
         action,
       })
       return true
     },
-    [agentRuns],
+    [conversations],
   )
 
   // The board opens at the left (Queued first). With Claimed + In
@@ -1050,34 +1095,34 @@ export default function Board() {
       // advances). Queue → Done is dismiss.
       if (sourceCol === 'queued') {
         if (targetCol === 'done') {
-          await fetch(`/api/tasks/${taskId}/swipe`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'dismiss', hesitation_ms: 0 }),
+            body: JSON.stringify({ status: 'dismissed' }),
           })
           fetchTasks()
           return
         }
         // Claim first, then advance if needed.
-        await fetch(`/api/tasks/${taskId}/swipe`, {
+        await apiFetch(`/api/tasks/${taskId}/claim`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
+          body: JSON.stringify({}),
         })
         if (targetCol === 'in_progress' || targetCol === 'in_review') {
-          await fetch(`/api/tasks/${taskId}/advance`, {
-            method: 'POST',
+          await apiFetch(`/api/tasks/${taskId}`, {
+            method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ to: targetCol }),
+            body: JSON.stringify({ status: targetCol }),
           })
         }
         fetchTasks()
         return
       }
 
-      // Any → Queued: requeue. Clears the claim and resets status. When the run
+      // Any → Queued: requeue. Clears the claim and resets status. When the conversation
       // still has unresolved artifacts this force-resolves them (+ cancels a live
-      // run), so confirm first; otherwise requeue straight away.
+      // conversation), so confirm first; otherwise requeue straight away.
       if (targetCol === 'queued') {
         if (requestResolveAll(taskId, 'requeue')) return
         await fireRequeue(taskId)
@@ -1107,19 +1152,19 @@ export default function Board() {
         return
       }
       if (targetCol === 'in_progress' || targetCol === 'in_review') {
-        await fetch(`/api/tasks/${taskId}/advance`, {
-          method: 'POST',
+        await apiFetch(`/api/tasks/${taskId}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ to: targetCol }),
+          body: JSON.stringify({ status: targetCol }),
         })
         fetchTasks()
         return
       }
-    } catch {
-      // A network blip on the swipe/advance/requeue mutation would otherwise
-      // leave the board silently in the wrong state; surface it and let the
-      // next fetchTasks reconcile.
-      toast.error('Move failed — please try again')
+    } catch (err) {
+      // A failed status/claim/requeue mutation would otherwise leave the board
+      // silently in the wrong state; surface it and let the next fetchTasks
+      // reconcile.
+      toast.error(httpErrorMessage(err, 'Could not move the task — please try again.'))
     }
   }
 
@@ -1135,11 +1180,15 @@ export default function Board() {
   // claim mutations in the board; drag is for column moves.
   const handlePickerClaim = useCallback(
     async (task: Task) => {
-      await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'claim', hesitation_ms: 0 }),
-      })
+      try {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        })
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not claim the task.'))
+      }
       fetchTasks()
     },
     [fetchTasks],
@@ -1161,29 +1210,26 @@ export default function Board() {
     setShowPromptPicker(true)
   }, [])
 
-  // Open a run's approval overlay (review or PR editor) by artifact id. Hoisted
+  // Open a conversation's approval overlay (review or PR editor) by artifact id. Hoisted
   // to a stable callback (rather than an inline closure in the column JSX) so
   // the memoized cards' props don't churn on every board render.
   const handleOpenApproval = useCallback(
-    (runID: string, kind: 'review' | 'pr', artifactId: string) => {
-      setApprovalCtx({ runID, kind, artifactId })
+    (conversationID: string, kind: 'review' | 'pr', artifactId: string) => {
+      setApprovalCtx({ conversationID, kind, artifactId })
     },
     [],
   )
 
   const handlePickerReassign = useCallback(
     async (task: Task, targetUserID: string) => {
-      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'reassign',
-          hesitation_ms: 0,
-          target_user_id: targetUserID,
-        }),
-      })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Reassign failed'))
+      try {
+        await apiFetch(`/api/tasks/${task.id}/claim`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ target_user_id: targetUserID }),
+        })
+      } catch (err) {
+        toast.error(httpErrorMessage(err, 'Could not reassign the task.'))
       }
       fetchTasks()
     },
@@ -1196,46 +1242,51 @@ export default function Board() {
       const task = pendingDelegateTask.current
       if (!task) return
       pendingDelegateTask.current = null
-      const res = await fetch(`/api/tasks/${task.id}/swipe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'delegate', hesitation_ms: 0, blueprint_id: promptId }),
-      })
-      if (res.ok) {
-        try {
-          const body = (await res.json()) as { conversation_id?: string; delegate_error?: string }
-          const runID = body.conversation_id
-          if (runID) {
-            setAgentRuns((prev) => ({
-              ...prev,
-              // Optimistic row for the conversation the delegate call just
-              // minted, standing in until the first WS status lands. `queued`
-              // is what the backend's display ladder reports for a fresh
-              // mint — nobody has claimed it yet — so the card shows its
-              // queue wait instead of pretending an agent is already working.
-              [task.id]: {
-                ID: runID,
-                TaskID: task.id,
-                Status: 'queued',
-                Model: '',
-                StartedAt: new Date().toISOString(),
-                ResultSummary: '',
-              },
-            }))
-            setDelegateFailures((prev) => {
-              if (!(task.id in prev)) return prev
-              const next = { ...prev }
-              delete next[task.id]
-              return next
-            })
-          } else if (body.delegate_error) {
-            setDelegateFailures((prev) => ({
-              ...prev,
-              [task.id]: body.delegate_error || 'spawn failed',
-            }))
-          }
-        } catch {
-          // Body wasn't JSON — fetchTasks below still recovers.
+      try {
+        const body = await apiJSON<{ conversation_id?: string }>(`/api/tasks/${task.id}/delegate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ blueprint_id: promptId }),
+        })
+        const conversationID = body.conversation_id
+        if (conversationID) {
+          setConversations((prev) => ({
+            ...prev,
+            // Optimistic row for the conversation the delegate call just
+            // minted, standing in until the first WS status lands. `queued`
+            // is what the backend's display ladder reports for a fresh
+            // mint — nobody has claimed it yet — so the card shows its
+            // queue wait instead of pretending an agent is already working.
+            [task.id]: {
+              ID: conversationID,
+              TaskID: task.id,
+              Status: 'queued',
+              Model: '',
+              StartedAt: new Date().toISOString(),
+              ResultSummary: '',
+            },
+          }))
+          setDelegateFailures((prev) => {
+            if (!(task.id in prev)) return prev
+            const next = { ...prev }
+            delete next[task.id]
+            return next
+          })
+        }
+      } catch (err) {
+        // Reason SPAWN_FAILED is the backend's "the claim stamped, only the
+        // conversation didn't fire" marker — the task is in the bot's lane with no
+        // conversation, so record the inline per-card failure the retry affordance
+        // renders. Status alone can't be used here: pre-claim faults also
+        // answer 500. Anything else means nothing landed; a toast is the
+        // right surface. fetchTasks below reconciles either way.
+        if (apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')) {
+          setDelegateFailures((prev) => ({
+            ...prev,
+            [task.id]: httpErrorMessage(err, 'spawn failed'),
+          }))
+        } else {
+          toast.error(httpErrorMessage(err, 'Could not delegate the task.'))
         }
       }
       fetchTasks()
@@ -1351,9 +1402,9 @@ export default function Board() {
                   <ColumnContents
                     colId={colId}
                     tasks={filtered[colId]}
-                    agentRuns={agentRuns}
-                    runFeeds={runFeeds}
-                    chainStepRuns={chainStepRuns}
+                    conversations={conversations}
+                    conversationFeeds={conversationFeeds}
+                    chainStepConversations={chainStepConversations}
                     permQueues={permQueueMap}
                     onResolvePermission={resolvePermission}
                     currentUserID={currentUserID}
@@ -1369,6 +1420,14 @@ export default function Board() {
                     onArtifactResolved={fetchTasks}
                     onRetry={handlePickerDelegate}
                   />
+                  {paging[colId].hasMore && (
+                    <ColumnMore
+                      shown={rawByColumn[colId].length}
+                      total={paging[colId].total}
+                      loading={paging[colId].loading}
+                      onLoadMore={paging[colId].loadMore}
+                    />
+                  )}
                 </BoardColumn>
               ),
             )}
@@ -1460,17 +1519,17 @@ interface PickerProps {
 
 // ColumnContents is the per-column body — handles empty state, the
 // SortableContext, and the per-task card-vs-agentcard branching. The card
-// wrappers it renders are memoized with identity-stable props (per-run slices
+// wrappers it renders are memoized with identity-stable props (per-conversation slices
 // of the board maps + useCallback'd handlers, with the per-card closures and
 // the AssigneePicker element built inside the wrapper, below its memo
-// boundary), so a live-feed tick for one run re-renders that run's card only —
+// boundary), so a live-feed tick for one conversation re-renders that conversation's card only —
 // not every card on the board.
 function ColumnContents({
   colId,
   tasks,
-  agentRuns,
-  runFeeds,
-  chainStepRuns,
+  conversations,
+  conversationFeeds,
+  chainStepConversations,
   permQueues,
   onResolvePermission,
   currentUserID,
@@ -1488,18 +1547,18 @@ function ColumnContents({
 }: {
   colId: ColumnId
   tasks: Task[]
-  agentRuns: Record<string, Conversation>
-  runFeeds: Record<string, RunCardFeed>
-  chainStepRuns: Record<string, Conversation[]>
+  conversations: Record<string, Conversation>
+  conversationFeeds: Record<string, ConversationCardFeed>
+  chainStepConversations: Record<string, Conversation[]>
   permQueues: Record<string, PendingPermission[]>
   onResolvePermission: (
-    runID: string,
+    conversationID: string,
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   delegateFailures: Record<string, string>
   onRequeue: (taskID: string) => void
-  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
   onRetry: (task: Task) => void
 } & Omit<PickerProps, 'pickerReadOnly'>) {
@@ -1522,22 +1581,22 @@ function ColumnContents({
     <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
       {tasks.map((task) => {
         // Queued tasks never render as AgentCards even if the
-        // agentRuns map has a stale entry from a prior delegate.
-        // After requeue, the run row stays in the DB but the task
+        // conversations map has a stale entry from a prior delegate.
+        // After requeue, the conversation row stays in the DB but the task
         // is back in the team queue with claim cols cleared —
         // showing an AgentCard there would lie about who's working
         // on it. The map is cleaned up on the next WS update; this
         // gate covers the window before that lands.
-        const run = colId === 'queued' ? undefined : agentRuns[task.id]
-        if (run) {
+        const conversation = colId === 'queued' ? undefined : conversations[task.id]
+        if (conversation) {
           return (
             <SortableAgentCard
               key={task.id}
               task={task}
-              run={run}
-              chainSteps={chainStepRuns[task.id]}
-              feed={runFeeds[run.ID]}
-              pendingPermissions={permQueues[run.ID]}
+              conversation={conversation}
+              chainSteps={chainStepConversations[task.id]}
+              feed={conversationFeeds[conversation.ID]}
+              pendingPermissions={permQueues[conversation.ID]}
               onResolvePermission={onResolvePermission}
               onRequeue={onRequeue}
               onOpenApproval={onOpenApproval}
@@ -1618,7 +1677,7 @@ const SortableTaskCard = memo(function SortableTaskCard({
   // assigneeSlot is forwarded into TaskCard's header instead
   // of overlaid via absolute positioning — the prior approach
   // collided with the bottom-row affordances on tall cards and with
-  // AgentCard's elapsed-time / expand cluster after a run completes.
+  // AgentCard's elapsed-time / expand cluster after a conversation completes.
   // Card owns its own layout; we just hand it the slot to render.
   return (
     <TaskCard
@@ -1639,15 +1698,15 @@ const SortableTaskCard = memo(function SortableTaskCard({
   )
 })
 
-// Run statuses where the AgentCard is safe to drag between columns: the
-// terminals, and nothing else. A run still setting up or executing stays
+// Conversation statuses where the AgentCard is safe to drag between columns: the
+// terminals, and nothing else. A conversation still setting up or executing stays
 // anchored — the cancel button is the right intent there, and dragging
-// mid-run would race with the spawner's status transitions.
-const draggableRunStatuses: ReadonlySet<string> = new Set(TERMINAL_RUN_STATUSES)
+// mid-flight would race with the spawner's status transitions.
+const draggableConversationStatuses: ReadonlySet<string> = new Set(TERMINAL_CONVERSATION_STATUSES)
 
 const SortableAgentCard = memo(function SortableAgentCard({
   task,
-  run,
+  conversation,
   chainSteps,
   feed,
   pendingPermissions,
@@ -1658,33 +1717,34 @@ const SortableAgentCard = memo(function SortableAgentCard({
   ...picker
 }: {
   task: Task
-  run: Conversation
+  conversation: Conversation
   chainSteps?: Conversation[]
-  feed?: RunCardFeed
+  feed?: ConversationCardFeed
   pendingPermissions?: PendingPermission[]
   onResolvePermission: (
-    runID: string,
+    conversationID: string,
     toolCallID: string,
     decision: PermissionDecisionInput,
   ) => Promise<void>
   onRequeue: (taskID: string) => void
-  onOpenApproval: (runID: string, kind: 'review' | 'pr', artifactId: string) => void
+  onOpenApproval: (conversationID: string, kind: 'review' | 'pr', artifactId: string) => void
   onArtifactResolved: () => void
 } & PickerProps) {
   // Bot-managed cards in in_progress / in_review are
-  // read-only — column placement is owned by the spawner's run-state
+  // read-only — column placement is owned by the spawner's conversation-state
   // mirror. The drop handler also short-circuits these drags, but
   // baking the guard into `disabled` here removes the misleading
   // grab cursor + drag preview so the user doesn't see a draggable
   // affordance that always snaps back.
   const botManaged =
     !!task.claimed_by_agent_id && (task.status === 'in_progress' || task.status === 'in_review')
-  // A terminal run is draggable; so is a settled run (idle/open) that still has
+  // A terminal conversation is draggable; so is a settled conversation (idle/open) that still has
   // unresolved artifacts — drag-to-Done / Return-to-queue is how you resolve them
   // (behind the confirmation). An actively-executing turn stays anchored (cancel
-  // is the right intent; dragging mid-run races the spawner).
+  // is the right intent; dragging mid-flight races the spawner).
   const draggable =
-    (draggableRunStatuses.has(run.Status) || (hasUnresolvedArtifacts(run) && !isActiveRun(run))) &&
+    (draggableConversationStatuses.has(conversation.Status) ||
+      (hasUnresolvedArtifacts(conversation) && !isActiveConversation(conversation))) &&
     !botManaged
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
@@ -1709,15 +1769,15 @@ const SortableAgentCard = memo(function SortableAgentCard({
     >
       <AgentCard
         task={task}
-        run={run}
+        conversation={conversation}
         chainSteps={chainSteps}
         feed={feed}
         pendingPermissions={pendingPermissions}
         onResolvePermission={(toolCallID, decision) =>
-          onResolvePermission(run.ID, toolCallID, decision)
+          onResolvePermission(conversation.ID, toolCallID, decision)
         }
         onRequeue={() => onRequeue(task.id)}
-        onOpenArtifact={(kind, artifactId) => onOpenApproval(run.ID, kind, artifactId)}
+        onOpenArtifact={(kind, artifactId) => onOpenApproval(conversation.ID, kind, artifactId)}
         onArtifactResolved={onArtifactResolved}
         assigneeSlot={<CardAssigneePicker task={task} picker={picker} />}
       />
@@ -1727,4 +1787,34 @@ const SortableAgentCard = memo(function SortableAgentCard({
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
   return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
+}
+
+// ColumnMore is the tail of a column that holds more than one page. A lane
+// that silently stopped at its page size would read as "that's all there is",
+// which is the failure the list contract exists to prevent — so the count is
+// stated and the next page is one click away.
+function ColumnMore({
+  shown,
+  total,
+  loading,
+  onLoadMore,
+}: {
+  shown: number
+  total: number | null
+  loading: boolean
+  onLoadMore: () => void
+}) {
+  // A null total means the server did not count the result set (a proxy
+  // list). Say what we know — "showing 40" — rather than inventing an "of 0".
+  const label = total === null ? `showing ${shown}` : `showing ${shown} of ${total}`
+  return (
+    <button
+      type="button"
+      onClick={onLoadMore}
+      disabled={loading}
+      className="w-full py-2 text-[12px] text-text-tertiary hover:text-text-secondary disabled:opacity-50"
+    >
+      {loading ? 'Loading…' : `Load more — ${label}`}
+    </button>
+  )
 }

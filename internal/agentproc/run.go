@@ -31,6 +31,12 @@ type RunOptions struct {
 	// Model is passed via --model. Empty omits the flag.
 	Model string
 
+	// PermissionMode is the Claude Code permission posture used when the query
+	// starts. Empty leaves the SDK default unchanged; "auto" lets Claude decide
+	// which tool calls can proceed without asking. This is an SDK-runtime option
+	// only — the native agent loop does not consume RunOptions.
+	PermissionMode string
+
 	// SessionID, when non-empty, switches the invocation to
 	// `--resume <id>`. Used for the crash-reclaim resume, the open-run
 	// resume path, and the curator's per-message resumption against a
@@ -110,8 +116,14 @@ type RunOptions struct {
 	GitUserName  string
 	GitUserEmail string
 
-	// TraceID is stamped onto every emitted message's RunID field.
-	// Storage-neutral: delegate uses the agent run UUID, the curator
+	// GitConfigPairs are additional process-scoped git settings for the direct
+	// path. Local delegated runs use them to route GitHub remotes through their
+	// per-engagement credential proxy. The sandbox path carries its equivalent
+	// in PrebuiltProxyEnv.
+	GitConfigPairs [][2]string
+
+	// TraceID is stamped onto every emitted message's ConversationID field.
+	// Storage-neutral: delegate uses the conversation id, the curator
 	// uses its own message-group id.
 	TraceID string
 
@@ -319,7 +331,7 @@ type GHChannelParams struct {
 	// (GH_ENTERPRISE_TOKEN). The injector strips it and injects the real token.
 	Token string
 	// CertSourcePath is the host path of the injector's trust file. On the
-	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(runID)),
+	// sandbox path it is what the sidecar wrote (agenthost.CertPathFor(conversationID)),
 	// bind-mounted RO at sandboxGHInjectorCert with the broker validating the
 	// source against its own derivation; on the direct path SSL_CERT_FILE
 	// points at it as-is.
@@ -399,16 +411,16 @@ func (s *UsageSink) OnMessage(m *domain.Message) error {
 
 // Sink is the storage-side adapter that turns parsed stream events
 // into rows + websocket pushes. Implementations are constructed per
-// invocation (they typically close over a runID or projectID) and are
+// invocation (they typically close over a conversationID or projectID) and are
 // not concurrency-safe — Run drives the sink from a single goroutine.
 type Sink interface {
 	// OnSession fires once, the first time the stream emits a
 	// system/init event with a session_id. Implementations persist
-	// the id to whatever table owns "this conversation's resume key"
-	// (runs.session_id for delegate; projects.curator_session_id
-	// for the curator). Returning an error is logged but does not
-	// abort the run — the stream continues and the result still
-	// lands; callers can re-attempt session capture on resume.
+	// the id to conversations.sdk_session_id — one column for both
+	// surfaces, delegate and curator alike. Returning an error is
+	// logged but does not abort the run — the stream continues and
+	// the result still lands; callers can re-attempt session capture
+	// on resume.
 	OnSession(sessionID string) error
 
 	// OnMessage fires per fully-accumulated assistant or tool message.
@@ -556,8 +568,8 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 			return outcome, ctx.Err()
 		}
 		if proc.OOMKilled() {
-			return outcome, fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_RUN_MEMORY_LIMIT_MB): %v",
-				ErrRunMemoryLimit, RunMemoryLimitMB(), waitErr)
+			return outcome, fmt.Errorf("agent runtime killed: %w (%d MB; tune TF_CLAIM_MEMORY_LIMIT_MB): %v",
+				ErrClaimMemoryLimit, ClaimMemoryLimitMB(), waitErr)
 		}
 		return outcome, fmt.Errorf("agent runtime exited with error: %w", waitErr)
 	}
@@ -622,9 +634,9 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 			// about to disappear rather than after it already has.
 			//
 			// Ordering is load-bearing beyond that: container ids are
-			// tf-<runIDfrag>-<idx> and the subnet idx is RECYCLED, so a later
+			// tf-<conversationIDFrag>-<idx> and the subnet idx is RECYCLED, so a later
 			// run can legitimately mint this same id (some callers pass a
-			// fixed RunID — see Wrap). Deregistering here, ahead of the idx
+			// fixed ConversationID — see Wrap). Deregistering here, ahead of the idx
 			// release in sb.Close() (or, on the executor path, in the
 			// delegate's even-later RunNetwork.Close), is what keeps a reused
 			// container id from ever being sampled against this claim.
@@ -736,7 +748,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	//      visible inside the alpine rootfs.
 	//
 	//   2. The per-run agenthost unix socket at /run/tf.sock (RW). Started
-	//      below when StartAgentHost is supplied. Caller-side hostAgentHost
+	//      below when StartAgentHost is supplied. The caller's StartAgentHost
 	//      handles chown/chmod so the sandbox UID can connect.
 	extraMounts := []sandbox.Mount{}
 	if hostSelfBin != "" {
@@ -872,7 +884,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 	sbEnv = append(sbEnv, ghChannelEnv(opts.GHChannel)...)
 
 	sandboxRun, sboxObj, err := sandbox.Wrap(runCtx, sandbox.Config{
-		RunID:           opts.TraceID,
+		ConversationID:  opts.TraceID,
 		MemoryNamespace: opts.MemoryNamespace,
 		Worktree:        workCwd,
 		SDKDir:          sdkDir,
@@ -880,7 +892,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		Env:             sbEnv,
 		ExtraMounts:     extraMounts,
 		Network:         opts.PrebuiltNetwork,
-		MemoryLimitMB:   RunMemoryLimitMB(),
+		MemoryLimitMB:   ClaimMemoryLimitMB(),
 	})
 	if err != nil {
 		// Wrap cleaned up its own partial state; cleanup covers the agenthost
@@ -959,6 +971,7 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// identity → IdentityConfigPairs returns nil → block carries hooks alone
 	// (unchanged behavior). TFAC-452.
 	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+	identityPairs = append(identityPairs, opts.GitConfigPairs...)
 	// Engine runtime tuning rides ExtraEnv's lane. Strip any inherited
 	// jscJITEnvKey from the parent env first rather than relying on
 	// duplicate-key precedence — that resolution order is

@@ -55,8 +55,8 @@ func defaultRlimits() []specs.POSIXRlimit {
 // creating its own (which would isolate from the host-side veth
 // we just set up).
 func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
-	if cfg.RunID == "" {
-		return nil, fmt.Errorf("spec: Config.RunID is required")
+	if cfg.ConversationID == "" {
+		return nil, fmt.Errorf("spec: Config.ConversationID is required")
 	}
 	if cfg.Worktree == "" {
 		return nil, fmt.Errorf("spec: Config.Worktree is required")

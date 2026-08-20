@@ -149,7 +149,7 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 }
 
 // minimalConfig builds a Config for tests with sensible defaults +
-// a unique RunID. Caller can mutate Argv to choose the payload.
+// a unique ConversationID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
 	t.Helper()
 	worktree := t.TempDir()
@@ -158,10 +158,10 @@ func minimalConfig(t *testing.T) Config {
 	}
 	sdkDir := t.TempDir() // empty stub for integration tests
 	return Config{
-		RunID:    "itest" + t.Name()[:min(len(t.Name()), 6)],
-		Worktree: worktree,
-		SDKDir:   sdkDir,
-		Argv:     []string{"/bin/echo", "hello"},
+		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
+		Worktree:       worktree,
+		SDKDir:         sdkDir,
+		Argv:           []string{"/bin/echo", "hello"},
 		Env: []string{
 			"PATH=/usr/local/bin:/usr/bin:/bin",
 			"HOME=/work",
@@ -521,7 +521,7 @@ func (e *configureProxyError) Error() string { return e.msg }
 // it into the sandbox at /usr/local/bin/triagefactory, starts a
 // listener on a temp socket the sandbox can reach via bind mount at
 // /run/tf.sock, and exec's the stub. The stub dials /run/tf.sock,
-// sends a LookupRun probe RPC, and prints the result on stdout. The
+// sends a LookupConversation probe RPC, and prints the result on stdout. The
 // test asserts the round-trip succeeded and the response carries the
 // run id the host registered.
 //
@@ -552,7 +552,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 
 	// Per-run socket on the host. Mode 0700 on the parent dir; the
 	// listener inherits from umask, then we chown + chmod to the
-	// sandbox UID exactly as the production startHostAgentHost does.
+	// sandbox UID exactly as the production agenthost.StartWithServer does.
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o700); err != nil {
 		t.Fatalf("chmod sock dir: %v", err)
@@ -575,7 +575,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	}
 
 	// Minimal echo daemon: accept one connection, read one frame,
-	// send back a synthetic LookupRun result. We don't want to drag
+	// send back a synthetic LookupConversation result. We don't want to drag
 	// the full agenthost.Server (and its db.Stores dep) into the
 	// sandbox-package test — the IPC pipe round-trip is what we're
 	// proving, and the frame format is identical to what the real
@@ -589,7 +589,7 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		R json.RawMessage `json:"r,omitempty"`
 		E string          `json:"e,omitempty"`
 	}
-	sentinelRunID := "itest-agenthost-ipc"
+	sentinelConversationID := "itest-agenthost-ipc"
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -608,8 +608,8 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		}
 		var r req
 		_ = json.Unmarshal(body, &r)
-		// Echo back a LookupRun-shaped response with our sentinel run id.
-		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","run_id":"` + sentinelRunID + `","is_event_triggered":false}}`)
+		// Echo back a LookupConversation-shaped response with our sentinel run id.
+		result := []byte(`{"info":{"org_id":"00000000-0000-0000-0000-000000000001","user_id":"","conversation_id":"` + sentinelConversationID + `","is_event_triggered":false}}`)
 		respBody, _ := json.Marshal(resp{R: result})
 		var outHeader [4]byte
 		binary.BigEndian.PutUint32(outHeader[:], uint32(len(respBody)))
@@ -639,8 +639,8 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stub exec: %v (output: %s)", err, out)
 	}
-	if !strings.Contains(string(out), sentinelRunID) {
-		t.Errorf("expected stub stdout to echo run id %q, got: %s", sentinelRunID, out)
+	if !strings.Contains(string(out), sentinelConversationID) {
+		t.Errorf("expected stub stdout to echo run id %q, got: %s", sentinelConversationID, out)
 	}
 }
 

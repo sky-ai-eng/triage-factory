@@ -4,8 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -15,53 +14,42 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// The /usage activity feed (TFAC-483) is the EE governance surface, behind
-// FeatureGovernance, with TWO lenses on the org's external footprint — selected
-// per request by ?view=:
+// The /usage activity feeds (TFAC-483) are the EE governance surface, behind
+// FeatureGovernance. There are TWO resources, and they are two routes:
 //
-//   - view=actions → the append-only external-action audit log of record: one
-//     row per external WRITE TF performed under an org credential (the bot's
-//     GitHub/Jira mutations, the human-authorized GitHub approval lifecycle, the
-//     Jira board mirror), who/what/when/from→to. The source of truth for "what
-//     did TF do." Includes actions with no artifact (the Jira mirror's
-//     transitions).
-//   - view=objects (default) → the artifacts head: each object the bot produced
-//     and its CURRENT state, reconciler-maintained. Includes externally-driven
-//     transitions (a human merging a PR — not a TF action, so it never appears in
-//     the Actions log). The coverage difference between the two is intentional.
+//   - .../artifacts/list → the artifacts head: each object the bot produced and
+//     its CURRENT state, reconciler-maintained. Includes externally-driven
+//     transitions (a human merging a PR — not a TF action, so it never appears
+//     in the actions log).
+//   - .../actions/list → the append-only external-action audit log of record:
+//     one row per external WRITE TF performed under an org credential (the
+//     bot's GitHub/Jira mutations, the human-authorized GitHub approval
+//     lifecycle, the Jira board mirror), who/what/when/from→to. The source of
+//     truth for "what did TF do." Includes actions with no artifact (the Jira
+//     mirror's transitions).
 //
-// Both lenses share the same two scopes + gates (mirroring the spend endpoints):
+// The coverage difference between the two is intentional, and it is exactly
+// why they are separate routes now. They used to be one route multiplexed by
+// ?view=, which meant one address answering with two different row shapes and
+// two different filter vocabularies — a caller's `state=` filter silently did
+// nothing on the actions lens, and a typo'd view answered with the other
+// resource entirely.
 //
-//   - GET /api/usage/teams/{team_id}/activity — one team's history (team admin
-//     OR org admin), RLS/team-scoped under the caller's claims.
-//   - GET /api/usage/org/activity — every team's history (org admin), the System
-//     cross-team read; rows carry team_id + team_name (+ actor_name for actions).
+// Each resource has the same two scopes + gates (mirroring the spend
+// endpoints):
+//
+//   - POST /api/teams/{team_id}/usage/{artifacts,actions}/list — one team's
+//     history (team admin OR org admin), RLS/team-scoped under the caller's
+//     claims.
+//   - POST /api/orgs/{org_id}/usage/{artifacts,actions}/list — every team's history (org
+//     admin), the System cross-team read; rows carry team_id + team_name (+
+//     actor_name for actions).
 //
 // Unlicensed builds (local mode included) 404, agreeing with the FE
 // useEntitlements gate that hides the surface entirely.
-
-// activity feed lens selector. ?view=actions selects the external-action log;
-// anything else (the default) selects the artifacts head.
-const (
-	viewObjects = "objects"
-	viewActions = "actions"
-)
-
-func activityView(r *http.Request) string {
-	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("view")), viewActions) {
-		return viewActions
-	}
-	return viewObjects
-}
-
-// activity feed page sizing. Limit defaults to activityPageDefault and is
-// clamped to activityPageMax so a caller can't request an unbounded scan.
-const (
-	activityPageDefault = 50
-	activityPageMax     = 200
-)
 
 // activityArtifactJSON is the bot-activity feed's wire shape: the shared run
 // artifact projection (artifactJSON) plus the owning team's id + name. The team
@@ -74,55 +62,108 @@ type activityArtifactJSON struct {
 	TeamName string `json:"team_name,omitempty"`
 }
 
-// handleUsageTeamActivity returns one team's bot-activity history, newest first.
+// artifactActivityListRequest is the body of the artifacts-head feeds. The
+// filter names are the query params they replaced, unchanged in meaning.
+type artifactActivityListRequest struct {
+	Provider string `json:"provider"`
+	Kind     string `json:"kind"`
+	State    string `json:"state"`
+	// Since / Until bound created_at to the half-open window [since, until).
+	// Both are RFC3339 or YYYY-MM-DD, and both default to UNBOUNDED: the feed
+	// is a full history, not a calendar month.
+	Since string `json:"since"`
+	Until string `json:"until"`
+
+	httpx.PageRequest
+}
+
+// resolveArtifactActivityFilters validates the body's filters into the store's
+// opts. Every vocabulary is closed: an unrecognized value used to reach the
+// store as a literal, match nothing, and answer 200 with an empty page — a typo
+// that reads exactly like "your bot did nothing".
+func resolveArtifactActivityFilters(v *httpx.Validation, req artifactActivityListRequest) db.ArtifactListOpts {
+	opts := db.ArtifactListOpts{
+		Provider: strings.TrimSpace(req.Provider),
+		Kind:     strings.TrimSpace(req.Kind),
+		State:    strings.TrimSpace(req.State),
+	}
+	for _, f := range []struct {
+		name, value string
+		vocab       []string
+	}{
+		{"provider", opts.Provider, domain.ArtifactProviders()},
+		{"kind", opts.Kind, domain.ArtifactKinds()},
+		{"state", opts.State, domain.ArtifactStates()},
+	} {
+		if f.value != "" && !slices.Contains(f.vocab, f.value) {
+			v.Invalid(f.name, "must be one of: "+strings.Join(f.vocab, ", "))
+		}
+	}
+	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)
+	return opts
+}
+
+// resolveActivityWindow parses the shared half-open [since, until) filter. Each
+// side applies only when supplied, so the zero value is unbounded; a
+// non-positive window is rejected only when BOTH bounds are present (a single
+// open side is fine), mirroring parseUsageWindow.
+func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time, time.Time) {
+	var sinceT, untilT time.Time
+	if raw := strings.TrimSpace(since); raw != "" {
+		t, err := parseUsageTime(raw)
+		if err != nil {
+			v.Invalid("since", "must be RFC3339 or YYYY-MM-DD")
+		} else {
+			sinceT = t
+		}
+	}
+	if raw := strings.TrimSpace(until); raw != "" {
+		t, err := parseUsageTime(raw)
+		if err != nil {
+			v.Invalid("until", "must be RFC3339 or YYYY-MM-DD")
+		} else {
+			untilT = t
+		}
+	}
+	if !sinceT.IsZero() && !untilT.IsZero() && !sinceT.Before(untilT) {
+		v.Invalid("since", "since must be before until")
+	}
+	return sinceT, untilT
+}
+
+// handleUsageTeamArtifacts returns one team's artifacts head, newest first.
 // Gate: FeatureGovernance AND (team admin OR org admin) — the org-governance
 // lens may inspect any team's bot activity, while a team's own admin sees their
 // team's. The read uses the RLS-scoped ListByTeam under the caller's claims
-// (defense in depth alongside the role gate); filter/paging opts come from the
-// query string. The team feed omits team_id/team_name (already one team).
+// (defense in depth alongside the role gate). The team feed omits
+// team_id/team_name (already one team).
 //
-// GET /api/usage/teams/{team_id}/activity?provider=&kind=&state=&since=&until=&limit=&offset=
-func (h *usageHandler) handleUsageTeamActivity(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+// POST /api/teams/{team_id}/usage/artifacts/list
+func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
 	if !ok {
 		return
 	}
-	if !requireGovernance(w, r, orgID) {
-		return
-	}
-	teamID := r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		// A malformed id is "not found" (parity with handleUsageTeam), not a role
-		// failure — don't surface it as a 500 from a uuid cast downstream.
-		http.NotFound(w, r)
-		return
-	}
-	// Confirm the team is in the caller's org first so a cross-org id 404s cleanly
-	// (non-disclosure) rather than falling through to the 403.
-	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
-		return
-	}
-	if !h.requireTeamOrOrgAdmin(w, r, orgID, userID, teamID) {
-		return
-	}
 
-	// Actions lens (the append-only external-action log) vs Objects lens (the
-	// artifacts head, below). Same gates; different source + row shape.
-	if activityView(r) == viewActions {
-		h.handleTeamActionsActivity(w, r, orgID, userID, teamID)
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-
-	opts, errMsg := parseArtifactListOpts(r.URL.Query())
-	if errMsg != "" {
-		badRequest(w, errMsg)
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	opts.Limit, opts.Offset = page.Limit, page.Offset
 
-	var arts []domain.Artifact
+	var (
+		arts  []domain.Artifact
+		total int
+	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		arts, e = tx.Artifacts.ListByTeam(r.Context(), orgID, teamID, opts)
+		arts, total, e = tx.Artifacts.ListByTeam(r.Context(), orgID, teamID, opts)
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)
@@ -133,49 +174,43 @@ func (h *usageHandler) handleUsageTeamActivity(w http.ResponseWriter, r *http.Re
 	for i, a := range arts {
 		out[i] = activityArtifactJSON{artifactJSON: toArtifactJSON(a)}
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
 }
 
-// handleUsageOrgActivity returns the org-wide bot-activity history across every
+// handleUsageOrgArtifacts returns the org-wide artifacts head across every
 // team, newest first. Gate: FeatureGovernance AND org admin — a cross-team read
 // (the authorized governance intent). It uses the System aggregate
 // (ListByOrgSystem, admin pool / BYPASSRLS) because crossing teams is the point,
 // then resolves each row's team name (via Teams.GetSystem) so the feed shows
-// which team's bot acted. Filter/paging opts come from the query string.
+// which team's bot acted.
 //
-// GET /api/usage/org/activity?provider=&kind=&state=&since=&until=&limit=&offset=
-func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+// POST /api/orgs/{org_id}/usage/artifacts/list
+func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
 	}
-	if !requireGovernance(w, r, orgID) {
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return
-	}
 
-	// Actions lens (the append-only external-action log) vs Objects lens (the
-	// artifacts head, below). Same org-admin gate; different source + row shape.
-	if activityView(r) == viewActions {
-		h.handleOrgActionsActivity(w, r, orgID, userID)
+	var req artifactActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-
-	opts, errMsg := parseArtifactListOpts(r.URL.Query())
-	if errMsg != "" {
-		badRequest(w, errMsg)
+	var v httpx.Validation
+	opts := resolveArtifactActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	opts.Limit, opts.Offset = page.Limit, page.Offset
 
 	var (
 		arts      []domain.Artifact
+		total     int
 		teamNames map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		arts, e = tx.Artifacts.ListByOrgSystem(r.Context(), orgID, opts)
+		arts, total, e = tx.Artifacts.ListByOrgSystem(r.Context(), orgID, opts)
 		if e != nil {
 			return e
 		}
@@ -194,7 +229,40 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 			TeamName:     teamNames[a.TeamID],
 		}
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
+}
+
+// resolveTeamActivityCaller runs the shared front gate for both team-scoped
+// activity feeds: the one {team_id} grammar, the cross-org 404, the
+// team-admin-or-org-admin role, and THEN the governance entitlement.
+//
+// Role before licence, for the reason resolveGovernedOrgAdmin gives: a caller
+// who fails the role check gets the same 403 licensed or not, so no non-admin
+// can read the org's plan tier off a status code.
+func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
+	orgID, userID, ok = h.resolveCaller(w, r)
+	if !ok {
+		return "", "", "", false
+	}
+	// The one {team_id} grammar; a segment that resolves to nothing is "not
+	// found" (parity with handleUsageTeam), not a role failure or a 500 from a
+	// uuid cast downstream.
+	teamID, ok = h.az.TeamIDFromPath(w, r, "usage", orgID, userID)
+	if !ok {
+		return "", "", "", false
+	}
+	// Confirm the team is in the caller's org first so a cross-org id 404s cleanly
+	// (non-disclosure) rather than falling through to the 403.
+	if !h.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
+		return "", "", "", false
+	}
+	if !h.requireTeamOrOrgAdmin(w, r, orgID, userID, teamID) {
+		return "", "", "", false
+	}
+	if !requireGovernance(w, r, orgID) {
+		return "", "", "", false
+	}
+	return orgID, userID, teamID, true
 }
 
 // requireGovernance gates a handler on the FeatureGovernance entitlement for
@@ -203,11 +271,15 @@ func (h *usageHandler) handleUsageOrgActivity(w http.ResponseWriter, r *http.Req
 // entirely in an unlicensed build — so the route reads as "not here", not
 // "forbidden". The check is mode-agnostic (entitlements never carve out by
 // runmode): a community / unlicensed build — local mode included — answers
-// false and 404s, which is why the role checks that follow are only ever
-// reached in a licensed multi deploy.
+// false and 404s.
+//
+// It runs AFTER the caller's role check on every route that uses it, so the
+// 404 is only ever shown to someone who would otherwise have been allowed in.
+// A caller who fails the role check never reaches here, and therefore cannot
+// tell a licensed deployment from an unlicensed one by the status they get.
 func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) bool {
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return false
 	}
 	return true
@@ -215,11 +287,12 @@ func requireGovernance(w http.ResponseWriter, r *http.Request, orgID string) boo
 
 // requireTeamOrOrgAdmin authorizes the team-scoped bot-activity feed: the caller
 // must be an admin of teamID OR an org admin. It writes a 403 and returns false
-// otherwise. Local mode short-circuits to allowed for safety — though the
-// governance gate (which 404s an unlicensed build, local included) runs first,
-// so this is only reached under a license. VerifyTeamInOrg has already confirmed
-// teamID is in the caller's org, so a non-admin here is a clean 403, never a
-// cross-org probe. The raw probes don't short-circuit local, hence the guard.
+// otherwise. Local mode short-circuits to allowed (N=1, the single user owns
+// the org) — the governance gate that follows still 404s an unlicensed build,
+// local included, so the route stays hidden there. VerifyTeamInOrg has already
+// confirmed teamID is in the caller's org, so a non-admin here is a clean 403,
+// never a cross-org probe. The raw probes don't short-circuit local, hence the
+// guard.
 func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) bool {
 	if runmode.Current() == runmode.ModeLocal {
 		return true
@@ -240,7 +313,7 @@ func (h *usageHandler) requireTeamOrOrgAdmin(w http.ResponseWriter, r *http.Requ
 	if isOrgAdmin {
 		return true
 	}
-	writeJSON(w, http.StatusForbidden, map[string]string{"error": "team admin or org admin role required"})
+	forbidden(w, "team admin or org admin role required")
 	return false
 }
 
@@ -271,61 +344,7 @@ func resolveArtifactTeamNames(ctx context.Context, tx db.TxStores, orgID string,
 	return names, nil
 }
 
-// parseArtifactListOpts builds the store filter/paging opts from the activity
-// feed's query string: ?provider=&kind=&state=&since=&until=&limit=&offset=.
-// provider/kind/state pass through as exact-match filters (empty = no filter on
-// that column). since/until reuse the usage time parser (RFC3339 or YYYY-MM-DD)
-// and — unlike the spend window — default to UNBOUNDED: the feed is a full
-// history, not a calendar month. limit defaults to activityPageDefault and is
-// clamped to activityPageMax; offset is non-negative. Returns a non-empty errMsg
-// on a malformed value (the handler 400s with it).
-func parseArtifactListOpts(q url.Values) (db.ArtifactListOpts, string) {
-	opts := db.ArtifactListOpts{
-		Limit:    activityPageDefault,
-		Provider: strings.TrimSpace(q.Get("provider")),
-		Kind:     strings.TrimSpace(q.Get("kind")),
-		State:    strings.TrimSpace(q.Get("state")),
-	}
-	if s := strings.TrimSpace(q.Get("since")); s != "" {
-		t, err := parseUsageTime(s)
-		if err != nil {
-			return db.ArtifactListOpts{}, "invalid 'since': want RFC3339 or YYYY-MM-DD"
-		}
-		opts.Since = t
-	}
-	if s := strings.TrimSpace(q.Get("until")); s != "" {
-		t, err := parseUsageTime(s)
-		if err != nil {
-			return db.ArtifactListOpts{}, "invalid 'until': want RFC3339 or YYYY-MM-DD"
-		}
-		opts.Until = t
-	}
-	// Half-open [since, until): reject a non-positive window only when both bounds
-	// are supplied (a single open side is fine), mirroring parseUsageWindow.
-	if !opts.Since.IsZero() && !opts.Until.IsZero() && !opts.Since.Before(opts.Until) {
-		return db.ArtifactListOpts{}, "'since' must be before 'until'"
-	}
-	if s := strings.TrimSpace(q.Get("limit")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 {
-			return db.ArtifactListOpts{}, "invalid 'limit': want a positive integer"
-		}
-		if n > activityPageMax {
-			n = activityPageMax
-		}
-		opts.Limit = n
-	}
-	if s := strings.TrimSpace(q.Get("offset")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return db.ArtifactListOpts{}, "invalid 'offset': want a non-negative integer"
-		}
-		opts.Offset = n
-	}
-	return opts, ""
-}
-
-// --- Actions lens (the external-action audit log) ---
+// --- The actions feed (the external-action audit log) ---
 
 // actionJSON is the action-log feed's wire shape — one external_actions row
 // projected for the FE. The team_id/team_name/actor_name fields populate ONLY the
@@ -376,25 +395,78 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 	}
 }
 
-// handleTeamActionsActivity returns one team's external-action history, newest
-// first — the Actions lens of the team feed. Same gates as the Objects lens (run
-// already by the caller). The team feed omits team_id/team_name (it's already one
-// team) but DOES resolve the authorizing actor's display name — this is the audit
-// surface a team admin reads, so raw actor UUIDs would be poor UX, and resolving
-// over one team's small distinct-actor set is cheap.
-func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) {
-	opts, errMsg := parseExternalActionListOpts(r.URL.Query())
-	if errMsg != "" {
-		badRequest(w, errMsg)
+// actionActivityListRequest is the body of the action-log feeds. It mirrors
+// artifactActivityListRequest (provider and the time window are identical) but
+// filters on the action discriminator and the actor user id instead of
+// kind/state — the two resources' filter vocabularies are genuinely different,
+// which is why they are two routes rather than one with a lens selector.
+type actionActivityListRequest struct {
+	Provider string `json:"provider"`
+	Action   string `json:"action"`
+	Actor    string `json:"actor"`
+	// Since / Until bound occurred_at (not created_at) to [since, until).
+	Since string `json:"since"`
+	Until string `json:"until"`
+
+	httpx.PageRequest
+}
+
+func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListRequest) domain.ExternalActionListOpts {
+	opts := domain.ExternalActionListOpts{
+		Provider:    strings.TrimSpace(req.Provider),
+		Action:      strings.TrimSpace(req.Action),
+		ActorUserID: strings.TrimSpace(req.Actor),
+	}
+	// Same closed-vocabulary rule as the artifacts feed.
+	if opts.Provider != "" && !slices.Contains(domain.ArtifactProviders(), opts.Provider) {
+		v.Invalid("provider", "must be one of: "+strings.Join(domain.ArtifactProviders(), ", "))
+	}
+	if opts.Action != "" && !slices.Contains(domain.ExternalActionTypes(), opts.Action) {
+		v.Invalid("action", "not a known action type")
+	}
+	if opts.ActorUserID != "" {
+		if _, err := uuid.Parse(opts.ActorUserID); err != nil {
+			v.Invalid("actor", "must be a user id")
+		}
+	}
+	opts.Since, opts.Until = resolveActivityWindow(v, req.Since, req.Until)
+	return opts
+}
+
+// handleUsageTeamActions returns one team's external-action history, newest
+// first. Same gates as the team artifacts feed. The team feed omits
+// team_id/team_name (it's already one team) but DOES resolve the authorizing
+// actor's display name — this is the audit surface a team admin reads, so raw
+// actor UUIDs would be poor UX, and resolving over one page's small
+// distinct-actor set is cheap.
+//
+// POST /api/teams/{team_id}/usage/actions/list
+func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
+	if !ok {
 		return
 	}
+
+	var req actionActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	opts := resolveActionActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset = page.Limit, page.Offset
+
 	var (
 		actions    []domain.ExternalAction
+		total      int
 		actorNames map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		actions, e = tx.ExternalActions.ListByTeam(r.Context(), orgID, teamID, opts)
+		actions, total, e = tx.ExternalActions.ListByTeam(r.Context(), orgID, teamID, opts)
 		if e != nil {
 			return e
 		}
@@ -410,29 +482,44 @@ func (h *usageHandler) handleTeamActionsActivity(w http.ResponseWriter, r *http.
 		j.ActorName = actorNames[a.ActorUserID]
 		out[i] = j
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
 }
 
-// handleOrgActionsActivity returns the org-wide external-action history across
-// every team, newest first — the Actions lens of the org feed. It uses the System
-// aggregate (ListByOrgSystem, admin pool) because crossing teams is the point,
-// then resolves each row's team name (Teams.GetSystem, admin pool) and human
-// actor's display name (Users.GetProfile, org-scoped under the caller's claims) so
-// the feed reads "team X's bot did Y, authorized by Z".
-func (h *usageHandler) handleOrgActionsActivity(w http.ResponseWriter, r *http.Request, orgID, userID string) {
-	opts, errMsg := parseExternalActionListOpts(r.URL.Query())
-	if errMsg != "" {
-		badRequest(w, errMsg)
+// handleUsageOrgActions returns the org-wide external-action history across
+// every team, newest first. It uses the System aggregate (ListByOrgSystem,
+// admin pool) because crossing teams is the point, then resolves each row's
+// team name (Teams.GetSystem, admin pool) and human actor's display name
+// (Users.GetProfile, org-scoped under the caller's claims) so the feed reads
+// "team X's bot did Y, authorized by Z".
+//
+// POST /api/orgs/{org_id}/usage/actions/list
+func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
+	if !ok {
 		return
 	}
+
+	var req actionActivityListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	opts := resolveActionActivityFilters(&v, req)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(opts), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	opts.Limit, opts.Offset = page.Limit, page.Offset
+
 	var (
 		actions    []domain.ExternalAction
+		total      int
 		teamNames  map[string]string
 		actorNames map[string]string
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		actions, e = tx.ExternalActions.ListByOrgSystem(r.Context(), orgID, opts)
+		actions, total, e = tx.ExternalActions.ListByOrgSystem(r.Context(), orgID, opts)
 		if e != nil {
 			return e
 		}
@@ -454,7 +541,7 @@ func (h *usageHandler) handleOrgActionsActivity(w http.ResponseWriter, r *http.R
 		j.ActorName = actorNames[a.ActorUserID]
 		out[i] = j
 	}
-	writeJSON(w, http.StatusOK, out)
+	httpx.WriteList(w, page, out, total)
 }
 
 // resolveActionTeamNames maps each distinct team in the action set to its name
@@ -504,54 +591,4 @@ func resolveActionActorNames(ctx context.Context, tx db.TxStores, actions []doma
 		names[a.ActorUserID] = name
 	}
 	return names, nil
-}
-
-// parseExternalActionListOpts builds the action-log filter/paging opts from the
-// query string: ?provider=&action=&actor=&since=&until=&limit=&offset=. Mirrors
-// parseArtifactListOpts (provider/time/limit/offset identical) but filters on the
-// action discriminator + the actor user id instead of kind/state, and bounds
-// occurred_at rather than created_at. limit defaults to activityPageDefault,
-// clamped to activityPageMax; offset is non-negative.
-func parseExternalActionListOpts(q url.Values) (domain.ExternalActionListOpts, string) {
-	opts := domain.ExternalActionListOpts{
-		Limit:       activityPageDefault,
-		Provider:    strings.TrimSpace(q.Get("provider")),
-		Action:      strings.TrimSpace(q.Get("action")),
-		ActorUserID: strings.TrimSpace(q.Get("actor")),
-	}
-	if s := strings.TrimSpace(q.Get("since")); s != "" {
-		t, err := parseUsageTime(s)
-		if err != nil {
-			return domain.ExternalActionListOpts{}, "invalid 'since': want RFC3339 or YYYY-MM-DD"
-		}
-		opts.Since = t
-	}
-	if s := strings.TrimSpace(q.Get("until")); s != "" {
-		t, err := parseUsageTime(s)
-		if err != nil {
-			return domain.ExternalActionListOpts{}, "invalid 'until': want RFC3339 or YYYY-MM-DD"
-		}
-		opts.Until = t
-	}
-	if !opts.Since.IsZero() && !opts.Until.IsZero() && !opts.Since.Before(opts.Until) {
-		return domain.ExternalActionListOpts{}, "'since' must be before 'until'"
-	}
-	if s := strings.TrimSpace(q.Get("limit")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 1 {
-			return domain.ExternalActionListOpts{}, "invalid 'limit': want a positive integer"
-		}
-		if n > activityPageMax {
-			n = activityPageMax
-		}
-		opts.Limit = n
-	}
-	if s := strings.TrimSpace(q.Get("offset")); s != "" {
-		n, err := strconv.Atoi(s)
-		if err != nil || n < 0 {
-			return domain.ExternalActionListOpts{}, "invalid 'offset': want a non-negative integer"
-		}
-		opts.Offset = n
-	}
-	return opts, ""
 }

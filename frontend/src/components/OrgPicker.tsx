@@ -6,6 +6,7 @@ import { useOrgContext } from '../contexts/OrgContext'
 import { reconnectWebSocket } from '../hooks/useWebSocket'
 import { invalidateTeams } from '../hooks/useTeams'
 import { invalidateEntitlements } from '../hooks/useEntitlements'
+import { apiFetch } from '../lib/apiClient'
 
 /**
  * Topbar dropdown for switching between orgs the user belongs to.
@@ -56,39 +57,33 @@ export default function OrgPicker() {
     // next /api/me will reconcile a transient persistence failure on
     // the user's next interaction.
     try {
-      const resp = await fetch('/api/me/active-org', {
+      await apiFetch('/api/me/active-org', {
         method: 'POST',
-        credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ org_id: newOrgId }),
       })
-      if (resp.ok) {
-        // Drop the cached /api/teams response only AFTER the active org
-        // is persisted server-side. /api/teams is session-org-scoped, so
-        // invalidating before the POST commits would race and refetch the
-        // OLD org's teams; doing it here guarantees the reload reads the
-        // new org's set. (Codex review on PR #263.)
-        invalidateTeams()
-        // Entitlements are scoped to the active org too (multi mode), so drop
-        // their cache on the same commit — the new org may license a different
-        // EE feature set. Same post-persist ordering rationale as teams.
-        invalidateEntitlements()
-        // Force the WS to re-handshake so the hub's per-(user, org)
-        // Broadcast filter routes events for the just-switched
-        // tenant rather than the previous one. Without this the
-        // user keeps receiving the old org's events until the next
-        // unrelated disconnect.
-        reconnectWebSocket()
-      } else {
-        // 404/409 here means the server refused the switch (revoked
-        // membership, etc.). The picker rolling back the local
-        // selection would conflict with whatever URL navigation is
-        // about to happen below; for now log and let the AuthGate /
-        // /api/me reconciliation correct it on the next page render.
-        console.warn('[org-picker] active-org POST failed:', resp.status)
-      }
+      // Drop the cached /api/teams response only AFTER the active org
+      // is persisted server-side. /api/teams is session-org-scoped, so
+      // invalidating before the POST commits would race and refetch the
+      // OLD org's teams; doing it here guarantees the reload reads the
+      // new org's set. (Codex review on PR #263.)
+      invalidateTeams()
+      // Entitlements are scoped to the active org too (multi mode), so drop
+      // their cache on the same commit — the new org may license a different
+      // EE feature set. Same post-persist ordering rationale as teams.
+      invalidateEntitlements()
+      // Force the WS to re-handshake so the hub's per-(user, org)
+      // Broadcast filter routes events for the just-switched
+      // tenant rather than the previous one. Without this the
+      // user keeps receiving the old org's events until the next
+      // unrelated disconnect.
+      reconnectWebSocket()
     } catch (err) {
-      console.warn('[org-picker] active-org POST error:', err)
+      // A refusal (revoked membership) or a network drop both land here. The
+      // picker rolling back the local selection would conflict with whatever
+      // URL navigation is about to happen below; for now log and let the
+      // AuthGate / /api/me reconciliation correct it on the next page render.
+      console.warn('[org-picker] active-org POST failed:', err)
     }
 
     // Rewrite the URL: swap the org_id segment, preserve everything

@@ -22,6 +22,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // titleResolveTimeout bounds the whole resolveTitle chain (bot token read,
@@ -35,7 +36,7 @@ const titleResolveTimeout = 10 * time.Second
 // can supply a single-method fake; db.EntityStore satisfies it structurally,
 // so the production wiring (install.go) needs no adapter.
 type entityTitleUpdater interface {
-	UpdateTitleSystem(ctx context.Context, orgID, entityID, title string) error
+	UpdateTitleSystem(ctx context.Context, orgID, entityID, title string) (domain.Entity, error)
 }
 
 // TitleResolver resolves a Slack mention's sender + channel display names and
@@ -125,7 +126,7 @@ func (r *TitleResolver) resolveTitle(ctx context.Context, ws slackstore.Workspac
 	}
 
 	title := composeThreadTitle(channelName)
-	if err := r.entities.UpdateTitleSystem(ctx, ws.OrgID, entityID, title); err != nil {
+	if _, err := r.entities.UpdateTitleSystem(ctx, ws.OrgID, entityID, title); err != nil {
 		slackLog.Warn("title: update failed", "workspace", ws.WorkspaceID, "entity", entityID, "error", err)
 	}
 }

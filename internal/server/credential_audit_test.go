@@ -90,21 +90,30 @@ func findCredAudit(t *testing.T, rows []credAuditRow, action, kind string) credA
 func githubUserStub(t *testing.T, login string) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v3/user" {
+		switch r.URL.Path {
+		case "/api/v3/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, login+"@example.com")
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// TestIntegrationsSetup_AuditsBothOrgCredentials: the setup wizard stores a
-// GitHub PAT and (optionally) a Jira one in a single call. It recorded only the
-// GitHub bind, so an org that connected Jira during setup had no record of it
-// ever being bound.
-func TestIntegrationsSetup_AuditsBothOrgCredentials(t *testing.T) {
+func writeGitHubPrimaryEmail(w http.ResponseWriter, email string) {
+	_ = json.NewEncoder(w).Encode([]map[string]any{{"email": email, "primary": true, "verified": true}})
+}
+
+// TestSetupWizard_AuditsBothOrgCredentials: the setup wizard binds a GitHub PAT
+// and (optionally) a Jira credential. It used to do both in one fused call that
+// recorded only the GitHub bind, so an org that connected Jira during setup had
+// no record of it ever being bound. The wizard now drives the two per-credential
+// routes, and this pins that the sequence it performs still lands both rows —
+// the property the fused route was there to provide.
+func TestSetupWizard_AuditsBothOrgCredentials(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -112,15 +121,18 @@ func TestIntegrationsSetup_AuditsBothOrgCredentials(t *testing.T) {
 	gh := githubUserStub(t, "acme-bot")
 	jiraStub := jiraMyselfStub(t, `{"accountId":"org-bot","displayName":"Org Bot"}`, nil)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/integrations/setup", map[string]string{
-		"github_url":     gh.URL,
-		"github_pat":     "ghp_test",
-		"jira_url":       jiraStub.URL,
-		"jira_pat":       "jira_test",
-		"clone_protocol": "https",
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup status = %d, body = %s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{
+		"base_url": gh.URL, "pat": "ghp_test",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("github pat bind = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
+		"deployment": "data_center", "url": jiraStub.URL, "pat": "jira_test",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("jira credential bind = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if rec := patchOrgSettings(t, s, map[string]any{"github_clone_protocol": "https"}); rec.Code != http.StatusOK {
+		t.Fatalf("clone protocol save = %d, body = %s", rec.Code, rec.Body.String())
 	}
 
 	rows := credAuditRows(t, s)
@@ -227,6 +239,10 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 		seedErr error
 	)
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v3/user/emails" {
+			writeGitHubPrimaryEmail(w, "acme-bot@example.com")
+			return
+		}
 		if r.URL.Path != "/api/v3/user" {
 			http.NotFound(w, r)
 			return
@@ -234,10 +250,13 @@ func TestGitHubPATPut_AppRegisteredDuringValidation_409(t *testing.T) {
 		// Racing writer: an App registration commits mid-validation. Errors are
 		// captured rather than t.Fatal'd — this runs on the server's goroutine.
 		once.Do(func() {
-			err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+			_, err := s.githubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
 				OrgID: runmode.LocalDefaultOrgID, AppID: "1", Slug: "tf-bot",
 				ClientID: "Iv1.x", Active: true,
 			})
+			if err == nil {
+				_, err = s.orgs.SetGitHubCredentialClass(context.Background(), runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp)
+			}
 			mu.Lock()
 			seedErr = err
 			mu.Unlock()
@@ -282,7 +301,7 @@ func TestGitHubPATDelete_AuditsRemoval(t *testing.T) {
 		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 
 	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
 	if rec.Code != http.StatusOK {
@@ -332,7 +351,7 @@ func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
 		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": host})
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 	seedLocalApp(t, s, false) // staged: the PAT is still the live credential
 
 	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
@@ -378,7 +397,7 @@ func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
 		auth.Credentials{JiraURL: host, JiraPAT: "jira_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"jira_base_url": host})
+	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": host})
 
 	rec := doJSON(t, s, http.MethodDelete, jiraCredentialRoute(), nil)
 	if rec.Code != http.StatusOK {
@@ -402,9 +421,12 @@ func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
 	}
 }
 
-// TestIntegrationsClear_AuditsEveryBoundCredential: the danger-zone sweep
-// destroys both org credentials at once and had no audit coverage at all.
-func TestIntegrationsClear_AuditsEveryBoundCredential(t *testing.T) {
+// TestDangerZoneClear_AuditsEveryBoundCredential: the danger-zone "clear all
+// tokens" gesture used to be a bulk route that destroyed both org credentials
+// with no discriminator and its own audit path. It is now the two
+// per-credential DELETEs in sequence, and this pins that the sequence still
+// records both removals — the whole reason the bulk route had to carry them.
+func TestDangerZoneClear_AuditsEveryBoundCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -416,9 +438,11 @@ func TestIntegrationsClear_AuditsEveryBoundCredential(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodDelete, "/api/integrations", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("clear = %d, body=%s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("github disconnect = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := doJSON(t, s, http.MethodDelete, jiraCredentialRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("jira disconnect = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
 	rows := credAuditRows(t, s)
@@ -426,11 +450,11 @@ func TestIntegrationsClear_AuditsEveryBoundCredential(t *testing.T) {
 	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindJiraOrg)
 }
 
-// TestOrgSettingsPost_TouchesNoCredential: the config route is inert with
+// TestOrgSettingsPatch_TouchesNoCredential: the config route is inert with
 // respect to credentials in BOTH directions — it can't bind one and it can't
 // revoke one. Clearing a base URL used to destroy the matching token as a side
 // effect; now it clears a column, and disconnecting is an explicit DELETE.
-func TestOrgSettingsPost_TouchesNoCredential(t *testing.T) {
+func TestOrgSettingsPatch_TouchesNoCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -441,8 +465,11 @@ func TestOrgSettingsPost_TouchesNoCredential(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	postJSONResp(t, s, "/api/settings/org", map[string]any{
-		"github_base_url": "", "jira_base_url": "", "github_pat": "", "jira_pat": "",
+	// github_pat / jira_pat aren't fields on this route, and strict decoding
+	// says so rather than accepting them silently — which is itself the
+	// guarantee this test is about. Clear only the URLs.
+	patchOrgSettingsOK(t, s, map[string]any{
+		"github_base_url": nil, "jira_base_url": nil,
 	})
 
 	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
@@ -454,19 +481,19 @@ func TestOrgSettingsPost_TouchesNoCredential(t *testing.T) {
 	}
 }
 
-// TestAnthropicConnect_ClearAuditsRemoval: switching back to system credentials
+// TestAnthropicDelete_AuditsRemoval: switching back to system credentials
 // revokes the org's stored LLM key. Only the bind was recorded, so the log
 // showed a key being set and never unset.
-func TestAnthropicConnect_ClearAuditsRemoval(t *testing.T) {
+func TestAnthropicDelete_AuditsRemoval(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusOK).URL)
-	if rec := doJSON(t, s, "POST", "/api/anthropic/connect", map[string]any{"api_key": "sk-ant-seed"}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "sk-ant-seed"}); rec.Code != http.StatusOK {
 		t.Fatalf("seed status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
-	if rec := doJSON(t, s, "POST", "/api/anthropic/connect", map[string]any{"api_key": ""}); rec.Code != http.StatusOK {
+	if rec := doJSON(t, s, http.MethodDelete, llmPath("anthropic"), nil); rec.Code != http.StatusOK {
 		t.Fatalf("clear status=%d body=%s, want 200", rec.Code, rec.Body.String())
 	}
 
@@ -491,7 +518,9 @@ func TestGitHubIdentityPAT_AuditsIdentityBind(t *testing.T) {
 	s := newTestServer(t)
 
 	gh := githubUserStub(t, "octocat")
-	postJSONResp(t, s, "/api/settings/org", map[string]any{"github_base_url": gh.URL})
+	if rec := patchOrgSettings(t, s, map[string]any{"github_base_url": gh.URL}); rec.Code != http.StatusOK {
+		t.Fatalf("seed base url = %d, body=%s", rec.Code, rec.Body.String())
+	}
 
 	rec := doJSON(t, s, http.MethodPost,
 		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/identity/pat",

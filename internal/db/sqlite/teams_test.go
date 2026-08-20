@@ -184,7 +184,7 @@ func TestTeamsStore_SQLite_Archive_HidesFromReadsButResolvesViaSystem(t *testing
 	ctx := context.Background()
 
 	// Visible before archive.
-	teams, err := stores.Teams.ListForUser(ctx, orgID)
+	teams, _, err := stores.Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListForUser: %v", err)
 	}
@@ -192,12 +192,12 @@ func TestTeamsStore_SQLite_Archive_HidesFromReadsButResolvesViaSystem(t *testing
 		t.Fatalf("team %s not in ListForUser before archive", teamID)
 	}
 
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
 
 	// Gone from the request-facing read.
-	teams, err = stores.Teams.ListForUser(ctx, orgID)
+	teams, _, err = stores.Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListForUser after archive: %v", err)
 	}
@@ -227,10 +227,10 @@ func TestTeamsStore_SQLite_Archive_AlreadyArchivedIsNotFound(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("first Archive: %v", err)
 	}
-	if err := stores.Teams.Archive(ctx, teamID); !errors.Is(err, db.ErrTeamNotFound) {
+	if _, err := stores.Teams.Archive(ctx, teamID); !errors.Is(err, db.ErrTeamNotFound) {
 		t.Fatalf("second Archive = %v; want ErrTeamNotFound", err)
 	}
 }
@@ -243,14 +243,14 @@ func TestTeamsStore_SQLite_Restore_RevivesTeam(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	if err := stores.Teams.Restore(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Restore(ctx, teamID); err != nil {
 		t.Fatalf("Restore: %v", err)
 	}
 
-	teams, err := stores.Teams.ListForUser(ctx, orgID)
+	teams, _, err := stores.Teams.ListForUser(ctx, orgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListForUser after restore: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestTeamsStore_SQLite_Restore_NotArchivedIsNotFound(t *testing.T) {
 	_, teamID := seedSQLiteTeam(t, conn)
 	stores := sqlitestore.New(conn)
 
-	if err := stores.Teams.Restore(context.Background(), teamID); !errors.Is(err, db.ErrTeamNotFound) {
+	if _, err := stores.Teams.Restore(context.Background(), teamID); !errors.Is(err, db.ErrTeamNotFound) {
 		t.Fatalf("Restore on active team = %v; want ErrTeamNotFound", err)
 	}
 }
@@ -289,7 +289,7 @@ func TestTeamsStore_SQLite_GetDefaultForOrg_SkipsArchived(t *testing.T) {
 	if got, _ := stores.Teams.GetDefaultForOrg(ctx, orgID); got != teamID {
 		t.Fatalf("default before archive = %q; want %q", got, teamID)
 	}
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
 	if got, _ := stores.Teams.GetDefaultForOrg(ctx, orgID); got != "" {
@@ -313,13 +313,13 @@ func TestTeamsStore_SQLite_ListArchivedForOrgSystem(t *testing.T) {
 		t.Fatalf("seed live team: %v", err)
 	}
 
-	if got, err := stores.Teams.ListArchivedForOrgSystem(ctx, orgID); err != nil || len(got) != 0 {
+	if got, _, err := stores.Teams.ListArchivedForOrgSystem(ctx, orgID, db.ListOpts{Limit: 50}); err != nil || len(got) != 0 {
 		t.Fatalf("ListArchivedForOrgSystem before archive = %v, %v; want empty", got, err)
 	}
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
-	got, err := stores.Teams.ListArchivedForOrgSystem(ctx, orgID)
+	got, _, err := stores.Teams.ListArchivedForOrgSystem(ctx, orgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListArchivedForOrgSystem: %v", err)
 	}
@@ -466,7 +466,7 @@ func TestTeamsStore_SQLite_TeamIDsForUserInOrgSystem_ExcludesArchived(t *testing
 		t.Fatalf("before archive = %v; want [%s]", ids, teamID)
 	}
 
-	if err := stores.Teams.Archive(ctx, teamID); err != nil {
+	if _, err := stores.Teams.Archive(ctx, teamID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
 	ids, err = stores.Teams.TeamIDsForUserInOrgSystem(ctx, orgID, userID)

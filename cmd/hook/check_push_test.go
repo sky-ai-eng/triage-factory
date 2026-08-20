@@ -19,7 +19,7 @@ import (
 // org/team rows), which is what the pre-push hook actually runs against.
 func newPolicyStores(t *testing.T) db.Stores {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -40,7 +40,7 @@ func setPushPolicy(t *testing.T, stores db.Stores, policy string) {
 		t.Fatalf("read team settings: %v", err)
 	}
 	set.BaseBranchPushPolicy = policy
-	if err := stores.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, set); err != nil {
+	if _, err := stores.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, set); err != nil {
 		t.Fatalf("write team settings: %v", err)
 	}
 }
@@ -51,11 +51,11 @@ func prePushStdin(remoteRef string) *strings.Reader {
 }
 
 func policyHost(stores db.Stores, eventTriggered bool) agenthost.Client {
-	return agenthost.NewLocal(stores, agenthost.RunInfo{
+	return agenthost.NewLocal(stores, agenthost.ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		UserID:           runmode.LocalDefaultUserID,
 		TeamID:           runmode.LocalDefaultTeamID,
-		RunID:            "r1",
+		ConversationID:   "r1",
 		IsEventTriggered: eventTriggered,
 	})
 }
@@ -109,15 +109,15 @@ func TestCheckPush_UnprofiledRepoStillRefusesMain(t *testing.T) {
 // repo, not just the two universal names.
 func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 	stores := newPolicyStores(t)
-	if err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
-		ID: "octo/repo", Owner: "octo", Repo: "repo",
+	if _, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+		Owner: "octo", Repo: "repo",
 		DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
-		t.Fatalf("seed profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 	if got := runCheckPush(policyHost(stores, false), stores,
 		[]string{"--remote", "https://github.com/octo/repo.git"}, prePushStdin("refs/heads/trunk")); got != ExitRefused {
-		t.Errorf("exit = %d, want %d (the profile's default branch is protected)", got, ExitRefused)
+		t.Errorf("exit = %d, want %d (the repository's default branch is protected)", got, ExitRefused)
 	}
 }
 

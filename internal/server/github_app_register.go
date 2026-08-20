@@ -20,8 +20,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Sentinel errors returned by buildManifestAndState so callers can map
@@ -175,6 +177,14 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		},
 		"public": false,
 		"default_permissions": map[string]string{
+			// Account permission used only by GitHub Connect's one-time identity
+			// capture. The user token is discarded after /user/emails returns.
+			// The resource is named "emails" — the manifest is validated against
+			// GitHub's permission-resource names, not the "Email addresses"
+			// display label, and an unknown key fails the whole registration
+			// with "Default permission records resource is not included in the
+			// list" rather than dropping the one entry.
+			"emails":        "read",
 			"issues":        "write",
 			"pull_requests": "write",
 			// contents:write — delegated agents push branches, and on a blobless
@@ -197,7 +207,7 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 			"statuses": "read",
 			// members:read is required for GET /orgs/{org}/teams under an
 			// App installation token — without it the team-mapping import
-			// (settings/team/.../github-groups) and the poller's
+			// (teams/{team_id}/github-groups) and the poller's
 			// deletion-reconcile both 403 and silently see zero teams in
 			// App-only orgs (no PAT fallback). Read-only: TF lists teams,
 			// never edits membership.
@@ -222,10 +232,13 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 	// NAT'd deployments we substitute an inert public placeholder
 	// (example.com is IANA-reserved for exactly this) and keep it inactive
 	// — it must never receive deliveries, and installation discovery there
-	// runs via API backfill instead.
+	// runs via API backfill instead. The placeholder is a shared constant
+	// rather than a literal because the webhook-health probe recognizes it:
+	// an App wearing our own sentinel is "not configured", which is the
+	// correct state for a local deployment and not a fault.
 	hookURL := publicURL + "/api/webhooks/github/" + orgID
 	if !reachable {
-		hookURL = "https://example.com/triage-factory-webhook-unconfigured"
+		hookURL = githubapp.PlaceholderHookURL
 	}
 	manifest["hook_attributes"] = map[string]any{
 		"url":    hookURL,
@@ -312,7 +325,9 @@ button:hover{background:#2ea043}
 // GET /api/orgs/{org_id}/github/app/register/launch?owner_type=&owner_login=
 func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
-		http.NotFound(w, r)
+		// No deploy config means the App-registration surface isn't wired on
+		// this deployment: a route that doesn't exist here is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -454,7 +469,9 @@ func (s *Server) renderLaunchError(w http.ResponseWriter, status int, orgID, ret
 // GET /api/orgs/{org_id}/github/app/register/callback?code=...&state=...
 func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.Request) {
 	if s.deployCfg == nil {
-		http.NotFound(w, r)
+		// No deploy config means the App-registration surface isn't wired on
+		// this deployment: a route that doesn't exist here is a 404.
+		notFound(w, "route")
 		return
 	}
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
@@ -472,11 +489,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	state, err := parseAppRegisterState(stateRaw, s.deployCfg.hmacKey)
 	if err != nil {
 		githubAppLog.Warn("invalid state", "error", err)
-		http.Error(w, "invalid or expired state token", http.StatusUnauthorized)
+		httpx.WriteErrors(w, http.StatusUnauthorized, httpx.ErrorItem{
+			Reason: httpx.ReasonUnauthenticated, Message: "invalid or expired state token",
+		})
 		return
 	}
 	if state.OrgID != orgID {
-		http.Error(w, "state org mismatch", http.StatusUnauthorized)
+		httpx.WriteErrors(w, http.StatusUnauthorized, httpx.ErrorItem{
+			Reason: httpx.ReasonUnauthenticated, Message: "state org mismatch",
+		})
 		return
 	}
 
@@ -502,9 +523,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 	if existing != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{
-			"error": "org already has a GitHub App registered; remove it first",
-		})
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 		return
 	}
 
@@ -536,9 +555,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 
 	secretKeys := []string{clientSecretKey, pemKey}
 
-	// A hookless App (the manifest omitted hook_attributes for a
-	// non-public deployment) comes back with no webhook secret. Leave the
-	// ref empty and store nothing rather than writing an empty Vault entry.
+	// The webhook secret is optional on the way back. The manifest ALWAYS
+	// emits hook_attributes — GitHub rejects a blank hook url outright — so a
+	// non-public deployment registers the inert placeholder above with
+	// active:false, and whether GitHub returns a webhook_secret for a hook in
+	// that shape is not established. Treat it as absent-or-present either way:
+	// leave the ref empty and store nothing rather than writing an empty Vault
+	// entry, which the receiver would read as a key every caller can sign with.
+	// Absence is no longer silent — the webhook-health probe reports the
+	// placeholder as "not configured".
 	hasWebhookSecret := strings.TrimSpace(convResp.WebhookSecret) != ""
 	var webhookSecretKey string
 	if hasWebhookSecret {
@@ -561,12 +586,20 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	// staged bit is how the old credential stays live across the switch window
 	// without a separate mode column.
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, _ := integrations.Load(r.Context(), tx.Secrets, orgID)
+		// A failed read here can't be treated as "no PAT": that would write the
+		// App active beside a live PAT, breaking the App-XOR-PAT invariant this
+		// whole staging rule exists to hold. Fail the request instead — nothing
+		// is written yet, so the rollback leaves no App row and no vaulted
+		// secrets, and the operator retries once the store recovers.
+		creds, lerr := integrations.Load(r.Context(), tx.Secrets, orgID)
+		if lerr != nil {
+			return fmt.Errorf("load org credentials: %w", lerr)
+		}
 		staged := creds.GitHubPAT != ""
 		if staged {
 			githubAppLog.Info("live pat present, staging app inactive until cutover", "org", orgID, "app_id", appIDStr)
 		}
-		if err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
+		if _, err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              appIDStr,
 			Slug:               convResp.Slug,
@@ -580,6 +613,15 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 			BotUserID:          botUserID,
 		}); err != nil {
 			return err
+		}
+		// The org is now in the BYO-App credential system — including when the
+		// App is STAGED behind a still-live PAT. The class names which system
+		// the org is in; the Active bit above names which credential is live.
+		// Two orthogonal facts, and this is the window where they differ.
+		// Written in this transaction so the class and the registration it
+		// describes can never disagree.
+		if _, err := tx.Orgs.SetGitHubCredentialClass(r.Context(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			return fmt.Errorf("set github credential class: %w", err)
 		}
 		if err := tx.Secrets.Put(r.Context(), orgID, clientSecretKey, convResp.ClientSecret, "GitHub App client secret"); err != nil {
 			return fmt.Errorf("vault put client_secret: %w", err)
@@ -615,9 +657,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		}
 		var exists *db.ErrGitHubAppExists
 		if errors.As(err, &exists) {
-			writeJSON(w, http.StatusConflict, map[string]string{
-				"error": "org already has a GitHub App registered; remove it first",
-			})
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "org already has a GitHub App registered; remove it first"})
 			return
 		}
 		internalError(w, "github-app", err)
@@ -625,6 +665,13 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 	}
 
 	githubAppLog.Info("registered app", "app_id", appIDStr, "slug", convResp.Slug, "org", orgID)
+
+	// The org now has a webhook secret where it had none (or a new one where
+	// it had another). GitHub starts delivering as soon as the App is
+	// installed, so drop whatever the receiver cached — a stale negative from
+	// a delivery that arrived mid-registration would reject real deliveries
+	// until it expired.
+	s.invalidateWebhookSecret(orgID)
 
 	// Land the user back where they launched registration from. The wizard
 	// (rt=setup) returns to /setup, which resumes on the now-current "Install
@@ -706,9 +753,12 @@ func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestC
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode: %w", err)
 	}
-	// webhook_secret is absent when the manifest omitted hook_attributes
-	// (hookless local/NAT'd Apps), so it's not load-bearing. client_id,
-	// client_secret, and pem always must be present.
+	// webhook_secret is not required here. The manifest always carries a
+	// hook_attributes block, but a deployment GitHub cannot reach gets the
+	// inactive placeholder one, and whether a conversion returns a secret for
+	// that is unverified — so this tolerates its absence instead of asserting
+	// either behaviour. client_id, client_secret, and pem always must be
+	// present.
 	if strings.TrimSpace(out.ClientID) == "" ||
 		strings.TrimSpace(out.ClientSecret) == "" ||
 		strings.TrimSpace(out.PEM) == "" {

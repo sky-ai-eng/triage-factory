@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -82,32 +84,33 @@ func (s *marketplaceStore) Publish(ctx context.Context, orgID string, l domain.M
 	return id, nil
 }
 
-func (s *marketplaceStore) PublishVersion(ctx context.Context, orgID, listingID string, snap domain.ListingSnapshot, name, desc string, eventTypes []string) (int, error) {
+func (s *marketplaceStore) PublishVersion(ctx context.Context, orgID, listingID string, snap domain.ListingSnapshot, name, desc string, eventTypes []string) (domain.MarketplaceListing, error) {
 	snapJSON, err := json.Marshal(snap)
 	if err != nil {
-		return 0, fmt.Errorf("marshal snapshot: %w", err)
+		return domain.MarketplaceListing{}, fmt.Errorf("marshal snapshot: %w", err)
 	}
 
-	var newVersion int
+	var updated domain.MarketplaceListing
 	err = inTx(ctx, s.q, func(q queryer) error {
-		switch err := q.QueryRowContext(ctx, `
+		l, err := scanListingRowPG(q.QueryRowContext(ctx, `
 			UPDATE marketplace_listings
 			SET name = $1, description = $2, current_version = current_version + 1, updated_at = now()
 			WHERE org_id = $3 AND id = $4::uuid
-			RETURNING current_version
-		`, name, desc, orgID, listingID).Scan(&newVersion); {
+			RETURNING `+listingColumnsPG, name, desc, orgID, listingID).Scan)
+		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("marketplace listing %s not found", listingID)
+			return db.ErrNoSuchListing
 		case err != nil:
 			return fmt.Errorf("update listing: %w", err)
 		}
+		updated = l
 		if _, err := q.ExecContext(ctx, `
 			INSERT INTO marketplace_listing_versions (listing_id, org_id, version, snapshot, creator_user_id, created_at)
 			VALUES ($1::uuid, $2, $3, $4::jsonb,
 				COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 				now())
-		`, listingID, orgID, newVersion, string(snapJSON)); err != nil {
-			return fmt.Errorf("insert version %d: %w", newVersion, err)
+		`, listingID, orgID, updated.CurrentVersion, string(snapJSON)); err != nil {
+			return fmt.Errorf("insert version %d: %w", updated.CurrentVersion, err)
 		}
 		if _, err := q.ExecContext(ctx, `DELETE FROM marketplace_listing_events WHERE org_id = $1 AND listing_id = $2::uuid`, orgID, listingID); err != nil {
 			return fmt.Errorf("clear listing events: %w", err)
@@ -115,9 +118,9 @@ func (s *marketplaceStore) PublishVersion(ctx context.Context, orgID, listingID 
 		return insertListingEventsPG(ctx, q, orgID, listingID, eventTypes)
 	})
 	if err != nil {
-		return 0, err
+		return domain.MarketplaceListing{}, err
 	}
-	return newVersion, nil
+	return updated, nil
 }
 
 // insertListingEventsPG inserts the (deduped) facet rows for a listing.
@@ -139,18 +142,29 @@ func insertListingEventsPG(ctx context.Context, q queryer, orgID, listingID stri
 	return nil
 }
 
-func (s *marketplaceStore) Delist(ctx context.Context, orgID, listingID string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE marketplace_listings SET status = $1, delisted_at = now(), updated_at = now() WHERE org_id = $2 AND id = $3::uuid
-	`, domain.ListingStatusDelisted, orgID, listingID)
-	return err
+func (s *marketplaceStore) Delist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error) {
+	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusDelisted, `delisted_at = now()`)
 }
 
-func (s *marketplaceStore) Relist(ctx context.Context, orgID, listingID string) error {
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE marketplace_listings SET status = $1, delisted_at = NULL, updated_at = now() WHERE org_id = $2 AND id = $3::uuid
-	`, domain.ListingStatusPublished, orgID, listingID)
-	return err
+func (s *marketplaceStore) Relist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error) {
+	return setListingStatusPG(ctx, s.q, orgID, listingID, domain.ListingStatusPublished, `delisted_at = NULL`)
+}
+
+// setListingStatusPG is Delist/Relist's shared shape: flip status + the
+// delisted_at pair on one listing row, RETURNING the updated row. Neither
+// caller state-guards the flip (a repeat Delist/Relist just re-stamps
+// updated_at) — the only miss is (orgID, listingID) matching no row, which
+// is db.ErrNoSuchListing rather than the silent zero-row no-op the
+// rows-affected Exec used to leave undetected.
+func setListingStatusPG(ctx context.Context, q queryer, orgID, listingID, status, delistedAtClause string) (domain.MarketplaceListing, error) {
+	l, err := scanListingRowPG(q.QueryRowContext(ctx, `
+		UPDATE marketplace_listings SET status = $1, `+delistedAtClause+`, updated_at = now()
+		WHERE org_id = $2 AND id = $3::uuid
+		RETURNING `+listingColumnsPG, status, orgID, listingID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.MarketplaceListing{}, db.ErrNoSuchListing
+	}
+	return l, err
 }
 
 // listingColumnsPG is the canonical unqualified column order
@@ -284,6 +298,10 @@ func fetchEventTypesForListingsPG(ctx context.Context, q queryer, orgID string, 
 // there's no RLS-crossing read at browse/detail time). $1 is the viewer
 // user id (NULL when no viewer context — e.g. a background caller).
 // Callers append their own WHERE/ORDER BY.
+//
+// The viewer is $1 and the WHERE's own args start at $2. That offset is
+// load-bearing for List's count query, which reuses the WHERE without these
+// joins and so must NOT bind $1 — see shiftPlaceholdersDownOne.
 const listingSummaryQueryPG = `
 	SELECT ` + listingColumnsLPG + `,
 		COALESCE(v.vote_count, 0), COALESCE(i.install_count, 0),
@@ -298,34 +316,77 @@ const listingSummaryQueryPG = `
 	LEFT JOIN marketplace_listing_stats ms ON ms.listing_id = l.id
 `
 
-func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter) ([]domain.ListingSummary, error) {
+// shiftPlaceholdersDownOne rewrites $2, $3, … to $1, $2, … so a WHERE built
+// against listingSummaryQueryPG's numbering can be reused by a query that does
+// not bind the viewer at $1. Postgres rejects a statement supplied a parameter
+// it never references, so dropping the arg means renumbering the rest.
+//
+// It scans for `$` followed by digits rather than doing a blind string
+// replace: `$1` is a prefix of `$10`, and a naive replacement would corrupt
+// two-digit placeholders as the filter set grows.
+func shiftPlaceholdersDownOne(where string) string {
+	return placeholderPattern.ReplaceAllStringFunc(where, func(m string) string {
+		n, err := strconv.Atoi(m[1:])
+		if err != nil || n < 2 {
+			return m
+		}
+		return "$" + strconv.Itoa(n-1)
+	})
+}
+
+var placeholderPattern = regexp.MustCompile(`\$\d+`)
+
+func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID string, f domain.ListingFilter, opts db.ListOpts) ([]domain.ListingSummary, int, error) {
+	// $1 is the viewer, referenced only by listingSummaryQueryPG's own joins;
+	// the filters start at $2.
 	args := []any{nullIfEmpty(viewerUserID), orgID, domain.ListingStatusPublished}
-	q := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.status = $3`
+	where := ` WHERE l.org_id = $2 AND l.status = $3`
 	if f.Kind != "" {
 		args = append(args, f.Kind)
-		q += fmt.Sprintf(" AND l.kind = $%d", len(args))
+		where += fmt.Sprintf(" AND l.kind = $%d", len(args))
 	}
 	if f.Query != "" {
 		args = append(args, "%"+f.Query+"%")
-		q += fmt.Sprintf(" AND (l.name ILIKE $%d OR l.description ILIKE $%d)", len(args), len(args))
+		where += fmt.Sprintf(" AND (l.name ILIKE $%d OR l.description ILIKE $%d)", len(args), len(args))
 	}
 	if f.EventType != "" {
 		args = append(args, f.EventType)
-		q += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM marketplace_listing_events e WHERE e.listing_id = l.id AND e.event_type = $%d)", len(args))
+		where += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM marketplace_listing_events e WHERE e.listing_id = l.id AND e.event_type = $%d)", len(args))
 	}
+
+	// The count runs the same WHERE on the same connection as the page, minus
+	// the summary query's viewer joins — so it must not bind $1. Shifting the
+	// placeholders down by one keeps one WHERE string as the single source of
+	// truth for what is being counted and what is being returned.
+	var total int
+	if err := s.q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM marketplace_listings l`+shiftPlaceholdersDownOne(where),
+		args[1:]...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Every sort ends in l.id so the order is total: installs, votes and
+	// total_runs all tie freely, and offset paging over a partial order drops
+	// and repeats rows.
+	q := listingSummaryQueryPG + where
 	switch f.Sort {
 	case domain.ListingSortInstalls:
-		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(i.install_count, 0) DESC, l.updated_at DESC, l.id`
 	case domain.ListingSortVotes:
-		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(v.vote_count, 0) DESC, l.updated_at DESC, l.id`
 	case domain.ListingSortMostUsed:
-		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC`
+		q += ` ORDER BY COALESCE(ms.total_runs, 0) DESC, l.updated_at DESC, l.id`
 	default:
-		q += ` ORDER BY l.updated_at DESC`
+		q += ` ORDER BY l.updated_at DESC, l.id`
 	}
-	rows, err := s.q.QueryContext(ctx, q, args...)
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.q.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -333,12 +394,12 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 	for rows.Next() {
 		sum, err := scanListingSummaryRowPG(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, sum)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	ids := make([]string, len(out))
@@ -347,28 +408,41 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 	}
 	eventTypes, err := fetchEventTypesForListingsPG(ctx, s.q, orgID, ids)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for i := range out {
 		out[i].EventTypes = eventTypes[out[i].ID]
 	}
-	return out, nil
+	return out, total, nil
+}
+
+// getListingSummaryPG resolves one listing's ListingSummary — header,
+// computed vote/install counts, the viewer's own vote state, and event
+// types — the shared projection Get and Vote both render their return value
+// from, so the browse counter and the vote response can never drift from
+// what a follow-up Get would show. Propagates sql.ErrNoRows when the listing
+// doesn't exist / isn't visible under RLS.
+func getListingSummaryPG(ctx context.Context, q queryer, orgID, listingID, viewerUserID string) (domain.ListingSummary, error) {
+	sel := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.id = $3::uuid`
+	summary, err := scanListingSummaryRowPG(q.QueryRowContext(ctx, sel, nullIfEmpty(viewerUserID), orgID, listingID).Scan)
+	if err != nil {
+		return domain.ListingSummary{}, err
+	}
+	eventTypes, err := fetchEventTypesForListingsPG(ctx, q, orgID, []string{listingID})
+	if err != nil {
+		return domain.ListingSummary{}, err
+	}
+	summary.EventTypes = eventTypes[listingID]
+	return summary, nil
 }
 
 // Get returns the full detail for one listing, or propagates sql.ErrNoRows
 // when it doesn't exist / isn't visible under RLS.
 func (s *marketplaceStore) Get(ctx context.Context, orgID, listingID, viewerUserID string) (domain.ListingDetail, error) {
-	q := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.id = $3::uuid`
-	summary, err := scanListingSummaryRowPG(s.q.QueryRowContext(ctx, q, nullIfEmpty(viewerUserID), orgID, listingID).Scan)
+	summary, err := getListingSummaryPG(ctx, s.q, orgID, listingID, viewerUserID)
 	if err != nil {
 		return domain.ListingDetail{}, err
 	}
-
-	eventTypes, err := fetchEventTypesForListingsPG(ctx, s.q, orgID, []string{listingID})
-	if err != nil {
-		return domain.ListingDetail{}, err
-	}
-	summary.EventTypes = eventTypes[listingID]
 
 	versions, err := listListingVersionsPG(ctx, s.q, orgID, listingID)
 	if err != nil {
@@ -469,27 +543,37 @@ func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID stri
 	return &summary, nil
 }
 
-func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID string) error {
-	_, err := s.q.ExecContext(ctx, `
+// Vote's INSERT is ON CONFLICT DO NOTHING (idempotent — a repeat vote is a
+// no-op), so its own RETURNING would answer zero rows on the conflict path.
+// vote_count is a computed join besides, not a column the vote row itself
+// carries, so the return value is sourced from a follow-up
+// getListingSummaryPG in the SAME transaction rather than the INSERT's own
+// RETURNING.
+//
+// The vote itself can land while that follow-up read comes up empty:
+// marketplace_votes_insert's RLS WITH CHECK only requires org
+// membership, not that the listing still satisfy marketplace_listings_select
+// ('published' OR a publisher-team writer). A listing delisted between the
+// caller's own pre-check and this call (or concurrently with it) leaves the
+// vote row landed but this SELECT seeing nothing — mapped to
+// db.ErrNoSuchListing rather than a bare, unmapped sql.ErrNoRows that would
+// misreport an actually-persisted write as an internal error.
+func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID string) (domain.ListingSummary, error) {
+	if _, err := s.q.ExecContext(ctx, `
 		INSERT INTO marketplace_votes (listing_id, org_id, user_id, created_at) VALUES ($1::uuid, $2, $3::uuid, now())
 		ON CONFLICT (listing_id, user_id) DO NOTHING
-	`, listingID, orgID, userID)
-	return err
+	`, listingID, orgID, userID); err != nil {
+		return domain.ListingSummary{}, err
+	}
+	summary, err := getListingSummaryPG(ctx, s.q, orgID, listingID, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ListingSummary{}, db.ErrNoSuchListing
+	}
+	return summary, err
 }
 
 func (s *marketplaceStore) Unvote(ctx context.Context, orgID, listingID, userID string) error {
 	_, err := s.q.ExecContext(ctx, `DELETE FROM marketplace_votes WHERE org_id = $1 AND listing_id = $2::uuid AND user_id = $3::uuid`, orgID, listingID, userID)
-	return err
-}
-
-func (s *marketplaceStore) RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) error {
-	if teamID == "" {
-		return errors.New("postgres marketplace: RecordInstall requires team_id")
-	}
-	_, err := s.q.ExecContext(ctx, `
-		INSERT INTO marketplace_installs (listing_id, org_id, version, team_id, user_id, root_object_id, created_at)
-		VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, now())
-	`, listingID, orgID, version, teamID, nullIfEmpty(userID), nullIfEmpty(rootObjectID))
 	return err
 }
 
@@ -570,7 +654,7 @@ func (s *marketplaceStore) MaterializeListing(ctx context.Context, orgID, teamID
 }
 
 // blueprintRunTerminalStatusesSQL is the blueprint_runs.status counterpart
-// to runTerminalStatusesSQL (run_queue.go) — the terminal set per
+// to conversationTerminalStatusesSQL (conversation_queue.go) — the terminal set per
 // domain.BlueprintRunStatus.Terminal(). No shared constant exists for this
 // table today; defined here since this is the first blueprint_runs query
 // that needs to distinguish terminal from in-flight.
@@ -580,7 +664,7 @@ const blueprintRunTerminalStatusesSQL = `'completed','aborted','failed','cancell
 // kind=prompt listing in $1. teams distinct-counts installing teams whose
 // copy (a prompts row) still exists and isn't soft-deleted.
 //
-// runs_agg counts only TERMINAL runs (runTerminalStatusesSQL, run_queue.go)
+// runs_agg counts only TERMINAL runs (conversationTerminalStatusesSQL, conversation_queue.go)
 // against any copy this listing has ever produced — a queued/cloning/running
 // run hasn't resolved yet, so it must count toward neither total_runs nor
 // success_rate until it does. Counting it as a not-yet-completed run would
@@ -625,7 +709,7 @@ const recomputePromptListingStatsPG = `
 			MAX(r.started_at) AS last_run_at
 		FROM (SELECT DISTINCT listing_id, root_object_id FROM marketplace_installs WHERE org_id = $1 AND root_object_id IS NOT NULL) mi
 		JOIN conversations r ON r.prompt_id = mi.root_object_id::text AND r.org_id = $1
-		WHERE r.status IN (` + runTerminalStatusesSQL + `)
+		WHERE r.status IN (` + conversationTerminalStatusesSQL + `)
 		GROUP BY mi.listing_id
 	) runs_agg ON runs_agg.listing_id = l.id
 	WHERE l.org_id = $1 AND l.kind = 'prompt'
@@ -640,8 +724,8 @@ const recomputePromptListingStatsPG = `
 
 // recomputeBlueprintListingStatsPG mirrors recomputePromptListingStatsPG for
 // kind=blueprint listings: copies live in blueprints (not prompts), runs
-// live in blueprint_runs.blueprint_id (not runs.prompt_id) filtered to
-// blueprintRunTerminalStatusesSQL instead of runTerminalStatusesSQL —
+// live in blueprint_runs.blueprint_id (not conversations.prompt_id) filtered to
+// blueprintRunTerminalStatusesSQL instead of conversationTerminalStatusesSQL —
 // everything else, including the terminal-only rationale, is identical.
 const recomputeBlueprintListingStatsPG = `
 	INSERT INTO marketplace_listing_stats (listing_id, org_id, teams_using, total_runs, success_rate, last_run_at, computed_at)

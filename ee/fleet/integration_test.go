@@ -190,9 +190,9 @@ func TestDrainEndpoint_Integration(t *testing.T) {
 
 // seedSandboxClaim stages one conversation and one claims row against it, in
 // whatever end state the case needs. Production accumulates these across a
-// run's whole life (enqueue → claim → complete → teardown stamp), and no
-// single store call reaches a chosen combination, so the fixture writes the
-// claim directly.
+// conversation's whole life (enqueue → claim → complete → teardown stamp),
+// and no single store call reaches a chosen combination, so the fixture
+// writes the claim directly.
 func seedSandboxClaim(
 	t *testing.T, conn *sql.DB,
 	claimID, executorID, status, failureKind string,
@@ -200,10 +200,10 @@ func seedSandboxClaim(
 	peakMemMB *int, cpuUsec *int64,
 ) {
 	t.Helper()
-	runID := uuid.New().String()
+	conversationID := uuid.New().String()
 	dbtest.SeedConversation(t, conn, domain.Conversation{
-		ID: runID, Status: status, TriggerType: "event",
-		FailureKind: domain.RunFailureKind(failureKind), StartedAt: claimedAt,
+		ID: conversationID, Status: status, TriggerType: "event",
+		FailureKind: domain.ConversationFailureKind(failureKind), StartedAt: claimedAt,
 	})
 	var released, peak, cpu any
 	if releasedAt != nil {
@@ -223,7 +223,7 @@ func seedSandboxClaim(
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch,
 		                    claimed_at, released_at, outcome, peak_mem_mb, cpu_usec)
 		VALUES (?, ?, ?, ?, 1, ?, ?, NULLIF(?, ''), ?, ?)
-	`, claimID, runmode.LocalDefaultOrgID, runID, executorID, claimedAt.UTC(),
+	`, claimID, runmode.LocalDefaultOrgID, conversationID, executorID, claimedAt.UTC(),
 		released, outcome, peak, cpu); err != nil {
 		t.Fatalf("seed claim %s: %v", claimID, err)
 	}

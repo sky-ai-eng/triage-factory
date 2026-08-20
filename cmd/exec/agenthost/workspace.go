@@ -27,7 +27,7 @@ import (
 // shared blobless bare cache and landing the checkout in the REAL host run
 // root, which the sandbox sees appear under /work.
 //
-// The create re-derives everything security-relevant host-side — repo profile,
+// The create re-derives everything security-relevant host-side — repository row,
 // clone URLs, team-tracking gate, ref validation — and takes only
 // (owner, repo, ref, pr) from the caller. The workspace CLI performs the same
 // checks first for friendlier agent-facing errors, but a sandboxed process
@@ -50,22 +50,22 @@ var (
 //
 // The host root is the run's recorded worktree_path — the directory the agent
 // process was started in (and, in multi mode, the one bind-mounted at /work).
-// That beats re-deriving worktree.RunRoot(runID): after a cold rehydrate the
+// That beats re-deriving worktree.RunRoot(conversationID): after a cold rehydrate the
 // run root is rebuilt keyed by the run's memory namespace (the blueprint run
-// id), so the runID-derived path and the actual cwd diverge — worktree_path is
+// id), so the conversationID-derived path and the actual cwd diverge — worktree_path is
 // the value the resume path maintains. The derivation is only the fallback for
 // a run whose worktree_path write failed at setup.
 func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error) {
-	run, err := c.GetConversation(ctx)
+	conv, err := c.GetConversation(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("load run for workspace roots: %w", err)
+		return "", "", fmt.Errorf("load conversation for workspace roots: %w", err)
 	}
 	root := ""
-	if run != nil {
-		root = run.WorktreePath
+	if conv != nil {
+		root = conv.WorktreePath
 	}
 	if root == "" {
-		root = worktree.RunRoot(c.info.RunID)
+		root = worktree.RunRoot(c.info.ConversationID)
 	}
 	return root, root, nil
 }
@@ -77,7 +77,7 @@ func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot s
 // (materializeWorkspace's ordering); this method only does the git work.
 //
 // Everything authorization-relevant is re-derived here rather than trusted
-// from the arguments: the repo must be org-configured (repo profile exists,
+// from the arguments: the repo must be org-configured (repository row exists,
 // with a clone URL) and tracked by the run's team — the same gates the git
 // proxy's Authorize applies, so a checkout is only ever created for a repo the
 // proxy will then let the agent push to. Clone URLs come from the stored
@@ -148,7 +148,7 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	repoID := owner + "/" + repo
 	profile, err := c.GetRepo(ctx, repoID)
 	if err != nil {
-		return "", fmt.Errorf("create workspace checkout: load repo profile: %w", err)
+		return "", fmt.Errorf("create workspace checkout: load repository: %w", err)
 	}
 	if profile == nil {
 		return "", fmt.Errorf("create workspace checkout: repo %s is not configured in Triage Factory", repoID)
@@ -156,10 +156,23 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 	if tracks, err := c.TeamTracksRepo(ctx, profile.Owner, profile.Repo); err != nil {
 		return "", fmt.Errorf("create workspace checkout: check team tracking: %w", err)
 	} else if !tracks {
-		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this run's team", repoID)
+		return "", fmt.Errorf("create workspace checkout: repo %s is not tracked by this conversation's team", repoID)
 	}
 	if profile.CloneURL == "" {
-		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its profile", repoID)
+		return "", fmt.Errorf("create workspace checkout: repo %s has no clone URL on its repository row", repoID)
+	}
+
+	// Mirror the workspace CLI's bare-add resolution so the RPC front door
+	// behaves identically whichever side computed the ref: an empty ref
+	// targets the branch the repository row names (base, else default), and
+	// only a row naming neither falls through to the create's origin/HEAD
+	// detection. CreateForCheckoutInRoot guards the interpolation, so an
+	// unusable stored value fails there rather than being silently reshaped.
+	if prNumber == 0 && ref == "" {
+		ref = profile.BaseBranch
+		if ref == "" {
+			ref = profile.DefaultBranch
+		}
 	}
 
 	if prNumber > 0 {
@@ -171,13 +184,13 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 			return "", fmt.Errorf("create workspace checkout: PR #%d not found on %s", prNumber, repoID)
 		}
 		upstream, head := prCloneURLs(profile.CloneURL, pr)
-		return workspaceCreatePR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, prNumber, c.info.RunID, hostRoot,
+		return workspaceCreatePR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, prNumber, c.info.ConversationID, hostRoot,
 			// WithBaseBranch refreshes origin/<base> so the worktree-local `pr diff`
 			// frames against a current base, not a clone-time-frozen ref (TFAC-505).
 			worktree.WithBaseBranch(pr.BaseRef),
 			worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, upstream)))
 	}
-	return workspaceCreateCheckout(ctx, profile.Owner, profile.Repo, profile.CloneURL, ref, c.info.RunID, hostRoot,
+	return workspaceCreateCheckout(ctx, profile.Owner, profile.Repo, profile.CloneURL, ref, c.info.ConversationID, hostRoot,
 		worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, profile.CloneURL)))
 }
 
@@ -201,8 +214,8 @@ func prCloneURLs(originURL string, pr *ghclient.PRView) (upstream, head string) 
 // workspaceCloneAuth resolves the HTTPS credential for the host-side clone of a
 // repo, in the form the run's placement dictates:
 //
-//   - Local mode: no injection. The operator's own git (SSH agent / anonymous
-//     HTTPS) authenticates, byte-for-byte the pre-relocation behavior.
+//   - Local mode: no per-call injection. The parent agent's process-scoped Git
+//     config routes this child command through the local credential proxy.
 //   - Executor sidecar (proxyCreds set): route the clone through the run's git
 //     proxy, presenting only the per-run placeholder. The real installation
 //     token lives solely in the sidecar's bundle-backed proxy and is injected on

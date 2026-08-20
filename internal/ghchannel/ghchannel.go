@@ -22,9 +22,9 @@
 // # Lifecycle
 //
 // One channel per run: Start before the agent subprocess, Close when the run
-// ends. Close stops the listener and removes the run's directory, so a run that
-// outlives its channel gets connection-refused — which surfaces to the agent as
-// an ordinary gh error, the same contract multi mode has.
+// ends. Close stops the listener and removes the channel directory, so a run
+// that outlives its channel gets connection-refused — which surfaces to the
+// agent as an ordinary gh error, the same contract multi mode has.
 package ghchannel
 
 import (
@@ -33,6 +33,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -48,8 +49,8 @@ const shutdownTimeout = 3 * time.Second
 
 // Config is one run's channel inputs.
 type Config struct {
-	// RunID scopes the on-disk directory. Required.
-	RunID string
+	// ConversationID scopes the on-disk directory. Required.
+	ConversationID string
 
 	// Upstream is the org's real REST API base ("https://api.github.com" or a
 	// GHES "{host}/api/v3"). Empty defaults to api.github.com.
@@ -87,6 +88,10 @@ type Config struct {
 	// refuses every gated shape without recording one — see the injector's own
 	// doc for why that is the fail-closed reading rather than an off switch.
 	AuthorizeWrite ghinjector.AuthorizeWrite
+
+	// GitHandler, when non-nil, serves git smart HTTP on the same TLS origin as
+	// the GitHub API. This keeps GH_HOST and git's rewritten remote identical.
+	GitHandler http.Handler
 }
 
 // Channel is a live per-run injector and the coordinates an agent subprocess
@@ -105,16 +110,16 @@ type Channel struct {
 	// BinDir is the directory the pinned gh lives in, for the PATH prepend.
 	BinDir string
 
-	srv    *ghinjector.Server
-	runDir string
+	srv        *ghinjector.Server
+	channelDir string
 }
 
 // Start writes the per-run trust surface and binds the injector on loopback.
-// On any error nothing is left running and the run directory is removed —
+// On any error nothing is left running and the channel directory is removed —
 // callers degrade to no gh channel rather than to a half-built one.
 func Start(cfg Config) (*Channel, error) {
-	if cfg.RunID == "" {
-		return nil, fmt.Errorf("ghchannel: RunID is required")
+	if cfg.ConversationID == "" {
+		return nil, fmt.Errorf("ghchannel: ConversationID is required")
 	}
 	if cfg.BinDir == "" {
 		return nil, fmt.Errorf("ghchannel: BinDir is required")
@@ -133,16 +138,16 @@ func Start(cfg Config) (*Channel, error) {
 	if _, err := paths.StateRootErr(); err != nil {
 		return nil, fmt.Errorf("ghchannel: resolve state root: %w", err)
 	}
-	runDir := paths.GHChannelRunDir(cfg.RunID)
-	configDir := filepath.Join(runDir, "config")
+	channelDir := paths.GHChannelDir(cfg.ConversationID)
+	configDir := filepath.Join(channelDir, "config")
 	// 0700 throughout: the agent runs as this same user in local mode, so the
 	// permissions are not a boundary against it — they keep the run's surface
 	// off other accounts on a shared machine.
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
-		return nil, fmt.Errorf("ghchannel: create run dir: %w", err)
+		return nil, fmt.Errorf("ghchannel: create channel dir: %w", err)
 	}
 	fail := func(err error) (*Channel, error) {
-		_ = os.RemoveAll(runDir)
+		_ = os.RemoveAll(channelDir)
 		return nil, err
 	}
 
@@ -150,7 +155,7 @@ func Start(cfg Config) (*Channel, error) {
 	if err != nil {
 		return fail(fmt.Errorf("ghchannel: generate cert: %w", err))
 	}
-	certPath := filepath.Join(runDir, "injector.crt")
+	certPath := filepath.Join(channelDir, "injector.crt")
 	// The system roots alongside this run's leaf: SSL_CERT_FILE is
 	// process-global, so a leaf-only file would narrow every other TLS client
 	// in the agent subprocess. See ghinjector.TrustBundlePEM.
@@ -166,11 +171,12 @@ func Start(cfg Config) (*Channel, error) {
 		Upstream:       upstream,
 		IncomingToken:  token,
 		Cert:           cert,
-		RunID:          cfg.RunID,
+		ConversationID: cfg.ConversationID,
 		TokenSource:    cfg.TokenSource,
 		Observe:        cfg.Observe,
 		ObserveWrite:   cfg.ObserveWrite,
 		AuthorizeWrite: cfg.AuthorizeWrite,
+		GitHandler:     cfg.GitHandler,
 		// Loopback only — no veth, no other host may reach this listener.
 	})
 	if err != nil {
@@ -182,17 +188,17 @@ func Start(cfg Config) (*Channel, error) {
 	}
 
 	return &Channel{
-		Host:      host,
-		Token:     token,
-		CertPath:  certPath,
-		ConfigDir: configDir,
-		BinDir:    cfg.BinDir,
-		srv:       srv,
-		runDir:    runDir,
+		Host:       host,
+		Token:      token,
+		CertPath:   certPath,
+		ConfigDir:  configDir,
+		BinDir:     cfg.BinDir,
+		srv:        srv,
+		channelDir: channelDir,
 	}, nil
 }
 
-// Close stops the injector and removes the run's directory. Idempotent and
+// Close stops the injector and removes the channel directory. Idempotent and
 // nil-safe, so callers can defer it unconditionally.
 func (c *Channel) Close() error {
 	if c == nil {
@@ -204,9 +210,9 @@ func (c *Channel) Close() error {
 		cancel()
 		c.srv = nil
 	}
-	if c.runDir != "" {
-		_ = os.RemoveAll(c.runDir)
-		c.runDir = ""
+	if c.channelDir != "" {
+		_ = os.RemoveAll(c.channelDir)
+		c.channelDir = ""
 	}
 	return nil
 }

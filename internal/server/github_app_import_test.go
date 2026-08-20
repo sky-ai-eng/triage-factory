@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // importStubCfg configures the fake GitHub the import handler talks to: GET /app
@@ -35,6 +37,7 @@ type importStubCfg struct {
 // importFullPerms grants every permission the manifest requests, so a stub left
 // at the default passes the preflight cleanly.
 var importFullPerms = map[string]string{
+	"emails":        "read",
 	"issues":        "write",
 	"pull_requests": "write",
 	"contents":      "write",
@@ -322,8 +325,10 @@ func TestGitHubAppImport_BadPEM(t *testing.T) {
 
 	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/import",
 		importBody("1", "not-a-pem", nil))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("import = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	// A PEM that isn't a PEM is a shape fault, not a semantic one: 400, in
+	// line with the epic's 400-vs-422 rule.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("import = %d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -336,6 +341,7 @@ func TestGitHubAppImport_HardPermGap(t *testing.T) {
 
 	// issues only read (needs write) — a hard gap.
 	perms := map[string]string{
+		"emails": "read",
 		"issues": "read", "pull_requests": "write", "contents": "write", "metadata": "read",
 		"checks": "read", "actions": "read", "statuses": "read", "members": "read",
 	}
@@ -353,6 +359,12 @@ func TestGitHubAppImport_HardPermGap(t *testing.T) {
 	}
 	if !out.Blocking {
 		t.Error("blocking = false, want true (hard gap)")
+	}
+	// The table rides alongside the envelope, not instead of it: the shared
+	// client parser has to find the message where it finds every other one.
+	if len(out.Errors) != 1 || out.Errors[0].Reason != httpx.ReasonPermissionGap ||
+		!strings.Contains(out.Errors[0].Message, "issues") {
+		t.Errorf("errors = %+v, want one PERMISSION_GAP item naming issues", out.Errors)
 	}
 	if len(out.Permissions) != len(importRequiredPermissions) {
 		t.Errorf("permissions table has %d rows, want the full %d", len(out.Permissions), len(importRequiredPermissions))
@@ -380,6 +392,7 @@ func TestGitHubAppImport_SoftPermGap(t *testing.T) {
 
 	// members missing entirely — a soft gap (degrades team import).
 	perms := map[string]string{
+		"emails": "read",
 		"issues": "write", "pull_requests": "write", "contents": "write", "metadata": "read",
 		"checks": "read", "actions": "read", "statuses": "read",
 	}
@@ -398,6 +411,10 @@ func TestGitHubAppImport_SoftPermGap(t *testing.T) {
 	}
 	if out.Blocking {
 		t.Error("blocking = true, want false (soft gap is acknowledgeable)")
+	}
+	if len(out.Errors) != 1 || out.Errors[0].Reason != httpx.ReasonPermissionGap ||
+		!strings.Contains(out.Errors[0].Message, "members") {
+		t.Errorf("errors = %+v, want one PERMISSION_GAP item naming members", out.Errors)
 	}
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app != nil {
 		t.Fatalf("app written before acknowledgment: %+v", app)

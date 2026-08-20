@@ -103,18 +103,17 @@ func TestBedrockRoleSetup_NoAmbientIdentity(t *testing.T) {
 	}
 }
 
-// TestBedrockRoleConnect_Success: a passing probe stores the role config (no
+// TestBedrockRolePut_Success: a passing probe stores the role config (no
 // secret), flips the presence flag + method marker, and the probe saw the
 // generated External ID.
-func TestBedrockRoleConnect_Success(t *testing.T) {
+func TestBedrockRolePut_Success(t *testing.T) {
 	fake := &fakeRoleResolver{arn: "arn:aws:iam::111122223333:role/tf-control"}
 	s := newRoleTestServer(t, fake)
 
-	rec := doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method": "role",
-		"role_arn":    "arn:aws:iam::444455556666:role/tf-bedrock",
-		"region":      "us-east-1",
-		"model_id":    "us.anthropic.claude-sonnet-4-6",
+	rec := putBedrock(t, s, "role", map[string]any{
+		"role_arn": "arn:aws:iam::444455556666:role/tf-bedrock",
+		"region":   "us-east-1",
+		"model_id": "us.anthropic.claude-sonnet-4-6",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
@@ -141,15 +140,14 @@ func TestBedrockRoleConnect_Success(t *testing.T) {
 	}
 }
 
-// TestBedrockRoleConnect_Denied: an AssumeRole denial produces the
+// TestBedrockRolePut_Denied: an AssumeRole denial produces the
 // trust-policy / External-ID guidance and stores nothing.
-func TestBedrockRoleConnect_Denied(t *testing.T) {
+func TestBedrockRolePut_Denied(t *testing.T) {
 	s := newRoleTestServer(t, &fakeRoleResolver{probeErr: llmcred.ErrAssumeRoleDenied})
 
-	rec := doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method": "role",
-		"role_arn":    "arn:aws:iam::444455556666:role/tf-bedrock",
-		"region":      "us-east-1",
+	rec := putBedrock(t, s, "role", map[string]any{
+		"role_arn": "arn:aws:iam::444455556666:role/tf-bedrock",
+		"region":   "us-east-1",
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -167,15 +165,14 @@ func TestBedrockRoleConnect_Denied(t *testing.T) {
 	}
 }
 
-// TestBedrockRoleConnect_NoAmbient: the no-ambient-identity failure is the
+// TestBedrockRolePut_NoAmbient: the no-ambient-identity failure is the
 // operator message, distinct from the trust-policy denial.
-func TestBedrockRoleConnect_NoAmbient(t *testing.T) {
+func TestBedrockRolePut_NoAmbient(t *testing.T) {
 	s := newRoleTestServer(t, &fakeRoleResolver{probeErr: llmcred.ErrNoAmbientIdentity})
 
-	rec := doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method": "role",
-		"role_arn":    "arn:aws:iam::444455556666:role/tf-bedrock",
-		"region":      "us-east-1",
+	rec := putBedrock(t, s, "role", map[string]any{
+		"role_arn": "arn:aws:iam::444455556666:role/tf-bedrock",
+		"region":   "us-east-1",
 	})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
@@ -185,15 +182,14 @@ func TestBedrockRoleConnect_NoAmbient(t *testing.T) {
 	}
 }
 
-// TestBedrockRoleConnect_ClearsOtherProviders: switching from access_keys to
-// role removes the stale IAM key material.
-func TestBedrockRoleConnect_ClearsOtherProviders(t *testing.T) {
+// TestBedrockRolePut_ClearsOtherProviders: switching from the access-key pair
+// to role removes the stale IAM key material.
+func TestBedrockRolePut_ClearsOtherProviders(t *testing.T) {
 	fake := &fakeRoleResolver{arn: "arn:aws:iam::1:role/c"}
 	s := newRoleTestServer(t, fake)
 
 	// Seed an access-keys config.
-	rec := doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method":       "access_keys",
+	rec := putBedrock(t, s, "access-keys", map[string]any{
 		"access_key_id":     "AKIAOLD",
 		"secret_access_key": "secretold",
 		"region":            "us-east-1",
@@ -203,10 +199,9 @@ func TestBedrockRoleConnect_ClearsOtherProviders(t *testing.T) {
 	}
 
 	// Switch to role mode.
-	rec = doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method": "role",
-		"role_arn":    "arn:aws:iam::444455556666:role/tf-bedrock",
-		"region":      "us-east-1",
+	rec = putBedrock(t, s, "role", map[string]any{
+		"role_arn": "arn:aws:iam::444455556666:role/tf-bedrock",
+		"region":   "us-east-1",
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("switch to role: status=%d body=%s", rec.Code, rec.Body.String())
@@ -216,10 +211,9 @@ func TestBedrockRoleConnect_ClearsOtherProviders(t *testing.T) {
 			t.Errorf("%s should be cleared on switch to role mode, got %q", k, got)
 		}
 	}
-	// And switching BACK to access_keys clears the role ARN (resolver detects
-	// role by aws_role_arn presence).
-	rec = doJSON(t, s, "POST", "/api/bedrock/connect", map[string]any{
-		"auth_method":       "access_keys",
+	// And switching BACK to the access-key pair clears the role ARN (the
+	// resolver detects role mode by aws_role_arn presence).
+	rec = putBedrock(t, s, "access-keys", map[string]any{
 		"access_key_id":     "AKIANEW",
 		"secret_access_key": "secretnew",
 		"region":            "us-east-1",
@@ -228,7 +222,7 @@ func TestBedrockRoleConnect_ClearsOtherProviders(t *testing.T) {
 		t.Fatalf("switch back: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if got := mustSecret(t, s, integrations.KeyAWSRoleARN); got != "" {
-		t.Errorf("role ARN should be cleared on switch back to access_keys, got %q", got)
+		t.Errorf("role ARN should be cleared on switch back to the access-key pair, got %q", got)
 	}
 }
 

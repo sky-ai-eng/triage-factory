@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,21 +79,34 @@ func (s *curatorStore) GetLiveConversation(ctx context.Context, orgID, projectID
 	return getLiveCuratorConversation(ctx, s.q, projectID, creatorUserID)
 }
 
+// curatorConversationColumns is CuratorStore's own projection of a
+// conversations row — not ConversationStore's fuller one (claim/ledger
+// derivations, memory-missing join): a curator conversation carries no
+// task/blueprint state to join in, so this stays the narrower shape the
+// curator surface has always read. GetLiveConversation SELECTs it,
+// SetSDKSession and ImportConversationStateSystem RETURN it, so a write's
+// shape can never drift from what the read already promised.
+const curatorConversationColumns = `id, type, visibility, project_id, creator_user_id,
+	COALESCE(team_id, ''), COALESCE(sdk_session_id, ''), started_at`
+
+func scanCuratorConversation(scan func(...any) error) (domain.Conversation, error) {
+	var c domain.Conversation
+	err := scan(&c.ID, &c.Type, &c.Visibility, &c.ProjectID, &c.CreatorUserID,
+		&c.TeamID, &c.SessionID, &c.StartedAt)
+	return c, err
+}
+
 // getLiveCuratorConversation picks the OLDEST live conversation
 // deterministically so two racing minters converge on the same row.
 func getLiveCuratorConversation(ctx context.Context, q queryer, projectID, creatorUserID string) (*domain.Conversation, error) {
-	row := q.QueryRowContext(ctx, `
-		SELECT id, type, visibility, project_id, creator_user_id,
-		       COALESCE(team_id, ''), COALESCE(sdk_session_id, ''), started_at
+	c, err := scanCuratorConversation(q.QueryRowContext(ctx, `
+		SELECT `+curatorConversationColumns+`
 		FROM conversations
 		WHERE project_id = ? AND creator_user_id = ? AND type = 'curator'
 		  AND archived_at IS NULL
 		ORDER BY started_at ASC, id ASC
 		LIMIT 1
-	`, projectID, creatorUserID)
-	var c domain.Conversation
-	err := row.Scan(&c.ID, &c.Type, &c.Visibility, &c.ProjectID, &c.CreatorUserID,
-		&c.TeamID, &c.SessionID, &c.StartedAt)
+	`, projectID, creatorUserID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -118,25 +132,41 @@ func (s *curatorStore) EnqueueUserMessage(ctx context.Context, orgID, conversati
 
 // --- History ---
 
-func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string) ([]domain.Message, error) {
+func (s *curatorStore) ListConversationMessages(ctx context.Context, orgID, conversationID string, limit int) ([]domain.Message, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	// Withdrawn-pending rows (undelivered + inactive) never happened and are
 	// hidden; delivered + inactive stays visible — that is retired history
 	// (compaction, a dead-lettered turn's input) the transcript still shows.
+	//
+	// A bounded read selects DESC and reverses, so the bound keeps the NEWEST
+	// rows: an ASC read with a LIMIT would hand back the oldest N and call it
+	// the transcript.
+	order, reverse := "ASC", false
+	tail := ""
+	args := []any{conversationID}
+	if limit > 0 {
+		order, reverse = "DESC", true
+		tail = " LIMIT ?"
+		args = append(args, limit)
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+sqliteMessageColumns+`
 		FROM messages
 		WHERE conversation_id = ?
 		  AND NOT (delivered = 0 AND window_state = 'inactive')
-		ORDER BY COALESCE(seq, id) ASC
-	`, conversationID)
+		ORDER BY COALESCE(seq, id) `+order+tail, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanMessageRows(rows)
+	out, err := scanMessageRows(rows)
+	if err != nil || !reverse {
+		return out, err
+	}
+	slices.Reverse(out)
+	return out, nil
 }
 
 func (s *curatorStore) ListClaims(ctx context.Context, orgID, conversationID string) ([]domain.Claim, error) {
@@ -326,11 +356,16 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 		}
 
 		p, err := scanCuratorProject(q.QueryRowContext(ctx, `
-			SELECT id, name, description, pinned_repos, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at
+			SELECT id, name, description, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at
 			FROM projects WHERE id = ?
 		`, projectID))
 		if err != nil {
 			return fmt.Errorf("read project: %w", err)
+		}
+		if p != nil {
+			if err := attachPinnedRepos(ctx, q, []*domain.Project{p}); err != nil {
+				return fmt.Errorf("read project pinned repos: %w", err)
+			}
 		}
 		start.Project = p
 		return nil
@@ -341,14 +376,22 @@ func (s *curatorStore) BeginTurn(ctx context.Context, orgID, projectID, conversa
 	return start, nil
 }
 
-func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) error {
+func (s *curatorStore) SetSDKSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE conversations SET sdk_session_id = ? WHERE id = ?
-	`, sessionID, conversationID)
-	return err
+	c, err := scanCuratorConversation(s.q.QueryRowContext(ctx, `
+		UPDATE conversations SET sdk_session_id = ?
+		WHERE id = ?
+		RETURNING `+curatorConversationColumns,
+		sessionID, conversationID).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, db.ErrNoSuchCuratorConversation
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 func (s *curatorStore) FailedTurnAttemptsSystem(ctx context.Context, orgID, conversationID string, messageID int64) (int, string, error) {
@@ -532,7 +575,7 @@ func (s *curatorStore) RevertTurnContext(ctx context.Context, orgID, conversatio
 // --- Boot sweeps ---
 //
 // Finding a claimable curator turn lives on the ONE claim loop
-// (RunQueueStore.ClaimNextRun), not here.
+// (ConversationQueueStore.ClaimNextConversation), not here.
 
 // CancelStrandedTurnsForHomeSystem is inert in SQLite (local uses the global
 // CancelOrphanedTurnsSystem boot sweep), but implemented for symmetry. An
@@ -709,27 +752,34 @@ func (s *curatorStore) GetTurnProvisionInfoSystem(ctx context.Context, orgID, co
 
 // --- Project bundle import ---
 
-func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) error {
+func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID string, conv domain.Conversation, claims []domain.Claim, msgs []domain.Message) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
+	var imported domain.Conversation
+	err := inTx(ctx, s.q, func(q queryer) error {
 		startedAt := conv.StartedAt
 		if startedAt.IsZero() {
 			startedAt = time.Now().UTC()
 		}
 		// team_id snapshots from the destination project row (the source
-		// snapshot is meaningless in the importing install).
-		if _, err := q.ExecContext(ctx, `
+		// snapshot is meaningless in the importing install). RETURNING
+		// projects the row through the same shape GetLiveConversation reads,
+		// so the caller learns exactly what landed rather than echoing conv
+		// back.
+		c, err := scanCuratorConversation(q.QueryRowContext(ctx, `
 			INSERT INTO conversations (
 				id, org_id, type, creator_user_id, team_id, visibility,
 				trigger_type, origin, runtime, status, project_id, sdk_session_id, started_at)
 			VALUES (?, ?, 'curator', ?, (SELECT team_id FROM projects WHERE id = ?),
 			        'private', 'manual', 'curator', 'sdk', NULL, ?, ?, ?)
-		`, conv.ID, orgID, conv.CreatorUserID, conv.ProjectID, conv.ProjectID,
-			sqliteNullStr(conv.SessionID), startedAt); err != nil {
+			RETURNING `+curatorConversationColumns,
+			conv.ID, orgID, conv.CreatorUserID, conv.ProjectID, conv.ProjectID,
+			sqliteNullStr(conv.SessionID), startedAt.UTC()).Scan)
+		if err != nil {
 			return fmt.Errorf("import curator conversation %s: %w", conv.ID, err)
 		}
+		imported = c
 		for _, cl := range claims {
 			var released any
 			if cl.ReleasedAt != nil {
@@ -753,9 +803,13 @@ func (s *curatorStore) ImportConversationStateSystem(ctx context.Context, orgID 
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return &imported, nil
 }
 
-// importCuratorMessage mirrors agentRunStore.InsertMessage's column
+// importCuratorMessage mirrors conversationStore.InsertMessage's column
 // handling for a bundle row (delivered/window_state/seq preserved rather
 // than defaulted — a compacted or seq-overridden message must not reappear
 // active in assembly after a round-trip).
@@ -805,15 +859,16 @@ func importCuratorMessage(ctx context.Context, q queryer, orgID string, msg *dom
 		                      tool_calls, tool_call_id, is_error, metadata, model,
 		                      input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
 		                      cost_usd, created_at, reasoning, content_blocks, delivered,
-		                      window_state, seq, duration_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      window_state, seq, duration_ms, stop_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, orgID, msg.ConversationID, sqliteNullStr(msg.UserID), sqliteNullStr(msg.ClaimID),
 		msg.Role, msg.Content, msg.Subtype,
 		toolCallsJSON, sqliteNullStr(msg.ToolCallID), msg.IsError, metadataJSON,
 		sqliteNullStr(msg.Model), sqliteNullInt(msg.InputTokens), sqliteNullInt(msg.OutputTokens),
 		sqliteNullInt(msg.CacheReadTokens), sqliteNullInt(msg.CacheCreationTokens),
 		sqliteNullFloat(msg.CostUSD), msg.CreatedAt, reasoningJSON, contentBlocksJSON, delivered,
-		string(windowState), sqliteNullFloat(msg.Seq), sqliteNullInt(msg.DurationMs))
+		string(windowState), sqliteNullFloat(msg.Seq), sqliteNullInt(msg.DurationMs),
+		sqliteNullStr(msg.StopReason))
 	if err != nil {
 		return fmt.Errorf("import curator message: %w", err)
 	}
@@ -906,12 +961,11 @@ func scanCuratorProject(row interface {
 		linearKey       sql.NullString
 		specBlueprintID sql.NullString
 		teamID          sql.NullString
-		pinnedJSON      string
 		createdAt       time.Time
 		updatedAt       time.Time
 	)
 	err := row.Scan(
-		&p.ID, &p.Name, &p.Description, &pinnedJSON,
+		&p.ID, &p.Name, &p.Description,
 		&jiraKey, &linearKey, &specBlueprintID, &teamID,
 		&createdAt, &updatedAt,
 	)
@@ -927,13 +981,6 @@ func scanCuratorProject(row interface {
 	p.SpecAuthorshipBlueprintID = specBlueprintID.String
 	p.CreatedAt = createdAt
 	p.UpdatedAt = updatedAt
-	if pinnedJSON == "" {
-		p.PinnedRepos = []string{}
-	} else if err := json.Unmarshal([]byte(pinnedJSON), &p.PinnedRepos); err != nil {
-		return nil, fmt.Errorf("unmarshal pinned_repos: %w", err)
-	}
-	if p.PinnedRepos == nil {
-		p.PinnedRepos = []string{}
-	}
+	p.PinnedRepos = []string{}
 	return &p, nil
 }

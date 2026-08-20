@@ -22,7 +22,7 @@ import (
 // Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
-//     consumer (server tasks handler, swipe handlers) runs here.
+//     consumer (the server's task handlers) runs here.
 //     The scorer reads tasks via the admin-pooled ScoreStore — not
 //     this store.
 //
@@ -127,116 +127,104 @@ func pgTaskTeamFilter(teamIDs []string, args []any) (string, []any) {
 	), args
 }
 
-func (s *taskStore) Queued(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// Derived filter mirrors SQLite. The event_handlers
-	// derived table is org-scoped so rules in another org can't
-	// influence ordering — load-bearing in multi mode.
-	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = true AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.org_id = $1
-			AND t.status = 'queued'
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL
-			AND (t.snooze_until IS NULL OR t.snooze_until <= NOW())`+teamClause+`
-		ORDER BY COALESCE(tr.sort_order, 999) ASC, COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
-}
+// pgTaskRuleOrderJoin mirrors the SQLite join of the same name: each task's
+// matching event_handler rule sort_order (the lowest, when several rules cover
+// the event type), so the list ordering can put "CI is broken" above "someone
+// asked for a review". The derived table is org-scoped so another org's rules
+// can't influence ordering — load-bearing in multi mode.
+const pgTaskRuleOrderJoin = `
+	LEFT JOIN (
+		SELECT org_id, event_type, MIN(sort_order) AS sort_order
+		FROM event_handlers
+		WHERE enabled = true AND kind = 'rule'
+		GROUP BY org_id, event_type
+	) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id`
 
-func (s *taskStore) QueuedIncludingSnoozed(ctx context.Context, orgID string, teamIDs []string) ([]domain.Task, error) {
-	// Snoozed rows render at the tail regardless of
-	// priority so deferred entries don't jump above live queued
-	// work. Postgres sorts false before true on the boolean
-	// expression (matches the SQLite mirror's 0/1 ordering).
-	args := []any{orgID}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
-		FROM tasks t
-		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		LEFT JOIN (
-			SELECT org_id, event_type, MIN(sort_order) AS sort_order
-			FROM event_handlers
-			WHERE enabled = true AND kind = 'rule'
-			GROUP BY org_id, event_type
-		) tr ON t.event_type = tr.event_type AND t.org_id = tr.org_id
-		WHERE t.org_id = $1
-			AND t.status IN ('queued', 'snoozed')
-			AND t.claimed_by_agent_id IS NULL
-			AND t.claimed_by_user_id  IS NULL`+teamClause+`
-		ORDER BY (t.status = 'snoozed') ASC,
-		         COALESCE(tr.sort_order, 999) ASC,
-		         COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
-}
+// pgTaskListOrder is List's ordering. It must stay byte-for-byte equivalent to
+// sqliteTaskListOrder in meaning — the dbtest conformance suite asserts the
+// two dialects agree on the order, not just the set. See that constant for why
+// each term is there.
+const pgTaskListOrder = `
+	ORDER BY (t.status = 'snoozed') ASC,
+	         (t.closed_at IS NOT NULL) ASC,
+	         t.closed_at DESC,
+	         COALESCE(tr.sort_order, 999) ASC,
+	         COALESCE(t.priority_score, 0.5) DESC,
+	         t.id ASC`
 
-func (s *taskStore) ByStatus(ctx context.Context, orgID, status string, teamIDs []string) ([]domain.Task, error) {
-	switch status {
-	case "claimed":
-		// "claimed" = any claim (user or bot) at
-		// status='queued'. Mirrors the SQLite branch — see that
-		// file's comment for the full rationale around the
-		// status='queued' filter and including bot claims to
-		// surface the delegate-spawn-failure retry case.
-		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL)
-				AND t.status = 'queued'`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "delegated":
-		args := []any{orgID}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND t.claimed_by_agent_id IS NOT NULL
-				AND t.status NOT IN ('done', 'dismissed')`+teamClause+`
-			ORDER BY COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
-	case "done", "dismissed":
-		// Cap the Done column at the last 7 days. Mirrors
-		// the SQLite branch — every close path now populates
-		// closed_at, so the NOT NULL guard turns missing values into
-		// surfacable bugs rather than letting them accumulate.
-		args := []any{orgID, status}
-		teamClause, args := pgTaskTeamFilter(teamIDs, args)
-		return queryTasksCtx(ctx, s.q, `
-			SELECT `+pgTaskColumnsWithEntity+`
-			FROM tasks t
-			JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-			WHERE t.org_id = $1
-				AND t.status = $2
-				AND t.closed_at IS NOT NULL
-				AND t.closed_at >= NOW() - INTERVAL '7 days'`+teamClause+`
-			ORDER BY t.closed_at DESC, COALESCE(t.priority_score, 0.5) DESC
-		`, args...)
+// pgTaskListWhere renders db.TaskListFilter as a WHERE body (no leading WHERE)
+// plus its args, numbering placeholders from $1. org_id is always $1 — in the
+// WHERE clause as defense in depth alongside RLS, like every other read here.
+func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
+	args := []any{orgID}
+	clauses := []string{"t.org_id = $1"}
+
+	if len(f.Statuses) > 0 {
+		var arms []string
+		var lifecycle []string
+		for _, s := range f.Statuses {
+			if s == db.TaskListStatusClaimed {
+				// The claim axis, not a lifecycle status — see
+				// db.TaskListStatusClaimed and the SQLite mirror.
+				arms = append(arms, "(t.status = 'queued' AND (t.claimed_by_user_id IS NOT NULL OR t.claimed_by_agent_id IS NOT NULL))")
+				continue
+			}
+			lifecycle = append(lifecycle, s)
+		}
+		if len(lifecycle) > 0 {
+			args = append(args, lifecycle)
+			arms = append(arms, fmt.Sprintf("t.status = ANY($%d)", len(args)))
+		}
+		clauses = append(clauses, "("+strings.Join(arms, " OR ")+")")
 	}
-	args := []any{orgID, status}
-	teamClause, args := pgTaskTeamFilter(teamIDs, args)
-	return queryTasksCtx(ctx, s.q, `
-		SELECT `+pgTaskColumnsWithEntity+`
+	if f.OnlyUnclaimed {
+		clauses = append(clauses, "t.claimed_by_agent_id IS NULL AND t.claimed_by_user_id IS NULL")
+	}
+	if !f.IncludeSnoozed {
+		clauses = append(clauses, "(t.snooze_until IS NULL OR t.snooze_until <= NOW())")
+	}
+	if f.ClosedSince != nil {
+		// Terminal rows only — see the SQLite mirror.
+		args = append(args, f.ClosedSince.UTC())
+		clauses = append(clauses, fmt.Sprintf(
+			"(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND t.closed_at >= $%d))", len(args)))
+	}
+	teamClause, args := pgTaskTeamFilter(f.TeamIDs, args)
+	// pgTaskTeamFilter renders as " AND (...)" and numbers its placeholders
+	// off len(args), so it must stay last.
+	return strings.Join(clauses, " AND ") + teamClause, args
+}
+
+func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter, opts db.ListOpts) ([]domain.Task, int, error) {
+	where, args := pgTaskListWhere(orgID, f)
+
+	// Same filters, same connection as the page below — see the SQLite
+	// mirror for why the rule-order join is left out of the count.
+	var total int
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT COUNT(*)
 		FROM tasks t
 		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id
-		WHERE t.org_id = $1 AND t.status = $2`+teamClause+`
-		ORDER BY COALESCE(t.priority_score, 0.5) DESC
-	`, args...)
+		WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	query := `
+		SELECT ` + pgTaskColumnsWithEntity + `
+		FROM tasks t
+		JOIN entities e ON t.entity_id = e.id AND e.org_id = t.org_id` + pgTaskRuleOrderJoin + `
+		WHERE ` + where + pgTaskListOrder
+	pageArgs := args
+	if opts.Limit > 0 {
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+		query += fmt.Sprintf(`
+		LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	}
+	tasks, err := queryTasksCtx(ctx, s.q, query, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return tasks, total, nil
 }
 
 func (s *taskStore) FindActiveByEntityAndType(ctx context.Context, orgID, entityID, eventType string) ([]domain.Task, error) {
@@ -338,7 +326,7 @@ func (s *taskStore) EntityIDsWithActiveTasks(ctx context.Context, orgID, source 
 // --- Lifecycle ---
 
 func (s *taskStore) FindOrCreate(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64) (*domain.Task, bool, error) {
-	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now())
+	return s.FindOrCreateAt(ctx, orgID, teamID, entityID, eventType, dedupKey, primaryEventID, defaultPriority, time.Now().UTC())
 }
 
 func (s *taskStore) FindOrCreateAt(ctx context.Context, orgID, teamID, entityID, eventType, dedupKey, primaryEventID string, defaultPriority float64, createdAt time.Time) (*domain.Task, bool, error) {
@@ -420,28 +408,36 @@ func (s *taskStore) VisibilityTeamsSystem(ctx context.Context, orgID, taskID str
 	return visibilityTeams(ctx, s.admin, taskID)
 }
 
-func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	return setOwnerTeam(ctx, s.q, orgID, taskID, teamID)
 }
 
-func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error {
+func (s *taskStore) SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error) {
 	return setOwnerTeam(ctx, s.admin, orgID, taskID, teamID)
 }
 
-func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) error {
-	if teamID == "" {
-		return nil
+func setOwnerTeam(ctx context.Context, q queryer, orgID, taskID, teamID string) (domain.Task, error) {
+	// Resolve the LocalDefaultTeamID sentinel to the canonical team so the
+	// teams(id) FK holds, mirroring FindOrCreate/StampAgentClaim. Only
+	// needed when teamID is non-empty — an empty teamID keeps the stored
+	// team_id (COALESCE/NULLIF below) rather than resolving anything.
+	var teamBind string
+	if teamID != "" {
+		var err error
+		teamBind, err = resolveTeamBind(ctx, q, orgID, teamID)
+		if err != nil {
+			return domain.Task{}, err
+		}
 	}
-	// Resolve the LocalDefaultTeamID sentinel to the canonical team so
-	// the teams(id) FK holds, mirroring FindOrCreate/StampAgentClaim.
-	teamBind, err := resolveTeamBind(ctx, q, orgID, teamID)
-	if err != nil {
-		return err
-	}
-	_, err = q.ExecContext(ctx, `
-		UPDATE tasks SET team_id = $1::uuid WHERE org_id = $2 AND id = $3
-	`, teamBind, orgID, taskID)
-	return err
+	// The row still has to exist for the write to answer anything, so a
+	// bogus id reports ErrNoSuchTask on this path too instead of the prior
+	// silent no-op — see SetOwnerTeam's doc comment on the interface.
+	var t domain.Task
+	return scanTaskBareRow(q.QueryRowContext(ctx, `
+		UPDATE tasks SET team_id = COALESCE(NULLIF($1, '')::uuid, team_id)
+		WHERE org_id = $2 AND id = $3
+		RETURNING `+pgTaskBareColumns,
+		teamBind, orgID, taskID), &t)
 }
 
 func visibilityTeams(ctx context.Context, q queryer, taskID string) ([]string, error) {
@@ -481,8 +477,8 @@ func resolveTeamBind(ctx context.Context, q queryer, orgID, teamID string) (stri
 }
 
 // entityTaskCreationLockSalt is the hashtextextended salt for the
-// per-entity advisory lock findOrCreateTaskAt and
-// findOrCreateTaskAtUnlessEntityActive take before touching tasks for an
+// per-entity advisory lock that findOrCreateTaskAt and
+// FindOrCreateAtUnlessEntityActiveSystem take before touching tasks for an
 // entity (TFAC-579). Both MUST use this same salt — they only close the
 // became_atomic cross-event-type race (see the interface doc on
 // FindOrCreateAtUnlessEntityActiveSystem) if every task-creation path for
@@ -592,67 +588,82 @@ func findOrCreateTaskAtLocked(ctx context.Context, q queryer, orgID, teamID, ent
 	return task, true, nil
 }
 
-func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return bumpTask(ctx, s.q, orgID, taskID)
 }
 
-func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) error {
+func (s *taskStore) BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error) {
 	return bumpTask(ctx, s.admin, orgID, taskID)
 }
 
-func bumpTask(ctx context.Context, q queryer, orgID, taskID string) error {
-	_, err := q.ExecContext(ctx, `
+func bumpTask(ctx context.Context, q queryer, orgID, taskID string) (domain.Task, error) {
+	var t domain.Task
+	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks
 		SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 		    snooze_until = CASE WHEN status = 'snoozed' THEN NULL ELSE snooze_until END
 		WHERE org_id = $1 AND id = $2
-	`, orgID, taskID)
-	return err
+		RETURNING `+pgTaskBareColumns,
+		orgID, taskID), &t)
 }
 
-func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	return closeTask(ctx, s.q, orgID, taskID, closeReason, closeEventType)
 }
 
-func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error {
+func (s *taskStore) CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
 	return closeTask(ctx, s.admin, orgID, taskID, closeReason, closeEventType)
 }
 
-func closeTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) error {
-	_, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
-	return err
+func closeTask(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) (domain.Task, error) {
+	t, err := closeTaskRow(ctx, q, orgID, taskID, closeReason, closeEventType)
+	if err != nil {
+		return domain.Task{}, err
+	}
+	if t == nil {
+		return domain.Task{}, db.ErrNoSuchTask
+	}
+	return *t, nil
 }
 
-// closeTaskRows is closeTask reporting whether it actually transitioned a row.
-// The guard is the same one that makes a replayed close a no-op; the caller
-// that stamps stop intent needs to know which side of it this call landed on.
-func closeTaskRows(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) (int64, error) {
+// closeTaskRow is closeTask's body, reporting the closed row via RETURNING or
+// nil when the state-guarded WHERE matched nothing — a missing id, or a task
+// already terminal (the same guard that makes a replayed close a no-op).
+// CloseWithConversationCancelIntentSystem shares it so both close paths agree
+// on what "did this land" means, and on the SAME connection this call's
+// caller is already inside a transaction on.
+func closeTaskRow(ctx context.Context, q queryer, orgID, taskID, closeReason, closeEventType string) (*domain.Task, error) {
 	var cet any
 	if closeEventType != "" {
 		cet = closeEventType
 	}
-	res, err := q.ExecContext(ctx, `
+	var t domain.Task
+	row, err := scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET status = 'done', close_reason = $1, close_event_type = $2,
 		                 closed_at = NOW()
 		WHERE org_id = $3 AND id = $4 AND status NOT IN ('done', 'dismissed')
-	`, closeReason, cet, orgID, taskID)
-	if err != nil {
-		return 0, err
+		RETURNING `+pgTaskBareColumns,
+		closeReason, cet, orgID, taskID), &t)
+	if err == db.ErrNoSuchTask {
+		return nil, nil
 	}
-	return res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	return &row, nil
 }
 
-func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
+func (s *taskStore) CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (bool, []string, error) {
 	var (
-		closed bool
-		runIDs []string
+		closed          bool
+		conversationIDs []string
 	)
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		n, err := closeTaskRows(ctx, q, orgID, taskID, closeReason, closeEventType)
+		t, err := closeTaskRow(ctx, q, orgID, taskID, closeReason, closeEventType)
 		if err != nil {
 			return fmt.Errorf("close task: %w", err)
 		}
-		closed = n > 0
+		closed = t != nil
 
 		if closingEventID != "" {
 			if err := recordTaskEvent(ctx, q, orgID, taskID, closingEventID, "closed"); err != nil {
@@ -666,17 +677,17 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 		rows, err := q.QueryContext(ctx, `
 			SELECT id FROM conversations
 			WHERE org_id = $1 AND task_id = $2
-			  AND (status IS NULL OR status NOT IN (`+runTerminalStatusesSQL+`))
+			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		`, orgID, taskID)
 		if err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 		// Drained and closed (scanIDs closes) before the UPDATE below rather
 		// than on a defer: both ride the one connection this tx holds, and an
 		// open cursor is the kind of thing a driver is entitled to refuse to
 		// write around.
-		if runIDs, err = scanIDs(rows, "conversations.id"); err != nil {
-			return fmt.Errorf("list active runs: %w", err)
+		if conversationIDs, err = scanIDs(rows, "conversations.id"); err != nil {
+			return fmt.Errorf("list active conversations: %w", err)
 		}
 
 		// The same predicate one join further out, rather than a stamp keyed on
@@ -695,7 +706,7 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 			      WHERE c.org_id = br.org_id
 			        AND c.task_id = $2
 			        AND c.blueprint_run_id = br.id
-			        AND (c.status IS NULL OR c.status NOT IN (`+runTerminalStatusesSQL+`))
+			        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
 			  )
 		`, orgID, taskID); err != nil {
 			return fmt.Errorf("stamp run cancel intent: %w", err)
@@ -705,22 +716,23 @@ func (s *taskStore) CloseWithRunCancelIntentSystem(ctx context.Context, orgID, t
 	if err != nil {
 		return false, nil, err
 	}
-	return closed, runIDs, nil
+	return closed, conversationIDs, nil
 }
 
-func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	return setTaskStatus(ctx, s.q, orgID, taskID, status)
 }
 
-func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) error {
+func (s *taskStore) SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error) {
 	return setTaskStatus(ctx, s.admin, orgID, taskID, status)
 }
 
-func setTaskStatus(ctx context.Context, q queryer, orgID, taskID, status string) error {
-	_, err := q.ExecContext(ctx, `
+func setTaskStatus(ctx context.Context, q queryer, orgID, taskID, status string) (domain.Task, error) {
+	var t domain.Task
+	return scanTaskBareRow(q.QueryRowContext(ctx, `
 		UPDATE tasks SET status = $1 WHERE org_id = $2 AND id = $3
-	`, status, orgID, taskID)
-	return err
+		RETURNING `+pgTaskBareColumns,
+		status, orgID, taskID), &t)
 }
 
 func (s *taskStore) AdvanceStatusForUser(ctx context.Context, orgID, taskID, userID, newStatus string) (bool, error) {
@@ -792,32 +804,34 @@ func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, 
 
 // --- Claim mutations ---
 
-func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error {
+func (s *taskStore) SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error) {
 	var a any
 	if agentID != "" {
 		a = agentID
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_agent_id = $1,
 		       claimed_by_user_id  = NULL
 		 WHERE org_id = $2 AND id = $3
-	`, a, orgID, taskID)
-	return err
+		RETURNING `+pgTaskBareColumns,
+		a, orgID, taskID), &t)
 }
 
-func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error {
+func (s *taskStore) SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error) {
 	var u any
 	if userID != "" {
 		u = userID
 	}
-	_, err := s.q.ExecContext(ctx, `
+	var t domain.Task
+	return scanTaskBareRow(s.q.QueryRowContext(ctx, `
 		UPDATE tasks
 		   SET claimed_by_user_id  = $1,
 		       claimed_by_agent_id = NULL
 		 WHERE org_id = $2 AND id = $3
-	`, u, orgID, taskID)
-	return err
+		RETURNING `+pgTaskBareColumns,
+		u, orgID, taskID), &t)
 }
 
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
@@ -1099,15 +1113,15 @@ func reassignClaimToUser(ctx context.Context, q queryer, orgID, taskID, fromUser
 
 // --- Breaker ---
 
-func (s *taskStore) CountConsecutiveFailedRuns(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.q, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedConversations(ctx, s.q, orgID, entityID, promptID)
 }
 
-func (s *taskStore) CountConsecutiveFailedRunsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
-	return countConsecutiveFailedRuns(ctx, s.admin, orgID, entityID, promptID)
+func (s *taskStore) CountConsecutiveFailedConversationsSystem(ctx context.Context, orgID, entityID, promptID string) (int, error) {
+	return countConsecutiveFailedConversations(ctx, s.admin, orgID, entityID, promptID)
 }
 
-func countConsecutiveFailedRuns(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
+func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, entityID, promptID string) (int, error) {
 	// Same shape as SQLite. Postgres' ROW_NUMBER / OVER / CTEs are
 	// identical syntax-wise; the only difference is the started_at
 	// fallback literal (Postgres requires a typed cast on the
@@ -1193,6 +1207,20 @@ const pgTaskColumnsWithEntity = `
 		ELSE 0
 	END`
 
+// pgTaskBareColumns is tasks' own columns — no entity join — in the order
+// taskScanState.bareTargets expects. It is the leading, identical prefix of
+// pgTaskColumnsWithEntity (kept that way so the two column lists cannot
+// drift apart) and is what every converted write's RETURNING projects: see
+// the returned-row shape note on db.TaskStore.
+const pgTaskBareColumns = `
+	id, entity_id, event_type, dedup_key, primary_event_id,
+	team_id,
+	status, priority_score, ai_summary, autonomy_suitability,
+	priority_reasoning, scoring_status, severity, relevance_reason,
+	source_status, snooze_until, close_reason, close_event_type,
+	closed_at, created_at,
+	claimed_by_agent_id, claimed_by_user_id`
+
 type taskScanState struct {
 	teamID                             sql.NullString
 	priorityScore, autonomySuitability sql.NullFloat64
@@ -1204,7 +1232,10 @@ type taskScanState struct {
 	claimedByAgentID, claimedByUserID  sql.NullString
 }
 
-func (s *taskScanState) targets(t *domain.Task) []any {
+// bareTargets is the scan-target list for pgTaskBareColumns — the
+// tasks-table columns only, none of the entity-join fields. targets below
+// extends it with those.
+func (s *taskScanState) bareTargets(t *domain.Task) []any {
 	return []any{
 		&t.ID, &t.EntityID, &t.EventType, &t.DedupKey, &t.PrimaryEventID,
 		&s.teamID,
@@ -1213,9 +1244,14 @@ func (s *taskScanState) targets(t *domain.Task) []any {
 		&s.sourceStatus, &s.snoozeUntil, &s.closeReason, &s.closeEventType,
 		&s.closedAt, &t.CreatedAt,
 		&s.claimedByAgentID, &s.claimedByUserID,
+	}
+}
+
+func (s *taskScanState) targets(t *domain.Task) []any {
+	return append(s.bareTargets(t),
 		&t.Title, &t.SourceURL, &t.EntitySourceID, &t.EntitySource, &t.EntityKind,
 		&t.OpenSubtaskCount, &t.SlackMessageCount,
-	}
+	)
 }
 
 func (s *taskScanState) finalize(t *domain.Task) {
@@ -1263,6 +1299,22 @@ func scanTaskFromRow(row *sql.Row, t *domain.Task) error {
 	}
 	s.finalize(t)
 	return nil
+}
+
+// scanTaskBareRow decodes a pgTaskBareColumns row — an id-keyed write's
+// UPDATE ... RETURNING. No row scanned means the write's WHERE clause
+// matched nothing (a missing id, or a state guard the row's current status
+// didn't satisfy), which is db.ErrNoSuchTask.
+func scanTaskBareRow(row *sql.Row, t *domain.Task) (domain.Task, error) {
+	var s taskScanState
+	if err := row.Scan(s.bareTargets(t)...); err != nil {
+		if err == sql.ErrNoRows {
+			return domain.Task{}, db.ErrNoSuchTask
+		}
+		return domain.Task{}, err
+	}
+	s.finalize(t)
+	return *t, nil
 }
 
 func queryTasksCtx(ctx context.Context, q queryer, query string, args ...any) ([]domain.Task, error) {

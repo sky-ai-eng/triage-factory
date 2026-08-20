@@ -99,12 +99,24 @@ type Token struct {
 // Installation is one App installation discovered via GET /app/installations:
 // a GitHub account (user or org) on which the App is installed. AccountType
 // is GitHub's verbatim "User" / "Organization"; CreatedAt is the installation's
-// created_at (zero if GitHub omitted it).
+// created_at (zero if GitHub omitted it). AccountID is the account's numeric
+// id — the half of the account's identity that a rename does not change, so it
+// is what the installation mirror keys credential resolution on; 0 when GitHub
+// omitted it. SuspendedAt is the installation's suspended_at (zero when the
+// account owner has not suspended it) and SuspendedBy the login that did,
+// carried so the reconcile can converge suspension that no webhook delivered.
+// RepositorySelection is GitHub's "all" / "selected" — whether the grant covers
+// every repository on the account or an enumerated set — which is what says
+// whether the grant can drift from the tracked set at all.
 type Installation struct {
-	ID           int64
-	AccountLogin string
-	AccountType  string
-	CreatedAt    time.Time
+	ID                  int64
+	AccountID           int64
+	AccountLogin        string
+	AccountType         string
+	CreatedAt           time.Time
+	SuspendedAt         time.Time
+	SuspendedBy         string
+	RepositorySelection string
 }
 
 // Minter signs JWTs with a GitHub App's RSA private key and exchanges
@@ -414,16 +426,35 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 }
 
 // installationListItem is the subset of an /app/installations array entry
-// we keep. GitHub returns far more (permissions, events, repository_selection);
-// installation mirroring only needs the id, the account it's installed on,
-// and when it was created.
+// we keep. GitHub returns far more (permissions, events, single_file_name);
+// installation mirroring only needs the id, the account it's installed on, when
+// it was created, whether the account owner has suspended it, and how wide the
+// grant is. Both halves of the account's identity are kept — the numeric id
+// (stable) and the login (renameable, and what the UI renders).
+//
+// suspended_at / suspended_by are the reconcile's half of suspension, and the
+// reason it is not webhook-only: GitHub does not re-deliver a missed
+// installation.suspend, and local mode receives no deliveries at all. Both are
+// nullable on the wire; encoding/json leaves a null as the zero value, so an
+// unsuspended installation reads back as a zero time and an empty login
+// without any pointer indirection.
 type installationListItem struct {
 	ID      int64 `json:"id"`
 	Account struct {
+		ID    int64  `json:"id"`
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"account"`
-	CreatedAt time.Time `json:"created_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	SuspendedAt time.Time `json:"suspended_at"`
+	SuspendedBy struct {
+		Login string `json:"login"`
+	} `json:"suspended_by"`
+	// repository_selection is the other half of what the reconcile cannot learn
+	// from a webhook it never received: an installation narrowed from "all" to a
+	// selection fires installation_repositories, which GitHub does not re-deliver
+	// and local mode never receives at all.
+	RepositorySelection string `json:"repository_selection"`
 }
 
 // ListInstallations enumerates every installation of the App via
@@ -469,14 +500,23 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 			return nil, fmt.Errorf("githubapp: parse installations response: %w", err)
 		}
 		for _, it := range page {
-			out = append(out, Installation{
-				ID:           it.ID,
-				AccountLogin: it.Account.Login,
-				AccountType:  it.Account.Type,
-				CreatedAt:    it.CreatedAt.UTC(),
-			})
+			inst := Installation{
+				ID:                  it.ID,
+				AccountID:           it.Account.ID,
+				AccountLogin:        it.Account.Login,
+				AccountType:         it.Account.Type,
+				CreatedAt:           it.CreatedAt.UTC(),
+				SuspendedBy:         it.SuspendedBy.Login,
+				RepositorySelection: it.RepositorySelection,
+			}
+			if !it.SuspendedAt.IsZero() {
+				inst.SuspendedAt = it.SuspendedAt.UTC()
+			}
+			out = append(out, inst)
 		}
-		next = nextPageURL(linkHeader)
+		if next, err = m.nextPage(linkHeader); err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
@@ -565,10 +605,54 @@ func (m *Minter) GetApp(ctx context.Context) (App, error) {
 	}, nil
 }
 
+// nextPage returns the rel="next" URL from a Link header, or "" when there is
+// no next page — after checking that it addresses the same origin as the
+// configured API base.
+//
+// The check is what makes following the header safe. Every request this package
+// paginates carries the App's signed JWT in an Authorization header, so a Link
+// pointing at another host would hand that credential to whoever answers, and
+// would make this process fetch a URL of the remote's choosing (the API base
+// may be an arbitrary GHES host, which can be misconfigured behind a proxy, or
+// simply wrong). The response body is attacker-shaped input; the request target
+// must not be. Go's client already strips Authorization across a redirect to a
+// different host, so this closes the half the stdlib does not see.
+//
+// Scheme and host must match; the path is not constrained, since a same-origin
+// path is neither a credential leak nor a reachability gain. A mismatch is an
+// error rather than a quiet stop: pagination that silently truncates would
+// report a partial listing as a complete one, and a Link header pointing off
+// the configured host is an anomaly worth surfacing either way.
+func (m *Minter) nextPage(link string) (string, error) {
+	next := nextPageURL(link)
+	if next == "" {
+		return "", nil
+	}
+	nu, err := url.Parse(next)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: parse pagination link: %w", err)
+	}
+	// apiBase was parsed and validated in NewMinter, so this cannot fail for a
+	// live Minter; the error is kept rather than ignored so a future
+	// construction path can't quietly skip the comparison.
+	bu, err := url.Parse(m.apiBase)
+	if err != nil {
+		return "", fmt.Errorf("githubapp: parse API base: %w", err)
+	}
+	if !strings.EqualFold(nu.Scheme, bu.Scheme) || !strings.EqualFold(nu.Host, bu.Host) {
+		return "", fmt.Errorf("githubapp: pagination link points at %s://%s, not the configured API host %s://%s",
+			nu.Scheme, nu.Host, bu.Scheme, bu.Host)
+	}
+	return next, nil
+}
+
 // nextPageURL extracts the rel="next" URL from a GitHub Link header, or ""
 // when there's no next page. The header looks like:
 //
 //	<https://api.github.com/app/installations?page=2>; rel="next", <...>; rel="last"
+//
+// Callers reach it through Minter.nextPage, which additionally pins the URL to
+// the configured API origin — this half only parses.
 func nextPageURL(link string) string {
 	for _, part := range strings.Split(link, ",") {
 		segs := strings.Split(strings.TrimSpace(part), ";")

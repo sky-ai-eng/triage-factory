@@ -54,18 +54,18 @@ const legacyJiraDisplayName = "jira_display_name"
 // DB column, so nothing writes this key anymore — but AllKeys still sweeps it so
 // an upgrade from an older install leaves no orphan keychain row (same
 // rationale as legacyJiraDisplayName). It has no companion DB ref, so it's safe
-// on the per-org Clear path.
+// to sweep with the rest of the integration-credential keys.
 const legacyGitHubUsername = "github_username"
 
 // Org-level secret keys that are NOT GitHub/Jira service credentials but DO
 // live in the same keychain/vault, so a full local uninstall must still sweep
-// them. They are deliberately excluded from AllKeys: AllKeys drives the per-org
-// integrations.Clear ("Clear All Tokens"), and each of these keys has companion
-// DB state (org_settings.anthropic_api_key_ref / the org_jira_apps row) that
-// Clear does not reconcile — sweeping the secret there would dangle the ref (the
-// UI would report "configured" against a key that's gone). They belong only in
-// the full-wipe AllLocalSweepKeys (uninstall / clean-slate, where the whole DB
-// is removed anyway).
+// them. They are deliberately excluded from AllKeys: each of these keys has
+// companion DB state (org_settings.anthropic_api_key_ref / the org_jira_apps
+// row) that only its own credential route reconciles — sweeping the secret
+// through the shared key set would dangle the ref (the UI would report
+// "configured" against a key that's gone). They belong only in the full-wipe
+// AllLocalSweepKeys (uninstall / clean-slate, where the whole DB is removed
+// anyway).
 //
 // Literals are duplicated here because integrations can't import server /
 // agentproc (server imports integrations — cycle), the same constraint that
@@ -123,9 +123,10 @@ func BedrockKeys() []string {
 }
 
 // AllKeys returns the integration-credential keys the SecretStore manages for a
-// tenant — the GitHub + Jira well-known keys plus legacy keys still swept on
-// Clear. This is exactly the set integrations.Clear ("Clear All Tokens") wipes,
-// so it stays scoped to credentials Clear can fully reconcile.
+// tenant — the GitHub + Jira well-known keys plus the legacy keys still swept
+// alongside them. It is the per-credential unbind routes' shared vocabulary and
+// the base of the uninstall sweep, and it stays scoped to credentials whose
+// companion DB state those routes reconcile.
 //
 // It is NOT the full uninstall sweep: org-level secrets that live in the same
 // keychain but aren't integration credentials (the Anthropic API key, the
@@ -377,12 +378,6 @@ func ClearJiraOtherScheme(ctx context.Context, secrets db.SecretStore, orgID str
 	default:
 		return nil
 	}
-}
-
-// Clear removes both GitHub and Jira credentials for orgID. Includes
-// the legacy jira_display_name sweep — see ClearJira.
-func Clear(ctx context.Context, secrets db.SecretStore, orgID string) error {
-	return clearKeys(ctx, secrets, orgID, AllKeys()...)
 }
 
 func clearKeys(ctx context.Context, secrets db.SecretStore, orgID string, keys ...string) error {

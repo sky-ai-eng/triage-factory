@@ -46,7 +46,7 @@ func (p fakeProbe) CloneURLForRepo(_ context.Context, owner, repo string) (strin
 
 func newBundleTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -72,19 +72,18 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	const slug = "sky-ai-eng/triage-factory"
 	const cloneURL = "https://github.com/sky-ai-eng/triage-factory.git"
 
-	if err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.RepoProfile{
-		ID:          slug,
+	if _, err := sqlitestore.New(database).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
 		Owner:       "sky-ai-eng",
 		Repo:        "triage-factory",
 		CloneURL:    cloneURL,
 		ProfiledAt:  ptrTime(time.Now().UTC()),
 		Description: "fixture",
 	}); err != nil {
-		t.Fatalf("seed repo profile: %v", err)
+		t.Fatalf("seed repository: %v", err)
 	}
 
 	sessionID := "11111111-2222-3333-4444-555555555555"
-	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           projectName,
 		Description:    "Fixture project",
 		PinnedRepos:    []string{slug},
@@ -93,6 +92,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	projectID := created.ID
 
 	root, err := curator.KnowledgeDir(runmode.LocalDefaultOrgID, projectID)
 	if err != nil {
@@ -123,7 +123,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("enqueue turn: %v", err)
 	}
-	claimed, err := stores.RunQueue.ClaimNextRun(ctx, "fixture-exec", 1, db.ClaimPlacement{})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "fixture-exec", 1, db.ClaimPlacement{})
 	if err != nil || claimed == nil || claimed.ID != conv.ID {
 		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, conv.ID)
 	}
@@ -131,7 +131,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if _, err := stores.Curator.BeginTurn(ctx, org, projectID, conv.ID, msgID); err != nil {
 		t.Fatalf("begin turn: %v", err)
 	}
-	if err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
+	if _, err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
 		t.Fatalf("set sdk session: %v", err)
 	}
 	if _, err := stores.Conversations.InsertMessage(ctx, org, &domain.Message{
@@ -335,7 +335,7 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if len(claims) != 1 || claims[0].Outcome != "completed" {
 		t.Fatalf("imported claims = %+v, want one completed engagement", claims)
 	}
-	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID)
+	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID, 0)
 	if err != nil {
 		t.Fatalf("list imported messages: %v", err)
 	}
@@ -361,14 +361,15 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	}
 
 	// The imported pin must be tracked for the importing team, not just
-	// upserted into repo_profiles. repo_profiles is a derived cache of
-	// team_github_repos, and the router team↔repo gate keys off the
-	// tracking table — without this row the team's handlers are dropped
-	// for the repo and polled events create no tasks until the user
+	// brought into the repository registry. The router team↔repo gate keys
+	// off the tracking table — without this row the team's handlers are
+	// dropped for the repo and polled events create no tasks until the user
 	// re-saves the selection.
 	var tracked int
-	if err := targetDB.QueryRow(
-		`SELECT count(*) FROM team_github_repos WHERE team_id = ? AND owner = ? AND repo = ?`,
+	if err := targetDB.QueryRow(`
+		SELECT count(*) FROM team_github_repos g
+		JOIN repositories r ON r.id = g.repository_id
+		WHERE g.team_id = ? AND r.owner = ? AND r.repo = ?`,
 		runmode.LocalDefaultTeamID, "sky-ai-eng", "triage-factory",
 	).Scan(&tracked); err != nil {
 		t.Fatalf("team_github_repos lookup: %v", err)
@@ -404,7 +405,7 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	if len(missing.Missing) != 1 || missing.Missing[0].Repo != "sky-ai-eng/triage-factory" {
 		t.Fatalf("unexpected missing repos payload: %+v", missing.Missing)
 	}
-	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
+	projects, _, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -439,7 +440,7 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	if !errors.As(err, &dup) {
 		t.Fatalf("expected DuplicateNameError, got %v", err)
 	}
-	projects, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID)
+	projects, _, err := sqlitestore.New(targetDB).Projects.List(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 200})
 	if err != nil {
 		t.Fatalf("list projects: %v", err)
 	}
@@ -454,7 +455,7 @@ func TestDecodeZipJSONLines_EnforcesRowLimit(t *testing.T) {
 	})
 	zf := entries[curatorClaimsPath]
 	if zf == nil {
-		t.Fatal("missing curator requests entry")
+		t.Fatal("missing curator claims entry")
 	}
 	var seen int
 	err := decodeZipJSONLines(

@@ -97,6 +97,13 @@ jobs:
       # stage the same release the sandbox image bakes. Version and checksum are
       # read out of the Dockerfile, which internal/ghpin's drift test holds
       # equal to the Go pin local mode fetches from.
+      #
+      # This step is also what makes a pin bump a test-mediated event: the
+      # conformance gate drives every write command the pinned gh has and
+      # asserts each still lands the audit row or the refusal the shared
+      # classification table names, and it checks the staged binary reports the
+      # pinned version, so a bump cannot land while the gate silently runs
+      # against the old release.
       - name: Stage pinned gh binary
         if: steps.docs.outputs.only != 'true'
         run: |
@@ -137,6 +144,98 @@ jobs:
       - name: Docs-only change, build/test skipped
         if: steps.docs.outputs.only == 'true'
         run: echo "All changed files are documentation (docs/** or *.md) or harness/ (tested by the harness job); skipping Go/frontend build and test steps."
+
+  # The same Go suite again, in zones that are not UTC.
+  #
+  # GitHub runners are UTC and nothing in the repo pinned a zone, so every
+  # timestamp offset was zero and a whole class of defect was structurally
+  # invisible here: timestamps written in the process's zone and compared
+  # against SQLite's UTC clock, and per-day buckets keyed from a local clock
+  # against days the database produced in UTC. Both shipped, and neither could
+  # fail a check on a UTC runner.
+  #
+  # Two zones, not one, because one fixed offset cannot tell a sign error from
+  # a fix — a bug that subtracts where it should add passes in one direction.
+  # New York is negative and crosses DST; Kolkata is +05:30, so a half-hour
+  # offset catches anything that assumes whole hours. UTC itself stays in the
+  # `test` job above.
+  #
+  # A separate job rather than a matrix on `test`: this needs Go and nothing
+  # else, so it skips the frontend build and the vitest run, and it runs
+  # alongside `test` instead of tripling it. frontend/dist is stubbed for the
+  # same reason — package main embeds it, and a placeholder satisfies the
+  # embed without a pnpm build, since no test here renders the SPA.
+  test-timezones:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz:
+          - America/New_York
+          - Asia/Kolkata
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      # Narrower than the docs-only gate the other jobs use, and inverted:
+      # this one asks whether the PR touches anything a timezone regression
+      # could arrive through — Go, a migration, the module graph, or this
+      # workflow. A frontend-only PR — the whole of frontend/, which the
+      # docs-only gate happily lets through — has nothing here to regress, and
+      # was paying for two extra full-suite runs to prove it.
+      #
+      # .sql is on the list for a concrete reason rather than for symmetry:
+      # the defect that created this matrix was fixed partly by a migration
+      # that rewrites every stored timestamp, and a migration is SQL that
+      # compares and rewrites timestamps with no Go file in the diff at all.
+      - name: Detect Go-relevant change
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          # An empty diff is not a situation this gate understands, so it runs
+          # rather than guesses — the same conservative default the docs-only
+          # gate takes.
+          if [ -z "$changed" ] || echo "$changed" | grep -qE '(\.go$|\.sql$|^go\.mod$|^go\.sum$|^\.github/workflows/test\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Stub frontend/dist for go:embed
+        if: steps.gate.outputs.run == 'true'
+        run: mkdir -p frontend/dist && echo "not built for the timezone job" > frontend/dist/index.html
+
+      # No -race here, deliberately. A data race does not depend on the
+      # process's timezone, and the `test` job above already runs the detector
+      # over identical code — so every second spent on it here is the same
+      # check paid for twice. It is not a small second either: the detector
+      # costs ~9.5x on internal/db/sqlite, which is precisely the package this
+      # matrix exists to exercise.
+      #
+      # -timeout stays as the deadlock backstop (a package that hangs should
+      # fail rather than burn the job's wall clock), but the 20m the `test` job
+      # needs is sized for -race on shared cores; without it these runs are far
+      # under that, and 10m is still generous headroom.
+      - name: Go test (TZ=${{ matrix.tz }})
+        if: steps.gate.outputs.run == 'true'
+        env:
+          TZ: ${{ matrix.tz }}
+        run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -timeout 10m
+
+      - name: Nothing timezone-relevant changed, matrix skipped
+        if: steps.gate.outputs.run != 'true'
+        run: echo "No .go / .sql / go.mod / go.sum / workflow change in this PR; a timezone regression cannot arrive through the changed files. Skipping the timezone matrix."
 
   # Rust workspace under harness/ (the in-sandbox agent tools). Mirrors the
   # skip pattern above: the job always runs and reports success so it can be

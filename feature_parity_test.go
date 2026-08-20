@@ -81,8 +81,8 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 	}
 }
 
-// TestFrontendMirrorsRunStatusVocabulary asserts that the frontend's copy of
-// the conversation status vocabulary matches internal/domain/run_status.go
+// TestFrontendMirrorsConversationStatusVocabulary asserts that the frontend's copy of
+// the conversation status vocabulary matches internal/domain/conversation_status.go
 // EXACTLY, in both directions.
 //
 // The mirror is hand-maintained by choice — codegen buys a build step and a
@@ -96,10 +96,10 @@ func TestFrontendMirrorsAllFeatures(t *testing.T) {
 // What this test canNOT see is component code, which never reads the arrays it
 // pins — it compares a status against a bare literal, and two retired statuses
 // walked back in that way within days of this test landing. That half is
-// enforced on the frontend side, by the run-status/no-ghost-run-status ESLint
+// enforced on the frontend side, by the conversation-status/no-ghost-conversation-status ESLint
 // rule (frontend/eslint-rules/), which reads its vocabulary out of the very
 // declarations parsed below.
-func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
+func TestFrontendMirrorsConversationStatusVocabulary(t *testing.T) {
 	src, err := os.ReadFile("frontend/src/types.ts")
 	if err != nil {
 		t.Fatalf("read types.ts: %v", err)
@@ -109,29 +109,57 @@ func TestFrontendMirrorsRunStatusVocabulary(t *testing.T) {
 	compare := func(decl string, want []string) {
 		got, _ := tsArrayDecl(t, content, decl)
 		if diff := vocabularyDiff(want, got); diff != "" {
-			t.Errorf("frontend %s has drifted from internal/domain/run_status.go:\n%s", decl, diff)
+			t.Errorf("frontend %s has drifted from internal/domain/conversation_status.go:\n%s", decl, diff)
 		}
 	}
 	compare("CLAIM_PHASES", domain.AllClaimPhases())
-	compare("TERMINAL_RUN_STATUSES", domain.AllTerminalRunStatuses())
+	compare("TERMINAL_CONVERSATION_STATUSES", domain.AllTerminalConversationStatuses())
 
-	// RUN_STATUSES is the full union, so it spells only the names that are
+	// CONVERSATION_STATUSES is the full union, so it spells only the names that are
 	// neither a phase nor a terminal and spreads the other two arrays — which
 	// is what keeps it from being a third place to forget a phase.
 	var base []string
-	for _, s := range domain.AllRunStatuses() {
-		if !domain.IsClaimPhase(s) && !domain.IsTerminalRunStatus(s) {
+	for _, s := range domain.AllConversationStatuses() {
+		if !domain.IsClaimPhase(s) && !domain.IsTerminalConversationStatus(s) {
 			base = append(base, s)
 		}
 	}
-	members, spreads := tsArrayDecl(t, content, "RUN_STATUSES")
+	members, spreads := tsArrayDecl(t, content, "CONVERSATION_STATUSES")
 	if diff := vocabularyDiff(base, members); diff != "" {
-		t.Errorf("frontend RUN_STATUSES spells the wrong non-phase non-terminal statuses:\n%s", diff)
+		t.Errorf("frontend CONVERSATION_STATUSES spells the wrong non-phase non-terminal statuses:\n%s", diff)
 	}
-	for _, want := range []string{"CLAIM_PHASES", "TERMINAL_RUN_STATUSES"} {
+	for _, want := range []string{"CLAIM_PHASES", "TERMINAL_CONVERSATION_STATUSES"} {
 		if !slices.Contains(spreads, want) {
-			t.Errorf("frontend RUN_STATUSES must spread ...%s rather than re-listing its members (spreads: %v)", want, spreads)
+			t.Errorf("frontend CONVERSATION_STATUSES must spread ...%s rather than re-listing its members (spreads: %v)", want, spreads)
 		}
+	}
+}
+
+// TestFrontendMirrorsParkReasonVocabulary asserts that every park reason the
+// backend can write onto conversations.park_reason has a gloss in the
+// frontend's PARK_REASON_LABELS, and that the map glosses nothing the backend
+// never writes.
+//
+// Both directions decide what a person reads on the run station's "stop"
+// readout. A reason missing from the map falls through parkReasonLabel to the
+// raw identifier — the run station printing `blueprint_terminal` at a viewer is
+// the exact defect the typed vocabulary replaced, since the old column printed
+// whatever the last writer happened to leave, model stop reasons included. A
+// key the backend never writes is the opposite: a phrase that can never appear,
+// which is how a gloss outlives the reason it described.
+func TestFrontendMirrorsParkReasonVocabulary(t *testing.T) {
+	src, err := os.ReadFile("frontend/src/lib/conversationStatus.ts")
+	if err != nil {
+		t.Fatalf("read conversationStatus.ts: %v", err)
+	}
+	got := tsObjectKeys(t, string(src), "PARK_REASON_LABELS: Record<string, string>")
+
+	want := make([]string, 0, len(domain.AllParkReasons()))
+	for _, r := range domain.AllParkReasons() {
+		want = append(want, string(r))
+	}
+	if diff := vocabularyDiff(want, got); diff != "" {
+		t.Errorf("frontend PARK_REASON_LABELS has drifted from internal/domain/conversation_status.go:\n%s", diff)
 	}
 }
 
@@ -173,42 +201,9 @@ func TestFrontendMirrorsExternalActionVocabulary(t *testing.T) {
 	}
 }
 
-// TestFrontendMirrorsRunActionsLimit pins the run view's copy of the
-// server's action-page cap to the server's own.
-//
-// The list renders a "most recent N" note when it receives a full page, so the
-// two numbers together are what stop a bounded list from reading as a complete
-// one. Raise the cap on the server alone and the note stops firing: the view
-// goes back to truncating silently, which on a governance surface is the
-// failure the note exists to prevent.
-func TestFrontendMirrorsRunActionsLimit(t *testing.T) {
-	// Both sides are read out of their own source, so neither needs an export
-	// that exists only for this test.
-	find := func(file string, re *regexp.Regexp, what string) string {
-		t.Helper()
-		src, err := os.ReadFile(file)
-		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
-		}
-		m := re.FindStringSubmatch(string(src))
-		if m == nil {
-			t.Fatalf("%s has no %s — this guard has stopped reading it", file, what)
-		}
-		return m[1]
-	}
-	server := find("internal/server/agent.go", goRunActionsLimit, "`runActionsLimit = <n>` declaration")
-	frontend := find("frontend/src/components/ActionList.tsx", tsPageConst, "`const PAGE = <n>` declaration")
-	if server != frontend {
-		t.Errorf("ActionList.tsx PAGE = %s, but the server caps the run-scoped action read at %s — a full page would stop being recognized as one",
-			frontend, server)
-	}
-}
-
 var (
-	goRunActionsLimit = regexp.MustCompile(`(?m)^const runActionsLimit = (\d+)$`)
-	tsPageConst       = regexp.MustCompile(`(?m)^const PAGE = (\d+)$`)
-	tsQuotedMember    = regexp.MustCompile(`'([a-z_]+)'`)
-	tsSpreadMember    = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
+	tsQuotedMember = regexp.MustCompile(`'([a-z_]+)'`)
+	tsSpreadMember = regexp.MustCompile(`\.\.\.([A-Z_]+)`)
 	// The const block's one-per-line `ActionX = "x"` form. Anchored to a leading
 	// tab so a doc comment quoting a value can't be mistaken for a declaration.
 	goActionConst = regexp.MustCompile(`(?m)^\tAction\w+\s+=\s+"([a-z_]+)"$`)
@@ -227,12 +222,12 @@ func tsObjectKeys(t *testing.T, src, decl string) []string {
 	open := "export const " + decl + " = {"
 	start := strings.Index(src, open)
 	if start < 0 {
-		t.Fatalf("actionMeta.ts has no `%s…}` declaration — the Go vocabulary needs a frontend mirror to check against", open)
+		t.Fatalf("no `%s…}` declaration found — the Go vocabulary needs a frontend mirror to check against", open)
 	}
 	body := src[start+len(open):]
 	end := strings.Index(body, "\n}")
 	if end < 0 {
-		t.Fatalf("actionMeta.ts declaration %s is unterminated", decl)
+		t.Fatalf("declaration %s is unterminated", decl)
 	}
 	var keys []string
 	for _, m := range tsObjectKey.FindAllStringSubmatch(body[:end], -1) {

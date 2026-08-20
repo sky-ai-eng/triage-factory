@@ -86,14 +86,14 @@ func requireInteractiveSandbox(t *testing.T) (SecretsReader, string) {
 // production contract: the delegate closes it after Run returns), so the
 // LiveRun's own teardown deliberately leaves it up. close is idempotent and
 // also registered as a cleanup backstop.
-func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, runID string) (*sandbox.RunNetwork, []string, func()) {
+func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, conversationID string) (*sandbox.RunNetwork, []string, func()) {
 	t.Helper()
 	ctx := context.Background()
 	creds, err := resolveCredentials(ctx, secrets, orgID, nil)
 	if err != nil {
 		t.Fatalf("resolve credentials: %v", err)
 	}
-	net, err := sandbox.SetupRunNetwork(ctx, runID)
+	net, err := sandbox.SetupRunNetwork(ctx, conversationID)
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
@@ -164,7 +164,7 @@ func assertNoNewNetns(t *testing.T, before map[string]bool) {
 
 // TestIntegration_InteractiveSandbox_SteerAndTeardown is the headline probe:
 // a sandboxed run streams a first turn, takes a second steering message on the
-// same warm process (proving streamInput over the gVisor channel and survival
+// same warm process (proving LiveRun.Send over the gVisor channel and survival
 // of the inter-turn idle), then closes cleanly with no netns/veth left behind.
 // That an assistant turn surfaces BEFORE Close is also the per-line-flush
 // regression (gotcha 2): a coalesced channel would only flush at process exit.

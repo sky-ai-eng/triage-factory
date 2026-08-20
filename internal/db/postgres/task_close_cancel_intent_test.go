@@ -14,12 +14,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestTaskStore_CloseWithRunCancelIntent_Postgres runs the shared close-
+// TestTaskStore_CloseWithConversationCancelIntent_Postgres runs the shared close-
 // carries-stop-intent suite against the Postgres impl. Fixtures are seeded
 // through the harness's admin connection (BYPASSRLS) and the store is wired
 // on the same pool — the method is admin-pool only, so that is the pool it
 // runs on in production too. Skips cleanly when Docker isn't available.
-func TestTaskStore_CloseWithRunCancelIntent_Postgres(t *testing.T) {
+func TestTaskStore_CloseWithConversationCancelIntent_Postgres(t *testing.T) {
 	h := pgtest.Shared(t)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
@@ -52,7 +52,7 @@ func TestTaskStore_CloseWithRunCancelIntent_Postgres(t *testing.T) {
 				}
 				return eventID
 			},
-			Run: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
+			BlueprintAndConversation: func(t *testing.T, taskID, blueprintStatus, convStatus string) (string, string) {
 				t.Helper()
 				brID := seedPgBlueprintRunForClose(t, conn, orgID, userID, taskID, blueprintStatus)
 				promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
@@ -69,7 +69,7 @@ func TestTaskStore_CloseWithRunCancelIntent_Postgres(t *testing.T) {
 				}
 				return brID, convID
 			},
-			BareRun: func(t *testing.T, taskID, convStatus string) string {
+			BareConversation: func(t *testing.T, taskID, convStatus string) string {
 				t.Helper()
 				convID := uuid.New().String()
 				// origin='interactive': the origin CHECK demands the blueprint

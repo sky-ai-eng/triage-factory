@@ -16,9 +16,8 @@ import (
 
 // stage1Func runs one broad-pass Haiku classification. It is the
 // classifier's unit-test seam — a per-instance field on the Runner,
-// defaulted in NewRunner to the real implementation, overridable in tests.
-// It replaces the package-level mutable var `runStage1Haiku`, mirroring the
-// repo-profiler's batchFn pattern.
+// defaulted in NewRunner to the real implementation, overridable in tests —
+// mirroring the repo-profiler's batchFn pattern.
 // orgID is carried explicitly (rather than read off the receiver inside the
 // seam) so a stub can assert the Runner's org threads through to the model
 // call; secrets/recorder/limiter are read off the receiver by the real impl.
@@ -156,7 +155,7 @@ func (r *Runner) run(ctx context.Context) {
 		// project-creation popup is the path to retro-assign these once
 		// projects exist.
 		for _, e := range entities {
-			if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, nil, ""); err != nil {
+			if _, err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, nil, ""); err != nil {
 				classifyLog.Warn("stamp classified_at failed", "org", r.orgID, "entity", e.ID, "error", err)
 			}
 		}
@@ -214,7 +213,7 @@ func (r *Runner) run(ctx context.Context) {
 			}
 			classifyLog.Info("entity unassigned, best score below threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
 		}
-		if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
+		if _, err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
 			classifyLog.Error("assign entity failed", "entity", e.ID, "error", err)
 		}
 	}

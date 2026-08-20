@@ -58,10 +58,10 @@ func IsReservedSocketRootPath(path string) bool {
 	return reserved
 }
 
-// sanitizeRunIDForSocket mirrors cmd/exec/agenthost's private
+// sanitizeSocketName mirrors cmd/exec/agenthost's private
 // sanitizeSocketName exactly (character-for-character); a drift test in
 // that package cross-checks the two functions agree.
-func sanitizeRunIDForSocket(s string) string {
+func sanitizeSocketName(s string) string {
 	r := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z',

@@ -85,6 +85,111 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift).
+		s, orgID, seed := mk(t)
+		created, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#900", "pr", "Returned", "https://example.com/900")
+		if err != nil {
+			t.Fatalf("FindOrCreate: %v", err)
+		}
+		read := func() (*domain.Entity, error) { return s.Get(ctx, orgID, created.ID) }
+
+		snapped, err := s.UpdateSnapshot(ctx, orgID, created.ID, `{"state":"open"}`)
+		if err != nil {
+			t.Fatalf("UpdateSnapshot: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateSnapshot", snapped, read)
+		// last_polled_at is the statement's, not the caller's — the input is
+		// one JSON string and the row carries a stamp alongside it.
+		if snapped.LastPolledAt == nil {
+			t.Error("UpdateSnapshot returned a row with no last_polled_at, the column it stamps")
+		}
+
+		patched, err := s.PatchSnapshot(ctx, orgID, created.ID, `{"state":"draft"}`)
+		if err != nil {
+			t.Fatalf("PatchSnapshot: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "PatchSnapshot", patched, read)
+
+		titled, err := s.UpdateTitle(ctx, orgID, created.ID, "Returned v2")
+		if err != nil {
+			t.Fatalf("UpdateTitle: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateTitle", titled, read)
+
+		described, err := s.UpdateDescription(ctx, orgID, created.ID, "body text")
+		if err != nil {
+			t.Fatalf("UpdateDescription: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateDescription", described, read)
+
+		urled, err := s.UpdateURLSystem(ctx, orgID, created.ID, "https://example.com/900-moved")
+		if err != nil {
+			t.Fatalf("UpdateURLSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateURLSystem", urled, read)
+
+		projectID := seed.Project(t, "returned-row-project")
+		assigned, err := s.AssignProject(ctx, orgID, created.ID, &projectID, "because")
+		if err != nil {
+			t.Fatalf("AssignProject: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "AssignProject", assigned, read)
+		if assigned.ProjectID == nil || *assigned.ProjectID != projectID {
+			t.Errorf("AssignProject returned project %v, want %q", assigned.ProjectID, projectID)
+		}
+
+		// The guarded close: it fires once and declines the second time, and
+		// nil is how the caller tells those apart.
+		closed, err := s.Close(ctx, orgID, created.ID)
+		if err != nil || closed == nil {
+			t.Fatalf("Close: got=%v err=%v", closed, err)
+		}
+		AssertWriteReturnedStoredRow(t, "Close", *closed, read)
+		if closed.State != "closed" || closed.ClosedAt == nil {
+			t.Errorf("Close returned %+v, want state=closed with a closed_at stamp", closed)
+		}
+		again, err := s.Close(ctx, orgID, created.ID)
+		if err != nil || again != nil {
+			t.Errorf("second Close: got=%v err=%v, want (nil, nil) — the guard declined", again, err)
+		}
+
+		marked, err := s.MarkClosed(ctx, orgID, created.ID)
+		if err != nil {
+			t.Fatalf("MarkClosed: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "MarkClosed", marked, read)
+
+		// A miss is an error rather than a silent no-op, on every id-keyed
+		// write — that is what retires the rows-affected probes.
+		missing := uuid.New().String()
+		for _, tc := range []struct {
+			name string
+			run  func() error
+		}{
+			{"UpdateSnapshot", func() error { _, e := s.UpdateSnapshot(ctx, orgID, missing, "{}"); return e }},
+			{"PatchSnapshot", func() error { _, e := s.PatchSnapshot(ctx, orgID, missing, "{}"); return e }},
+			{"UpdateTitle", func() error { _, e := s.UpdateTitle(ctx, orgID, missing, "x"); return e }},
+			{"UpdateDescription", func() error { _, e := s.UpdateDescription(ctx, orgID, missing, "x"); return e }},
+			{"UpdateURLSystem", func() error { _, e := s.UpdateURLSystem(ctx, orgID, missing, "x"); return e }},
+			{"AssignProject", func() error { _, e := s.AssignProject(ctx, orgID, missing, nil, ""); return e }},
+			{"MarkClosed", func() error { _, e := s.MarkClosed(ctx, orgID, missing); return e }},
+		} {
+			if err := tc.run(); !errors.Is(err, sql.ErrNoRows) {
+				t.Errorf("%s on a missing id: got %v, want sql.ErrNoRows", tc.name, err)
+			}
+		}
+		// Close is the exception in shape: its guard makes "no such active
+		// entity" an answer, so a missing id is (nil, nil) like GetBySource.
+		if got, err := s.Close(ctx, orgID, missing); err != nil || got != nil {
+			t.Errorf("Close on a missing id: got=%v err=%v, want (nil, nil)", got, err)
+		}
+	})
+
 	t.Run("FindOrCreate_inserts_then_returns_existing", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
@@ -265,7 +370,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// microsecond bin and .After() returns false.
 		time.Sleep(2 * time.Millisecond)
 
-		if err := s.UpdateSnapshot(ctx, orgID, baseline.ID, `{"k":"v"}`); err != nil {
+		if _, err := s.UpdateSnapshot(ctx, orgID, baseline.ID, `{"k":"v"}`); err != nil {
 			t.Fatalf("UpdateSnapshot: %v", err)
 		}
 
@@ -339,7 +444,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		initialPolled := baseline.LastPolledAt
 
-		if err := s.PatchSnapshot(ctx, orgID, baseline.ID, `{"patched":true}`); err != nil {
+		if _, err := s.PatchSnapshot(ctx, orgID, baseline.ID, `{"patched":true}`); err != nil {
 			t.Fatalf("PatchSnapshot: %v", err)
 		}
 
@@ -403,10 +508,10 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("seed: %v", err)
 		}
 
-		if err := s.UpdateTitle(ctx, orgID, ent.ID, "New Title"); err != nil {
+		if _, err := s.UpdateTitle(ctx, orgID, ent.ID, "New Title"); err != nil {
 			t.Fatalf("UpdateTitle: %v", err)
 		}
-		if err := s.UpdateDescription(ctx, orgID, ent.ID, "Body paragraph"); err != nil {
+		if _, err := s.UpdateDescription(ctx, orgID, ent.ID, "Body paragraph"); err != nil {
 			t.Fatalf("UpdateDescription: %v", err)
 		}
 
@@ -434,7 +539,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		const permalink = "https://acme.slack.com/archives/C0125/p1700000000000200"
-		if err := s.UpdateURLSystem(ctx, orgID, ent.ID, permalink); err != nil {
+		if _, err := s.UpdateURLSystem(ctx, orgID, ent.ID, permalink); err != nil {
 			t.Fatalf("UpdateURLSystem: %v", err)
 		}
 		got, err := s.Get(ctx, orgID, ent.ID)
@@ -445,13 +550,12 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("url = %q, want %q", got.URL, permalink)
 		}
 
-		// A missing id is a no-op (row must exist, but there is no
-		// existence-signal contract here the way AssignProject has —
-		// unlike that method, UpdateURLSystem's only caller already knows
-		// the entity exists (it just created it), so silently affecting
-		// zero rows is acceptable).
-		if err := s.UpdateURLSystem(ctx, orgID, uuid.New().String(), permalink); err != nil {
-			t.Errorf("UpdateURLSystem on missing entity: %v, want nil (no-op)", err)
+		// A missing id is sql.ErrNoRows, like every other id-keyed write on
+		// this store. The caller resolved the entity moments earlier, so the
+		// only way to reach this is the row going away underneath it — which
+		// is worth a log line rather than a silent success.
+		if _, err := s.UpdateURLSystem(ctx, orgID, uuid.New().String(), permalink); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("UpdateURLSystem on missing entity: %v, want sql.ErrNoRows", err)
 		}
 	})
 
@@ -463,7 +567,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("seed: %v", err)
 		}
 
-		if err := s.Close(ctx, orgID, ent.ID); err != nil {
+		if _, err := s.Close(ctx, orgID, ent.ID); err != nil {
 			t.Fatalf("first Close: %v", err)
 		}
 		got, _ := s.Get(ctx, orgID, ent.ID)
@@ -474,7 +578,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Close on an already-closed entity must be a no-op (the
 		// state='active' guard skips the update).
-		if err := s.Close(ctx, orgID, ent.ID); err != nil {
+		if _, err := s.Close(ctx, orgID, ent.ID); err != nil {
 			t.Fatalf("second Close: %v", err)
 		}
 		again, _ := s.Get(ctx, orgID, ent.ID)
@@ -491,7 +595,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if err := s.MarkClosed(ctx, orgID, ent.ID); err != nil {
+		if _, err := s.MarkClosed(ctx, orgID, ent.ID); err != nil {
 			t.Fatalf("MarkClosed: %v", err)
 		}
 		got, _ := s.Get(ctx, orgID, ent.ID)
@@ -518,7 +622,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		// Close, then reactivate.
-		if err := s.Close(ctx, orgID, ent.ID); err != nil {
+		if _, err := s.Close(ctx, orgID, ent.ID); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err = s.Reactivate(ctx, orgID, ent.ID)
@@ -543,7 +647,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		pid := seed.Project(t, "Roundtrip")
-		if err := s.AssignProject(ctx, orgID, ent.ID, &pid, "winner because X"); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, ent.ID, &pid, "winner because X"); err != nil {
 			t.Fatalf("AssignProject: %v", err)
 		}
 
@@ -560,7 +664,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		// nil projectID stamps classified_at but clears the FK.
-		if err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
 			t.Fatalf("AssignProject(nil): %v", err)
 		}
 		got, _ = s.Get(ctx, orgID, ent.ID)
@@ -571,7 +675,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// Unknown id surfaces sql.ErrNoRows so the backfill handler can
 		// report per-row failures. UUID-shape id so Postgres's uuid
 		// column can bind.
-		if err := s.AssignProject(ctx, orgID, uuid.New().String(), &pid, ""); !errors.Is(err, sql.ErrNoRows) {
+		if _, err := s.AssignProject(ctx, orgID, uuid.New().String(), &pid, ""); !errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("AssignProject on missing entity: err = %v, want sql.ErrNoRows", err)
 		}
 	})
@@ -601,7 +705,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("seed entity: %v", err)
 		}
 		pid := seed.Project(t, "Owned")
-		if err := s.AssignProject(ctx, orgID, ent.ID, &pid, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, ent.ID, &pid, ""); err != nil {
 			t.Fatalf("AssignProject: %v", err)
 		}
 		team, err := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID)
@@ -703,7 +807,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// Below-threshold classification: AssignProject(nil) stamps
 		// classified_at while leaving project_id NULL. The wait keys on
 		// classified_at, so this MUST report classified.
-		if err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
 			t.Fatalf("AssignProject(nil): %v", err)
 		}
 		classified, exists, err = s.ClassificationStatusSystem(ctx, orgID, ent.ID)
@@ -724,7 +828,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		if err != nil {
 			t.Fatalf("seed entity 2: %v", err)
 		}
-		if err := s.AssignProject(ctx, orgID, other.ID, &pid, "winner"); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, other.ID, &pid, "winner"); err != nil {
 			t.Fatalf("AssignProject(pid): %v", err)
 		}
 		classified, _, err = s.ClassificationStatusSystem(ctx, orgID, other.ID)
@@ -759,10 +863,10 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#c", "pr", "C", "")
 
 		pid := seed.Project(t, "P")
-		if err := s.AssignProject(ctx, orgID, assigned.ID, &pid, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, assigned.ID, &pid, ""); err != nil {
 			t.Fatalf("assign: %v", err)
 		}
-		if err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
+		if _, err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
 			t.Fatalf("MarkClosed: %v", err)
 		}
 
@@ -791,7 +895,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#la-gh", "pr", "GH", "")
 		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-la-1", "issue", "JI", "")
 		ghClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#la-closed", "pr", "GC", "")
-		if err := s.MarkClosed(ctx, orgID, ghClosed.ID); err != nil {
+		if _, err := s.MarkClosed(ctx, orgID, ghClosed.ID); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 
@@ -828,7 +932,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 				t.Fatalf("create %s: %v", sourceID, err)
 			}
 			if snapshot != "" {
-				if err := s.UpdateSnapshot(ctx, orgID, e.ID, snapshot); err != nil {
+				if _, err := s.UpdateSnapshot(ctx, orgID, e.ID, snapshot); err != nil {
 					t.Fatalf("snapshot %s: %v", sourceID, err)
 				}
 			}
@@ -841,7 +945,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		jiraDone := seedSnap("PROJ-tc-done", "jira", `{"key":"PROJ-tc-done","status":"Done"}`)
 		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress"}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
-		if err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
+		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 
@@ -904,23 +1008,23 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		pid := seed.Project(t, "Panel")
 		assignedActive, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#pa", "pr", "Active", "")
-		if err := s.AssignProject(ctx, orgID, assignedActive.ID, &pid, "r"); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, assignedActive.ID, &pid, "r"); err != nil {
 			t.Fatalf("assign active: %v", err)
 		}
 		assignedClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#pc", "pr", "Closed", "")
-		if err := s.AssignProject(ctx, orgID, assignedClosed.ID, &pid, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, assignedClosed.ID, &pid, ""); err != nil {
 			t.Fatalf("assign closed: %v", err)
 		}
-		if err := s.MarkClosed(ctx, orgID, assignedClosed.ID); err != nil {
+		if _, err := s.MarkClosed(ctx, orgID, assignedClosed.ID); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 		other, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#po", "pr", "Other", "")
 		otherPid := seed.Project(t, "Other")
-		if err := s.AssignProject(ctx, orgID, other.ID, &otherPid, ""); err != nil {
+		if _, err := s.AssignProject(ctx, orgID, other.ID, &otherPid, ""); err != nil {
 			t.Fatalf("assign other: %v", err)
 		}
 
-		got, err := s.ListProjectPanel(ctx, orgID, pid)
+		got, _, err := s.ListProjectPanel(ctx, orgID, pid, db.ListOpts{Limit: 200})
 		if err != nil {
 			t.Fatalf("ListProjectPanel: %v", err)
 		}
@@ -943,7 +1047,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		withDesc, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#d1", "pr", "T", "")
-		if err := s.UpdateDescription(ctx, orgID, withDesc.ID, "rich body"); err != nil {
+		if _, err := s.UpdateDescription(ctx, orgID, withDesc.ID, "rich body"); err != nil {
 			t.Fatalf("UpdateDescription: %v", err)
 		}
 		empty, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#d2", "pr", "T", "")

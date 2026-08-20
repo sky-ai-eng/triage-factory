@@ -12,15 +12,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
-// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(runID)
+// ensureRunTreeFixture creates the on-disk directory RunTreeRoot(conversationID)
 // resolves to. The worktree/mount-scope check now requires a launch's
 // Worktree to actually exist (realPath resolves symlinks, which needs the
 // path to be there) — in production internal/worktree.CreateForPR /
 // MakeRunRoot always materialize it before agentproc.Run ever issues the
 // launch RPC, so tests that want an ACCEPTED launch must do the same.
-func ensureRunTreeFixture(t *testing.T, runID string) string {
+func ensureRunTreeFixture(t *testing.T, conversationID string) string {
 	t.Helper()
-	dir := RunTreeRoot(runID)
+	dir := RunTreeRoot(conversationID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir run-tree fixture %q: %v", dir, err)
 	}
@@ -41,7 +41,7 @@ func ensureGitHooksFixture(t *testing.T) {
 }
 
 // ensureAgentHostSocketFixture creates a placeholder file at
-// TrustedAgentHostSocketPath(runID) — the fixed host path
+// TrustedAgentHostSocketPath(conversationID) — the fixed host path
 // cmd/exec/agenthost.Start binds a real unix socket to — so tests can
 // exercise the existence-checked per-run socket pinning without a real
 // HostDaemon running. realPath only needs the path to exist (any file
@@ -54,13 +54,13 @@ func ensureGitHooksFixture(t *testing.T) {
 // real root is /run/tf, which only root (or whoever the container
 // entrypoint hands it to) can create — mirrors cmd/capbroker's
 // brokerSocketPath test redirection for the same reason.
-func ensureAgentHostSocketFixture(t *testing.T, runID string) string {
+func ensureAgentHostSocketFixture(t *testing.T, conversationID string) string {
 	t.Helper()
 	orig := trustedAgentHostSocketRoot
 	trustedAgentHostSocketRoot = t.TempDir()
 	t.Cleanup(func() { trustedAgentHostSocketRoot = orig })
 
-	sockPath := TrustedAgentHostSocketPath(runID)
+	sockPath := TrustedAgentHostSocketPath(conversationID)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		t.Fatalf("mkdir agenthost socket dir: %v", err)
 	}
@@ -82,9 +82,9 @@ func ensureAgentHostSocketFixture(t *testing.T, runID string) string {
 func validParams() LaunchParams {
 	_ = os.MkdirAll(RunTreeRoot("run-abc123"), 0o755)
 	return LaunchParams{
-		RunID:       "run-abc123",
-		ContainerID: "tf-abc123-1",
-		Rootfs:      RootfsSelector{Name: "base"},
+		ConversationID: "run-abc123",
+		ContainerID:    "tf-abc123-1",
+		Rootfs:         RootfsSelector{Name: "base"},
 		Env: []EnvVar{
 			{Key: "PATH", Value: "/usr/bin"},
 			{Key: "ANTHROPIC_BASE_URL", Value: "http://10.42.1.1:9000"},
@@ -514,7 +514,7 @@ func TestValidateLaunchParams_AcceptsRealisticMountSet(t *testing.T) {
 		t.Fatalf("resolve trusted TF binary path: %v", err)
 	}
 	p := validParams()
-	agentSocket := ensureAgentHostSocketFixture(t, p.RunID)
+	agentSocket := ensureAgentHostSocketFixture(t, p.ConversationID)
 	p.Mounts = []Mount{
 		{Source: tfBin, Destination: TrustedTFBinaryDestination, Options: []string{"ro"}},
 		{Source: TrustedGitHooksDir(), Destination: githooks.SandboxDir, Options: []string{"ro"}},

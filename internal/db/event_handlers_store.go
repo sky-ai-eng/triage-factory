@@ -2,11 +2,24 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=EventHandlerStore --output=./mocks --case=underscore --with-expecter
+
+// ErrNoSuchEventHandler means an id-keyed write named no live handler. Three
+// stored states produce it and none is distinguishable to a caller holding
+// only an id, which is why they share one answer: no row carries the id, the
+// row is soft-deleted, or the row is of the other kind than the write is for
+// (Promote wants a rule, RetargetBlueprint wants a trigger). The id not
+// parsing as a UUID is the same answer for the same reason — nothing can
+// answer to it.
+//
+// Only the writes return it: Get and GetBySystemSlug keep answering a miss
+// with (nil, nil).
+var ErrNoSuchEventHandler = errors.New("no live event handler with that id")
 
 // EventHandlerStore is the unified successor to TaskRuleStore + TriggerStore.
 // One table, one store, one router query. Rows are partitioned by
@@ -32,6 +45,43 @@ import (
 //     otherwise gate on creator_user_id = tf.current_user_id().
 //
 // SQLite: one connection; orgID is the local sentinel for local mode.
+//
+// # Every single-row write returns the row it persisted
+//
+// Create, Update, Promote and RetargetBlueprint hand back the
+// stored row, read off RETURNING on the write statement itself rather than
+// from a follow-up SELECT, projecting the point read's column list and scanner
+// so the write shape cannot drift from the read shape. The row is the only
+// place several of these outcomes are visible: Update decides user_modified by
+// comparing against stored content, so whether the flag flipped is not
+// something the caller's struct knows; Promote clears the rule-only columns
+// and populates the trigger-only ones in one statement; both restamp
+// updated_at. A miss is ErrNoSuchEventHandler rather than the silent
+// zero-rows these writes used to report.
+//
+// Exempt, each said so at the method: Seed and Sync (shipped-content
+// reconciliation over a whole team's set), Reorder (a set write — it renumbers
+// every rule in one transaction), and Delete (a delete, hard or soft by the
+// row's provenance).
+// EventHandlerListFilter is the event-handler list's filter set.
+type EventHandlerListFilter struct {
+	// Kind is "" (both), "rule", or "trigger".
+	Kind string
+	// TeamID scopes to one team's handlers; "" returns everything visible
+	// (solo/local, or an unfiltered view). Every handler is team-owned
+	// (team_id NOT NULL, no org-visible tier), so this is a plain team
+	// filter. The SQLite impl ignores it — local mode is single-team.
+	TeamID string
+	// GatedEventTypes are event types this org is not entitled to; handlers
+	// bound to one are hidden. Rows persist regardless of entitlement state —
+	// this is visibility only.
+	//
+	// It filters in the query rather than after the read for the same reason
+	// BlueprintListFilter's does: a post-window trim shortens the page and
+	// leaves total_count counting rows the caller cannot see.
+	GatedEventTypes []string
+}
+
 type EventHandlerStore interface {
 	// Seed materializes every row in ShippedEventHandlers as the given
 	// team's own copy if it isn't already present, leaving existing rows
@@ -58,18 +108,18 @@ type EventHandlerStore interface {
 	// team does this fire for?" In local mode the caller passes
 	// runmode.LocalDefaultTeamID; in multi mode each new team calls Seed at
 	// creation time to inherit the shipped defaults.
+	//
+	// Exempt from the returned-row rule: it reconciles a set, so there is no
+	// single row a return value could name — and its INSERT is ON CONFLICT DO
+	// NOTHING, which returns nothing at all for the rows that were already
+	// there. What it wrote is read back through List / GetBySystemSlug.
 	Seed(ctx context.Context, orgID, teamID string, blueprintIDsBySlug map[string]string) error
 
-	// List returns handlers in the order:
+	// List returns one page of handlers plus the unpaged total, in the order:
 	//   rules first by sort_order ASC, then name ASC,
-	//   then triggers by created_at DESC.
-	// kind="" returns all. kind="rule" or kind="trigger" filters.
-	// teamID="" returns all (solo/local, or unfiltered). A non-empty
-	// teamID — the multi-team prompts page narrowed to one team — scopes
-	// to that team's handlers. Every handler is team-owned (team_id NOT
-	// NULL, no org-visible tier), so this is a plain team
-	// filter. The SQLite impl ignores it (local mode is single-team).
-	List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error)
+	//   then triggers by created_at DESC,
+	// with an id tiebreaker so the order is total and the pages partition it.
+	List(ctx context.Context, orgID string, f EventHandlerListFilter, opts ListOpts) ([]domain.EventHandler, int, error)
 
 	// Get returns one handler by id, or (nil, nil) if not found or soft-deleted.
 	Get(ctx context.Context, orgID string, id string) (*domain.EventHandler, error)
@@ -99,7 +149,11 @@ type EventHandlerStore interface {
 	// server-side. The Postgres impl binds teamID directly (it satisfies
 	// the team-membership RLS); the SQLite impl ignores it (local mode is
 	// single-team and pins the sentinel).
-	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error
+	//
+	// Returns the persisted row, which carries the server-stamped timestamps,
+	// the forced source and the team_id and creator each dialect resolved its
+	// own way — none of which h describes.
+	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error)
 
 	// Update changes a handler's mutable fields. ID, kind, source,
 	// event_type, and created_at are immutable. For triggers,
@@ -110,17 +164,22 @@ type EventHandlerStore interface {
 	// scope_predicate_json, name, default_priority (rules), or
 	// breaker_threshold / min_autonomy_suitability (triggers). Never stamps
 	// for enabled or sort_order alone: activation state and presentation
-	// order are the user's to own regardless of content drift, matching the
-	// dedicated SetEnabled / Reorder methods below. Determined by comparing
+	// order are the user's to own regardless of content drift, which is the
+	// same reason Reorder never stamps either. Determined by comparing
 	// against the row's current content, so a caller that resends unchanged
 	// content alongside a new enabled value does not spuriously stamp.
-	Update(ctx context.Context, orgID string, h domain.EventHandler) error
-
-	// SetEnabled flips just the enabled bit — the user-facing enable/disable
-	// toggle, and (per the automations-as-toggles product direction) the
-	// primary way most users interact with a shipped handler. Never stamps
-	// user_modified: activation state is not content.
-	SetEnabled(ctx context.Context, orgID string, id string, enabled bool) error
+	//
+	// An enabled-only update is how the product enables and disables a
+	// handler — the rule and trigger switches both PATCH this field — so that
+	// exclusion is load-bearing rather than an edge case: flipping a shipped
+	// handler off must not mark it user-modified and take it out of content
+	// sync.
+	//
+	// Returns the updated row, or ErrNoSuchEventHandler. The stamping decision
+	// above is exactly why the row and not h is the answer: whether
+	// user_modified flipped is a fact about stored content the caller never
+	// held.
+	Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error)
 
 	// Delete removes a handler. A row with a system_slug (a shipped copy)
 	// soft-deletes — stamps deleted_at, leaving the
@@ -131,6 +190,10 @@ type EventHandlerStore interface {
 	// path filters deleted_at IS NULL, so a soft-deleted row is
 	// indistinguishable from a hard-deleted one to every caller except the
 	// sync itself.
+	//
+	// Exempt from the returned-row rule: it is a delete. The soft arm leaves a
+	// row, but one every read path filters out — precisely the row a caller
+	// must not be handed as a result.
 	Delete(ctx context.Context, orgID string, id string) error
 
 	// Reorder updates sort_order for each rule based on its position
@@ -138,6 +201,10 @@ type EventHandlerStore interface {
 	// silently skipped (sort_order is rule-only by CHECK constraint).
 	// Wrapped in a transaction. Never stamps user_modified — sort_order is
 	// presentation order the user owns, not shipped content.
+	//
+	// Exempt from the returned-row rule: it writes a set. The order it
+	// establishes is a property of the whole list, and the caller already
+	// holds that list — it is the argument.
 	Reorder(ctx context.Context, orgID string, ids []string) error
 
 	// Promote converts a kind='rule' row to kind='trigger' atomically:
@@ -146,7 +213,11 @@ type EventHandlerStore interface {
 	// the row isn't found, isn't a rule, or the new trigger fields
 	// don't satisfy the CHECK constraints. Always stamps user_modified=true —
 	// a kind change is never something the sync should undo.
-	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error
+	//
+	// Returns the promoted row, or ErrNoSuchEventHandler when no live rule
+	// carries the id. t describes only the trigger half of the outcome; the
+	// row carries the cleared rule-only columns with it.
+	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) (domain.EventHandler, error)
 
 	// RetargetBlueprint re-points a trigger at a different blueprint in a single
 	// UPDATE, preserving the handler row — and its id, which runs /
@@ -159,7 +230,11 @@ type EventHandlerStore interface {
 	// user_modified=true — a user-initiated retarget must never be silently
 	// reverted by a later sync pass (which re-resolves an unmodified trigger's
 	// blueprint binding from the shipped slug on every boot).
-	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) error
+	//
+	// Returns the retargeted row, or ErrNoSuchEventHandler — which is now what
+	// a rule id gets, rather than the silent no-op the kind filter used to
+	// produce.
+	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) (domain.EventHandler, error)
 
 	// Sync brings teamID's unmodified copies of shippedHandlers up to current
 	// shipped content, one handler at a time. Production callers always pass
@@ -190,6 +265,10 @@ type EventHandlerStore interface {
 	// takes, built fresh by the caller from post-blueprint-sync state.
 	//
 	// Runs on the admin pool; must run OUTSIDE any WithTx (mirrors Seed).
+	//
+	// Exempt from the returned-row rule: it reconciles a whole team's shipped
+	// set, most of it to no-ops, so there is no single row a return value
+	// could name.
 	Sync(ctx context.Context, orgID, teamID string, shippedHandlers []ShippedEventHandler, blueprintIDsBySlug map[string]string) error
 
 	// --- Admin-pool variants (`...System`) ---

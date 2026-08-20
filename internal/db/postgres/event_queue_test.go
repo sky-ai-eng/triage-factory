@@ -82,7 +82,7 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	if err := stores.EventQueue.MarkFailed(ctx, orgA, claimed.ID, "boom"); err != nil {
 		t.Fatalf("MarkFailed orgA: %v", err)
 	}
-	if parkedB, err := stores.EventQueue.ListFailedEvents(ctx, orgB, 0); err != nil {
+	if parkedB, _, err := stores.EventQueue.ListFailedEvents(ctx, orgB, db.ListOpts{Limit: 50}); err != nil {
 		t.Fatalf("ListFailedEvents orgB: %v", err)
 	} else if len(parkedB) != 0 {
 		t.Errorf("orgB ListFailedEvents returned %d of orgA's parked rows", len(parkedB))
@@ -92,7 +92,7 @@ func TestEventQueueStore_Postgres_CrossOrg(t *testing.T) {
 	} else if n != 0 {
 		t.Errorf("orgB requeued %d of orgA's parked rows, want 0", n)
 	}
-	parkedA, _ := stores.EventQueue.ListFailedEvents(ctx, orgA, 0)
+	parkedA, _, _ := stores.EventQueue.ListFailedEvents(ctx, orgA, db.ListOpts{Limit: 50})
 	if len(parkedA) != 1 || parkedA[0].ID != claimed.ID {
 		t.Fatalf("orgA's parked row = %+v, want the row it parked, untouched", parkedA)
 	}

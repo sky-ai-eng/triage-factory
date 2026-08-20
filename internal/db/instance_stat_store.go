@@ -15,6 +15,9 @@ import (
 // "...System" suffix. SQLite is N=1: the single process samples itself.
 type InstanceStatStore interface {
 	// Record appends one sample. Called once a minute per pod by the sampler.
+	//
+	// Exempt from the returned-row rule: fire-and-forget telemetry. The sample
+	// is written on the way past and spent by a later aggregate read.
 	Record(ctx context.Context, stat domain.InstanceStat) error
 
 	// ListSince returns every sample at-or-after `since`, oldest first,

@@ -25,7 +25,7 @@ func TestProcRegistry_RegisterGetDeregister(t *testing.T) {
 	if h == nil {
 		t.Fatal("expected a handle after register")
 	}
-	if h.lr != lr || h.runID != "run-1" || h.orgID != "org-1" {
+	if h.lr != lr || h.conversationID != "run-1" || h.orgID != "org-1" {
 		t.Errorf("handle mismatch: %+v", h)
 	}
 	s.deregisterProc("run-1")
@@ -95,7 +95,7 @@ func TestSpawnerExecutorIdentityIndependentPerInstance(t *testing.T) {
 // leaves the conversation unclaimed, never claiming under a fabricated id.
 func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-exec", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-exec", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	// Unwired: the empty id releases rather than mints, so no active claim
@@ -120,12 +120,12 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	}
 }
 
-// TestStop_ActiveRun_RoutesThroughController verifies the live-run stop
+// TestStop_ActiveConversation_RoutesThroughController verifies the live-run stop
 // path: an active run (a registered cancel handle) is killed via the
 // controller rather than the DB-only path.
-func TestStop_ActiveRun_RoutesThroughController(t *testing.T) {
+func TestStop_ActiveConversation_RoutesThroughController(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-active", "sess", "/tmp/wt") // status running
+	seedConversation(t, database, "r-active", "sess", "/tmp/wt") // status running
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fired := make(chan struct{}, 1)
 	s.cancels["r-active"] = func() { fired <- struct{}{} }
@@ -148,29 +148,29 @@ func TestParseMaxConcurrentRuns(t *testing.T) {
 		wantClamped bool
 		wantErr     bool
 	}{
-		{"empty uses default", "", DefaultMaxConcurrentRuns, false, false},
-		{"whitespace uses default", "  ", DefaultMaxConcurrentRuns, false, false},
+		{"empty uses default", "", DefaultMaxConcurrentClaims, false, false},
+		{"whitespace uses default", "  ", DefaultMaxConcurrentClaims, false, false},
 		{"plain value", "32", 32, false, false},
 		{"trims whitespace", " 8 ", 8, false, false},
 		{"one is legal", "1", 1, false, false},
 		{"ceiling exactly", "256", 256, false, false},
-		{"above ceiling clamps", "1000", MaxConcurrentRunsCeiling, true, false},
-		{"zero is invalid", "0", DefaultMaxConcurrentRuns, false, true},
-		{"negative is invalid", "-3", DefaultMaxConcurrentRuns, false, true},
-		{"garbage is invalid", "lots", DefaultMaxConcurrentRuns, false, true},
-		{"float is invalid", "4.5", DefaultMaxConcurrentRuns, false, true},
+		{"above ceiling clamps", "1000", MaxConcurrentClaimsCeiling, true, false},
+		{"zero is invalid", "0", DefaultMaxConcurrentClaims, false, true},
+		{"negative is invalid", "-3", DefaultMaxConcurrentClaims, false, true},
+		{"garbage is invalid", "lots", DefaultMaxConcurrentClaims, false, true},
+		{"float is invalid", "4.5", DefaultMaxConcurrentClaims, false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, clamped, err := ParseMaxConcurrentRuns(tt.raw)
+			got, clamped, err := ParseMaxConcurrentClaims(tt.raw)
 			if got != tt.want {
-				t.Errorf("ParseMaxConcurrentRuns(%q) = %d, want %d", tt.raw, got, tt.want)
+				t.Errorf("ParseMaxConcurrentClaims(%q) = %d, want %d", tt.raw, got, tt.want)
 			}
 			if clamped != tt.wantClamped {
-				t.Errorf("ParseMaxConcurrentRuns(%q) clamped = %v, want %v", tt.raw, clamped, tt.wantClamped)
+				t.Errorf("ParseMaxConcurrentClaims(%q) clamped = %v, want %v", tt.raw, clamped, tt.wantClamped)
 			}
 			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseMaxConcurrentRuns(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
+				t.Errorf("ParseMaxConcurrentClaims(%q) err = %v, wantErr %v", tt.raw, err, tt.wantErr)
 			}
 		})
 	}
@@ -258,8 +258,8 @@ func TestDerivedRunCapacity(t *testing.T) {
 		{"16GB host", 16 * 1024, 16},
 		{"32GB host", 32 * 1024, 80},
 		{"64GB host", 64 * 1024, 208},
-		{"96GB hits the ceiling", 96 * 1024, MaxConcurrentRunsCeiling},
-		{"huge host stays at ceiling", 512 * 1024, MaxConcurrentRunsCeiling},
+		{"96GB hits the ceiling", 96 * 1024, MaxConcurrentClaimsCeiling},
+		{"huge host stays at ceiling", 512 * 1024, MaxConcurrentClaimsCeiling},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -282,7 +282,7 @@ func TestExecutorReserve_RescuesSmallPodCapacity(t *testing.T) {
 		t.Fatalf("precondition: an %dMB host under the all-in-one reserve should derive 0", smallPodMB)
 	}
 	got := DerivedRunCapacityWithReserve(smallPodMB, DefaultExecutorPlatformReserveMB)
-	want := (smallPodMB - DefaultExecutorPlatformReserveMB) / DefaultRunMemoryBudgetMB
+	want := (smallPodMB - DefaultExecutorPlatformReserveMB) / DefaultClaimMemoryBudgetMB
 	if got != want {
 		t.Errorf("DerivedRunCapacityWithReserve(%d, executor reserve) = %d, want %d", smallPodMB, got, want)
 	}
@@ -323,7 +323,7 @@ func TestParsePlatformReserveMB(t *testing.T) {
 // utilization is not a backlog), a blocked acquire with queued work opens
 // the episode exactly once, and an immediate acquire closes it.
 func TestNoteCapSaturationTransitions(t *testing.T) {
-	s, database, _, _, run0 := reactorFixture(t, "capsat", 1, "completed", "finish")
+	s, database, _, _, step0ConversationID := reactorFixture(t, "capsat", 1, "completed", "finish")
 	ctx := context.Background()
 
 	s.noteCapAcquireBlocked(ctx, 4)
@@ -331,7 +331,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 		t.Error("blocked acquire with an empty queue must not open a saturation episode")
 	}
 
-	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, run0); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("force queued: %v", err)
 	}
 	s.noteCapAcquireBlocked(ctx, 4)
@@ -351,7 +351,7 @@ func TestNoteCapSaturationTransitions(t *testing.T) {
 }
 
 // TestNoteCapSaturation_NilRunQueueSafe guards test/partial-wiring setups: a
-// spawner with no RunQueueStore must not panic when the dispatcher helpers
+// spawner with no ConversationQueueStore must not panic when the dispatcher helpers
 // fire.
 func TestNoteCapSaturation_NilRunQueueSafe(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")

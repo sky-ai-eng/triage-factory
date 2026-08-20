@@ -17,7 +17,7 @@ import (
 // invoking the recompute, without spawning a real agent.
 //
 // setupAdvanceFixture seeds an entity + event + task + a 1-step blueprint_run
-// whose single run starts 'running' (see seedRun → seedRunBlueprint).
+// whose single run starts 'running' (see seedConversation → seedConversationBlueprint).
 
 func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 	s, database, _, taskID := setupAdvanceFixture(t, "ip")
@@ -32,9 +32,9 @@ func TestRecomputeBoard_RunningSetsInProgress(t *testing.T) {
 
 // A parked run — `open` — moves the aggregate to in_review.
 func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "ai")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "ai")
 	stampBotClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -46,10 +46,10 @@ func TestRecomputeBoard_OpenSetsInReview(t *testing.T) {
 // An unresolved artifact (a draft PR) is the derived approval signal and lands
 // the task in the same "needs 👀" column even though no run is parked open.
 func TestRecomputeBoard_UnresolvedArtifactSetsInReview(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "unresolved")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "unresolved")
 	stampBotClaim(t, database, taskID)
 	// Run stays running; the draft PR it queued is what surfaces the approval column.
-	seedDraftPRArtifact(t, s, runID)
+	seedDraftPRArtifact(t, s, conversationID)
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -62,7 +62,7 @@ func TestRecomputeBoard_UnresolvedArtifactSetsInReview(t *testing.T) {
 // (park) → in_progress (resume) → in_review (park again). The aggregate follows
 // the run state each time, no step-count gate.
 func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "bounce")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "bounce")
 	stampBotClaim(t, database, taskID)
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
@@ -70,19 +70,19 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 		t.Fatalf("initial: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, runID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after open: status = %q, want in_review", got)
 	}
 
-	setRunStatus(t, database, runID, "running")
+	setConversationStatus(t, database, conversationID, "running")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
 		t.Fatalf("after resume: status = %q, want in_progress", got)
 	}
 
-	setRunStatus(t, database, runID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Fatalf("after second park: status = %q, want in_review", got)
@@ -93,12 +93,12 @@ func TestRecomputeBoard_BouncesAcrossInteractionPoints(t *testing.T) {
 // An earlier step completed + the current step parked → in_review (any parked).
 // All-unparked → in_progress. Same rule as 1-step; more runs just feed it.
 func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "multi")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "multi")
 	stampBotClaim(t, database, taskID)
-	brID := blueprintRunIDForRun(t, database, runID)
+	brID := blueprintRunIDForConversation(t, database, conversationID)
 	// Step 0 (the seeded run) completed; add step 1, currently running.
-	setRunStatus(t, database, runID, "completed")
-	addStepRun(t, database, brID, taskID, "step1-multi", 1, "running")
+	setConversationStatus(t, database, conversationID, "completed")
+	addStepConversation(t, database, brID, taskID, "step1-multi", 1, "running")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_progress" {
@@ -106,7 +106,7 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 	}
 
 	// Now step 1 parks open → in_review (any parked run flips the aggregate).
-	setRunStatus(t, database, "step1-multi", "open")
+	setConversationStatus(t, database, "step1-multi", "open")
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 	if got := readTaskStatus(t, database, taskID); got != "in_review" {
 		t.Errorf("step parked: status = %q, want in_review", got)
@@ -116,9 +116,9 @@ func TestRecomputeBoard_MultiStepAggregate(t *testing.T) {
 // A user claim is column-neutral: a user-claimed task is owned by the user, so
 // the recompute leaves their card alone even with a parked run.
 func TestRecomputeBoard_UserClaimedTaskNeutral(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "user-claim")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "user-claim")
 	stampUserClaim(t, database, taskID)
-	setRunStatus(t, database, runID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -140,12 +140,12 @@ func TestRecomputeBoard_UnclaimedTaskNeutral(t *testing.T) {
 
 // Already-terminal task: a late transition must not reopen a done/dismissed row.
 func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "already-done")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "already-done")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(`UPDATE tasks SET status = 'dismissed' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
-	setRunStatus(t, database, runID, "open")
+	setConversationStatus(t, database, conversationID, "open")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -158,17 +158,17 @@ func TestRecomputeBoard_AlreadyTerminalNeutral(t *testing.T) {
 // terminateBlueprint owns the terminal column, so recompute is a no-op and
 // leaves the task where it is.
 func TestRecomputeBoard_NoActiveBlueprintRunNeutral(t *testing.T) {
-	s, database, runID, taskID := setupAdvanceFixture(t, "noactive")
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "noactive")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("park: %v", err)
 	}
 	// Terminate the blueprint_run so there is no active run for the task.
-	brID := blueprintRunIDForRun(t, database, runID)
+	brID := blueprintRunIDForConversation(t, database, conversationID)
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed' WHERE id = ?`, brID); err != nil {
 		t.Fatalf("complete blueprint_run: %v", err)
 	}
-	setRunStatus(t, database, runID, "completed")
+	setConversationStatus(t, database, conversationID, "completed")
 
 	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
 
@@ -203,14 +203,14 @@ func setupAdvanceFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, string
 	); err != nil {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
-	runID := "r-adv-" + suffix
-	seedRun(t, database, runID, "sess-"+suffix, "/tmp/wt-adv-"+suffix)
+	conversationID := "r-adv-" + suffix
+	seedConversation(t, database, conversationID, "sess-"+suffix, "/tmp/wt-adv-"+suffix)
 	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, runID).Scan(&taskID); err != nil {
+	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
 		t.Fatalf("lookup task_id: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	return s, database, runID, taskID
+	return s, database, conversationID, taskID
 }
 
 func stampBotClaim(t *testing.T, database *sql.DB, taskID string) {
@@ -242,31 +242,31 @@ func readTaskStatus(t *testing.T, database *sql.DB, taskID string) string {
 	return status
 }
 
-func setRunStatus(t *testing.T, database *sql.DB, runID, status string) {
+func setConversationStatus(t *testing.T, database *sql.DB, conversationID, status string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, runID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, conversationID); err != nil {
 		t.Fatalf("set run status: %v", err)
 	}
 }
 
-func blueprintRunIDForRun(t *testing.T, database *sql.DB, runID string) string {
+func blueprintRunIDForConversation(t *testing.T, database *sql.DB, conversationID string) string {
 	t.Helper()
 	var brID string
-	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, runID).Scan(&brID); err != nil {
+	if err := database.QueryRow(`SELECT blueprint_run_id FROM conversations WHERE id = ?`, conversationID).Scan(&brID); err != nil {
 		t.Fatalf("read blueprint_run_id: %v", err)
 	}
 	return brID
 }
 
-// addStepRun appends another step run to an existing blueprint_run so the
+// addStepConversation appends another step run to an existing blueprint_run so the
 // multi-step aggregate can be exercised.
-func addStepRun(t *testing.T, database *sql.DB, blueprintRunID, taskID, runID string, stepIndex int, status string) {
+func addStepConversation(t *testing.T, database *sql.DB, blueprintRunID, taskID, conversationID string, stepIndex int, status string) {
 	t.Helper()
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, team_id, visibility,
 		                  creator_user_id, worktree_path, blueprint_run_id, blueprint_step_index)
 		VALUES (?, ?, 'test-prompt', ?, 'manual', ?, 'team', ?, '/tmp/wt-step', ?, ?)
-	`, runID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex); err != nil {
+	`, conversationID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex); err != nil {
 		t.Fatalf("add step run: %v", err)
 	}
 }

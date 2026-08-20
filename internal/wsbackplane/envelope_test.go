@@ -45,7 +45,7 @@ func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
 }
 
 // TestWireEvent_MalformedDataDegradesGracefully asserts a corrupt Data
-// payload doesn't sink the whole event — Type/OrgID/RunID still route.
+// payload doesn't sink the whole event — Type/OrgID/ConversationID still route.
 func TestWireEvent_MalformedDataDegradesGracefully(t *testing.T) {
 	we := wireEvent{Type: "task_updated", OrgID: "org-1", Data: json.RawMessage(`{not valid json`)}
 	got := we.toEvent()

@@ -20,7 +20,9 @@ import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRos
 import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
 import type { ArchivePreview } from '../../lib/teamLifecycle'
 import { toast } from '../../components/Toast/toastStore'
-import { apiFetch, apiJSON } from '../../lib/apiClient'
+import { apiFetch, apiList } from '../../lib/apiClient'
+import { fetchTeamRoster } from '../../lib/teamRoster'
+import { fetchTeamRepos } from '../settings/teamConfig'
 import './team-settings.css'
 
 // Team settings — the overview, and the three source pages behind it.
@@ -200,11 +202,11 @@ export default function TeamSettings() {
       protectedRole: 'admin',
       roleLabels: ROLE_LABELS,
       async fetchMembers(): Promise<RosterMember[]> {
-        // Never build the URL without an id: `/api/teams//members` matches no
-        // route, and comes back as "endpoint not found".
+        // Never build the URL without an id: a blank one addresses no team, and
+        // comes back as "endpoint not found".
         if (!teamId) return []
-        const data = await apiJSON<{ members: MemberApiRow[] }>(`/api/teams/${teamId}/members`)
-        return data.members.map((m) => ({
+        const roster = await fetchTeamRoster(teamId)
+        return roster.members.map((m) => ({
           userId: m.user_id,
           displayName: m.display_name,
           githubUsername: m.github_username,
@@ -245,9 +247,7 @@ export default function TeamSettings() {
       // The first consequence the design states, and the one number this page
       // does not already hold. Best-effort: an unread count is a line the
       // dialog leaves out, never a zero.
-      apiJSON<{ repos: string[] }>(`/api/settings/team/${encodeURIComponent(teamId)}/repos`)
-        .then((d) => (d.repos ?? []).length)
-        .catch(() => null),
+      fetchTeamRepos(teamId).then((repos) => repos?.length ?? null),
     ])
       .then(([live, repos]) => {
         setPreview(live)
@@ -318,9 +318,14 @@ export default function TeamSettings() {
   useEffect(() => {
     if (!orgId || !isAdmin) return
     let live = true
-    void apiJSON<{ members: MemberApiRow[] }>(`/api/orgs/${orgId}/members`)
-      .then((d) => {
-        if (live) setOrgPeople(d.members)
+    // page_size at the route max: the candidate set is the whole directory
+    // minus the team, which is a comparison across both rosters rather than a
+    // page of rows to read.
+    void apiList<MemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
+      page_size: 200,
+    })
+      .then((page) => {
+        if (live) setOrgPeople(page.items)
       })
       .catch(() => {
         // A directory that cannot be read leaves the draft page with nothing to

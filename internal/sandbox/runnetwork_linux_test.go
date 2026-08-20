@@ -106,9 +106,9 @@ func TestSandboxClose_RespectsNetworkOwnership(t *testing.T) {
 	defaultAllocator().MarkInUse(borrowedIdx)
 	t.Cleanup(func() { defaultAllocator().Release(borrowedIdx) })
 	sbBorrowed := &Sandbox{
-		RunID:     "borrowed",
-		SubnetIdx: borrowedIdx,
-		teardown:  &teardownState{subnetIdx: borrowedIdx, ownsNetwork: false},
+		ConversationID: "borrowed",
+		SubnetIdx:      borrowedIdx,
+		teardown:       &teardownState{subnetIdx: borrowedIdx, ownsNetwork: false},
 	}
 	if err := sbBorrowed.Close(); err != nil {
 		t.Fatalf("Close (borrowed): %v", err)
@@ -124,9 +124,9 @@ func TestSandboxClose_RespectsNetworkOwnership(t *testing.T) {
 	const ownedIdx = 201
 	defaultAllocator().MarkInUse(ownedIdx)
 	sbOwned := &Sandbox{
-		RunID:     "owned",
-		SubnetIdx: ownedIdx,
-		teardown:  &teardownState{subnetIdx: ownedIdx, ownsNetwork: true, netSt: NetworkState{}},
+		ConversationID: "owned",
+		SubnetIdx:      ownedIdx,
+		teardown:       &teardownState{subnetIdx: ownedIdx, ownsNetwork: true, netSt: NetworkState{}},
 	}
 	if err := sbOwned.Close(); err != nil {
 		t.Fatalf("Close (owned): %v", err)

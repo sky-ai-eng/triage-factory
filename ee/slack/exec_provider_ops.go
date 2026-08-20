@@ -17,7 +17,7 @@ import (
 // answer here is an authorization decision, a workspace IDENTITY (never a bot
 // token — that rides the sealed bundle; see exec_provider.go), or — for
 // opRecordThreadRoot — the entity bookkeeping only the orchestrator's stores
-// can do. Identity is bound orchestrator-side from the RunInfo the ProviderOp
+// can do. Identity is bound orchestrator-side from the ConversationInfo the ProviderOp
 // receives, so a sidecar cannot steer these at another org's channels.
 
 // registerSlackProviderOps registers the Slack policy ops. Every op is a pure
@@ -71,9 +71,9 @@ type (
 	}
 )
 
-// slackOpAuthorizeChannel is the stage-1 gate: does the run's team track the
+// slackOpAuthorizeChannel is the stage-1 gate: does the conversation's team track the
 // channel (mirrors exec workspace add's team-tracked-repo gate).
-func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
+func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, err
@@ -94,11 +94,11 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
 // a channel — the non-secret half of the old resolveWorkspaceAndToken. Channel
-// registry unknown → error. If this run's task is a slack:message naming this
+// registry unknown → error. If this conversation's task is a slack:message naming this
 // SAME channel, that message's (workspace_id, api_app_id) is authoritative;
 // otherwise every connected workspace matching the channel's WorkspaceID is
 // listed: exactly one → use it; more than one → refuse rather than guess.
-func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
+func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, err
@@ -115,7 +115,7 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 		return nil, fmt.Errorf("slack: channel %s is not visible to Triage Factory", a.Channel)
 	}
 
-	if ws, metaChannel, ok, err := workspaceFromRunTaskMetadata(ctx, stores, info); err != nil {
+	if ws, metaChannel, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
 		return nil, err
 	} else if ok && metaChannel == a.Channel {
 		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
@@ -144,12 +144,12 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 }
 
 // slackOpResolveWorkspaceForDownload resolves which (workspace, app) IDENTITY to
-// speak as for `download`, which carries no channel: prefer this run's own
+// speak as for `download`, which carries no channel: prefer this conversation's own
 // message-task metadata, else the org's sole connected workspace (refuse on
 // zero or ambiguous). This picks an identity ONLY; the file's real channel
 // membership is authorized separately (slackOpAuthorizeFileChannels).
-func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, info agenthost.RunInfo, _ json.RawMessage) (any, error) {
-	if ws, _, ok, err := workspaceFromRunTaskMetadata(ctx, stores, info); err != nil {
+func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, _ json.RawMessage) (any, error) {
+	if ws, _, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
 		return nil, err
 	} else if ok {
 		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
@@ -160,7 +160,7 @@ func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, i
 	}
 	if len(workspaces) != 1 {
 		return nil, fmt.Errorf(
-			"slack: cannot determine which connected workspace to download from (this run has no Slack thread context and the org has %d connected workspaces)",
+			"slack: cannot determine which connected workspace to download from (this conversation has no Slack thread context and the org has %d connected workspaces)",
 			len(workspaces))
 	}
 	return slackWorkspaceIdentity{WorkspaceID: workspaces[0].WorkspaceID, APIAppID: workspaces[0].APIAppID}, nil
@@ -169,7 +169,7 @@ func slackOpResolveWorkspaceForDownload(ctx context.Context, stores db.Stores, i
 // slackOpAuthorizeFileChannels is download's authorization gate, run after
 // files.info resolves the file's real channel membership. Refuses when the file
 // is shared into no channel this team tracks; passes as soon as ANY one is.
-func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
+func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackFileChannelsArg
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, err
@@ -194,7 +194,7 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 }
 
 // slackOpRecordThreadRoot is exec_host.go send()'s companion for a
-// channel-root post (no --thread-ts): the run's own message IS the thread's
+// channel-root post (no --thread-ts): the conversation's own message IS the thread's
 // root, so the thread is engaged the same way a root mention engages one at
 // ingest (ingest.go's handleEventCallback) — idempotent FindOrCreateSystem
 // with kind="thread", titled from the posted text. FindOrCreate never
@@ -204,7 +204,7 @@ func slackOpAuthorizeFileChannels(ctx context.Context, stores db.Stores, info ag
 // create the same (channel, ts) key first and default it to kind="message".
 // Only on first creation, dispatches the same best-effort permalink
 // resolution the ingest pipeline fires for a root mention.
-func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agenthost.RunInfo, args json.RawMessage) (any, error) {
+func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackThreadRootArg
 	if err := json.Unmarshal(args, &a); err != nil {
 		return nil, err
@@ -236,21 +236,21 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 	return nil, nil
 }
 
-// workspaceFromRunTaskMetadata resolves the run's own Slack context — its task,
+// workspaceFromConversationTaskMetadata resolves the conversation's own Slack context — its task,
 // if a slack:message task, and that message's event metadata — via
 // Conversations.GetSystem → Task → PrimaryEventID → Events.GetMetadataSystem. Every
 // store call propagates its error; only a genuine "not found" maps to (ok=false,
 // nil), so a masked failure never silently falls through to the org-wide
 // fallback and replies as the wrong bot identity.
-func workspaceFromRunTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.RunInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
-	run, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.RunID)
+func workspaceFromConversationTaskMetadata(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo) (ws slackstore.Workspace, channel string, ok bool, err error) {
+	conv, err := stores.Conversations.GetSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
-		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load run: %w", err)
+		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load conversation: %w", err)
 	}
-	if run == nil || run.TaskID == "" {
+	if conv == nil || conv.TaskID == "" {
 		return slackstore.Workspace{}, "", false, nil
 	}
-	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, run.TaskID)
+	task, err := stores.Tasks.GetSystem(ctx, info.OrgID, conv.TaskID)
 	if err != nil {
 		return slackstore.Workspace{}, "", false, fmt.Errorf("slack: load task: %w", err)
 	}

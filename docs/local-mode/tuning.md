@@ -8,7 +8,7 @@ local-mode only.
 ## Run concurrency
 
 Delegated runs execute through a process-wide dispatcher that runs at most
-`TF_MAX_CONCURRENT_RUNS` agents at once — **default 8, and the cap applies in
+`TF_MAX_CONCURRENT_CLAIMS` agents at once — **default 8, and the cap applies in
 local mode too**, not just multi (concurrency is an API-spend throttle as much
 as a memory guard). Delegating more work than the cap is normal: the extra runs
 wait in a durable queue — the board card and the run page show **QUEUED** with
@@ -20,7 +20,7 @@ waited meaningfully shows its dwell as its own `queued` readout on the card
 footer and the run page's telemetry rail.
 
 ```bash
-export TF_MAX_CONCURRENT_RUNS=16   # each concurrent run costs ~256 MB RAM plus API spend
+export TF_MAX_CONCURRENT_CLAIMS=16   # each concurrent run costs ~256 MB RAM plus API spend
 ```
 
 The effective cap is logged at boot (`run concurrency cap`); when a burst
@@ -33,8 +33,29 @@ One companion guardrail also defers queued runs on a loaded host:
 new runs while the host's available memory is below the floor — runs stay
 queued and dispatch resumes when memory recovers. It fails open where memory
 isn't reportable (for example macOS). The per-run memory ceiling
-(`TF_RUN_MEMORY_LIMIT_MB`) is a multi-mode sandbox control and does not apply
+(`TF_CLAIM_MEMORY_LIMIT_MB`) is a multi-mode sandbox control and does not apply
 locally.
+
+## Parked workspace disk
+
+A stopped run keeps its worktree on disk so resuming it is instant — a resume
+reuses the tree rather than rebuilding it from the snapshot TF also wrote. Those
+trees are full checkouts, and nothing reclaims them while the process is
+running; a restart sweeps the ones no parked run still wants.
+
+If parked runs pile up faster than you restart and the disk matters more than
+warm resumes, `TF_WORKSPACE_EVICT_AFTER_SEC` turns on an hourly sweep that
+reclaims trees idle longer than the given number of seconds:
+
+```bash
+export TF_WORKSPACE_EVICT_AFTER_SEC=21600   # reclaim trees parked >6h ago
+```
+
+It is **off unless you set it** (multi mode defaults it to 6h — there the disk
+belongs to shared infrastructure rather than to you). A tree is only reclaimed
+once its snapshot is verifiably written and no run sharing it is live, and
+resuming afterwards rebuilds the workspace from that snapshot — slower than a
+warm resume, never lost work.
 
 ## Logging
 

@@ -35,7 +35,7 @@ func (f *fakeCuratorTeamRepos) TracksRepoSystem(_ context.Context, _, owner, rep
 // fails closed.
 func TestCuratorGitAuthorizeDecision(t *testing.T) {
 	ctx := context.Background()
-	info := agenthost.RunInfo{OrgID: "org-1", TeamID: "team-1", RunID: "req-1"}
+	info := agenthost.ConversationInfo{OrgID: "org-1", TeamID: "team-1", ConversationID: "req-1"}
 	pinned := []string{"acme/widgets"}
 
 	t.Run("pinned_and_tracked_allowed_no_refs", func(t *testing.T) {
@@ -114,10 +114,11 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 // minted by the curator engine, not any delegate-side store.
 func seedCuratorTurn(t *testing.T, database *sql.DB, stores db.Stores, executorID string, bootEpoch int64) (conversationID string) {
 	t.Helper()
-	projectID, err := stores.Projects.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
+	created, err := stores.Projects.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID := created.ID
 	conversationID = "conv-curator-turn"
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id)
@@ -134,7 +135,7 @@ func seedCuratorTurn(t *testing.T, database *sql.DB, stores db.Stores, executorI
 	return conversationID
 }
 
-// fakeRunCredentials is an in-memory db.RunCredentialsStore standing in for
+// fakeRunCredentials is an in-memory db.ClaimCredentialsStore standing in for
 // the Postgres-only claim_credentials channel (the SQLite impl refuses every
 // call), so the provision loop's poll half is exercisable here.
 type fakeRunCredentials struct {
@@ -185,7 +186,7 @@ func TestCuratorSidecarProvisionFor(t *testing.T) {
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(3*time.Second, 5*time.Millisecond)
 	creds := &fakeRunCredentials{}
-	s.runCredentials = creds
+	s.claimCredentials = creds
 
 	fn := s.curatorSidecarProvisionFor(org, conversationID)
 
@@ -230,7 +231,7 @@ func TestCuratorSidecarProvisionFor_TimesOut(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "")
 	s.SetExecutorID("home-exec", 5)
 	s.SetAwaitingCredentialsTimeout(80*time.Millisecond, 5*time.Millisecond)
-	s.runCredentials = &fakeRunCredentials{}
+	s.claimCredentials = &fakeRunCredentials{}
 
 	fn := s.curatorSidecarProvisionFor(org, conversationID)
 	if _, _, err := fn(ctx, "sidecar-pubkey-b64"); err == nil {

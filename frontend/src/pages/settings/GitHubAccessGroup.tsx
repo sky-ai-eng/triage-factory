@@ -9,6 +9,7 @@ import {
 } from './primitives'
 import GitHubAppPanel from './GitHubAppPanel'
 import type { CloneProtocol } from './orgConfig'
+import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
 
 interface GitHubAccessValue {
   github_url: string
@@ -76,19 +77,16 @@ export default function GitHubAccessGroup({
   const testSSH = async () => {
     setSshTestState({ kind: 'running' })
     try {
-      const res = await fetch('/api/github/preflight-ssh', { method: 'POST' })
-      if (!res.ok) {
-        setSshTestState({ kind: 'fail', stderr: `Server returned ${res.status}` })
-        return
-      }
-      const data = (await res.json()) as { ok: boolean; stderr?: string }
+      const data = await apiJSON<{ ok: boolean; stderr?: string }>('/api/github/preflight-ssh', {
+        method: 'POST',
+      })
       if (data.ok) {
         setSshTestState({ kind: 'ok' })
       } else {
         setSshTestState({ kind: 'fail', stderr: data.stderr || 'Preflight failed.' })
       }
     } catch (err) {
-      setSshTestState({ kind: 'fail', stderr: (err as Error).message })
+      setSshTestState({ kind: 'fail', stderr: httpErrorMessage(err, 'Preflight failed.') })
     }
   }
 
@@ -118,15 +116,16 @@ export default function GitHubAccessGroup({
           <p className="text-reported text-ink-3 mt-1">
             Requires a{' '}
             <a
-              href="https://github.com/settings/tokens/new?scopes=repo,read:org&description=Triage+Factory"
+              href="https://github.com/settings/tokens/new?scopes=repo,read:org,user:email&description=Triage+Factory"
               target="_blank"
               rel="noopener noreferrer"
               className="text-warm hover:underline"
             >
               classic PAT
             </a>{' '}
-            with <code className="text-ink-2">repo</code> and{' '}
-            <code className="text-ink-2">read:org</code> scopes — the token Triage Factory&rsquo;s
+            with <code className="text-ink-2">repo</code>,{' '}
+            <code className="text-ink-2">read:org</code>, and{' '}
+            <code className="text-ink-2">user:email</code> scopes — the token Triage Factory&rsquo;s
             bots poll your organization with. <code className="text-ink-2">read:org</code> lets them
             resolve your organization&rsquo;s team memberships so review requests routed to teams
             (e.g. CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly

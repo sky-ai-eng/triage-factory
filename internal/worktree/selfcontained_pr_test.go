@@ -36,16 +36,16 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 	_, content := seedBloblessUpstream(t, reposRoot, "repo", "refs/pull/7/head")
 	cloneURL := startAuthedGitServer(t, reposRoot, "x-access-token", token) + "/repo.git"
 
-	const runID = "pr-run-multi"
+	const rootKey = "pr-run-multi"
 	const prNumber = 7
 	// Own-repo PR: head URL == upstream URL. WithBaseBranch exercises the
 	// clone-side base fetch (diff framing) too.
-	wtPath, err := CreateForPR(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", prNumber, runID,
+	wtPath, err := CreateForPR(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", prNumber, rootKey,
 		WithCloneAuth(CloneAuthFor(cloneURL, token)), WithBaseBranch("main"))
 	if err != nil {
 		t.Fatalf("CreateForPR (multi mode, self-contained): %v", err)
 	}
-	t.Cleanup(func() { _ = RemoveAt(wtPath, runID) })
+	t.Cleanup(func() { _ = RemoveAt(wtPath, rootKey) })
 
 	// The defining property: .git is a real directory (self-contained), not a
 	// worktree pointer file — so nothing dangles when mounted in the sandbox.
@@ -78,8 +78,8 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 
 	// Push tracking lives in the CLONE's config (so it ships into the sandbox),
 	// not the shared bare. Own-repo PR → a per-run push remote at the upstream.
-	localBranch := prLocalBranch(runID, prNumber)
-	remote := prPushRemoteName(runID, prNumber)
+	localBranch := prLocalBranch(rootKey, prNumber)
+	remote := prPushRemoteName(rootKey, prNumber)
 	if r := gitCfgValue(t, wtPath, "branch."+localBranch+".pushRemote"); r != remote {
 		t.Errorf("clone branch.%s.pushRemote = %q, want %q", localBranch, r, remote)
 	}

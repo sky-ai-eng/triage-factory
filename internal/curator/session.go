@@ -448,7 +448,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	// without it, exec would fail in the jail (no DB, no keychain). Mirrors the
 	// spawner (internal/delegate/run.go). The closure is only invoked in the
 	// sandbox branch (multi+linux); local/non-sandbox runs never call it.
-	// RunID is the conversation id (unique per active turn → unique socket);
+	// ConversationID is the conversation id (unique per active turn → unique socket);
 	// identity is the requesting user's (org, user). TeamID is the curated
 	// project's owning team (this surface is project-scoped, not run-backed,
 	// so project.TeamID is the canonical team here). IsEventTriggered is
@@ -467,10 +467,10 @@ func (s *projectSession) dispatch(item queueItem) {
 		// socket server in-process over its live stores. PinnedRepos authorizes
 		// the agent's exec-gh verbs against the project's pinned set — a curator
 		// turn creates no conversation_worktrees rows the run path's gate would key on.
-		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.RunInfo{
+		hd, mount, err := agenthost.Start(s.curator.stores, agenthost.ConversationInfo{
 			OrgID:            item.orgID,
 			UserID:           item.creatorUserID,
-			RunID:            item.conversationID,
+			ConversationID:   item.conversationID,
 			TeamID:           project.TeamID,
 			IsEventTriggered: false,
 			PinnedRepos:      project.PinnedRepos,

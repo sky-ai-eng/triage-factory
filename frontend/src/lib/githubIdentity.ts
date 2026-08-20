@@ -13,7 +13,7 @@
 // reach) on failure. Goes through apiClient so a stale-session 401 is funneled
 // to AuthContext (re-auth) rather than surfacing as a raw status.
 
-import { apiJSON, HttpError } from './apiClient'
+import { apiJSON, httpErrorMessage } from './apiClient'
 
 export interface GitHubIdentityCaptured {
   login: string
@@ -25,25 +25,17 @@ export async function captureGitHubIdentityPat(
   pat: string,
 ): Promise<GitHubIdentityCaptured> {
   try {
-    return await apiJSON<GitHubIdentityCaptured>('/github/identity/pat', {
-      org: orgId,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pat }),
-    })
+    return await apiJSON<GitHubIdentityCaptured>(
+      `/api/orgs/${encodeURIComponent(orgId)}/github/identity/pat`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pat }),
+      },
+    )
   } catch (err) {
-    // Surface the endpoint's user-facing `error` field instead of a bare HTTP
+    // Surface the endpoint's user-facing `error` field rather than a bare HTTP
     // status. (A 401 has already been routed to AuthContext by apiClient.)
-    if (err instanceof HttpError) {
-      let msg = `Couldn't verify that token (HTTP ${err.status}).`
-      try {
-        const body = JSON.parse(err.body) as { error?: string }
-        if (body?.error) msg = body.error
-      } catch {
-        // Non-JSON error body — keep the generic message.
-      }
-      throw new Error(msg)
-    }
-    throw err
+    throw new Error(httpErrorMessage(err, "Couldn't verify that token."))
   }
 }

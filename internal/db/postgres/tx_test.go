@@ -65,7 +65,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Seed a repo in orgB through the admin pool so the row exists
 	// regardless of claims.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repo_profiles (org_id, owner, repo, profiled_at)
+		INSERT INTO repositories (org_id, owner, repo, profiled_at)
 		VALUES ($1, 'orgb-owner', 'orgb-repo', now())
 	`, orgB); err != nil {
 		t.Fatalf("seed orgB repo: %v", err)
@@ -74,11 +74,11 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	// Run SyntheticClaimsWithTx with userA's claims (orgA). Inside
-	// fn, try to read orgB's repos via the app-pool RepoStore. RLS
+	// fn, try to read orgB's repos via the app-pool RepositoryStore. RLS
 	// must reject the read because tf.current_org_id() resolves to
-	// orgA and repo_profiles_all gates on (org_id = current_org_id()).
+	// orgA and repositories_all gates on (org_id = current_org_id()).
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgA, userA, func(tx db.TxStores) error {
-		got, err := tx.Repos.List(context.Background(), orgB)
+		got, _, err := tx.Repos.List(context.Background(), orgB, db.ListOpts{})
 		if err != nil {
 			return fmt.Errorf("orgB List under orgA claims: %w", err)
 		}
@@ -173,15 +173,29 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 
-	names, err := stores.Repos.ListConfiguredNamesSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("ListConfiguredNamesSystem: %v", err)
-	}
+	names := registryNames(t, stores, orgID)
 	for _, name := range names {
 		if name == "rolled/back" {
 			t.Errorf("rolled/back row landed after fn returned error; full list=%v", names)
 		}
 	}
+}
+
+// registryNames reads back what SetConfigured wrote. It lists the registry
+// rather than the tracked set on purpose: SetConfigured writes repositories
+// and touches no team's tracking, so a tracked read would answer a different
+// question than the one these tests ask.
+func registryNames(t *testing.T, stores db.Stores, orgID string) []string {
+	t.Helper()
+	repos, err := stores.Repos.ListSystem(context.Background(), orgID)
+	if err != nil {
+		t.Fatalf("ListSystem: %v", err)
+	}
+	out := make([]string, 0, len(repos))
+	for _, r := range repos {
+		out = append(out, r.Slug())
+	}
+	return out
 }
 
 // TestWithTx_Postgres_SurvivesCancelledOriginCtx pins the
@@ -228,10 +242,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 		t.Fatalf("WithTx on detached ctx: %v", err)
 	}
 
-	names, err := stores.Repos.ListConfiguredNamesSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("ListConfiguredNamesSystem: %v", err)
-	}
+	names := registryNames(t, stores, orgID)
 	if len(names) != 1 || names[0] != "survives/cancel" {
 		t.Errorf("after WithTx on detached ctx: got %v, want [survives/cancel]", names)
 	}

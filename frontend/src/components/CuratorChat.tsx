@@ -12,9 +12,11 @@ import {
 import { useNavigate } from 'react-router'
 import { useCuratorChat } from '../hooks/useCuratorChat'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import { linkifyMarkdown, type LinkifyContext } from '../lib/linkify'
 import { toast } from './Toast/toastStore'
 import PromptPicker from './PromptPicker'
+import { apiJSON, apiListAll } from '../lib/apiClient'
 import type { Message, CuratorRequestWithMessages, Project, Prompt, ToolCall } from '../types'
 
 const SYSTEM_TICKET_SPEC_PROMPT_ID = 'system-ticket-spec'
@@ -66,12 +68,12 @@ export default function CuratorChat({ project, onPatch }: Props) {
   const refetchPrompts = useMemo(
     () => () => {
       const ac = new AbortController()
-      const q = promptTeamId ? `?team_id=${encodeURIComponent(promptTeamId)}` : ''
-      fetch(`/api/prompts${q}`, { signal: ac.signal })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((d: Prompt[] | null) => {
+      apiListAll<Prompt>('/api/prompts/list', promptTeamId ? { team_id: promptTeamId } : {}, {
+        signal: ac.signal,
+      })
+        .then((prompts) => {
           if (ac.signal.aborted) return
-          if (Array.isArray(d)) setPrompts(d)
+          setPrompts(prompts)
         })
         .catch(() => {
           // Header button degrades to "Spec skill" without a name.
@@ -120,10 +122,13 @@ export default function CuratorChat({ project, onPatch }: Props) {
   // AbortController gates the setter against unmount/remount
   // so a slow response can't land on a stale view.
   const [jiraBaseURL, setJiraBaseURL] = useState<string | undefined>(undefined)
+  const apiOrgId = useApiOrgId()
   useEffect(() => {
+    if (!apiOrgId) return
     const ac = new AbortController()
-    fetch('/api/settings/org', { signal: ac.signal })
-      .then((r) => (r.ok ? r.json() : null))
+    apiJSON<{ jira_base_url?: string }>(`/api/orgs/${encodeURIComponent(apiOrgId)}/settings`, {
+      signal: ac.signal,
+    })
       .then((d) => {
         if (ac.signal.aborted) return
         setJiraBaseURL(d?.jira_base_url || undefined)
@@ -134,7 +139,7 @@ export default function CuratorChat({ project, onPatch }: Props) {
         // didn't ask for anything that depends on this.
       })
     return () => ac.abort()
-  }, [])
+  }, [apiOrgId])
   const linkifyCtx: LinkifyContext = useMemo(() => ({ jiraBaseURL }), [jiraBaseURL])
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -808,7 +813,7 @@ function Composer({
   )
 }
 
-// --- Tool-call vocabulary (mirrors lib/runFeed's formatToolCall but keeps
+// --- Tool-call vocabulary (mirrors lib/conversationFeed's formatToolCall but keeps
 // curator-side knowledge of the tools the curator actually uses) ---
 
 function formatToolCall(name: string, input: Record<string, unknown>): string {

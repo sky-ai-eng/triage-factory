@@ -18,17 +18,17 @@ import (
 // dispatch round trip can be tested without real netns/iptables/cgroup
 // syscalls (which need CAP_NET_ADMIN/CAP_SYS_ADMIN and real kernel state).
 type fakeOps struct {
-	setupNetworkFn    func(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error)
+	setupNetworkFn    func(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error)
 	teardownNetworkFn func(ctx context.Context, state sandbox.NetworkState) error
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
 	reapOrphansFn     func(ctx context.Context) error
 	chownRunTreeFn    func(ctx context.Context, root, subpath string) error
 	removeRunTreeFn   func(ctx context.Context, path string) error
-	captureRunDeltaFn func(ctx context.Context, worktree, sessionID string) ([]byte, error)
+	captureRunDeltaFn func(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error)
 }
 
-func (f *fakeOps) SetupNetwork(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
-	return f.setupNetworkFn(ctx, runID, subnetIdx)
+func (f *fakeOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error) {
+	return f.setupNetworkFn(ctx, conversationID, subnetIdx)
 }
 func (f *fakeOps) TeardownNetwork(ctx context.Context, state sandbox.NetworkState) error {
 	return f.teardownNetworkFn(ctx, state)
@@ -45,8 +45,8 @@ func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string) error 
 func (f *fakeOps) RemoveRunTree(ctx context.Context, path string) error {
 	return f.removeRunTreeFn(ctx, path)
 }
-func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
-	return f.captureRunDeltaFn(ctx, worktree, sessionID)
+func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+	return f.captureRunDeltaFn(ctx, worktree, stagingDir, sessionID)
 }
 
 var _ sandbox.PrivilegedOps = (*fakeOps)(nil)
@@ -83,12 +83,12 @@ func TestIPCRoundTrip_SetupAndTeardownNetwork(t *testing.T) {
 		HostIP:    "10.42.7.1",
 		NetnsPath: "/var/run/netns/tf-abc123-7",
 	}
-	var gotRunID string
+	var gotConversationID string
 	var gotSubnetIdx uint8
 	var teardownState sandbox.NetworkState
 	client := serveTestBroker(t, &fakeOps{
-		setupNetworkFn: func(ctx context.Context, runID string, subnetIdx uint8) (sandbox.NetworkState, error) {
-			gotRunID, gotSubnetIdx = runID, subnetIdx
+		setupNetworkFn: func(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error) {
+			gotConversationID, gotSubnetIdx = conversationID, subnetIdx
 			return wantState, nil
 		},
 		teardownNetworkFn: func(ctx context.Context, state sandbox.NetworkState) error {
@@ -104,8 +104,8 @@ func TestIPCRoundTrip_SetupAndTeardownNetwork(t *testing.T) {
 	if !reflect.DeepEqual(got, wantState) {
 		t.Errorf("SetupNetwork state = %+v, want %+v", got, wantState)
 	}
-	if gotRunID != "run-abc123" || gotSubnetIdx != 7 {
-		t.Errorf("broker saw runID=%q subnetIdx=%d, want run-abc123/7", gotRunID, gotSubnetIdx)
+	if gotConversationID != "run-abc123" || gotSubnetIdx != 7 {
+		t.Errorf("broker saw conversationID=%q subnetIdx=%d, want run-abc123/7", gotConversationID, gotSubnetIdx)
 	}
 
 	if err := client.TeardownNetwork(context.Background(), got); err != nil {

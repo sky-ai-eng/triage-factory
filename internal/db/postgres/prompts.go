@@ -53,21 +53,38 @@ var _ db.PromptStore = (*promptStore)(nil)
 
 // --- CRUD ----------------------------------------------------------
 
-func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]domain.Prompt, error) {
+// pgPromptColumns is the canonical projection of a prompts row, in the order
+// scanPromptRowPG reads them. Every point read SELECTs it and every single-row
+// write RETURNs it, so the write shape cannot drift from the read shape as
+// columns are added.
+const pgPromptColumns = `id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at`
+
+func (s *promptStore) List(ctx context.Context, orgID string, teamID string, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	args := []any{orgID}
-	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
-		FROM prompts WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
+	where := ` WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
 	if teamID != "" {
 		// Prompts page narrowed to one team: that team's prompts. Every
 		// prompt is team-scoped (no org-visible tier), so this
 		// is a plain team filter. RLS still gates what the caller may see.
 		args = append(args, teamID)
-		q += fmt.Sprintf(" AND team_id = $%d", len(args))
+		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
-	q += ` ORDER BY updated_at DESC`
-	rows, err := s.app.QueryContext(ctx, q, args...)
+
+	var total int
+	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompts`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		FROM prompts` + where + ` ORDER BY updated_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, q, pageArgs...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -75,11 +92,11 @@ func (s *promptStore) List(ctx context.Context, orgID string, teamID string) ([]
 	for rows.Next() {
 		p, err := scanPromptRowPG(rows.Scan)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		prompts = append(prompts, p)
 	}
-	return prompts, rows.Err()
+	return prompts, total, rows.Err()
 }
 
 // Get is request-facing: it filters deleted_at IS NULL. GetSystem (admin pool)
@@ -101,7 +118,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 		return nil, errors.New("postgres prompts: GetBySystemSlug requires team_id")
 	}
 	p, err := scanPromptRowPG(s.app.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT `+pgPromptColumns+`
 		FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -115,7 +132,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 
 func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Prompt, error) {
 	query := `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT ` + pgPromptColumns + `
 		FROM prompts WHERE org_id = $1 AND id = $2`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -146,7 +163,7 @@ func scanPromptRowPG(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	return p, nil
 }
 
-func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
+func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) (domain.Prompt, error) {
 	// creator_user_id is NOT NULL. Two execution contexts:
 	//   - Production request path: WithTx has set request.jwt.claims,
 	//     so tf.current_user_id() returns the caller's UUID. That's
@@ -175,37 +192,56 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	// (tf.user_in_team) satisfied. Empty is a handler bug (it must thread
 	// the resolved team), so reject it rather than write an invalid row.
 	if teamID == "" {
-		return fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
+		return domain.Prompt{}, fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
-	_, err := s.app.ExecContext(ctx, `
+	// RETURNING projects the point read's column list, so the row handed back
+	// carries the usage_count, the timestamps and the team_id the statement
+	// resolved — p describes none of them.
+	return scanPromptRowPG(s.app.QueryRowContext(ctx, `
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			$3::uuid,
 			$4, $5, $6, $7, $8, 0, now(), now())
-	`, p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
-	return err
+		RETURNING `+pgPromptColumns,
+		p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model,
+	).Scan)
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
-	_, err := s.app.ExecContext(ctx, `
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx, `
 		UPDATE prompts SET name = $1, body = $2, model = $3, user_modified = TRUE, updated_at = now()
 		WHERE org_id = $4 AND id = $5
-	`, name, body, model, orgID, id)
-	return err
+		RETURNING `+pgPromptColumns,
+		name, body, model, orgID, id,
+	))
 }
 
-func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error {
-	_, err := s.app.ExecContext(ctx, `
+func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx, `
 		UPDATE prompts SET name = $1, body = $2, allowed_tools = $3, updated_at = now()
 		WHERE org_id = $4 AND id = $5
-	`, name, body, allowedTools, orgID, id)
-	return err
+		RETURNING `+pgPromptColumns,
+		name, body, allowedTools, orgID, id,
+	))
 }
 
-// Delete soft-deletes: it stamps deleted_at rather than removing the row, so
-// runs.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id (RESTRICT) FKs
-// never fire and historical runs keep resolving the prompt via GetSystem.
+// scanUpdatedPrompt decodes an id-keyed UPDATE … RETURNING. No row scanned
+// means the id matched nothing — or, on the app pool, that RLS hides whatever
+// does — and both are db.ErrNoSuchPrompt, the answer these writes used to give
+// silently as zero rows affected.
+func scanUpdatedPrompt(row *sql.Row) (domain.Prompt, error) {
+	p, err := scanPromptRowPG(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Prompt{}, db.ErrNoSuchPrompt
+	}
+	return p, err
+}
+
+// Delete soft-deletes: it stamps deleted_at rather than removing the row,
+// so conversations.prompt_id (RESTRICT) and blueprint_steps.step_prompt_id
+// (RESTRICT) FKs never fire and historical runs keep resolving the prompt
+// via GetSystem.
 func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error {
 	res, err := s.app.ExecContext(ctx, `UPDATE prompts SET deleted_at = now() WHERE org_id = $1 AND id = $2 AND deleted_at IS NULL`, orgID, id)
 	if err != nil {
@@ -221,23 +257,23 @@ func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error
 	return nil
 }
 
-func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET hidden = TRUE WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+func (s *promptStore) Hide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = TRUE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
 }
 
-func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
 }
 
-func (s *promptStore) CountRunReferences(ctx context.Context, orgID, id string) (int, error) {
+func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {
 	var n int
 	err := s.app.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM conversations WHERE org_id = $1 AND prompt_id = $2`, orgID, id,
 	).Scan(&n)
 	if err != nil {
-		return 0, fmt.Errorf("count run references: %w", err)
+		return 0, fmt.Errorf("count conversation references: %w", err)
 	}
 	return n, nil
 }
@@ -320,11 +356,16 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 		stats.LastUsedAt = &formatted
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -30).Format("2006-01-02")
+	// UTC days on both sides. A bare started_at::date casts the timestamptz
+	// through the session's TimeZone, so the day a run lands in depends on a
+	// connection setting — and the skeleton below, built in the process's own
+	// zone, is a third answer again. Pin both to UTC and the lookups line up.
+	cutoff := time.Now().UTC().AddDate(0, 0, -30).Format("2006-01-02")
 	rows, err := s.app.QueryContext(ctx, `
-		SELECT started_at::date AS day, COUNT(*) AS cnt
+		SELECT (started_at AT TIME ZONE 'UTC')::date AS day, COUNT(*) AS cnt
 		FROM conversations
-		WHERE org_id = $1 AND prompt_id = $2 AND started_at::date >= $3::date
+		WHERE org_id = $1 AND prompt_id = $2
+		  AND (started_at AT TIME ZONE 'UTC')::date >= $3::date
 		GROUP BY day ORDER BY day
 	`, orgID, promptID, cutoff)
 	if err != nil {
@@ -347,7 +388,7 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	}
 
 	for i := 29; i >= 0; i-- {
-		d := time.Now().AddDate(0, 0, -i).Format("2006-01-02")
+		d := time.Now().UTC().AddDate(0, 0, -i).Format("2006-01-02")
 		stats.RunsPerDay = append(stats.RunsPerDay, domain.DayCount{Date: d, Count: dayMap[d]})
 	}
 	return stats, nil

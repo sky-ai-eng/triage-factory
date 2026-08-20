@@ -7,9 +7,9 @@
 // This package owns only the PUBLISH half (plus the channel name and the
 // Message wire shape). The LISTEN half is internal/app's unified tf_ctl
 // dispatcher (internal/app/ctl.go) — one dedicated connection per pod
-// serving every tf_ctl consumer (relay messages, run-signal doorbells,
-// session kicks), with the "only the brain acts on relay traffic" rule
-// enforced by a holder gate at dispatch (internal/app/relay.go's
+// serving every tf_ctl consumer (relay messages, conversation-signal
+// doorbells, session kicks), with the "only the brain acts on relay traffic"
+// rule enforced by a holder gate at dispatch (internal/app/relay.go's
 // handleCtlMessage) rather than by lease-scoped subscription.
 //
 // The relay is deliberately lossy — the spec is explicit: "a dropped
@@ -29,7 +29,7 @@ import (
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
 // rides. The same channel carries TFAC-584's session kicks, TFAC-585's
-// run-signal doorbells, TFAC-614's cred_request doorbell, the
+// conversation-signal doorbells, TFAC-614's cred_request doorbell, the
 // curator_cred_request doorbell, and the curator homing doorbells (spec §6.3) —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
@@ -39,12 +39,12 @@ const Channel = "tf_ctl"
 // Message is the relay payload. Kind selects which field group applies:
 // "trigger" uses Manager/OrgID/Force (a scorer/classifier/profiler/
 // reconciler Manager.Trigger call); "pollsoon" uses Source/OrgID (a
-// poller.Manager.PollSoon call); "cred_request" uses OrgID/RunID (TFAC-614:
+// poller.Manager.PollSoon call); "cred_request" uses OrgID/ConversationID (TFAC-614:
 // an executor whose claim is parked in phase='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
-// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/RunID
+// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/ConversationID
 // too (a home executor standing a curator turn's credential sidecar up nudging
-// the same provisioner — RunID carries the curator conversation id, the
+// the same provisioner — ConversationID carries the curator conversation id, the
 // claim-credentials channel's key);
 // "curator_new" / "curator_cancel" use
 // OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
@@ -59,14 +59,14 @@ const Channel = "tf_ctl"
 // self-filtered like the curator kinds — only the pod holding (or homing) the
 // project reacts.
 type Message struct {
-	Kind      string `json:"kind"`
-	Manager   string `json:"manager,omitempty"`
-	OrgID     string `json:"org_id"`
-	Source    string `json:"source,omitempty"`
-	Force     bool   `json:"force,omitempty"`
-	RunID     string `json:"run_id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
-	Op        string `json:"op,omitempty"`
+	Kind           string `json:"kind"`
+	Manager        string `json:"manager,omitempty"`
+	OrgID          string `json:"org_id"`
+	Source         string `json:"source,omitempty"`
+	Force          bool   `json:"force,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
+	Op             string `json:"op,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

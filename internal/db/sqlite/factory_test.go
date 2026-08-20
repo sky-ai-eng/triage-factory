@@ -23,7 +23,7 @@ import (
 func TestFactoryReadStore_SQLite(t *testing.T) {
 	dbtest.RunFactoryReadStoreConformance(t, func(t *testing.T) (db.FactoryReadStore, string, dbtest.FactorySeeder) {
 		t.Helper()
-		conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+		conn, err := sql.Open("sqlite", db.TestDSNMemory)
 		if err != nil {
 			t.Fatalf("open in-memory db: %v", err)
 		}
@@ -34,7 +34,7 @@ func TestFactoryReadStore_SQLite(t *testing.T) {
 		if err := db.BootstrapSchemaForTest(conn); err != nil {
 			t.Fatalf("bootstrap schema: %v", err)
 		}
-		// runs.prompt_id FKs into prompts — seed a stable prompt row
+		// conversations.prompt_id FKs into prompts — seed a stable prompt row
 		// once so every Run() call resolves the FK without per-call
 		// setup.
 		if _, err := conn.Exec(
@@ -112,10 +112,10 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			}
 			return id
 		},
-		Run: func(t *testing.T, taskID, status string) string {
+		Conversation: func(t *testing.T, taskID, status string) string {
 			t.Helper()
 			id := uuid.New().String()
-			blueprintRunID := seedBlueprintRunForRun(t, conn, taskID)
+			blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 			// "running" is an engagement, not a stored value — mint the
 			// claim the real claim path would and leave the column NULL.
 			stored := any(status)
@@ -126,7 +126,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
 				VALUES (?, ?, ?, ?, 'manual', ?)
 			`, id, taskID, factoryTestPromptID, stored, blueprintRunID); err != nil {
-				t.Fatalf("seed run: %v", err)
+				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {
 				if _, err := conn.Exec(`
@@ -142,19 +142,19 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			t.Helper()
 			if _, err := conn.Exec(
 				`UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?`,
-				closedAt, entityID,
+				closedAt.UTC(), entityID,
 			); err != nil {
 				t.Fatalf("close entity %s: %v", entityID, err)
 			}
 		},
-		SetRunMemory: func(t *testing.T, runID, entityID, content string) {
+		SetConversationMemory: func(t *testing.T, conversationID, entityID, content string) {
 			t.Helper()
 			memID := uuid.New().String()
 			if content == dbtest.NullMemorySentinel {
 				if _, err := conn.Exec(`
 					INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 					VALUES (?, ?, ?, NULL)
-				`, memID, runID, entityID); err != nil {
+				`, memID, conversationID, entityID); err != nil {
 					t.Fatalf("seed null conversation_memory: %v", err)
 				}
 				return
@@ -162,7 +162,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			if _, err := conn.Exec(`
 				INSERT INTO conversation_memory (id, conversation_id, entity_id, agent_content)
 				VALUES (?, ?, ?, ?)
-			`, memID, runID, entityID, content); err != nil {
+			`, memID, conversationID, entityID, content); err != nil {
 				t.Fatalf("seed conversation_memory: %v", err)
 			}
 		},
@@ -175,7 +175,7 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 // The conformance suite exercises the happy path; this test pins
 // the SQLite-specific rejection.
 func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestFactoryReadStore_SQLite_AssertLocalOrg(t *testing.T) {
 // hide untriaged-but-relevant PRs the user expects to see. The
 // converse (multi-mode membership exclusion) is Postgres-only.
 func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 // keeps the station header consistent with the unfiltered local belt
 // (every polled entity is the user's own).
 func TestFactoryReadStore_SQLite_CountersUnscoped(t *testing.T) {
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

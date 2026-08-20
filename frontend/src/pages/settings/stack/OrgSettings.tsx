@@ -10,25 +10,26 @@
 // token replacement (GitHubAccessControl), which composes the same step
 // components internally (account type, App panel, install view) but routes every
 // credential change through a validated preflight + an inform-only reachability
-// diff. There is no free-form PAT field: the bulk settings save carries no
+// diff. There is no free-form PAT field: the settings PATCH carries no
 // credential at all.
 //
 // What Settings adds over /setup is the per-section Save model (the approved
 // design): expand a section, edit its draft, Save (or Cancel/discard). The
-// org-form sections all persist through the single POST /api/settings/org, so
-// each saves {...baseline.org, ...ownFields} against the LIVE baseline — saving
-// one never flushes another's unsaved edits. Selector/panel sections (the
-// GitHub access control, the App register panel) carry no Save footer, and Jira
-// disconnect commits inline on its own button. The Jira *credential* is the
-// exception that proves the rule it used to break: its Save footer ("Connect" /
-// "Replace credential") drives PUT /api/orgs/{org}/jira/access/credential rather
-// than the org POST, but it's a footer all the same.
+// org-form sections all persist through the single org-settings PATCH, each
+// sending ONLY its own fields — so saving one section never flushes another's
+// unsaved edits, and never carries a value its user wasn't looking at.
+// Selector/panel sections (the GitHub access control, the App register panel)
+// carry no Save footer, and Jira disconnect commits inline on its own button.
+// The Jira *credential* is the exception that proves the rule it used to
+// break: its Save footer ("Connect" / "Replace credential") drives
+// PUT /api/orgs/{org}/jira/access/credential rather than the org POST, but
+// it's a footer all the same.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
 import { toast } from '../../../components/Toast/toastStore'
 import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
-import { readError } from '../../../lib/api'
+import { apiJSON, httpErrorMessage } from '../../../lib/apiClient'
 import {
   hostOf,
   normalizeBaseUrl,
@@ -54,11 +55,14 @@ import {
   dailyCapError,
   concurrentRunsError,
   MAX_CONCURRENT_RUNS_CEILING,
-  saveOrgConfig,
+  fetchOrgSettings,
+  patchOrgSettings,
   type OrgConfigForm,
+  type OrgSettingsPatch,
 } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
-import { connectAnthropic, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
+import { disconnectGitHubPAT, disconnectJira } from '../orgCredentials'
+import { connectAnthropic, disconnectLLM, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
 import { ClaudeProviderCards, AnthropicKeyField, BedrockFields } from '../../setup/ClaudeStep'
 import { ChoiceCards } from '../../setup/parts'
@@ -165,34 +169,58 @@ export default function OrgSettings({
     return cancel
   }, [load])
 
-  // commitOrgSlice persists one section's fields merged onto the LIVE baseline
-  // org form (the single POST /api/settings/org), folding the slice back in on
-  // success. github_pat is always sent blank in the baseline (the stored token
-  // never round-trips); a section that owns it passes the typed value in `slice`.
+  // commitOrgSlice persists one section's fields through the org-settings
+  // PATCH, folding the slice back into the baseline on success. Only the
+  // slice's own fields ride the wire — the PATCH's absent-means-keep contract
+  // covers the rest — so a section can never carry a neighbour's draft or
+  // clobber a concurrent change to fields it doesn't own.
+  //
+  // The baseline carries the row's concurrency token, so the fold-back has to
+  // include the version the save just produced — the next section's save
+  // asserts it, and without the refresh it would conflict with this one's own
+  // write. A save that LOSES the race (another admin committed in between)
+  // reloads the whole group rather than reporting a retryable error: the draft
+  // the user is looking at was assembled from a row that no longer exists.
   const commitOrgSlice = useCallback(
-    async (key: string, slice: Partial<OrgConfigForm>, label: string): Promise<boolean> => {
+    async (key: string, slice: OrgSettingsPatch, label: string): Promise<boolean> => {
+      if (!orgId) return false
       setSavingKey(key, true)
       try {
-        const next: OrgConfigForm = {
-          ...baseline.org,
-          ...slice,
-          github_pat: slice.github_pat ?? '',
-        }
-        const res = await saveOrgConfig(next)
+        const res = await patchOrgSettings(orgId, baseline.org.version, slice)
         if (!res.ok) {
           toast.error(res.error)
+          if (res.conflict) load()
           return false
         }
-        setBaseline((b) => ({ ...b, org: { ...b.org, ...slice, github_pat: '' } }))
-        if (res.warning) toast.info(res.warning)
+        setBaseline((b) => ({
+          ...b,
+          org: { ...b.org, ...slice, version: res.settings.version },
+        }))
+        if (res.settings.warning) toast.info(res.settings.warning)
         toast.success(`${label} saved`)
         return true
       } finally {
         setSavingKey(key, false)
       }
     },
-    [baseline.org],
+    [baseline.org.version, orgId, load],
   )
+
+  // refreshOrgVersion folds the settings row's current concurrency token into
+  // the live baseline + draft after a write that lands OUTSIDE the settings
+  // PATCH: the credential binds and unbinds persist their host / key-ref
+  // columns on the same row server-side, which bumps the token, so the one
+  // this screen holds goes stale the moment a connect succeeds — and the next
+  // section's save would 409 against a change this same screen just made.
+  // Best-effort: on a failed re-read the held token stands, and the save
+  // path's conflict → reload recovers.
+  const refreshOrgVersion = useCallback(async () => {
+    if (!orgId) return
+    const fresh = await fetchOrgSettings(orgId)
+    if (!fresh) return
+    setBaseline((b) => ({ ...b, org: { ...b.org, version: fresh.version } }))
+    setDraft((d) => ({ ...d, org: { ...d.org, version: fresh.version } }))
+  }, [orgId])
 
   // revertOrg resets the named org fields in the draft back to the baseline —
   // a section's Cancel, scoped so it never touches a neighbour's edits.
@@ -218,7 +246,9 @@ export default function OrgSettings({
 
   // The StepContext every /setup body consumes — the live draft + patch, with
   // advance a no-op (Settings has no linear flow; selfAdvancing pickers just
-  // record the choice). orgId/teamId/isLocal ride along for the App panel etc.
+  // record the choice). orgId/isLocal ride along for the App panel etc.;
+  // teamId only satisfies the context shape — no org step reads it, and the
+  // "default" alias would not resolve on a multi-mode team route.
   const ctx: StepContext = { orgId, teamId: 'default', isLocal, state: draft, patch, advance: noop }
 
   // Live GitHub mode — derived from the App registration's active bit, NOT the
@@ -455,6 +485,8 @@ export default function OrgSettings({
                 jiraDeployment: null,
                 org: { ...b.org, jira_url: '' },
               }))
+              // The disconnect also cleared the URL on the settings row.
+              void refreshOrgVersion()
             }}
             bare
           />
@@ -505,6 +537,8 @@ export default function OrgSettings({
                 toast.error(result.error)
                 return false
               }
+              // The bind also persisted the URL onto the settings row.
+              await refreshOrgVersion()
               setDraft((d) => ({
                 ...d,
                 jiraConnected: true,
@@ -764,8 +798,8 @@ export default function OrgSettings({
       </SettingsSection>
 
       {/* ── Claude credentials ── Save drives the selected provider's validated
-          connect endpoint (connectAnthropic / connectBedrock — never the bulk
-          org POST). Local: source radio, then provider + credentials when BYOK.
+          bind route (connectAnthropic / connectBedrock — never the org settings
+          PATCH). Local: source radio, then provider + credentials when BYOK.
           Multi: provider + credentials only. */}
       <SettingsSection
         title="Claude credentials"
@@ -774,22 +808,26 @@ export default function OrgSettings({
         saving={isSaving('claude')}
         saveDisabled={claudeSaveDisabled}
         onSave={async () => {
+          if (!orgId) return false
           setSavingKey('claude', true)
           try {
             const useSystem = isLocal && draft.anthropicKeySource === 'system'
 
-            // Amazon Bedrock: the whole form goes to the validated connect
-            // endpoint; blank secrets with the stored method = keep current.
+            // Amazon Bedrock: the selected shape's fields go to that shape's
+            // bind route, which replaces the credential — so the secret is
+            // always required, even for a region-only edit.
             if (!useSystem && draft.claudeProvider === 'bedrock') {
               if (bedrockErr !== null) {
                 toast.error(bedrockErr)
                 return false
               }
-              const r = await connectBedrock(bedrockPayloadFromForm(draft.org))
+              const r = await connectBedrock(orgId, bedrockPayloadFromForm(draft.org))
               if (!r.ok) {
                 toast.error(r.error)
                 return false
               }
+              // The bind persisted its key ref onto the settings row.
+              await refreshOrgVersion()
               const clearSecrets = {
                 bedrock_bearer_token: '',
                 aws_access_key_id: '',
@@ -822,8 +860,9 @@ export default function OrgSettings({
             }
 
             const key = draft.org.anthropic_api_key.trim()
-            // BYOK + blank + already configured = "leave blank to keep current":
-            // a no-op that must NOT POST an empty key (which would clear it).
+            // BYOK + blank + already configured is a no-op: nothing was typed,
+            // so there is nothing to rotate. The bind requires a key, so there
+            // is no blank call to make by accident.
             if (!useSystem && key === '') {
               if (baseline.anthropicConnected) {
                 patch({ org: { ...draft.org, anthropic_api_key: '' } })
@@ -832,11 +871,15 @@ export default function OrgSettings({
               toast.error('Paste an Anthropic API key.')
               return false
             }
-            const r = await connectAnthropic(useSystem ? '' : key)
+            // "System credentials" is a removal of BOTH providers' material —
+            // two deletes, since they are two credentials.
+            const r = useSystem ? await disconnectLLM(orgId) : await connectAnthropic(orgId, key)
             if (!r.ok) {
               toast.error(r.error)
               return false
             }
+            // Bind and removal alike rewrite the key refs on the settings row.
+            await refreshOrgVersion()
             const nowConfigured = !useSystem
             const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
             const apply = (s: WizardState): WizardState => ({
@@ -960,7 +1003,7 @@ export default function OrgSettings({
       </SettingsSection>
 
       <SettingsSection title="Danger zone" summary="Clear stored tokens">
-        <DangerZone />
+        <DangerZone orgId={orgId} />
       </SettingsSection>
     </div>
   )
@@ -991,12 +1034,12 @@ function SkillsImport() {
     if (importing) return
     setImporting(true)
     try {
-      const res = await fetch('/api/skills/import', { method: 'POST' })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to import skills'))
-        return
-      }
-      const result = await res.json()
+      const result = await apiJSON<{
+        errors?: string[]
+        imported: number
+        skipped: number
+        scanned: number
+      }>('/api/prompts/from-disk', { method: 'POST' })
       if (result.errors?.length) {
         toast.error(
           `${result.errors.length} skill${result.errors.length !== 1 ? 's' : ''} failed to import: ${result.errors[0]}`,
@@ -1012,7 +1055,7 @@ function SkillsImport() {
         )
       }
     } catch (err) {
-      toast.error(`Failed to import skills: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not import the skills.'))
     } finally {
       setImporting(false)
     }
@@ -1063,22 +1106,17 @@ function SkillPasteImport() {
     if (submitting || !content.trim() || !ready) return
     setSubmitting(true)
     try {
-      const res = await fetch('/api/skills/upload', {
+      const created = await apiJSON<{ name: string }>('/api/prompts/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content, team_id: team }),
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to import skill'))
-        return
-      }
-      const created = await res.json()
       if (team) noteWrittenTeam(team)
       toast.success(`Imported "${created.name}" into the prompt library`)
       setContent('')
       if (fileRef.current) fileRef.current.value = ''
     } catch (err) {
-      toast.error(`Failed to import skill: ${(err as Error).message}`)
+      toast.error(httpErrorMessage(err, 'Could not import the skill.'))
     } finally {
       setSubmitting(false)
     }
@@ -1125,15 +1163,32 @@ function SkillPasteImport() {
   )
 }
 
-// DangerZone — clear all stored integration tokens. Credentials are re-entered
-// through the access sections above; the tenant itself is untouched.
-function DangerZone() {
+// DangerZone — clear the org's stored integration tokens. Credentials are
+// re-entered through the access sections above; the tenant itself is untouched.
+//
+// It drives the two per-credential DELETEs in sequence rather than a bulk
+// route. The bulk route was a second way to remove the same two credentials,
+// with no discriminator and its own audit path, so the two spellings could (and
+// did) drift; sequencing the real ones keeps exactly one way to unbind each.
+// Both are idempotent, so an org with only one bound still ends up clean.
+function DangerZone({ orgId }: { orgId: string | null }) {
   return (
     <button
       type="button"
+      disabled={!orgId}
       onClick={async () => {
+        if (!orgId) return
         if (!confirm('Clear all stored tokens? You will need to re-authenticate.')) return
-        await fetch('/api/integrations', { method: 'DELETE' })
+        const github = await disconnectGitHubPAT(orgId)
+        if (!github.ok) {
+          toast.error(github.error)
+          return
+        }
+        const jira = await disconnectJira(orgId)
+        if (!jira.ok) {
+          toast.error(jira.error)
+          return
+        }
         window.location.reload()
       }}
       className="rounded-xl border border-alarm/20 px-4 py-2 text-body text-alarm transition-colors hover:border-alarm/30 hover:text-alarm/80"

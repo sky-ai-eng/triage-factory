@@ -120,9 +120,10 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
+	// Staged still means the org is in the BYO-App system — the class is
+	// written at registration, and only the Active bit waits for cutover.
+	seedBYOAppCredentialClass(t, stores, org)
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -133,6 +134,7 @@ func TestRunGitHubCycleForOrg_StagedAppPollsViaPAT(t *testing.T) {
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
+		orgs:     stores.Orgs,
 		// A staged App: registered (a row exists) but active=false, plus an
 		// installation that would otherwise pull us into the App path.
 		apps: &fakeInstallsStore{
@@ -170,9 +172,8 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.Repos.SetConfigured(ctx, org, []string{"octo/repo"}); err != nil {
-		t.Fatalf("SetConfigured: %v", err)
-	}
+	trackRepos(t, stores, org, []string{"octo/repo"})
+	seedBYOAppCredentialClass(t, stores, org)
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -184,6 +185,7 @@ func TestRunGitHubCycleForOrg_ActiveAppNoFunctionalInstallationDegrades(t *testi
 		tasks:    stores.Tasks,
 		entities: stores.Entities,
 		repos:    stores.Repos,
+		orgs:     stores.Orgs,
 		apps: &fakeInstallsStore{
 			app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
 			installs: []domain.OrgGitHubAppInstallation{{InstallationID: "1", AccountLogin: "octo"}},
@@ -222,7 +224,7 @@ const openPRBodyForPoller = `[
 
 func newMigratedSQLiteForPoller(t *testing.T) *sql.DB {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -233,4 +235,37 @@ func newMigratedSQLiteForPoller(t *testing.T) *sql.DB {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	return database
+}
+
+// seedBYOAppCredentialClass records that the org is in the BYO-App credential
+// system — what registering or importing an App writes in the same transaction
+// as the registration row itself.
+//
+// A fixture that hands the Manager a fake apps store holding a registration
+// must seed this too, or it is modelling a state the product cannot reach: an
+// org with an App and a class saying it has none. The poll cycle dispatches on
+// the class, so without it such a fixture polls as a PAT.
+func seedBYOAppCredentialClass(t *testing.T, stores db.Stores, orgID string) {
+	t.Helper()
+	if _, err := stores.Orgs.SetGitHubCredentialClass(context.Background(), orgID, domain.GitHubCredentialClassBYOApp); err != nil {
+		t.Fatalf("SetGitHubCredentialClass: %v", err)
+	}
+}
+
+// trackRepos records the org's tracked repo set on the local default team —
+// the seed every poll fixture needs now that "which repos does TF poll" is a
+// question about tracking rather than a listing of the repository registry.
+func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
+	t.Helper()
+	repos := make([]domain.TeamGitHubRepo, 0, len(names))
+	for _, name := range names {
+		owner, repo, ok := strings.Cut(name, "/")
+		if !ok {
+			t.Fatalf("trackRepos: %q is not an owner/repo slug", name)
+		}
+		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, repos); err != nil {
+		t.Fatalf("track repos %v: %v", names, err)
+	}
 }

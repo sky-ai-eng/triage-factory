@@ -65,25 +65,19 @@ func modelForRow(completion *inference.Completion, params Params) string {
 	return params.Model
 }
 
-// metadataFinishReason is the metadata key carrying the provider's terminal
-// stop reason for an assistant row.
-const metadataFinishReason = "finish_reason"
-
-// stampFinishReason records why the provider stopped generating. It is an
-// observability fact, not an assembly input, which is why it rides metadata
-// rather than a column — but it is the fact an investigation needs first, and
-// without it a truncated turn has to be inferred from an output-token count
-// that happens to equal a cap. An empty reason (the stream reported none) is
-// left absent rather than stored as "", so "unknown" and "not reported" stay
-// the same thing.
+// stampFinishReason records why the provider stopped generating, on
+// messages.stop_reason — the same column the SDK runtime writes from its own
+// assistant events, so a truncated turn reads identically whichever engine
+// produced it. Without it a `max_tokens` cut has to be inferred from an
+// output-token count that happens to equal a cap.
+//
+// An empty reason (the stream reported none) is left empty rather than given
+// a placeholder, so "unknown" and "not reported" stay the same thing.
+//
+// Observability, not an assembly input: the loop classifies the reason it
+// just received, never one read back off a row.
 func stampFinishReason(row *domain.Message, reason string) {
-	if reason == "" {
-		return
-	}
-	if row.Metadata == nil {
-		row.Metadata = map[string]any{}
-	}
-	row.Metadata[metadataFinishReason] = reason
+	row.StopReason = reason
 }
 
 // unreplayableTurn reports an assistant row with nothing a later request

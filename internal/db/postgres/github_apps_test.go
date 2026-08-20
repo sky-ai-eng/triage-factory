@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -49,7 +50,7 @@ func TestGitHubAppsStore_Postgres_RoundTrip(t *testing.T) {
 			RegisteredByUserID: userID,
 			Active:             true,
 		}
-		if err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
+		if _, err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
 			return fmt.Errorf("CreateForOrg: %w", err)
 		}
 
@@ -95,7 +96,7 @@ func TestGitHubAppsStore_Postgres_BotUserID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgWithID, AppID: "7001", Slug: "acme-bot", ClientID: "Iv1.x",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 		BotUserID: 41898282,
@@ -111,7 +112,7 @@ func TestGitHubAppsStore_Postgres_BotUserID(t *testing.T) {
 	}
 
 	// An unset id stores NULL (CreateForOrg maps 0 → NULL) and scans back as 0.
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgWithout, AppID: "7002", Slug: "no-bot", ClientID: "Iv1.y",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 	}); err != nil {
@@ -147,7 +148,7 @@ func TestGitHubAppsStore_Postgres_ConflictOnDuplicate(t *testing.T) {
 			PEMRef:           "ref_pem",
 			WebhookSecretRef: "ref_wh",
 		}
-		if err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
+		if _, err := stores.GitHubApps.CreateForOrg(ctx, app); err != nil {
 			return fmt.Errorf("first Create: %w", err)
 		}
 
@@ -159,7 +160,7 @@ func TestGitHubAppsStore_Postgres_ConflictOnDuplicate(t *testing.T) {
 		}
 		app.AppID = "200"
 		app.Slug = "second"
-		err := stores.GitHubApps.CreateForOrg(ctx, app)
+		_, err := stores.GitHubApps.CreateForOrg(ctx, app)
 		if _, rerr := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT dup"); rerr != nil {
 			return fmt.Errorf("rollback savepoint: %w", rerr)
 		}
@@ -242,7 +243,7 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 
 	err := h.WithUser(t, memberID, orgID, func(tx *sql.Tx) error {
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		return stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		_, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 			OrgID:            orgID,
 			AppID:            "77",
 			Slug:             "member-attempt",
@@ -251,6 +252,7 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 			PEMRef:           "r2",
 			WebhookSecretRef: "r3",
 		})
+		return err
 	})
 	if err == nil {
 		t.Fatal("non-admin CreateForOrg should have been rejected by RLS")
@@ -260,7 +262,7 @@ func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {
 
 // TestGitHubAppsStore_Postgres_InstallationLifecycle exercises the
 // admin-pool installation writes (tf_app is denied all writes to
-// org_github_app_installations): Upsert → MarkRemoved → Upsert-revive.
+// org_github_app_installations): Upsert → MarkInstallationRemoved → Upsert-revive.
 // Wires both pools to AdminDB (BYPASSRLS) so the test exercises the SQL
 // independent of the auth path.
 func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
@@ -277,7 +279,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 		AccountType:    "Organization",
 		AccountLogin:   "acme",
 	}
-	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
 		t.Fatalf("UpsertInstallation: %v", err)
 	}
 
@@ -292,7 +294,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted now()")
 	}
 
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	if got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(got) != 0 {
@@ -300,7 +302,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 	}
 
 	inst.AccountLogin = "acme-renamed"
-	if err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
 		t.Fatalf("UpsertInstallation (revive): %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -324,12 +326,12 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	// Same numeric installation_id under both orgs — legal across distinct
 	// GitHub hosts. The composite (org_id, installation_id) PK must keep
 	// these as two independent rows, not let one overwrite the other.
-	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		InstallationID: "900", OrgID: orgA, AccountType: "User", AccountLogin: "only-in-a",
 	}); err != nil {
 		t.Fatalf("UpsertInstallation orgA: %v", err)
 	}
-	if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		InstallationID: "900", OrgID: orgB, AccountType: "Organization", AccountLogin: "only-in-b",
 	}); err != nil {
 		t.Fatalf("UpsertInstallation orgB (same id): %v", err)
@@ -345,7 +347,7 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	}
 
 	// A delete for orgB's id=900 must not touch orgA's id=900.
-	if err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
 		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
@@ -365,7 +367,7 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := stores.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: orgID, AppID: "1", Slug: "staged", ClientID: "Iv1.x",
 		ClientSecretRef: "cs", PEMRef: "pem", WebhookSecretRef: "wh",
 		RegisteredByUserID: userID, Active: false, // staged
@@ -376,7 +378,7 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 		t.Fatalf("after staged create got %+v, want Active=false", got)
 	}
 
-	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+	if _, err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
 		t.Fatalf("SetActive: %v", err)
 	}
 	if got, _ := stores.GitHubApps.GetForOrg(ctx, orgID); got == nil || !got.Active {
@@ -385,7 +387,7 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 
 	// Seed installations, then tear the whole registration down.
 	for _, login := range []string{"acme", "globex"} {
-		if err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
 		}); err != nil {
 			t.Fatalf("seed installation %s: %v", login, err)
@@ -402,12 +404,82 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 	}
 
 	// Both ops are no-ops (no error) on an org with no registration.
-	if err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
+	if _, err := stores.GitHubApps.SetActive(ctx, orgID, true); err != nil {
 		t.Errorf("SetActive on absent row = %v, want nil", err)
 	}
 	if err := stores.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 		t.Errorf("DeleteForOrg on absent row = %v, want nil", err)
 	}
+}
+
+// TestGitHubAppsStore_Postgres_AppReturnedRowConformance runs the shared
+// app-row returned-row suite (CreateForOrg, SetActive) against the app pool
+// under the registrant's claims — the RLS-relevant half, same reasoning as
+// TestJiraAppsStore_Postgres_ReturnedRowConformance.
+func TestGitHubAppsStore_Postgres_AppReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).GitHubApps
+		dbtest.RunGitHubAppReturnedRowConformance(t, func(t *testing.T) (db.GitHubAppsStore, string, string) {
+			t.Helper()
+			return store, orgID, userID
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+}
+
+// TestGitHubAppsStore_Postgres_InstallationReturnedRowConformance runs the
+// shared installation-row returned-row suite (UpsertInstallation,
+// SetInstallationSuspension, MarkInstallationRemoved) on the admin pool — the
+// only pool these writes ever use, since tf_app is denied all writes to
+// org_github_app_installations by RLS (see gitHubAppsStore's doc).
+func TestGitHubAppsStore_Postgres_InstallationReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgOrgAndUserForGitHubApps(t, h)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	readRaw := func(installationID string) (*domain.OrgGitHubAppInstallation, error) {
+		var (
+			inst        domain.OrgGitHubAppInstallation
+			accountID   sql.NullString
+			suspendedAt sql.NullTime
+			suspendedBy sql.NullString
+			selection   sql.NullString
+		)
+		err := h.AdminDB.QueryRowContext(ctx, `
+			SELECT installation_id, org_id, account_type, account_id, account_login,
+			       github_host, installed_at, suspended_at, suspended_by, repository_selection
+			  FROM org_github_app_installations
+			 WHERE org_id = $1 AND installation_id = $2
+		`, orgID, installationID).Scan(
+			&inst.InstallationID, &inst.OrgID, &inst.AccountType,
+			&accountID, &inst.AccountLogin, &inst.GitHubHost, &inst.InstalledAt,
+			&suspendedAt, &suspendedBy, &selection,
+		)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		inst.AccountID = accountID.String
+		inst.SuspendedAt = suspendedAt.Time
+		inst.SuspendedBy = suspendedBy.String
+		inst.RepositorySelection = selection.String
+		return &inst, nil
+	}
+
+	dbtest.RunGitHubInstallationReturnedRowConformance(t, func(t *testing.T) (db.GitHubAppsStore, string, func(string) (*domain.OrgGitHubAppInstallation, error)) {
+		t.Helper()
+		return stores.GitHubApps, orgID, readRaw
+	})
 }
 
 func seedPgOrgAndUserForGitHubApps(t *testing.T, h *pgtest.Harness) (orgID, userID string) {

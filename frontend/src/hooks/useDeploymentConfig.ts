@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react'
-import type { DeploymentConfig, MeResponse, TeamMember, TeamMembersResponse } from '../types'
+import { apiFetch, apiJSON, httpErrorMessage, readJSON } from '../lib/apiClient'
+import type { DeploymentConfig, MeResponse, TeamBot, TeamMember } from '../types'
+import { fetchTeamRoster, type TeamRoster } from '../lib/teamRoster'
+import { pickerDefault, useTeams } from './useTeams'
 
 /** In-flight Promise dedup for /api/config. The endpoint is read once at
  *  FE boot by AuthGate, but multiple components may still race to mount
@@ -8,14 +11,9 @@ let configInFlight: Promise<DeploymentConfig> | null = null
 
 function loadConfig(): Promise<DeploymentConfig> {
   if (configInFlight) return configInFlight
-  configInFlight = fetch('/api/config')
-    .then((r) => {
-      if (!r.ok) throw new Error(`/api/config: ${r.status}`)
-      return r.json() as Promise<DeploymentConfig>
-    })
-    .finally(() => {
-      configInFlight = null
-    })
+  configInFlight = apiJSON<DeploymentConfig>('/api/config').finally(() => {
+    configInFlight = null
+  })
   return configInFlight
 }
 
@@ -42,7 +40,7 @@ export function useDeploymentConfig(): {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load the deployment configuration.'))
           setLoading(false)
         }
       })
@@ -64,12 +62,13 @@ let meInFlight: Promise<MeResponse | null> | null = null
 
 function loadMe(): Promise<MeResponse | null> {
   if (meInFlight) return meInFlight
-  meInFlight = fetch('/api/me')
-    .then((r) => {
-      if (r.status === 401) return null
-      if (!r.ok) throw new Error(`/api/me: ${r.status}`)
-      return r.json() as Promise<MeResponse>
-    })
+  // `allow: [401]` is doing two things: a signed-out session resolves here
+  // instead of throwing, and — the load-bearing half — it keeps this read out
+  // of the global re-auth funnel. "Not signed in" is the answer this hook
+  // exists to return, so firing the handler would turn every render of a
+  // logged-out surface into a redirect.
+  meInFlight = apiFetch('/api/me', { allow: [401] })
+    .then((r) => (r.status === 401 ? null : readJSON<MeResponse>(r, '/api/me')))
     .finally(() => {
       meInFlight = null
     })
@@ -106,7 +105,7 @@ export function useMe(): {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
+          setError(httpErrorMessage(err, 'Could not load your account.'))
           setLoading(false)
         }
       })
@@ -118,43 +117,60 @@ export function useMe(): {
   return { me, loading, error }
 }
 
-/** useTeamMembers fetches the roster for the active user's team. Used
- *  by Variant B (multi-select) of the identity-allowlist field. Fetched
- *  fresh on each component mount — the roster is mutable during a
- *  session but cache invalidation isn't worth the websocket plumbing
- *  for v1. The list is usually small (single digits to low tens). */
+/** useTeamMembers fetches the roster of the team the user is ACTING as — the
+ *  same team the shell around the consumer resolves (last-written, else the
+ *  first team). Resolving it here, from the shared teams cache, is what keeps a
+ *  roster and the page it renders inside naming the same team for a user who
+ *  belongs to more than one.
+ *
+ *  Used by Variant B (multi-select) of the identity-allowlist field and by the
+ *  board's assignee picker. Fetched fresh whenever the acting team resolves or
+ *  changes — the roster is mutable during a session, and cache invalidation
+ *  isn't worth the websocket plumbing while the list is this small (single
+ *  digits to low tens).
+ *
+ *  `bot` is the raw roster bot; a caller that OFFERS it (rather than describing
+ *  it) filters through `usableBot`. */
 export function useTeamMembers(): {
   members: TeamMember[]
+  bot: TeamBot | null
   loading: boolean
   error: string | null
 } {
-  const [members, setMembers] = useState<TeamMember[]>([])
-  const [loading, setLoading] = useState(true)
+  const { teams, lastActingTeamId, loaded } = useTeams()
+  const teamId = loaded ? pickerDefault(teams, lastActingTeamId) : ''
+  const [roster, setRoster] = useState<TeamRoster | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    if (!teamId) return
     let cancelled = false
-    fetch('/api/team/members')
-      .then((r) => {
-        if (!r.ok) throw new Error(`/api/team/members: ${r.status}`)
-        return r.json() as Promise<TeamMembersResponse>
-      })
+    fetchTeamRoster(teamId)
       .then((data) => {
-        if (!cancelled) {
-          setMembers(data.members || [])
-          setLoading(false)
-        }
+        if (cancelled) return
+        setRoster(data)
+        // Clearing on success, rather than at dispatch, keeps this effect from
+        // setting state synchronously — and a prior failure stays visible
+        // until a later read actually succeeds.
+        setError(null)
       })
       .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err))
-          setLoading(false)
-        }
+        if (!cancelled) setError(httpErrorMessage(err, 'Could not load the team roster.'))
       })
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [teamId])
 
-  return { members, loading, error }
+  return {
+    members: roster?.members ?? [],
+    bot: roster?.bot ?? null,
+    // Still loading while the teams cache is resolving the acting team: a
+    // consumer that branches on roster SIZE (the predicate editor picks its
+    // variant that way) must not read an empty roster as "solo team". A user
+    // with no team at all resolves to '' and is not loading — there is
+    // nothing further to wait for, and neither is there after a failure.
+    loading: !loaded || (teamId !== '' && roster === null && error === null),
+    error,
+  }
 }

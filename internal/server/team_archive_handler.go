@@ -4,11 +4,12 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // Team archive/restore lifecycle (TFAC-448). Archiving a team is a soft-delete
@@ -17,9 +18,9 @@ import (
 // "let it finish" option by design. Org-admin only (matches the org-admin-only
 // teams_delete RLS); multi-mode only (local is N=1 and never archives its sole
 // team). Restore flips the tombstone back but deliberately does NOT resurrect
-// the runs / curator sessions that archive force-stopped.
+// the conversations / curator sessions that archive force-stopped.
 
-// teamArchiveCountsJSON is the shared count shape: the preview reports the work
+// teamArchivePreviewJSON is the shared count shape: the preview reports the work
 // an archive WOULD stop; the archive response reports what it DID stop. Field
 // names differ between the two responses (active_* vs cancelled_*) so the two
 // shapes below embed concrete fields rather than this struct.
@@ -44,13 +45,16 @@ type teamArchiveResultJSON struct {
 
 // resolveTeamForLifecycle runs the shared front gate for every archive/restore
 // endpoint: multi-mode only, active org resolved, a syntactically valid team_id
-// that belongs to the org, and an org-admin caller. Non-org-admin 404s (not
-// 403) — the same non-disclosure posture as handleTeamCreate, so a non-admin
-// never learns the team exists. Returns the resolved (orgID, userID, teamID) and
-// ok=false when a response was already written.
+// that belongs to the org, and an org-admin caller. A non-org-admin gets 403,
+// not 404: VerifyTeamInOrg has already established that the team is in the
+// caller's org, which means GET /api/teams lists it for them, so hiding it
+// here would deny the existence of a row they can see. 404 stays where it
+// belongs — the team isn't in this org, or the id isn't an id. Returns the
+// resolved (orgID, userID, teamID) and ok=false when a response was already
+// written.
 func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.Request) (orgID, userID, teamID string, ok bool) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return "", "", "", false
 	}
 	orgID, ok = requireOrg(w, r)
@@ -59,9 +63,8 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 	}
 	userID = ClaimsFrom(r.Context()).Subject
 
-	teamID = r.PathValue("team_id")
-	if _, err := uuid.Parse(teamID); err != nil {
-		http.NotFound(w, r)
+	teamID, ok = th.az.TeamIDFromPath(w, r, "teams", orgID, userID)
+	if !ok {
 		return "", "", "", false
 	}
 	// Cross-org 404 before the role gate — non-disclosure of teams in other orgs.
@@ -74,9 +77,7 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 		return "", "", "", false
 	}
 	if !isAdmin {
-		// 404 not 403 — a non-admin learns only that the surface doesn't exist
-		// for them, never that the team does (matches handleTeamCreate).
-		http.NotFound(w, r)
+		forbidden(w, "org admin role required")
 		return "", "", "", false
 	}
 	return orgID, userID, teamID, true
@@ -119,8 +120,8 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 
 // handleTeamArchive soft-deletes the team and force-stops its in-flight work.
 // Order: stamp deleted_at FIRST (so no further team-scoped writes can land —
-// new runs / curator turns are blocked), THEN enumerate and cancel the active
-// runs + curator sessions. Enumerating after the tombstone keeps the cascade
+// new conversations / curator turns are blocked), THEN enumerate and cancel the active
+// conversations + curator sessions. Enumerating after the tombstone keeps the cascade
 // from missing work that started in the window between the read and the stamp.
 // The cascade runs on the admin pool (spawner.Cancel with an empty userID,
 // curator.CancelProject) so the now-archived team's write RLS doesn't block the
@@ -143,7 +144,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if team.DeletedAt != nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "team is already archived"})
+		conflict(w, "team is already archived")
 		return
 	}
 
@@ -151,10 +152,11 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 	// RLS gates the write (org-admin via the front gate); a zero-row result means
 	// it was archived in a race past GetSystem.
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.Archive(r.Context(), teamID)
+		_, e := tx.Teams.Archive(r.Context(), teamID)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "team is already archived"})
+			conflict(w, "team is already archived")
 			return
 		}
 		internalError(w, "teams", err)
@@ -163,9 +165,9 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 
 	// Enumerate the work to stop now that the tombstone blocks new writes. The
 	// curator in-flight count is a point-in-time read taken before CancelProject
-	// clears the in-flight marker; the run ids are stable (cancellation only moves
+	// clears the in-flight marker; the conversation ids are stable (cancellation only moves
 	// them to terminal).
-	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
@@ -180,17 +182,18 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 
-	// Force-stop the runs. StopAndCancelBlueprint("" userID) hard-kills a live
-	// process or parks one that has none, and cancels the blueprint behind it —
-	// an archived team's work is over, so a frozen 'running' blueprint would
-	// hold a worktree nobody can resume. All on the admin pool. A per-run error
-	// is a benign race (the run reached terminal on its own) — log and keep going
-	// so one stuck run can't strand the rest; count only the ones we stopped.
+	// Force-stop the conversations. StopConversationAndCancelBlueprint with an
+	// empty userID hard-kills a live process or parks one that has none, and
+	// cancels the blueprint behind it — an archived team's work is over, so a
+	// frozen 'running' blueprint would hold a worktree nobody can resume. All
+	// on the admin pool. A per-conversation error is a benign race (the
+	// conversation reached terminal on its own) — log and keep going so one
+	// stuck conversation can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
-		for _, runID := range runIDs {
-			if cErr := sp.StopAndCancelBlueprint(orgID, runID, "", delegate.StopCauseTeamArchived); cErr != nil {
-				teamsLog.Warn("archive: run stop failed", "team", teamID, "run", runID, "error", cErr)
+		for _, conversationID := range conversationIDs {
+			if cErr := sp.StopConversationAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseTeamArchived); cErr != nil {
+				teamsLog.Warn("archive: conversation stop failed", "team", teamID, "conversation", conversationID, "error", cErr)
 				continue
 			}
 			cancelledRuns++
@@ -215,7 +218,7 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 }
 
 // handleTeamRestore clears the team's tombstone so it's visible + writable
-// again. Killed runs and curator sessions are NOT resurrected — archive's
+// again. Killed conversations and curator sessions are NOT resurrected — archive's
 // teardown is terminal by design. Org-admin only, multi-mode only.
 //
 // POST /api/teams/{team_id}/restore
@@ -235,16 +238,19 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if team.DeletedAt == nil {
-		writeJSON(w, http.StatusConflict, map[string]string{"error": "team is not archived"})
+		conflict(w, "team is not archived")
 		return
 	}
 
+	var restored domain.Team
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Teams.Restore(r.Context(), teamID)
+		var e error
+		restored, e = tx.Teams.Restore(r.Context(), teamID)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrTeamNotFound) {
 			// Restored in a race past GetSystem — treat as already-restored.
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "team is not archived"})
+			conflict(w, "team is not archived")
 			return
 		}
 		internalError(w, "teams", err)
@@ -252,27 +258,36 @@ func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request
 	}
 
 	teamsLog.Info("team restored", "org", orgID, "team", teamID)
-	writeJSON(w, http.StatusOK, teamDetailJSON{
-		ID: team.ID, Name: team.Name, Slug: team.Slug, Description: team.Description,
-	})
+	// The row the write returned, not the copy read before it: that copy still
+	// carries the tombstone this request removed, and patching the field off it
+	// by hand was a response asserting a state nobody had read.
+	writeJSON(w, http.StatusOK, teamToJSON(restored, ""))
 }
 
-// archivedTeamJSON is one row of the org-admin "Archived teams" restore surface.
-type archivedTeamJSON struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Slug       string `json:"slug"`
-	ArchivedAt string `json:"archived_at"`
+// archivedTeamListRequest is the body of POST /api/teams/archived/list. The
+// resource is "the org's archived teams", which has no filters of its own.
+type archivedTeamListRequest struct {
+	httpx.PageRequest
 }
 
 // handleTeamArchivedList returns the org's archived teams for the org-admin
 // restore surface (a toggle on the Teams management view). Org-admin only,
 // multi-mode only.
 //
-// GET /api/teams/archived
+// It is its own route rather than a flag on POST /api/teams/list because the
+// two reads are different resources wearing one word: the active list is
+// membership-scoped and answers "my teams", while this one is org-scoped and
+// admin-gated so a restore surface can reach a team its admin never joined.
+// Folding them together would mean one route whose scope, gate, and result set
+// all change with a boolean.
+//
+// Rows carry `role` empty for the same reason: an org admin restoring a team
+// they were never on has no membership to report.
+//
+// POST /api/teams/archived/list
 func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Request) {
 	if runmode.Current() == runmode.ModeLocal {
-		http.NotFound(w, r)
+		notFound(w, "route")
 		return
 	}
 	orgID, ok := requireOrg(w, r)
@@ -286,32 +301,43 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if !isAdmin {
-		http.NotFound(w, r)
+		// The caller is an org member by construction (requireOrg resolved
+		// their active org), so the org is visible and the denial names the
+		// role rather than hiding the surface.
+		forbidden(w, "org admin role required")
 		return
 	}
 
-	teams, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID)
+	var req archivedTeamListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(struct{}{}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	teams, total, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID,
+		db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 	if err != nil {
 		internalError(w, "teams", err)
 		return
 	}
-	out := make([]archivedTeamJSON, 0, len(teams))
+	out := make([]teamJSON, 0, len(teams))
 	for _, t := range teams {
-		archivedAt := ""
-		if t.DeletedAt != nil {
-			archivedAt = t.DeletedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
-		}
-		out = append(out, archivedTeamJSON{ID: t.ID, Name: t.Name, Slug: t.Slug, ArchivedAt: archivedAt})
+		out = append(out, teamToJSON(t, ""))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"teams": out})
+	httpx.WriteList(w, page, out, total)
 }
 
-// teamActiveWork returns the count of active runs + in-flight curator sessions
-// for the team — the preview's two numbers. Runs are read on the admin pool
+// teamActiveWork returns the count of active conversations + in-flight curator
+// sessions for the team — the preview's two numbers (the active_runs /
+// active_curator_sessions wire fields). Conversations are read on the admin pool
 // (ActiveIDsForTeamSystem); curator sessions are the in-flight count over the
 // team's projects.
 func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs, curatorSessions int, err error) {
-	runIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
+	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -322,7 +348,7 @@ func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (r
 	if cur := th.curatorRuntime(); cur != nil {
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
-	return len(runIDs), curatorSessions, nil
+	return len(conversationIDs), curatorSessions, nil
 }
 
 // spawnerRuntime / curatorRuntime resolve the wired delegation spawner / curator

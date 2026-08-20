@@ -56,7 +56,7 @@ func enqueueCIFailed(t *testing.T, database *sql.DB, entityID string) {
 func backdateClaim(t *testing.T, database *sql.DB, queueID int64, age time.Duration) {
 	t.Helper()
 	res, err := database.Exec(`UPDATE event_queue SET claimed_at = ? WHERE id = ?`,
-		time.Now().Add(-age), queueID)
+		time.Now().UTC().Add(-age), queueID)
 	if err != nil {
 		t.Fatalf("backdate claimed_at: %v", err)
 	}

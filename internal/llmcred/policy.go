@@ -85,12 +85,13 @@ func networkCondition(b NetworkBinding) map[string]any {
 	return cond
 }
 
-// sessionNameForRun turns a run id into a valid RoleSessionName: AWS
-// restricts it to 2–64 chars of [\w+=,.@-]. A run id (a uuid) already
-// satisfies the charset; the "tf-" prefix marks the session as TF-minted in
-// the customer's CloudTrail. Truncated to 64 for safety against non-uuid ids.
-func sessionNameForRun(runID string) string {
-	return clampSessionName("tf-" + sanitizeSessionName(runID))
+// sessionNameForConversation turns a conversation id into a valid
+// RoleSessionName: AWS restricts it to 2–64 chars of [\w+=,.@-]. A conversation
+// id (a uuid) already satisfies the charset; the "tf-" prefix marks the session
+// as TF-minted in the customer's CloudTrail. Truncated to 64 for safety against
+// non-uuid ids.
+func sessionNameForConversation(conversationID string) string {
+	return clampSessionName("tf-" + sanitizeSessionName(conversationID))
 }
 
 func sanitizeSessionName(s string) string {
@@ -113,7 +114,7 @@ func clampSessionName(s string) string {
 		return s[:64]
 	}
 	if s == "" {
-		return "tf-run"
+		return "tf-conversation"
 	}
 	return s
 }

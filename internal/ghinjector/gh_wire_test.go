@@ -34,7 +34,7 @@ import (
 // tests skip; TF_TEST_GH_BINARY points them at a local copy.
 const pinnedGHBinary = "/opt/tf/bin/gh"
 
-func ghBinary(t *testing.T) string {
+func ghBinary(t testing.TB) string {
 	t.Helper()
 	if override := os.Getenv("TF_TEST_GH_BINARY"); override != "" {
 		return override
@@ -141,15 +141,27 @@ func fakeGHE(t *testing.T, createExtra string) (*httptest.Server, func() string)
 // SSL_CERT_FILE points at a bundle carrying the injector's per-run leaf. The
 // environment is built from scratch rather than inherited so a developer's real
 // GH_TOKEN or gh config can't influence the result.
-func ghEnv(t *testing.T, upstream string, observe func(context.Context, ObservedMutation)) []string {
+func ghEnv(t testing.TB, upstream string, observe func(context.Context, ObservedMutation)) []string {
 	return ghEnvWithWrites(t, upstream, observe, nil)
 }
 
 // ghEnvWithWrites is ghEnv with the write-audit callback wired too — the half
 // that answers "what did this run do", as opposed to Observe's "what exists".
-func ghEnvWithWrites(t *testing.T, upstream string,
+func ghEnvWithWrites(t testing.TB, upstream string,
 	observe func(context.Context, ObservedMutation),
 	observeWrite func(context.Context, ObservedWrite)) []string {
+	return ghEnvWithGate(t, upstream, observe, observeWrite, nil)
+}
+
+// ghEnvWithGate is the full harness: the injector's two observation callbacks
+// plus the gate's decision hook, which is where a refused write leaves its one
+// record. A nil hook keeps the production posture — every gated shape refused,
+// nothing recorded — so the callers that only watch writes pass nil and read
+// exactly as before.
+func ghEnvWithGate(t testing.TB, upstream string,
+	observe func(context.Context, ObservedMutation),
+	observeWrite func(context.Context, ObservedWrite),
+	authorize AuthorizeWrite) []string {
 	t.Helper()
 	const placeholder = "placeholder-wire-token"
 
@@ -158,12 +170,13 @@ func ghEnvWithWrites(t *testing.T, upstream string,
 		t.Fatalf("GenerateCert: %v", err)
 	}
 	srv, err := New(Config{
-		Upstream:      upstream + "/api/v3",
-		IncomingToken: placeholder,
-		Cert:          cert,
-		Observe:       observe,
-		ObserveWrite:  observeWrite,
-		TokenSource:   func(context.Context) (string, error) { return "ghs_realtoken", nil },
+		Upstream:       upstream + "/api/v3",
+		IncomingToken:  placeholder,
+		Cert:           cert,
+		Observe:        observe,
+		ObserveWrite:   observeWrite,
+		AuthorizeWrite: authorize,
+		TokenSource:    func(context.Context) (string, error) { return "ghs_realtoken", nil },
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -199,7 +212,7 @@ func ghEnvWithWrites(t *testing.T, upstream string,
 // runGH invokes the pinned binary and fails the test if it errors, since a gh
 // failure means the fixture drifted from what gh actually sends — exactly the
 // signal these tests exist to produce.
-func runGH(t *testing.T, env []string, args ...string) string {
+func runGH(t testing.TB, env []string, args ...string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

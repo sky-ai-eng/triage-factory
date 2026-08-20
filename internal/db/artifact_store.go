@@ -8,20 +8,21 @@ import (
 )
 
 // ArtifactStore owns the artifacts table — the single durable,
-// run-attributed, polymorphic record of everything a run produces in an
-// external system (branch, PR, review, Jira/Linear issue, comment). Every
-// capture writer in TFAC-454's Sub-epic A UPSERTs through it; the
-// run-detail view, team-level C2, and the audit ledger read from it.
+// conversation-attributed, polymorphic record of everything a conversation
+// produces in an external system (branch, PR, review, Jira/Linear issue,
+// comment). Every capture writer in TFAC-454's Sub-epic A UPSERTs through it;
+// the conversation detail view, team-level C2, and the audit ledger read from
+// it.
 //
-// Mirrors the runs store for pool/RLS/scan conventions: app pool in
+// Mirrors the conversations store for pool/RLS/scan conventions: app pool in
 // Postgres (RLS-active under tf_app, team-scoped via team_id exactly like
-// runs), the one connection in SQLite. orgID is required on every method
+// conversations), the one connection in SQLite. orgID is required on every method
 // and stays in the WHERE/INSERT clause as defense in depth alongside RLS;
 // SQLite asserts it equals runmode.LocalDefaultOrgID. See TFAC-455.
 type ArtifactStore interface {
 	// Upsert inserts the artifact or, on a (org_id, dedup_key) conflict,
 	// updates the existing row's mutable fields (state, target,
-	// details_json, run_id, team_id, updated_at). This is the one writer all
+	// details_json, conversation_id, team_id, updated_at). This is the one writer all
 	// of Sub-epic A shares: the same PR seen via exec and again via
 	// reconciliation lands on one row. Returns the stored row with id and
 	// timestamps populated. a.ID may be empty (both impls generate a uuid); a
@@ -38,18 +39,19 @@ type ArtifactStore interface {
 	// Runs on the app pool in Postgres (RLS-active), so the caller must be
 	// inside a claims-set tx (request handler or SyntheticClaimsWithTx). A
 	// caller with an authoritative team identity but no JWT-claims context —
-	// an event-triggered run's exec choke point, which has no user (runs by
-	// schema CHECK carry no creator) — must use UpsertSystem instead.
+	// an event-triggered conversation's exec choke point, which has no user
+	// (event-triggered conversations by schema CHECK carry no creator) — must
+	// use UpsertSystem instead.
 	Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
 	// UpsertSystem is the admin-pool (BYPASSRLS) variant of Upsert for
 	// system-service writers that hold a real (org_id, team_id) identity but
 	// no JWT-claims context — chiefly the exec choke point on an
-	// event-triggered run (TFAC-459), whose insert is unreachable through
+	// event-triggered conversation (TFAC-459), whose insert is unreachable through
 	// tf_app because the artifacts_insert RLS policy demands a team-writing
-	// user and the run has none. Mirrors the `...System` admin halves on
-	// Conversations / RunWorktrees / Reviews. org_id stays bound as defense in
-	// depth; team_id on the row is authoritative (it comes from the run).
+	// user and the conversation has none. Mirrors the `...System` admin halves on
+	// Conversations / ConversationWorktrees / Reviews. org_id stays bound as defense in
+	// depth; team_id on the row is authoritative (it comes from the conversation).
 	// Identical to Upsert in SQLite (single-tenant, no RLS).
 	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
@@ -91,7 +93,7 @@ type ArtifactStore interface {
 	// TransitionReviewState, for the exec choke point's event-triggered review
 	// writers — the same split UpdateReviewDetailsIfPendingSystem covers. The
 	// auto-posting review posture needs the identical claim the approve handler
-	// takes: the drafting run and a human approver can both reach a finalized
+	// takes: the drafting conversation and a human approver can both reach a finalized
 	// draft, so whichever calls SubmitReview must win this CAS first or the
 	// review posts twice. Identical to TransitionReviewState in SQLite.
 	TransitionReviewStateSystem(ctx context.Context, orgID, id, from, to, externalID, url, detailsJSON string) (bool, error)
@@ -122,15 +124,15 @@ type ArtifactStore interface {
 	// org_id stays bound as defense in depth alongside RLS.
 	Get(ctx context.Context, orgID, id string) (*domain.Artifact, error)
 
-	// ListByRun returns every artifact produced by one run, newest first.
-	// Backs the run-detail surface (A·6).
-	ListByRun(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
+	// ListByConversation returns every artifact produced by one conversation, newest first.
+	// Backs the conversation detail surface (A·6).
+	ListByConversation(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
 	// ListPendingReviewsByTargetSystem returns every PENDING review artifact
 	// (Kind=review, State=pending) whose Target is the given PR resource key
 	// (owner/repo#number), across every team in the org, newest first. It backs
 	// the new-commits notifier (TFAC-501): a PR head-SHA change finds the
-	// in-flight review drafts anchored to that PR so their runs can be told the
+	// in-flight review drafts anchored to that PR so their conversations can be told the
 	// PR advanced under them. "Pending" — not yet submitted or dismissed — is the
 	// only state with a live draft worth reconciling; a submitted/dismissed
 	// review is done.
@@ -143,48 +145,51 @@ type ArtifactStore interface {
 	// (single-tenant, no RLS).
 	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error)
 
-	// ListByRunSystem is the admin-pool (BYPASSRLS) variant of ListByRun for
+	// ListByConversationSystem is the admin-pool (BYPASSRLS) variant of ListByConversation for
 	// system-service readers that hold a real (org_id) identity but no
 	// JWT-claims context — chiefly the delegate spawner's post-completion
-	// artifact check, which reads a run's artifacts from a goroutine detached
-	// from any request. Mirrors reviews.ByRunIDSystem. Identical to ListByRun
+	// artifact check, which reads a conversation's artifacts from a goroutine detached
+	// from any request. Identical to ListByConversation
 	// in SQLite (single-tenant, no RLS).
-	ListByRunSystem(ctx context.Context, orgID, runID string) ([]domain.Artifact, error)
+	ListByConversationSystem(ctx context.Context, orgID, conversationID string) ([]domain.Artifact, error)
 
-	// CountByRun returns the number of artifacts each given run produced,
-	// keyed by run id. Runs with zero artifacts (or absent from the table)
-	// have no entry — the caller treats a missing key as 0. It batches the
-	// run-list path's per-card count into one query so listing a task's runs
-	// stays O(1) in artifact reads rather than N+1 (the run response's
-	// artifact_count, internal/server/agent.go). An empty runIDs returns an
-	// empty map without touching the DB.
+	// CountByConversation returns the number of artifacts each given conversation produced,
+	// keyed by conversation id. Conversations with zero artifacts (or absent
+	// from the table) have no entry — the caller treats a missing key as 0. It
+	// batches the conversation-list path's per-card count into one query so
+	// listing a task's conversations stays O(1) in artifact reads rather than
+	// N+1 (the conversation response's artifact_count,
+	// internal/server/agent.go). An empty conversationIDs returns an empty map
+	// without touching the DB.
 	//
-	// Mirrors ListByRun's pool/RLS conventions: app pool in Postgres
+	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
 	// (RLS-active, so the count is team-scoped exactly like the rows it
 	// counts — a non-member counts zero), the one connection in SQLite.
-	// orgID stays bound as defense in depth. Detached artifacts (run purged →
-	// run_id NULL) never match and are correctly excluded.
-	CountByRun(ctx context.Context, orgID string, runIDs []string) (map[string]int, error)
+	// orgID stays bound as defense in depth. Detached artifacts (conversation
+	// purged → conversation_id NULL) never match and are correctly excluded.
+	CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error)
 
-	// ListByRuns returns the artifacts for every given run as one flat slice,
-	// each ordered newest-first (created_at DESC, id DESC) so a run's rows
-	// match ListByRun's order once grouped. It lets a caller projecting many
-	// runs fetch their artifacts in a single query instead of an N+1 of
-	// per-run ListByRun calls — the run-list response uses it to resolve
-	// pending_kind for the parked runs in a task's run list
-	// (internal/server/agent.go). Each artifact carries its RunID, so the
-	// caller groups by it; an empty runIDs returns nil without touching the DB.
+	// ListByConversations returns the artifacts for every given conversation as
+	// one flat slice, each ordered newest-first (created_at DESC, id DESC) so a
+	// conversation's rows match ListByConversation's order once grouped. It
+	// lets a caller projecting many conversations fetch their artifacts in a
+	// single query instead of an N+1 of per-conversation ListByConversation
+	// calls — the conversation-list response uses it to resolve pending_kind
+	// for the parked conversations in a task's conversation list
+	// (internal/server/agent.go). Each artifact carries its ConversationID, so
+	// the caller groups by it; an empty conversationIDs returns nil without
+	// touching the DB.
 	//
-	// Mirrors ListByRun's pool/RLS conventions: app pool in Postgres
+	// Mirrors ListByConversation's pool/RLS conventions: app pool in Postgres
 	// (RLS-active, team-scoped), the one connection in SQLite. orgID stays
-	// bound as defense in depth. Detached artifacts (run_id NULL) never match.
-	ListByRuns(ctx context.Context, orgID string, runIDs []string) ([]domain.Artifact, error)
+	// bound as defense in depth. Detached artifacts (conversation_id NULL) never match.
+	ListByConversations(ctx context.Context, orgID string, conversationIDs []string) ([]domain.Artifact, error)
 
 	// ListByTeam returns the team's artifacts, newest first (the
 	// team_created index order). Backs team-level C2 (TFAC-449) through the
-	// shared A·6 API. Detached rows (run purged → run_id NULL) are still
-	// the team's and are included.
-	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, error)
+	// shared A·6 API. Detached rows (conversation purged → conversation_id
+	// NULL) are still the team's and are included.
+	ListByTeam(ctx context.Context, orgID, teamID string, opts ArtifactListOpts) ([]domain.Artifact, int, error)
 
 	// ListNonTerminalBySystem returns every artifact for the org whose
 	// (kind, state) is still reconcilable — PR draft|open, review pending,
@@ -211,12 +216,12 @@ type ArtifactStore interface {
 	// / time window) and pages (limit / offset).
 	//
 	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped shape
-	// ListNonTerminalBySystem uses (mirrors ListByRunSystem's pool selection):
+	// ListNonTerminalBySystem uses (mirrors ListByConversationSystem's pool selection):
 	// the org feed is an org-admin-gated cross-team read with no per-team RLS
 	// context, so it must see every team's rows. org_id stays bound in the
 	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
 	// (single-tenant, no RLS).
-	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.Artifact, error)
+	ListByOrgSystem(ctx context.Context, orgID string, opts ArtifactListOpts) ([]domain.Artifact, int, error)
 }
 
 // ArtifactListOpts carries the optional filters/paging for

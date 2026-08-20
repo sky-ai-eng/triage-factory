@@ -17,8 +17,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// reviewFreshnessOut is the slice of reviewArtifactJSON the TFAC-500 freshness
-// tests assert on.
+// reviewFreshnessOut is the slice of the review artifact's `details` payload
+// the freshness tests assert on.
 type reviewFreshnessOut struct {
 	CommitsSinceFinalize *int `json:"commits_since_finalize"`
 	Comments             []struct {
@@ -30,13 +30,13 @@ type reviewFreshnessOut struct {
 	} `json:"comments"`
 }
 
-// seedFinalizedReviewAt seeds a finalized review-draft artifact (TFAC-494) with a
-// stamped finalize-time head (TFAC-500) and one inline comment on a.go anchored to
-// that head at the given line. Returns the artifact id. The owner must be "acme"
+// seedFinalizedReviewAt seeds a finalized review-draft artifact with a stamped
+// finalize-time head and one inline comment on a.go anchored to that head at
+// the given line. Returns the artifact id. The owner must be "acme"
 // so the App resolver (acmeInstall) matches.
 func seedFinalizedReviewAt(t *testing.T, s *Server, suffix string, number int, finalizeHead string, line int) string {
 	t.Helper()
-	artID, _, _ := seedReviewArtifactWithRun(t, s, suffix, "acme", "api", number, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, s, suffix, "acme", "api", number, "COMMENT")
 	art := getArtifact(t, s, artID)
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	d.FinalizedHeadSHA = finalizeHead
@@ -89,11 +89,13 @@ func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOu
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var out reviewFreshnessOut
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+	var envelope struct {
+		Details reviewFreshnessOut `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	return out
+	return envelope.Details
 }
 
 // TestArtifactDiff_ReviewServesFinalizeFrame pins that a review with a stored
@@ -157,8 +159,8 @@ func TestArtifactDiff_FramelessReviewServesLiveDiff(t *testing.T) {
 	stub := httptest.NewServer(mux)
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
-	// seedReviewArtifactWithRun records no finalize frame → frameless.
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rlive", "acme", "api", 7, "COMMENT")
+	// seedReviewArtifactWithConversation records no finalize frame → frameless.
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rlive", "acme", "api", 7, "COMMENT")
 
 	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID+"/diff", nil)
 	if rec.Code != http.StatusOK {
@@ -198,7 +200,7 @@ func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 
-	artID, _, _ := seedReviewArtifactWithRun(t, srv, "rref", "acme", "api", 7, "COMMENT")
+	artID, _, _ := seedReviewArtifactWithConversation(t, srv, "rref", "acme", "api", 7, "COMMENT")
 	art := getArtifact(t, srv, artID)
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	d.FinalizedHeadSHA, d.FinalizedBaseSHA = "finA", "base0"

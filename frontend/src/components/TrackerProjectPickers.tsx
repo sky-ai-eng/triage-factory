@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { apiJSON } from '../lib/apiClient'
 
 interface TeamSettingsResponse {
   jira_projects: { key: string }[]
@@ -11,15 +12,18 @@ interface Props {
   linearKey: string
   onJiraChange: (key: string) => void
   onLinearChange: (key: string) => void
-  // The team whose configured Jira projects populate the picker. A UUID
-  // (the acting team in the multi-team create modal) or the literal
-  // "default" — the backend's /api/settings/team/{team_id} accepts both.
-  // Empty/undefined falls back to "default": the single-team detail view
-  // and solo/local, where the sole team's config is the right source.
-  // Must match the team the create POST validates jira_project_key
-  // against, or valid team-B projects are hidden and default-team choices
-  // 400. The create modal clears the selection on team change (see the
-  // parent's [team] effect); the fixed-team detail view never changes it.
+  // The team whose configured Jira projects populate the picker: the
+  // acting team's uuid, or empty. Empty falls back to the "default" alias,
+  // which the backend resolves in local mode only — there it reads the sole
+  // team's config, the right source for local's detail view and create
+  // modal. In multi the fallback read 404s and the picker degrades to its
+  // disabled state, which is also the right answer for the case that sends
+  // it: a teamless (private/org-visibility) project's detail view, whose
+  // tracker-key writes the backend 400s anyway. Must match the team the
+  // create POST validates jira_project_key against, or valid team-B
+  // projects are hidden and default-team choices 400. The create modal
+  // clears the selection on team change (see the parent's [team] effect);
+  // the fixed-team detail view never changes it.
   teamId?: string
 }
 
@@ -60,14 +64,10 @@ export default function TrackerProjectPickers({
     setLoading(true)
     const load = async () => {
       try {
-        const res = await fetch(`/api/settings/team/${encodeURIComponent(settingsTeam)}`, {
-          signal: controller.signal,
-        })
-        if (controller.signal.aborted) return
-        if (!res.ok) {
-          return
-        }
-        const data: TeamSettingsResponse = await res.json()
+        const data = await apiJSON<TeamSettingsResponse>(
+          `/api/teams/${encodeURIComponent(settingsTeam)}/settings`,
+          { signal: controller.signal },
+        )
         if (controller.signal.aborted) return
         const keys = (data.jira_projects || []).map((p) => p.key)
         setJiraEnabled(keys.length > 0)

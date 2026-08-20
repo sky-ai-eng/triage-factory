@@ -22,9 +22,9 @@ func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return "", false, err
 	}
 	// Action → effect mapping. The responsibility axis
 	// (who owns this) is split off the lifecycle axis (where in its life the
@@ -40,13 +40,17 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 	//
 	// closed_at + close_reason are written on terminal swipes
 	// so the Board's Done-column 7-day cap actually applies. They're
-	// NOT cleared on claim/delegate because the swipe handler refuses
-	// claim transitions on terminal tasks at the entry — so a row
-	// reaching this path with stale close metadata isn't a state the
-	// handler permits. Re-open paths (RequeueTask / UndoLastSwipe)
-	// clear the close columns explicitly.
+	// NOT cleared on claim/delegate because every task-action route
+	// refuses on a terminal task at the entry — so a row reaching this
+	// path with stale close metadata isn't a state the handlers
+	// permit. Re-open paths (RequeueTask / UndoLastSwipe) clear the
+	// close columns explicitly.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
+	// snoozeVal is what lands in tasks.snooze_until: the caller's wake
+	// time on a snooze, NULL on every other action (each of which is a
+	// transition out of a snooze, if the row was in one).
+	var snoozeVal any
 	switch action {
 	case "claim", "delegate", "reassign":
 		// Audit-only path — read the current status to return so the
@@ -58,17 +62,14 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		newStatus = "done"
 		closeReason = "user_completed"
 	case "snooze":
-		// Defensive: the FE routes snoozing through
-		// /api/tasks/{id}/snooze → SnoozeTask, but handleSwipe still
-		// accepts action='snooze' and falls into the dismiss/snooze/
-		// complete branch that calls RecordSwipe. If a request ever
-		// lands here, write status='snoozed' so the audit row at least
-		// matches the lifecycle write — without this, the default arm
-		// below would silently write 'queued' and the snooze "would
-		// have happened" without happening. snooze_until stays NULL
-		// (handler doesn't pass it through this path), which the FE
-		// doesn't produce in practice.
+		// The snooze arm. It must write a real wake time — the queue's
+		// wake sweep requeues on snooze_until, so a snoozed row without
+		// one never comes back. Refuse rather than write that state.
+		if snoozeUntil == nil {
+			return "", false, db.ErrSnoozeUntilRequired
+		}
 		newStatus = "snoozed"
+		snoozeVal = snoozeUntil.UTC()
 	default:
 		// Unknown action — same fallback as before, write 'queued'.
 		newStatus = "queued"
@@ -89,14 +90,23 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			// keeps every non-snoozed status intact — load-bearing for
 			// the assignee picker's take-over-from-bot path, which
 			// hits an in_progress / in_review row.
-			if _, err := q.ExecContext(ctx,
+			res, err := q.ExecContext(ctx,
 				`UPDATE tasks
 				   SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				       snooze_until = NULL
-				 WHERE id = ?`,
+				 WHERE id = ?
+				   AND status NOT IN ('done', 'dismissed')`,
 				taskID,
-			); err != nil {
+			)
+			if err != nil {
 				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return errTerminalRefused
 			}
 			// Read-back so the caller's WS broadcast carries the
 			// actual post-mutation status.
@@ -106,25 +116,49 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		var closedAt any
 		var reason any
 		if terminal {
-			closedAt = time.Now()
+			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
-		_, err := q.ExecContext(ctx,
+		// The status predicate is what makes a second close a no-op
+		// rather than a rewrite: two callers closing the same task
+		// concurrently both pass their own pre-read, and only the one
+		// that gets here first finds a row to update.
+		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			   SET status = ?,
-			       snooze_until = NULL,
+			       snooze_until = ?,
 			       closed_at = ?,
 			       close_reason = ?
-			 WHERE id = ?`,
-			newStatus, closedAt, reason, taskID,
+			 WHERE id = ?
+			   AND status NOT IN ('done', 'dismissed')`,
+			newStatus, snoozeVal, closedAt, reason, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errTerminalRefused
+		}
+		return nil
 	})
-	if err != nil {
-		return "", err
+	if errors.Is(err, errTerminalRefused) {
+		return "", false, nil
 	}
-	return newStatus, nil
+	if err != nil {
+		return "", false, err
+	}
+	return newStatus, true, nil
 }
+
+// errTerminalRefused signals RecordSwipe's status predicate refused: the task
+// closed between the caller's read and this write. Distinct from a real DB
+// error so RecordSwipe can return ("", false, nil) while still triggering
+// inTx's deferred rollback for the audit row it already inserted.
+var errTerminalRefused = errors.New("sqlite swipes: task is closed")
 
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
@@ -150,13 +184,19 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 		// (drain skips it, re-derive skips it, Board doesn't
 		// render the SnoozedBadge in a claimed lane). Refuse here;
 		// caller surfaces 409 and the user can requeue first.
+		//
+		// The status predicate is the other half: a closed task can have
+		// both claim columns NULL, so without it a dismiss landing between
+		// the caller's read and this write would park a closed task in the
+		// snoozed lane for the wake sweep to resurrect.
 		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'snoozed', snooze_until = ?
 			  WHERE id = ?
 			    AND claimed_by_agent_id IS NULL
-			    AND claimed_by_user_id  IS NULL`,
-			until, taskID,
+			    AND claimed_by_user_id  IS NULL
+			    AND status NOT IN ('done', 'dismissed')`,
+			until.UTC(), taskID,
 		)
 		if err != nil {
 			return err
@@ -221,29 +261,60 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	return ok, err
 }
 
-func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) error {
+func (s *swipeStore) ClearSnooze(ctx context.Context, orgID string, taskID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return false, err
 	}
-	return inTx(ctx, s.q, func(q queryer) error {
-		if _, err := q.ExecContext(ctx,
-			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
-			taskID,
-		); err != nil {
-			return err
-		}
-		// Undo mirrors requeue's full reset — claim cols
-		// also clear. A claim/delegate swipe stamps the relevant
-		// claim col; the post-swipe-handler teardown
-		// (teardownTaskArtifacts + spawner.Cancel for the
-		// dismiss/complete/claim paths) is the side-effect, but the
-		// claim col left on the row would keep the task in the
-		// owner's lane even after status returns to 'queued'. Clear
-		// both cols so the task lands back in the team's unclaimed
-		// triage queue, the same shape /requeue produces.
-		// Also clear close metadata too — undoing a dismiss /
-		// complete swipe means the task isn't terminal anymore.
-		_, err := q.ExecContext(ctx,
+	// Status predicate in the WHERE clause, not a read-then-write: the
+	// refusal and the write are then one statement, so a concurrent
+	// requeue or dismiss can't land between the check and the update.
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE tasks
+		    SET status = 'queued',
+		        snooze_until = NULL
+		  WHERE id = ?
+		    AND status = 'snoozed'`,
+		taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	var ok bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		// Undo reverses the caller's own last gesture, and only while that
+		// gesture is still the last thing that happened to the task. Both
+		// halves matter: "mine" alone would let a stale gesture reverse
+		// somebody else's later dismiss (gestures don't expire, and
+		// RequeueTask deliberately logs nothing, so a released claim stays
+		// a user's newest row indefinitely), and "not already undone"
+		// alone would let a second undo re-reverse.
+		//
+		// The predicate rides the UPDATE rather than a read before it, so
+		// the check and the write are one statement: two undos racing on
+		// the same task can't both pass. The audit row goes in AFTER, or
+		// it would be the newest row and shadow the very thing being
+		// tested. A task with no gestures at all reads NULL here, which
+		// fails the comparison and refuses — the same answer.
+		//
+		// Undo mirrors requeue's full reset — claim cols also clear. A
+		// claim/delegate gesture stamps the relevant claim col; the claim
+		// col left on the row would keep the task in the owner's lane even
+		// after status returns to 'queued'. Clear both cols so the task
+		// lands back in the team's unclaimed triage queue, the same shape
+		// /requeue produces. Close metadata clears too — undoing a dismiss
+		// or complete means the task isn't terminal anymore.
+		res, err := q.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'queued',
 			        snooze_until = NULL,
@@ -251,9 +322,40 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 			        claimed_by_user_id  = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
-			  WHERE id = ?`,
-			taskID,
+			  WHERE id = ?
+			    AND (SELECT creator_user_id FROM swipe_events
+			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) = ?
+			    AND (SELECT action FROM swipe_events
+			          WHERE task_id = ? ORDER BY id DESC LIMIT 1) <> 'undo'`,
+			taskID, taskID, userID, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errNothingToUndo
+		}
+		if _, err := q.ExecContext(ctx,
+			`INSERT INTO swipe_events (task_id, action) VALUES (?, 'undo')`,
+			taskID,
+		); err != nil {
+			return err
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errNothingToUndo) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
+// gesture isn't the caller's, or is itself an undo. Distinct from a real DB
+// error so UndoLastSwipe can return (false, nil) while still triggering
+// inTx's deferred rollback.
+var errNothingToUndo = errors.New("sqlite swipes: the task's newest gesture isn't the caller's to undo")

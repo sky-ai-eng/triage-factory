@@ -45,7 +45,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	// Mint the run with a length-1 plan frozen onto it, exactly as delegate.go
 	// does at mint — snapshot the single resolved step. Cancelled mirrors the
 	// repro (the run was cancelled before the blueprint was edited).
-	const brID = "br-frozen"
+	brID := fixtureUUID("br-frozen")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           brID,
 		BlueprintID:  bpID,
@@ -70,9 +70,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	}
 
 	// Precondition: the live blueprint now reports 2 steps.
-	live := doJSON(t, s, http.MethodGet, "/api/blueprints/"+bpID+"/steps", nil)
-	var liveSteps []map[string]any
-	_ = json.Unmarshal(live.Body.Bytes(), &liveSteps)
+	liveSteps := listBlueprintSteps(t, s, bpID)
 	if len(liveSteps) != 2 {
 		t.Fatalf("live blueprint steps = %d, want 2 (precondition for the regression)", len(liveSteps))
 	}

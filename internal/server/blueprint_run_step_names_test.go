@@ -31,7 +31,7 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 	taskID := seedBlueprintRunTask(t, s, "owner/repo#names")
 
 	// The plan a delegation freezes onto the run at mint — prompt names and all.
-	const plannedID = "br-named"
+	plannedID := fixtureUUID("br-named")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           plannedID,
 		BlueprintID:  bpID,
@@ -71,7 +71,7 @@ func TestBlueprintRunGet_StepNamesFromFrozenPlan(t *testing.T) {
 
 	// The defensive branch: a run with no frozen plan falls back to the live
 	// steps, which carry a prompt id and no name.
-	const unplannedID = "br-unnamed"
+	unplannedID := fixtureUUID("br-unnamed")
 	if _, err := sqlitestore.New(s.db).Blueprints.CreateRun(ctx, runmode.LocalDefaultOrgID, domain.BlueprintRun{
 		ID:           unplannedID,
 		BlueprintID:  bpID,
@@ -109,17 +109,17 @@ type blueprintRunStepJSON struct {
 	} `json:"step"`
 }
 
-func getBlueprintRunSteps(t *testing.T, s *Server, runID string) []blueprintRunStepJSON {
+func getBlueprintRunSteps(t *testing.T, s *Server, blueprintRunID string) []blueprintRunStepJSON {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-runs/"+runID, nil)
+	rec := doJSON(t, s, http.MethodGet, "/api/blueprint-runs/"+blueprintRunID, nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("get blueprint run %s: %d: %s", runID, rec.Code, rec.Body.String())
+		t.Fatalf("get blueprint run %s: %d: %s", blueprintRunID, rec.Code, rec.Body.String())
 	}
 	var resp struct {
 		Steps []blueprintRunStepJSON `json:"steps"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode blueprint run %s: %v", runID, err)
+		t.Fatalf("decode blueprint run %s: %v", blueprintRunID, err)
 	}
 	return resp.Steps
 }

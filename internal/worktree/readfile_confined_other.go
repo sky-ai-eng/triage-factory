@@ -13,3 +13,7 @@ import (
 func readFileConfined(root, rel string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(root, rel))
 }
+
+func openFileConfined(root, rel string) (*os.File, error) {
+	return os.Open(filepath.Join(root, rel))
+}

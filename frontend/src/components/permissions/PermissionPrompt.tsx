@@ -4,7 +4,7 @@ import { stripWorktree } from '../../lib/worktree'
 import { tint } from '../runstation/stationStyle'
 import type { PendingPermission, PermissionDecisionInput } from '../../lib/permissions'
 
-// PermissionPrompt — the head of a run's tool-approval queue, rendered with
+// PermissionPrompt — the head of a conversation's tool-approval queue, rendered with
 // priority because it's parking the agent's turn. The SDK's prompt sentence
 // (or a tool-name fallback) + a compact input summary, Deny / Allow, and an "N
 // more" count when parallel tool calls stacked up. Shared between the RunStation dock and the board's AgentCard so the

@@ -3,8 +3,8 @@ package domain
 import "time"
 
 // Artifact is one row in the artifacts table — the single durable,
-// run-attributed, polymorphic record of something a run produced in an
-// external system (a pushed branch, a draft/open PR, a draft/submitted
+// conversation-attributed, polymorphic record of something a conversation
+// produced in an external system (a pushed branch, a draft/open PR, a draft/submitted
 // review, a Jira/Linear issue, a comment). One row per external object;
 // the (Provider, Kind) pair discriminates the shape. See TFAC-455.
 //
@@ -13,14 +13,14 @@ import "time"
 // pre-push hook, git-proxy backstop, reconciliation) saw it first.
 // Build the key with ArtifactDedupKey.
 //
-// TeamID is denormalized from the owning run so reads scope by team
-// exactly like runs. RunID is nullable (empty string here) so a row
-// survives a run purge for audit — the FK is ON DELETE SET NULL.
+// TeamID is denormalized from the owning conversation so reads scope by team
+// exactly like conversations. ConversationID is nullable (empty string here) so
+// a row survives a conversation purge for audit — the FK is ON DELETE SET NULL.
 type Artifact struct {
 	ID string `json:"id"`
-	// ConversationID is the run that produced this artifact. Empty after the run
-	// is purged (FK ON DELETE SET NULL) — the artifact outlives it for
-	// the audit ledger.
+	// ConversationID is the conversation that produced this artifact. Empty
+	// after the conversation is purged (FK ON DELETE SET NULL) — the artifact
+	// outlives it for the audit ledger.
 	ConversationID string `json:"conversation_id,omitempty"`
 	OrgID          string `json:"org_id"`
 	TeamID         string `json:"team_id"`
@@ -116,7 +116,7 @@ const (
 	// issue (Jira / future Linear). These track the *last* action on the
 	// row, not the first: because the artifact is one deduped row, a
 	// 'created' issue that a later upsert touches again flips to 'updated',
-	// so "did this run create or only update the issue?" is NOT recoverable
+	// so "did this conversation create or only update the issue?" is NOT recoverable
 	// from state alone — a writer that needs that distinction must record it
 	// in details_json at create time.
 	ArtifactStateIssueCreated = "created"
@@ -133,6 +133,63 @@ const (
 	// in this ticket's scope, so there is no terminal state to add yet.
 	ArtifactStateMessagePosted = "posted"
 )
+
+// ArtifactKinds is the closed kind vocabulary, and ArtifactStates the union of
+// every per-kind state above. Read APIs validate a caller's ?kind= / ?state=
+// filter against them so a typo is a rejected request rather than an
+// authoritative-looking empty page.
+func ArtifactKinds() []string {
+	return []string{
+		ArtifactKindBranch, ArtifactKindPullRequest, ArtifactKindReview,
+		ArtifactKindIssue, ArtifactKindComment, ArtifactKindMessage,
+	}
+}
+
+// artifactStatesByKind is every kind's full lifecycle, one entry per kind in
+// ArtifactKinds. ArtifactStates is derived from it rather than hand-listed, so
+// a state added to a kind above joins the read filters' vocabulary with it — a
+// separately maintained union drifts silently, and the failure mode is a valid
+// request rejected as a typo.
+var artifactStatesByKind = map[string][]string{
+	ArtifactKindBranch: {ArtifactStateBranchPushed, ArtifactStateBranchDeleted},
+	ArtifactKindPullRequest: {
+		ArtifactStatePRPending, ArtifactStatePRDraft, ArtifactStatePROpen,
+		ArtifactStatePRMerged, ArtifactStatePRClosed,
+	},
+	ArtifactKindReview: {
+		ArtifactStateReviewPending, ArtifactStateReviewSubmitted, ArtifactStateReviewDismissed,
+	},
+	ArtifactKindIssue:   {ArtifactStateIssueCreated, ArtifactStateIssueUpdated},
+	ArtifactKindComment: {ArtifactStateCommentPosted, ArtifactStateCommentDeleted},
+	ArtifactKindMessage: {ArtifactStateMessagePosted},
+}
+
+// ArtifactStates is the deduplicated union of the per-kind lifecycles. A state
+// is only meaningful read with its kind (values alias across kinds), so this is
+// a filter vocabulary, not a per-kind contract. Iteration is over ArtifactKinds
+// rather than the map, so the order is stable for the "want one of …" message.
+func ArtifactStates() []string {
+	out := make([]string, 0, len(artifactStatesByKind))
+	seen := map[string]bool{}
+	for _, kind := range ArtifactKinds() {
+		for _, state := range artifactStatesByKind[kind] {
+			if seen[state] {
+				continue
+			}
+			seen[state] = true
+			out = append(out, state)
+		}
+	}
+	return out
+}
+
+// ArtifactProviders is the closed provider vocabulary, for the same use.
+func ArtifactProviders() []string {
+	return []string{
+		ArtifactProviderGitHub, ArtifactProviderJira, ArtifactProviderLinear,
+		ArtifactProviderGit, ArtifactProviderSlack, ArtifactProviderNetwork,
+	}
+}
 
 // ArtifactDedupKey builds the stable, provider-natural key Upsert
 // conflicts on: provider:kind:resource[:anchor]. The same logical artifact
@@ -183,7 +240,7 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 // reconcilableNonTerminal lists, per Kind, the states the reconciler
 // (TFAC-464) treats as non-terminal AND backed by a fetchable GitHub object —
 // the exact set Artifacts.ListNonTerminalBySystem returns and the Tier-2
-// run-scoped refresh filters to. It is the single source of truth both the
+// conversation-scoped refresh filters to. It is the single source of truth both the
 // store's SQL predicate and IsReconcilableNonTerminal derive from.
 //
 // PR 'pending' is deliberately excluded: a pending PR is intent-only (no
@@ -203,9 +260,9 @@ var reconcilableNonTerminal = map[string]map[string]bool{
 
 // IsReconcilableNonTerminal reports whether an artifact of (kind, state) is
 // in the reconciler's working set: non-terminal AND backed by a fetchable
-// GitHub object. The Tier-2 run-scoped refresh filters a run's artifacts
-// through this so it reconciles exactly what the org-wide Tier-1 query would;
-// TestReconcilableNonTerminal pins it equal to the store's SQL predicate.
+// GitHub object. The Tier-2 conversation-scoped refresh filters a
+// conversation's artifacts through this so it reconciles exactly what the org-wide Tier-1 query would;
+// the ListNonTerminal store tests pin it equal to the store's SQL predicate.
 func IsReconcilableNonTerminal(kind, state string) bool {
 	return reconcilableNonTerminal[kind][state]
 }

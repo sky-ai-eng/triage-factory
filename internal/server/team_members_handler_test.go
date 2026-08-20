@@ -132,20 +132,26 @@ func TestTeamRosterList_AnyMemberReads(t *testing.T) {
 		 VALUES ($1, 'https://github.com', 'founder-gh', 'pat', now())`, r.admin)
 
 	rec := httptest.NewRecorder()
-	r.tmh.handleTeamRosterList(rec, r.req(http.MethodGet, r.memb, "", nil))
+	r.tmh.handleTeamRosterList(rec, r.req(http.MethodPost, r.memb, "", map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	var resp teamRosterResponse
+	var resp teamRosterListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Members) != 2 {
-		t.Fatalf("members = %d, want 2 (admin, member)", len(resp.Members))
+	if len(resp.Items) != 2 {
+		t.Fatalf("items = %d, want 2 (admin, member)", len(resp.Items))
+	}
+	if resp.TotalCount != 2 {
+		t.Errorf("total_count = %d, want 2 (the members, never the bot)", resp.TotalCount)
+	}
+	if resp.NextPageToken != "" {
+		t.Errorf("next_page_token = %q, want empty (single page)", resp.NextPageToken)
 	}
 	byID := map[string]teamRosterRow{}
-	for _, m := range resp.Members {
+	for _, m := range resp.Items {
 		byID[m.UserID] = m
 	}
 	if got := byID[r.admin].Role; got != "admin" {
@@ -191,13 +197,21 @@ func TestTeamRosterList_BotRow(t *testing.T) {
 	`, r.teamID, agentID)
 
 	rec := httptest.NewRecorder()
-	r.tmh.handleTeamRosterList(rec, r.req(http.MethodGet, r.admin, "", nil))
+	r.tmh.handleTeamRosterList(rec, r.req(http.MethodPost, r.admin, "", map[string]any{}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var resp teamRosterResponse
+	var resp teamRosterListResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+	for _, m := range resp.Items {
+		if m.UserID == resp.Bot.AgentID {
+			t.Errorf("the bot appears in items; it belongs beside the page")
+		}
+	}
+	if resp.TotalCount != len(resp.Items) {
+		t.Errorf("total_count = %d, want %d (the members, never the bot)", resp.TotalCount, len(resp.Items))
 	}
 	if resp.Bot == nil {
 		t.Fatalf("bot = nil, want the seeded agent row")
@@ -213,15 +227,17 @@ func TestTeamRosterList_BotRow(t *testing.T) {
 	}
 }
 
-// TestTeamMemberRoleChange_NonManagerIs404: a plain member can't change roles —
-// the team-admin-or-org-admin gate answers 404, and the row is untouched.
-func TestTeamMemberRoleChange_NonManagerIs404(t *testing.T) {
+// TestTeamMemberRoleChange_NonManagerIsForbidden: a plain member can't change
+// roles — the team-admin-or-org-admin gate answers 403 (the team is in their
+// org and they can list it, so the denial names the missing role rather than
+// hiding the team), and the row is untouched.
+func TestTeamMemberRoleChange_NonManagerIsForbidden(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.tmh.handleTeamMemberRoleChange(rec, r.req(http.MethodPatch, r.memb, r.admin, map[string]string{"role": "member"}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager); body=%s", rec.Code, rec.Body.String())
 	}
 	if got := r.teamRoleOf(t, r.admin); got != "admin" {
 		t.Errorf("admin role = %q after blocked change, want admin (unchanged)", got)
@@ -349,14 +365,14 @@ func TestTeamMemberRemove_AdminRemovesMember(t *testing.T) {
 }
 
 // TestTeamMemberRemove_NonManagerCantRemoveOther: a plain member removing a
-// different user is 404 (not self, not a manager) and the target stays.
+// different user is 403 (not self, not a manager) and the target stays.
 func TestTeamMemberRemove_NonManagerCantRemoveOther(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	rec := httptest.NewRecorder()
 	r.tmh.handleTeamMemberRemove(rec, r.req(http.MethodDelete, r.memb, r.admin, nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager removing other); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager removing other); body=%s", rec.Code, rec.Body.String())
 	}
 	if !r.isTeamMember(t, r.admin) {
 		t.Errorf("admin removed by non-manager, want still a member")
@@ -418,8 +434,8 @@ func TestTeamMemberAdd_DuplicateIs409(t *testing.T) {
 	}
 }
 
-// TestTeamMemberAdd_NonManagerIs404: a plain member can't add anyone — 404.
-func TestTeamMemberAdd_NonManagerIs404(t *testing.T) {
+// TestTeamMemberAdd_NonManagerIsForbidden: a plain member can't add anyone — 403.
+func TestTeamMemberAdd_NonManagerIsForbidden(t *testing.T) {
 	r := newTeamMembersRig(t)
 
 	newcomer := pgtest.SeedUser(t, r.h, "newcomer")
@@ -430,8 +446,8 @@ func TestTeamMemberAdd_NonManagerIs404(t *testing.T) {
 	r.tmh.handleTeamMemberAdd(rec, r.req(http.MethodPost, r.memb, "", map[string]string{
 		"user_id": newcomer, "role": "member",
 	}))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404 (non-manager add); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (non-manager add); body=%s", rec.Code, rec.Body.String())
 	}
 	if r.isTeamMember(t, newcomer) {
 		t.Errorf("newcomer added by non-manager, want not a member")
@@ -452,7 +468,7 @@ func TestTeamMembers_CrossOrgTeamIs404(t *testing.T) {
 		target string
 		body   any
 	}{
-		{"list", http.MethodGet, r.tmh.handleTeamRosterList, "", nil},
+		{"list", http.MethodPost, r.tmh.handleTeamRosterList, "", map[string]any{}},
 		{"add", http.MethodPost, r.tmh.handleTeamMemberAdd, "", map[string]string{"user_id": r.memb, "role": "member"}},
 		{"role", http.MethodPatch, r.tmh.handleTeamMemberRoleChange, r.memb, map[string]string{"role": "admin"}},
 		{"remove", http.MethodDelete, r.tmh.handleTeamMemberRemove, r.memb, nil},
@@ -467,10 +483,12 @@ func TestTeamMembers_CrossOrgTeamIs404(t *testing.T) {
 	}
 }
 
-// TestTeamMembers_LocalIs404: the whole surface is hosted-only — every method
-// 404s in local mode regardless of identity (local keeps the synthetic
-// single-member /api/team/members roster instead).
-func TestTeamMembers_LocalIs404(t *testing.T) {
+// TestTeamMembers_LocalMutatorsAre404: the roster WRITES are hosted-only —
+// every mutator 404s in local mode regardless of identity, because N=1 has
+// nobody to enrol, promote or remove. The list read is deliberately absent
+// from this table: it is the one roster every consumer reads, in both modes,
+// and TestTeamRosterList_LocalSingleMember covers it there.
+func TestTeamMembers_LocalMutatorsAre404(t *testing.T) {
 	r := newTeamMembersRig(t)
 	runmode.SetForTest(t, runmode.ModeLocal)
 
@@ -481,7 +499,6 @@ func TestTeamMembers_LocalIs404(t *testing.T) {
 		target string
 		body   any
 	}{
-		{"list", http.MethodGet, r.tmh.handleTeamRosterList, "", nil},
 		{"add", http.MethodPost, r.tmh.handleTeamMemberAdd, "", map[string]string{"user_id": r.memb, "role": "member"}},
 		{"role", http.MethodPatch, r.tmh.handleTeamMemberRoleChange, r.memb, map[string]string{"role": "admin"}},
 		{"remove", http.MethodDelete, r.tmh.handleTeamMemberRemove, r.memb, nil},

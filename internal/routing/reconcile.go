@@ -163,7 +163,7 @@ func (r *Router) reconcileTerminalEntity(ctx context.Context, orgID string, enti
 		return
 	}
 
-	if err := r.entities.CloseSystem(ctx, orgID, entity.ID); err != nil {
+	if _, err := r.entities.CloseSystem(ctx, orgID, entity.ID); err != nil {
 		lifecycleLog.Error("terminal reconciler: close entity failed", "entity_id", entity.ID, "org", orgID, "error", err)
 		return
 	}

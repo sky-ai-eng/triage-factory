@@ -7,7 +7,7 @@ import (
 )
 
 // runTreeBasename is the directory ephemeral per-run worktrees live under
-// inside os.TempDir(): os.TempDir()/triagefactory-runs/<runID>. This is the
+// inside os.TempDir(): os.TempDir()/triagefactory-runs/<rootKey>. This is the
 // GitHub-PR / Jira / Slack task-run shape of Config.Worktree — org-blind by
 // construction, since these trees don't outlive their own run.
 // internal/worktree is the historical owner of this path (its
@@ -21,13 +21,28 @@ import (
 // equal.
 const runTreeBasename = "triagefactory-runs"
 
-// RunTreeRoot returns the ephemeral per-run worktree root for runID. This
+// Capture staging member names are part of the privileged-op boundary: the
+// broker validates exactly these parent-owned files before starting the child.
+const (
+	CaptureBundleFile     = "repo.bundle"
+	CapturePatchFile      = "uncommitted.patch"
+	CaptureTranscriptFile = "session.jsonl"
+)
+
+// RunTreeRoot returns the ephemeral per-run worktree root for rootKey. This
 // is the ONLY legitimate shape for a delegated task run's Config.Worktree;
 // launchspec_linux.go's mount-source validation rejects any Worktree that
 // is neither this exact path nor under the org-scoped state-root tree
 // (Curator sessions' shape — see worktreeScope).
-func RunTreeRoot(runID string) string {
-	return filepath.Join(os.TempDir(), runTreeBasename, runID)
+//
+// rootKey is the tree's key, not a conversation id: a delegated run's tree is
+// keyed by its memory namespace (the blueprint run id), so a blueprint's steps
+// share one root and a resumed step rebuilds at the same path. Both keys reach
+// this package — the launch pins the worktree by namespace while Config.ConversationID
+// stays the conversation — which is why worktreeScope accepts either and this
+// parameter claims neither.
+func RunTreeRoot(rootKey string) string {
+	return filepath.Join(os.TempDir(), runTreeBasename, rootKey)
 }
 
 // This file is the cross-platform surface for the run-tree ownership
@@ -80,11 +95,10 @@ func RunTreeHandedOff(path string) bool {
 }
 
 // CaptureRunDelta runs the parked-run capture in a child dropped to the
-// sandbox uid inside an empty network namespace and returns its raw JSON
-// stdout (a worktree.CapturedState — the git delta plus, when sessionID is
-// set, the session transcript — decoded by the caller). Linux-only by
-// construction; the non-Linux stub errors, and the delegate caller never
-// routes here off Linux.
-func CaptureRunDelta(ctx context.Context, worktree, sessionID string) ([]byte, error) {
-	return captureRunDelta(ctx, worktree, sessionID)
+// sandbox uid inside an empty network namespace. Large members stream into
+// parent-owned stagingDir; the returned stdout is only their JSON manifest.
+// Linux-only by construction; the non-Linux stub errors, and the delegate
+// caller never routes here off Linux.
+func CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+	return captureRunDelta(ctx, worktree, stagingDir, sessionID)
 }

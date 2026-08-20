@@ -12,19 +12,27 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --------------------------------------------------------------------
-// /api/settings/team/{team_id}/repos — the per-team GitHub repo
-// *tracking* selection (the source of truth that repo_profiles is the
-// org-wide UNION of). GET (any team member) returns the team's tracked
-// repo slugs; PUT (team admin) replace-sets them and reconciles
-// repo_profiles. The {team_id} segment accepts a UUID or the literal
-// "default", same as the sibling team-settings routes. The candidate
-// list (the repos the user's token can see) is fetched separately via
-// GET /api/github/repos, mirroring how the existing repo picker sources
+// /api/teams/{team_id}/github-repos — the per-team GitHub repo
+// *tracking* selection, and the source of truth for what TF polls and
+// profiles. GET (any team member) returns the team's tracked repo slugs; PUT
+// (team admin) replace-sets them, bringing any newly-tracked repository into
+// the registry the rows reference. Untracking removes the tracking row alone:
+// the registry row survives whatever still names it. The {team_id} segment
+// resolves through authz.ResolveTeamID — a UUID, plus the literal "default"
+// in local mode — same as the sibling team routes. The candidate list (the
+// repos the user's token can see) is fetched separately via
+// POST /api/github/repos/list, mirroring how the existing repo picker sources
 // its options.
+//
+// A child collection of the team, named github-repos rather than repos: it
+// sits beside jira-projects and github-groups, and the bare word would read
+// as the top-level /api/repos registry, which is a different resource.
 // --------------------------------------------------------------------
 
 type teamReposResponse struct {
@@ -43,7 +51,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "teams/github-repos", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -52,7 +60,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 
 	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -62,7 +70,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -80,7 +88,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "teams/github-repos", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -98,7 +106,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Repos []string `json:"repos"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -124,7 +132,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 	added := newlyAddedRepos(existing, repos)
@@ -136,7 +144,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, repos)
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -170,21 +178,51 @@ func repoSlugs(repos []domain.TeamGitHubRepo) []string {
 	return out
 }
 
+// reachableGateMaxAge is how old the reachable mirror may be and still decide a
+// write. It is stated here rather than inherited so the gate's staleness posture
+// is a decision someone made, and the decision is: THE SAME WINDOW THE PICKER
+// SERVES FROM.
+//
+// The gate's job is to reject what the user could not have seen, and the picker
+// is the only place a selection comes from — so trusting the mirror exactly as
+// far as the picker does is what makes the two agree. A stricter gate would not
+// catch anything the picker let through; it would just re-prove, one GitHub call
+// per selected slug, a membership the picker had already asserted from these
+// same rows.
+//
+// What a stricter gate WOULD buy is catching a repository whose access was
+// revoked mid-window, and that is deliberately not bought here: the cold path
+// below already fails open on every inconclusive answer, so the gate has never
+// been the thing that guarantees reachability — the poller is, by no-oping on a
+// repo it cannot reach. What would change the decision is the reverse case
+// getting expensive: if the mirror's TTL were lengthened to days, "reachable six
+// hours ago" and "reachable last week" stop being the same claim, and the gate
+// should then pin its own shorter window rather than follow.
+const reachableGateMaxAge = reachcache.TTL
+
 // rejectUnreachableRepo is the write-time guard that keeps a team from
 // tracking a repo this deployment's GitHub credentials can't reach (a
 // typo'd slug, a stale client, a hand-crafted curl). It validates the
 // input repos in two tiers, both bounded by *selection* size rather than
 // *org* size:
 //
-//   - Tier 1 (hot path): the in-process enumeration cache the picker
-//     warmed on its way out (handleGitHubRepos → reachableRepoCachePut).
-//     A cache hit is a memory lookup — no GitHub call — and the cached
-//     enumeration is authoritative for membership, so firstUnreachableRepo
-//     decides directly.
-//   - Tier 2 (cold path): on a miss (cache expired, never warmed, or
-//     evicted by a creds rotation) we probe *only the selected slugs* via
-//     per-repo GET /repos/{owner}/{repo}, concurrently, instead of
-//     re-enumerating the whole org. See fanOutUnreachableRepo.
+//   - Tier 1 (hot path): the durable reachable-repo mirror — the same rows the
+//     picker listed the options from. It is one indexed read of just the
+//     selected slugs, no GitHub call, and it is authoritative for membership, so
+//     firstUnreachableRepo decides directly.
+//   - Tier 2 (cold path): when the mirror is empty or older than
+//     reachableGateMaxAge, probe *only the selected slugs* via per-repo
+//     GET /repos/{owner}/{repo}, concurrently, instead of re-enumerating the
+//     whole org. See fanOutUnreachableRepo.
+//
+// Tier 1 used to be an in-process, per-(org, user) map warmed as a side effect
+// of the picker read. Three things that cost, all of which the mirror removes:
+// it was per-PROCESS, so in multi mode a PUT that landed on a different pod than
+// the picker silently fell to the cold path and the gate's behavior depended on
+// which pod answered; it died on restart, so a deploy moved every subsequent
+// write to the cold path; and being warmed by a read meant the picker had to be
+// careful to cache only a COMPLETE enumeration, since a partial page would make
+// the gate reject repos the user genuinely just saw.
 //
 // Both tiers preserve the long-standing fail-OPEN posture: if we can't
 // reach a conclusive "this repo does not exist for us" answer (no
@@ -198,14 +236,49 @@ func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID string
 	if len(repos) == 0 {
 		return "", false
 	}
-	// Tier 1: hot path. The cached picker enumeration is the local read
-	// the old docstring anticipated — authoritative for membership, so a
-	// hit checks against it directly (checked=true).
-	if set, ok := s.reachableRepoCacheGet(orgID, userID); ok {
+	if set, ok := s.reachableMirrorSet(ctx, orgID, repos); ok {
 		return firstUnreachableRepo(set, true, repos)
 	}
 	// Tier 2: cold path. Probe only the selected slugs.
 	return s.fanOutUnreachableRepo(ctx, orgID, userID, repos)
+}
+
+// reachableMirrorSet reads which of the selected slugs the mirror says the org
+// can reach, or reports that the mirror is not fit to decide this write.
+//
+// Every failure arm falls through to the cold path rather than to a rejection:
+// an unreadable class, an unreadable mirror, an empty one, or one past
+// reachableGateMaxAge all mean "we don't know from here", and the per-slug probe
+// is the thing that knows. Rejecting on any of them would turn a store hiccup
+// into a user-facing "that repo doesn't exist".
+func (s *Server) reachableMirrorSet(ctx context.Context, orgID string, repos []domain.TeamGitHubRepo) (map[string]struct{}, bool) {
+	class, err := s.reachableCredentialClass(ctx, orgID)
+	if err != nil {
+		reposLog.Warn("resolve reachable credential class failed; probing per repo instead", "org", orgID, "error", err)
+		return nil, false
+	}
+	state, err := s.reachableRepos.ReachableStateSystem(ctx, orgID, class)
+	if err != nil {
+		reposLog.Warn("read reachable cache state failed; probing per repo instead", "org", orgID, "error", err)
+		return nil, false
+	}
+	if state.StaleAt(time.Now(), reachableGateMaxAge) {
+		// Ask for a refresh on the way past. This write is decided by the probe
+		// either way, but the user is mid-flow and their next Save should not pay
+		// for the same staleness twice.
+		s.kickReachRefresh(orgID, false)
+		return nil, false
+	}
+	slugs := make([]string, 0, len(repos))
+	for _, r := range repos {
+		slugs = append(slugs, r.Slug())
+	}
+	set, err := s.reachableRepos.ReachableSlugsSystem(ctx, orgID, class, slugs)
+	if err != nil {
+		reposLog.Warn("read reachable slugs failed; probing per repo instead", "org", orgID, "error", err)
+		return nil, false
+	}
+	return set, true
 }
 
 // newlyAddedRepos returns the entries of desired that are not already in

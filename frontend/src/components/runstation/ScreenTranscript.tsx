@@ -1,8 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import Markdown from 'react-markdown'
 import { Check, Copy } from 'lucide-react'
 import type { Message, Conversation, ToolCall } from '../../types'
-import { isActiveRun } from '../../lib/runStatus'
+import { isActiveConversation } from '../../lib/conversationStatus'
 import { isSystemNotice } from '../../lib/messageVoice'
 import { stripWorktree } from '../../lib/worktree'
 import { toast } from '../Toast/toastStore'
@@ -10,13 +10,20 @@ import { stationState } from './stationStyle'
 
 interface Props {
   messages: Message[]
-  run: Conversation
+  conversation: Conversation
+  /** History remains before the held transcript's first row. The transcript
+   *  read is bounded, so a long conversation opens on its tail; without this
+   *  control everything before that page is unreachable and nothing on screen
+   *  says so. */
+  hasOlder?: boolean
+  loadingOlder?: boolean
+  onLoadOlder?: () => void
 }
 
 // react-markdown parses its source on every render. Memoizing it means an
 // unchanged row's markdown is parsed exactly once — without this, every
-// streamed `message` event re-parsed the ENTIRE transcript (O(N²) over a run's
-// life), which is what made long live runs peg a core.
+// streamed `message` event re-parsed the ENTIRE transcript (O(N²) over a
+// conversation's life), which is what made long live conversations peg a core.
 const MemoMarkdown = memo(Markdown)
 
 // ScreenTranscript — the machine's display. The transcript runs on the screen
@@ -32,7 +39,7 @@ const MemoMarkdown = memo(Markdown)
 // Memoized (default export below): RunDetail re-renders once per second for
 // its elapsed-time tick, and the transcript — the most expensive subtree on
 // the page — doesn't depend on the clock at all.
-function ScreenTranscript({ messages, run }: Props) {
+function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLoadOlder }: Props) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
@@ -51,7 +58,26 @@ function ScreenTranscript({ messages, run }: Props) {
     if (!pinnedRef.current) return
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages, run])
+  }, [messages, conversation])
+
+  // Loading earlier history grows the content ABOVE the viewport, which would
+  // otherwise slide whatever the reader was looking at down the screen by the
+  // height of the page they just asked for. The anchor is the distance from the
+  // bottom — invariant under a prepend — captured at click time and restored
+  // once the rows land, before paint.
+  const pendingAnchorRef = useRef<number | null>(null)
+  const handleLoadOlder = useCallback(() => {
+    const el = scrollRef.current
+    pendingAnchorRef.current = el ? el.scrollHeight - el.scrollTop : null
+    onLoadOlder?.()
+  }, [onLoadOlder])
+  useLayoutEffect(() => {
+    const el = scrollRef.current
+    const anchor = pendingAnchorRef.current
+    if (!el || anchor === null) return
+    pendingAnchorRef.current = null
+    el.scrollTop = el.scrollHeight - anchor
+  }, [messages])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -78,17 +104,24 @@ function ScreenTranscript({ messages, run }: Props) {
     if (top < prev) setPinned(false)
   }, [])
 
-  // Key the rows off run.WorktreePath — the only run field they read — rather
-  // than the run object itself, whose identity churns on every status refetch
-  // and artifact poll. Rebuilding here is cheap element creation; the heavy
-  // work (markdown parsing, tool panes) bails out per-row via the memoized
-  // leaf components when a row's inputs are unchanged.
-  const rows = useMemo(() => buildRows(messages, run.WorktreePath), [messages, run.WorktreePath])
+  // Key the rows off conversation.WorktreePath — the only conversation field
+  // they read — rather than the conversation object itself, whose identity
+  // churns on every status refetch and artifact poll. Rebuilding here is
+  // cheap element creation; the heavy work (markdown parsing, tool panes)
+  // bails out per-row via the memoized leaf components when a row's inputs
+  // are unchanged.
+  const rows = useMemo(
+    () => buildRows(messages, conversation.WorktreePath),
+    [messages, conversation.WorktreePath],
+  )
 
-  // The settled-run verdict renders outside buildRows so the row list doesn't
-  // depend on the full run object (see above). Same visibility rule as before:
-  // present once the run is settled and carries a summary.
-  const verdict = run.ResultSummary && !isActiveRun(run) ? <Verdict run={run} /> : null
+  // The settled verdict renders outside buildRows so the row list doesn't
+  // depend on the full conversation object (see above). Same visibility rule
+  // as before: present once the conversation is settled and carries a summary.
+  const verdict =
+    conversation.ResultSummary && !isActiveConversation(conversation) ? (
+      <Verdict conversation={conversation} />
+    ) : null
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden rounded-[5px]">
@@ -143,8 +176,25 @@ function ScreenTranscript({ messages, run }: Props) {
         className="absolute inset-0 overflow-y-auto px-5 py-5 focus:outline-none md:px-8"
       >
         <div ref={contentRef}>
+          {hasOlder && (
+            <div className="flex justify-center pb-3">
+              <button
+                type="button"
+                onClick={handleLoadOlder}
+                disabled={loadingOlder}
+                className="inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] transition-opacity hover:opacity-80 disabled:opacity-40"
+                style={{
+                  color: 'var(--hmi-ink-dim)',
+                  background: 'color-mix(in srgb, var(--hmi-screen-lift) 80%, transparent)',
+                  boxShadow: 'inset 0 0 0 1px var(--hmi-line)',
+                }}
+              >
+                {loadingOlder ? 'loading…' : 'load earlier messages'}
+              </button>
+            </div>
+          )}
           {rows.length === 0 && !verdict ? (
-            <EmptyReadout active={isActiveRun(run)} />
+            <EmptyReadout active={isActiveConversation(conversation)} />
           ) : (
             <>
               {rows}
@@ -232,7 +282,7 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
     // Legacy transcripts carry this as a standalone subtype:"thinking" row;
     // current writes ride it on the owning assistant message's Reasoning
     // field instead — both render with the same ThinkingLine treatment,
-    // and the legacy row still renders for historical runs.
+    // and the legacy row still renders for historical conversations.
     if (msg.subtype === 'thinking') {
       if (msg.content) {
         rows.push(
@@ -302,9 +352,9 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
   )
 }
 
-// UserLine — an operator message steered into the run: a YOU tag in the
-// run's input tone, the text rendered plain (it's the user's raw words, not
-// agent markdown). Memoized (like ThinkingLine/ToolLine below) so appending a
+// UserLine — an operator message steered into the conversation: a YOU tag in
+// the conversation's input tone, the text rendered plain (it's the user's
+// raw words, not agent markdown). Memoized (like ThinkingLine/ToolLine below) so appending a
 // new message to the transcript doesn't re-render every prior row.
 const UserLine = memo(function UserLine({ text }: { text: string }) {
   return (
@@ -552,9 +602,10 @@ function Pane({
   )
 }
 
-// Verdict — the settled run's outcome, stamped on the screen in the state tone.
-function Verdict({ run }: { run: Conversation }) {
-  const st = stationState(run)
+// Verdict — the settled conversation's outcome, stamped on the screen in the
+// state tone.
+function Verdict({ conversation }: { conversation: Conversation }) {
+  const st = stationState(conversation)
   return (
     <div className="mb-2 mt-5">
       <div className="mb-2 flex items-center gap-2">
@@ -573,7 +624,7 @@ function Verdict({ run }: { run: Conversation }) {
         className="max-w-none text-card-title leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-reported [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
         style={{ color: 'var(--hmi-ink)' }}
       >
-        <MemoMarkdown>{run.ResultSummary}</MemoMarkdown>
+        <MemoMarkdown>{conversation.ResultSummary}</MemoMarkdown>
       </div>
     </div>
   )

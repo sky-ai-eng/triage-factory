@@ -11,13 +11,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// runSink adapts an agentproc invocation to the delegate's storage:
-// session ids land on runs.session_id, parsed messages land in
+// conversationSink adapts an agentproc invocation to the delegate's storage:
+// session ids land on conversations.sdk_session_id, parsed messages land in
 // messages, and both fan out to the websocket so the UI can
 // react in real time.
 //
 // One sink per agentproc.Run call (initial invocation + each resume
-// own a fresh sink). The runID is captured at construction so every
+// own a fresh sink). The conversationID is captured at construction so every
 // row + broadcast is keyed correctly even when the spawner is
 // servicing many runs concurrently.
 //
@@ -29,13 +29,13 @@ import (
 // tx — SyntheticClaimsWithTx scopes JWT claims to one Postgres
 // connection's transaction, which the agent subprocess would stream
 // past on the next OnMessage.
-type runSink struct {
-	spawner       *Spawner
-	orgID         string
-	runID         string
-	claimID       string
-	triggerType   string
-	creatorUserID string
+type conversationSink struct {
+	spawner        *Spawner
+	orgID          string
+	conversationID string
+	claimID        string
+	triggerType    string
+	creatorUserID  string
 
 	// fenced records that the DB refused a transcript write because this
 	// engagement's claim is no longer live — a successor owns the
@@ -44,8 +44,8 @@ type runSink struct {
 	fenced atomic.Bool
 
 	// sessionDelivered suppresses repeated OnSession handling within
-	// this runSink instance. Some streams can emit system/init more
-	// than once for the same session_id; while SetConversationSession is
+	// this conversationSink instance. Some streams can emit system/init more
+	// than once for the same session_id; while SetSession is
 	// idempotent at the DB layer, skipping duplicate handling also
 	// avoids an extra running-status broadcast from the same stream.
 	// Because each agentproc.Run call gets a fresh sink, this does
@@ -53,19 +53,19 @@ type runSink struct {
 	sessionDelivered bool
 }
 
-func newRunSink(s *Spawner, orgID, runID, claimID, triggerType, creatorUserID string) *runSink {
-	return &runSink{
-		spawner:       s,
-		orgID:         orgID,
-		runID:         runID,
-		claimID:       claimID,
-		triggerType:   triggerType,
-		creatorUserID: creatorUserID,
+func newConversationSink(s *Spawner, orgID, conversationID, claimID, triggerType, creatorUserID string) *conversationSink {
+	return &conversationSink{
+		spawner:        s,
+		orgID:          orgID,
+		conversationID: conversationID,
+		claimID:        claimID,
+		triggerType:    triggerType,
+		creatorUserID:  creatorUserID,
 	}
 }
 
 // OnSession persists the captured session_id and re-broadcasts the
-// running status so the UI re-fetches the run row and picks up
+// running status so the UI re-fetches the conversation row and picks up
 // SessionID. The "Take over" button is gated on session id presence;
 // without this nudge it stays hidden until the next status flip
 // (often "running" → terminal), which is too late to be useful.
@@ -78,33 +78,49 @@ func newRunSink(s *Spawner, orgID, runID, claimID, triggerType, creatorUserID st
 // resume tries to reconnect to a session that died with this process. A
 // refusal therefore DISCARDS this id — there is no unfenced retry, because
 // the write succeeding is precisely the harm.
-func (k *runSink) OnSession(sessionID string) error {
+func (k *conversationSink) OnSession(sessionID string) error {
 	if k.sessionDelivered {
 		return nil
 	}
 	k.sessionDelivered = true
 	bgCtx := context.Background()
+	// broadcastStatus prefers the just-written row's derived display status
+	// over a hardcoded "running" guess — SetSession only touches
+	// sdk_session_id, so the row is the one place that actually knows whether
+	// this engagement is live, still setting up (a claim phase), or has
+	// already raced past this point.
+	broadcastStatus := "running"
 	switch {
 	case k.claimID != "":
-		if err := k.spawner.agentRuns.SetSessionForClaimSystem(bgCtx, k.orgID, k.runID, k.claimID, sessionID); err != nil {
+		row, err := k.spawner.conversations.SetSessionForClaimSystem(bgCtx, k.orgID, k.conversationID, k.claimID, sessionID)
+		if err != nil {
 			if errors.Is(err, db.ErrClaimReleased) {
 				k.tripFence(err)
 				return err
 			}
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		broadcastStatus = row.Status
 	case k.triggerType == "manual":
+		var row *domain.Conversation
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.SetSession(bgCtx, k.orgID, k.runID, sessionID)
+			r, err := ts.Conversations.SetSession(bgCtx, k.orgID, k.conversationID, sessionID)
+			row = r
+			return err
 		}); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		if row != nil {
+			broadcastStatus = row.Status
+		}
 	default:
-		if err := k.spawner.agentRuns.SetSessionSystem(bgCtx, k.orgID, k.runID, sessionID); err != nil {
+		row, err := k.spawner.conversations.SetSessionSystem(bgCtx, k.orgID, k.conversationID, sessionID)
+		if err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		broadcastStatus = row.Status
 	}
-	k.spawner.broadcastRunUpdate(k.orgID, k.runID, "running")
+	k.spawner.broadcastConversationUpdate(k.orgID, k.conversationID, broadcastStatus)
 	return nil
 }
 
@@ -116,7 +132,7 @@ func (k *runSink) OnSession(sessionID string) error {
 // The one failure that is not per-row is the fence: a refused write means
 // this engagement no longer owns the conversation, and every row after it
 // would interleave with a successor's. That one abandons the run.
-func (k *runSink) OnMessage(msg *domain.Message) error {
+func (k *conversationSink) OnMessage(msg *domain.Message) error {
 	bgCtx := context.Background()
 	var id int64
 	switch {
@@ -124,7 +140,7 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 		// The engagement writes as itself. Manual and event-triggered runs
 		// converge here: attribution rides on the claim, not on which pool
 		// the statement runs through.
-		i, ierr := k.spawner.agentRuns.InsertMessageForClaimSystem(bgCtx, k.orgID, k.claimID, msg)
+		i, ierr := k.spawner.conversations.InsertMessageForClaimSystem(bgCtx, k.orgID, k.claimID, msg)
 		if ierr != nil {
 			if errors.Is(ierr, db.ErrClaimReleased) {
 				k.tripFence(ierr)
@@ -145,14 +161,14 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 			return fmt.Errorf("insert message: %w", err)
 		}
 	default:
-		i, ierr := k.spawner.agentRuns.InsertMessageSystem(bgCtx, k.orgID, msg)
+		i, ierr := k.spawner.conversations.InsertMessageSystem(bgCtx, k.orgID, msg)
 		if ierr != nil {
 			return fmt.Errorf("insert message: %w", ierr)
 		}
 		id = i
 	}
 	msg.ID = int(id)
-	k.spawner.broadcastMessage(k.orgID, k.runID, msg)
+	k.spawner.broadcastMessage(k.orgID, k.conversationID, msg)
 	return nil
 }
 
@@ -166,20 +182,20 @@ func (k *runSink) OnMessage(msg *domain.Message) error {
 // Logged at error level on purpose: reaching here means the cooperative
 // self-fence did not stop this executor in time, which is a fleet incident
 // worth waking someone for, not a per-row hiccup.
-func (k *runSink) tripFence(err error) {
+func (k *conversationSink) tripFence(err error) {
 	if k.fenced.Swap(true) {
 		return
 	}
-	delegateLog.Error("claim fence tripped — this executor no longer owns the conversation; abandoning the run without writing",
-		"run_id", k.runID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
+	delegateLog.Error("claim fence tripped — this executor no longer owns the conversation; abandoning the conversation without writing",
+		"conversation", k.conversationID, "claim_id", k.claimID, "org_id", k.orgID, "error", err)
 	// Best-effort: no live handle means the process is already gone, which
 	// is the outcome this call was after.
-	k.spawner.getController().Cancel(k.runID)
+	k.spawner.getController().Cancel(k.conversationID)
 }
 
 // fenceTripped reports whether this engagement was fenced out mid-stream.
-func (k *runSink) fenceTripped() bool { return k.fenced.Load() }
+func (k *conversationSink) fenceTripped() bool { return k.fenced.Load() }
 
-// Compile-time check that runSink satisfies the agentproc.Sink
+// Compile-time check that conversationSink satisfies the agentproc.Sink
 // contract.
-var _ agentproc.Sink = (*runSink)(nil)
+var _ agentproc.Sink = (*conversationSink)(nil)

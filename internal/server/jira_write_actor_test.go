@@ -76,18 +76,18 @@ func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID str
 	}
 }
 
-// TestSwipeClaim_JiraTask_NoUserCredential_Returns409 pins the defense-in-depth
+// TestTaskClaim_JiraTask_NoUserCredential_Returns409 pins the defense-in-depth
 // boundary: claiming a Jira-backed task when the acting user has no connected
 // Jira is refused with 409 BEFORE the claim lands. Acting as the org/bot here
 // would mis-assign the ticket to the service account, so the handler must
 // refuse rather than fall back.
-func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
+func TestTaskClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	s := newTestServer(t)
 	s.jiraResolver = &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
-	seedQueuedJiraTask(t, s.db, "e_jira_nocred", "SKY-1", "t_jira_nocred")
+	seedQueuedJiraTask(t, s.db, "e_jira_nocred", "SKY-1", "00000000-0000-4000-8000-000000000020")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_nocred/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000020/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
@@ -98,7 +98,7 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	// Refused before mutation: no claim stamped, no audit row.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_nocred'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000020'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	}
 	var swipeCount int
 	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM swipe_events WHERE task_id = 't_jira_nocred'`,
+		`SELECT COUNT(*) FROM swipe_events WHERE task_id = '00000000-0000-4000-8000-000000000020'`,
 	).Scan(&swipeCount); err != nil {
 		t.Fatalf("scan swipe_events: %v", err)
 	}
@@ -116,18 +116,18 @@ func TestSwipeClaim_JiraTask_NoUserCredential_Returns409(t *testing.T) {
 	}
 }
 
-// TestSwipeClaim_JiraTask_ResolverBackendError_Returns500 pins that a non-
+// TestTaskClaim_JiraTask_ResolverBackendError_Returns500 pins that a non-
 // ErrNoJiraUserCredential failure (a transient secret-store / backend error)
 // is a 500 routed through internalError — NOT a 409, and NOT the raw wrapped
 // error echoed to the client (internalError redacts in multi-mode) — and the
 // claim does not land.
-func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
+func TestTaskClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
 	s := newTestServer(t)
 	s.jiraResolver = &recordingJiraResolver{userErr: errors.New("vault unreachable: org=secret user=secret")}
-	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "t_jira_bkerr")
+	seedQueuedJiraTask(t, s.db, "e_jira_bkerr", "SKY-9", "00000000-0000-4000-8000-000000000019")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_bkerr/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000019/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
@@ -135,7 +135,7 @@ func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
 	// Backend error preempts the claim — no mutation, no audit.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_bkerr'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000019'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -144,10 +144,10 @@ func TestSwipeClaim_JiraTask_ResolverBackendError_Returns500(t *testing.T) {
 	}
 }
 
-// TestSwipeClaim_JiraTask_ResolvesActingUserCredential pins the positive path:
+// TestTaskClaim_JiraTask_ResolvesActingUserCredential pins the positive path:
 // a Jira-backed claim resolves the ACTING user's credential — routed by the
 // authenticated (orgID, userID), not the org/bot — and the claim lands.
-func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
+func TestTaskClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	s := newTestServer(t)
 	res := &recordingJiraResolver{
 		// A non-nil client so the post-switch sync sees jiraUserClient != nil.
@@ -156,10 +156,10 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 		userClient: jira.NewClient(jira.DataCenterPAT("http://127.0.0.1:0", "user-tok")),
 	}
 	s.jiraResolver = res
-	seedQueuedJiraTask(t, s.db, "e_jira_ok", "SKY-2", "t_jira_ok")
+	seedQueuedJiraTask(t, s.db, "e_jira_ok", "SKY-2", "00000000-0000-4000-8000-000000000021")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_jira_ok/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000021/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -178,7 +178,7 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	// The claim landed on the TF side.
 	var claim sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT claimed_by_user_id FROM tasks WHERE id = 't_jira_ok'`,
+		`SELECT claimed_by_user_id FROM tasks WHERE id = '00000000-0000-4000-8000-000000000021'`,
 	).Scan(&claim); err != nil {
 		t.Fatalf("scan task: %v", err)
 	}
@@ -187,11 +187,11 @@ func TestSwipeClaim_JiraTask_ResolvesActingUserCredential(t *testing.T) {
 	}
 }
 
-// TestSwipeClaim_GitHubTask_SkipsJiraResolver pins that the resolver is only
+// TestTaskClaim_GitHubTask_SkipsJiraResolver pins that the resolver is only
 // consulted for Jira-backed claims — a GitHub task claim must not touch the
 // Jira write path at all (no spurious ForUser, no 409 on a GitHub claim from a
 // user without Jira).
-func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
+func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	s := newTestServer(t)
 	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
 	s.jiraResolver = res
@@ -211,13 +211,13 @@ func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 	if _, err := s.db.Exec(
 		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
-		 VALUES ('t_gh', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
+		 VALUES ('00000000-0000-4000-8000-000000000022', 'e_gh', ?, 'ev_gh', 'queued')`, eventType,
 	); err != nil {
 		t.Fatalf("seed task: %v", err)
 	}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/tasks/t_gh/swipe",
-		map[string]any{"action": "claim", "hesitation_ms": 0})
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/00000000-0000-4000-8000-000000000022/claim",
+		map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (GitHub claim unaffected by Jira cred); body=%s", rec.Code, rec.Body.String())
 	}
@@ -226,14 +226,13 @@ func TestSwipeClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 	}
 }
 
-// TestStockPost_QueueOnly_SkipsJiraResolver pins the queue-only
-// optimization: a stock batch containing only "queue" actions synthesizes
-// events + tasks with no Jira mutation, so it must NOT call ForUser — a pure
-// queue can't be made to depend on secret-store availability. The
-// needsUserClient pre-scan runs before the action loop, so this holds even
-// though no entity is seeded (the queue row fails "entity not found" per-row,
-// which is irrelevant to whether the resolver was consulted).
-func TestStockPost_QueueOnly_SkipsJiraResolver(t *testing.T) {
+// TestStockQueue_SkipsJiraResolver pins that the queue route makes no Jira
+// write at all, so it must NOT call ForUser — a pure queue can't be made to
+// depend on secret-store availability. The resolver is only reached by the
+// claim and done routes, so this holds even though no entity is seeded (the
+// queued key fails "ticket not found" per-row, which is irrelevant to whether
+// the resolver was consulted).
+func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
 	ctx := t.Context()
@@ -267,13 +266,13 @@ func TestStockPost_QueueOnly_SkipsJiraResolver(t *testing.T) {
 	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
 	s.jiraResolver = res
 
-	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock", map[string]any{
-		"actions": []map[string]string{{"issue_key": "SKY-1", "action": "queue"}},
+	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{
+		"issue_keys": []string{"SKY-1"},
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 	if calls, _, _ := res.snapshot(); calls != 0 {
-		t.Errorf("ForUser called %d times for a queue-only stock POST; want 0 (queue does no Jira write)", calls)
+		t.Errorf("ForUser called %d times for a stock queue; want 0 (queue does no Jira write)", calls)
 	}
 }

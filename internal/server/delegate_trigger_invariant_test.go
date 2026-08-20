@@ -26,8 +26,8 @@ func TestDelegateRequestStructs_NoTriggerTypeFieldFromAPI(t *testing.T) {
 	// unmarshals into. The reflection check refuses any tag that
 	// would let a caller drive Spawner.Delegate's triggerType branch.
 	delegateRequestTypes := []any{
-		factoryDelegateRequest{},
-		swipeRequest{},
+		taskCreateRequest{},
+		taskDelegateRequest{},
 	}
 
 	forbidden := map[string]bool{

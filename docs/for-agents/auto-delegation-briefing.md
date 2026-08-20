@@ -119,7 +119,7 @@ Files you'll almost certainly need. **Verify each before editing** — line numb
 | `internal/tracker/diff.go`         | Snapshot-to-snapshot diff logic. SKY-140 and SKY-144 both edit this. CI failure emission was around lines 48-60 at writing time.                    |
 | `internal/github/status.go`        | GitHub API client. Around line 91 is where check runs are fetched — see SKY-144 for what's already in the response that we're currently discarding. |
 | `internal/delegate/spawner.go`     | Delegation entry point. `parseAgentResult` was around line 522 at writing time; completion handling around line 363.                                |
-| `internal/worktree/worktree.go`    | Worktree lifecycle. `MakeRunCwd`, cleanup, `RemoveClaudeProjectDir`.                                                                                |
+| `internal/worktree/worktree.go`    | Worktree lifecycle. `MakeRunRoot`, cleanup, `RemoveClaudeProjectDir`.                                                                                |
 
 **Prompts live in both places.** Shipped mission prompts exist as `.txt` files under `internal/promptseed/prompts/` AND as rows in the `prompts` table with `source = 'system'`. User prompts are DB-only. When you add a new shipped prompt (e.g. a new `ci-fix.txt`), you need both the file and an entry in `promptseed.Prompts()` — the seeder and the boot-time drift sync both read that list.
 

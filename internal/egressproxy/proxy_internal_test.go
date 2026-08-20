@@ -223,6 +223,64 @@ func TestProxy_DeniesOffAllowlistHost(t *testing.T) {
 	}
 }
 
+// TestProxy_DeniesTheGitHubAPIHosts is the control that makes one hole in a
+// sibling package's coverage a refusal rather than a silence.
+//
+// The per-run gh injector observes only the requests gh builds from the base
+// url GH_HOST redirects. A handful of commands — the release asset verbs, and
+// release delete — instead follow an ABSOLUTE url out of a response body
+// (the upload endpoint, an asset's own url, the release's api url), which names
+// GitHub directly and never that listener. The injector cannot see those
+// requests and so cannot audit them, which would be an unlogged write under an
+// org credential if anything could carry one out.
+//
+// Nothing can, and this is half of why: a sandboxed run reaches the public
+// internet only through this proxy, and these two hosts are not on the list it
+// admits. (The other half is that the jail holds a placeholder rather than a
+// credential, so the request would be unauthenticated even with a route.) The
+// attempt is refused here and recorded as a denial, which is the point — the
+// act ends in a refusal row rather than in nothing at all.
+//
+// It asserts against the shipped list rather than one written for the test,
+// because what makes the escape fail closed is what a real run admits. When
+// per-profile allowlists replace that constant with customer data, this
+// property has to survive the move: a profile carrying either host would open
+// an unaudited write path, not merely widen package reach.
+func TestProxy_DeniesTheGitHubAPIHosts(t *testing.T) {
+	for _, host := range []string{"api.github.com", "uploads.github.com"} {
+		t.Run(host, func(t *testing.T) {
+			var dialed []string
+			denialCh := make(chan DeniedConnect, 4)
+			addr := newTestServer(t, Config{
+				AllowedHosts: DefaultRegistryHosts(),
+				RecordDenial: func(_ context.Context, d DeniedConnect) { denialCh <- d },
+			}, []netip.Addr{netip.MustParseAddr("140.82.121.6")}, &dialed, nil)
+
+			target := host + ":443"
+			resp := rawConnect(t, addr, target, "")
+			if !strings.Contains(resp, "403") {
+				t.Fatalf("CONNECT %s got:\n%s\nwant 403 — a run must have no route to the host the gh "+
+					"release commands escape to", target, resp)
+			}
+			// The deny precedes resolution, so the stub resolver above is never
+			// consulted and nothing touches the network: a refused host is not
+			// one this proxy looks up on the caller's behalf.
+			if len(dialed) != 0 {
+				t.Errorf("proxy dialed %v for a denied host", dialed)
+			}
+			select {
+			case d := <-denialCh:
+				if d.Target != target {
+					t.Errorf("RecordDenial target = %q, want %q", d.Target, target)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("the denial left no record — a refused escape that logs nothing is the outcome " +
+					"this whole arrangement exists to delete")
+			}
+		})
+	}
+}
+
 // TestProxy_SlowDenialSinkDoesNotDelayResponse pins the async-audit
 // contract: with a sink wedged on a never-closed channel, the 403
 // still returns immediately — the response path must never wait on

@@ -120,9 +120,9 @@ func TestSSOConnectionCreate_HappyPath(t *testing.T) {
 	}
 }
 
-// TestSSOConnectionCreate_NonAdmin_404: a plain org member can't register a
-// connection — 404 (non-disclosure), no GoTrue call, no row.
-func TestSSOConnectionCreate_NonAdmin_404(t *testing.T) {
+// TestSSOConnectionCreate_NonAdminIsForbidden: a plain org member can't register a
+// connection — 403 (the org is visible to them), no GoTrue call, no row.
+func TestSSOConnectionCreate_NonAdminIsForbidden(t *testing.T) {
 	r, fake := newSSORig(t)
 	owner := r.seedUser()
 	orgID, teamID := r.seedOrg(owner, "sso-nonadmin")
@@ -132,8 +132,8 @@ func TestSSOConnectionCreate_NonAdmin_404(t *testing.T) {
 
 	resp := doReq(r, http.MethodPost, "/api/sso/connection", sid,
 		map[string]string{"metadata_url": "https://idp/metadata.xml"})
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d; want 404 (non-admin); body=%s", resp.StatusCode, readBody(resp))
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d; want 403 (non-admin); body=%s", resp.StatusCode, readBody(resp))
 	}
 	if fake.posts() != 0 {
 		t.Errorf("GoTrue POSTs = %d; want 0 (gated before registration)", fake.posts())

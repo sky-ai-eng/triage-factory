@@ -52,24 +52,25 @@ const toolHostDialTimeout = 60 * time.Second
 // conversation that has been running for an hour must not be ended by two
 // seconds of that. Every failure ahead of engine.Run therefore comes back as a
 // launchErr for the dispatcher to retry; only the loop itself writes terminals.
-func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
+func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
 	model = nativeWireModel(model)
 	orgID := cfg.orgID
-	namespace := memoryNamespace(cfg.blueprintRunID, runID)
+	namespace := memoryNamespace(cfg.blueprintRunID)
 	claudeCwd := cfg.wtPath
 
 	// The park a stop lands on, wherever the stop catches this engagement.
 	stopped := func() engagementDisposition {
-		fenced := s.parkRunOpen(ctx, liveParkContext{
-			orgID:         orgID,
-			runID:         runID,
-			taskID:        task.ID,
-			namespace:     namespace,
-			claudeCwd:     claudeCwd,
-			triggerType:   triggerType,
-			creatorUserID: creatorUserID,
-			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
+		fenced := s.parkConversationOpen(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			taskID:         task.ID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			triggerType:    triggerType,
+			creatorUserID:  creatorUserID,
+			claimID:        cfg.claimID,
+			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 		return engagementDisposition{fenced: fenced}
 	}
@@ -95,20 +96,20 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
 		owned = scanRepoFiles(ctx, claudeCwd)
 		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
-			delegateLog.Warn("plant sandbox memory symlink failed; this run reads no prior memory", "run", runID, "cwd", claudeCwd, "error", err)
+			delegateLog.Warn("plant sandbox memory symlink failed; this conversation reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
 		}
 	}
 
 	// The SDK path's twin (runAgent) — same staging, same span, so the two
 	// runtimes' setup is comparable in the backend rather than only in prose.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
-	memoryDir, memoryOwned := entityMemoryTarget(&cfg, runID, claudeCwd, owned)
+	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
 
-	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, runID, claudeCwd, owned, handedOff)
+	priorMemory := s.prepareInheritedMemory(stagingCtx, orgID, conversationID, claudeCwd, owned, handedOff)
 
 	if handedOff {
-		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "run", runID, "cwd", claudeCwd)
+		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
 	} else {
 		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
 	}
@@ -123,21 +124,21 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	}
 	systemPrompt := nativeSystemPrompt(cfg.appendSysPrompt != "")
 
-	s.updatePhase(ctx, orgID, runID, cfg.claimID, domain.ClaimPhaseAgentStarting)
+	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {
 		return stopped()
 	}
 
 	jail, err := agentproc.LaunchToolHost(ctx, agentproc.ToolHostOptions{
-		RunID:                runID,
+		ConversationID:       conversationID,
 		MemoryNamespace:      namespace,
 		Worktree:             claudeCwd,
 		SDKDir:               paths.SDKDir(),
-		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, runID, namespace, cfg, triggerType, creatorUserID),
+		ExtraEnv:             s.nativeAgentEnv(ctx, orgID, conversationID, namespace, cfg, triggerType, creatorUserID),
 		PrebuiltNetwork:      cfg.sidecar.runNetwork(),
 		PrebuiltProxyEnv:     cfg.sidecar.jailEnv(),
-		AgentHostSocket:      agenthost.SocketMountFor(runID),
-		GHChannel:            cfg.sidecar.ghChannel(runID),
+		AgentHostSocket:      agenthost.SocketMountFor(conversationID),
+		GHChannel:            cfg.sidecar.ghChannel(conversationID),
 		SkillsSourcePath:     cfg.skillsSourcePath,
 		MemorySourcePath:     cfg.memorySourcePath,
 		OrgID:                orgID,
@@ -156,13 +157,13 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 	tools := agentloop.NewToolHost(conn, 0)
 	defer func() { _ = tools.Close() }()
 
-	s.updatePhase(ctx, orgID, runID, cfg.claimID, "")
-	delegateLog.Info("native agent loop starting", "run", runID, "cwd", claudeCwd, "model", model)
+	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
+	delegateLog.Info("native agent loop starting", "conversation", conversationID, "cwd", claudeCwd, "model", model)
 
-	transcript := newNativeTranscript(s, orgID, runID, cfg.claimID)
-	if err := s.mintOpeningTurn(ctx, transcript, orgID, runID, creatorUserID, opening); err != nil {
+	transcript := newNativeTranscript(s, orgID, conversationID, cfg.claimID)
+	if err := s.mintOpeningTurn(ctx, transcript, orgID, conversationID, creatorUserID, opening); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
-			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "run", runID, "claim", cfg.claimID)
+			delegateLog.Error("engagement fenced out before its first turn; a successor owns the conversation", "conversation", conversationID, "claim", cfg.claimID)
 			return engagementDisposition{fenced: true}
 		}
 		return launchFailed(fmt.Errorf("mint opening turn: %w", err))
@@ -183,33 +184,33 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
 		Hooks: agentloop.Hooks{
-			BeforeToolCall:      s.ghCommandGate(orgID, runID),
-			ShouldStopAfterTurn: s.artifactContractNudge(orgID, runID, task, cfg),
+			BeforeToolCall:      s.ghCommandGate(orgID, conversationID),
+			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg),
 		},
 		Log: delegateLog,
 	}
 
 	result := engine.Run(ctx, agentloop.Params{
 		OrgID:          orgID,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		Model:          model,
 		SystemPrompt:   systemPrompt,
 		HasBlueprint:   true,
 		MaxIterations:  nativeMaxIterations(),
 		// Derived from the very ceiling this jail was launched under, not from
 		// a constant that could drift from it.
-		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.RunMemoryLimitMB()),
+		BashMemBudgetMB: nativeBashMemBudgetMB(agentproc.ClaimMemoryLimitMB()),
 		UserID:          creatorUserID,
 		// A delegation's opening turn is the control-plane-minted mission:
 		// compaction pins it instead of re-injecting the first message.
 		MissionAnchored:     true,
 		ColdCompactionModel: coldModel,
 		Workspace:           cfg.workspace,
-		ExecutorChanged:     s.executorChangedSince(ctx, orgID, runID, cfg.claimID, cfg.workspace),
+		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
 	})
 
 	return engagementDisposition{
-		fenced: s.recordNativeResult(ctx, orgID, runID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory),
+		fenced: s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, priorMemory),
 	}
 }
 
@@ -226,7 +227,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, runID string, task domain.
 // symmetric: a missing sentence costs the agent a fact it can rediscover from
 // the tree, while a spurious one is exactly the false claim this notice is
 // being made honest about.
-func (s *Spawner) executorChangedSince(ctx context.Context, orgID, runID, claimID string, prov domain.WorkspaceProvenance) bool {
+func (s *Spawner) executorChangedSince(ctx context.Context, orgID, conversationID, claimID string, prov domain.WorkspaceProvenance) bool {
 	if !prov.Rebuilt() || claimID == "" {
 		return false
 	}
@@ -234,10 +235,10 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, runID, claimI
 	if self == "" {
 		return false
 	}
-	prior, err := s.agentRuns.PriorClaimExecutorSystem(ctx, orgID, runID, claimID)
+	prior, err := s.conversations.PriorClaimExecutorSystem(ctx, orgID, conversationID, claimID)
 	if err != nil {
 		delegateLog.Warn("read the prior claim's executor failed; the resume notice will not claim the executor changed",
-			"run", runID, "claim", claimID, "error", err)
+			"conversation", conversationID, "claim", claimID, "error", err)
 		return false
 	}
 	return prior != "" && prior != self
@@ -256,15 +257,15 @@ func (s *Spawner) executorChangedSince(ctx context.Context, orgID, runID, claimI
 // One row, not several: the mission and the context it is about are one
 // statement of what to do. Compaction pins either shape — the anchored span is
 // every leading row before the first assistant turn — so either would work.
-func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, runID, creatorUserID, opening string) error {
-	rows, err := transcript.ListForAssembly(ctx, orgID, runID)
+func (s *Spawner) mintOpeningTurn(ctx context.Context, transcript agentloop.Transcript, orgID, conversationID, creatorUserID, opening string) error {
+	rows, err := transcript.ListForAssembly(ctx, orgID, conversationID)
 	if err != nil {
 		return err
 	}
 	if len(rows) > 0 {
 		return nil
 	}
-	_, err = transcript.Insert(ctx, orgID, pendingUserInput(runID, creatorUserID, opening))
+	_, err = transcript.Insert(ctx, orgID, pendingUserInput(conversationID, creatorUserID, opening))
 	return err
 }
 
@@ -354,15 +355,15 @@ func nativeSpec() agentprompt.Spec {
 // path's prior session id, which the native runtime has no counterpart to, and
 // it is the same signal mintOpeningTurn reads to answer the same question a few
 // calls later.
-func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
-	driven, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
+func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, conversationID, cwd string, owned repoFiles, handedOff bool) *memoryFingerprint {
+	driven, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 	if err != nil {
 		// An unreadable transcript is treated as a fresh claim. The two ways of
 		// being wrong are not symmetric: crediting this run with a predecessor's
 		// memory corrupts the entity's durable record, while distrusting a
 		// re-claimed engagement's own notes costs one run's notes and nothing
 		// downstream.
-		delegateLog.Warn("read transcript to classify the inherited memory file failed; treating this claim as fresh", "run", runID, "error", err)
+		delegateLog.Warn("read transcript to classify the inherited memory file failed; treating this claim as fresh", "conversation", conversationID, "error", err)
 	} else if len(driven) > 0 {
 		return nil
 	}
@@ -376,9 +377,9 @@ func (s *Spawner) prepareInheritedMemory(ctx context.Context, orgID, runID, cwd 
 // command it runs — the same run-identity variables the SDK path exports, so
 // a `tfac`/`triagefactory exec` invocation from inside a tool resolves the
 // same run.
-func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, runID, namespace string, cfg runConfig, triggerType, creatorUserID string) []string {
+func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, namespace string, cfg runConfig, triggerType, creatorUserID string) []string {
 	env := []string{
-		"TRIAGE_FACTORY_CONVERSATION_ID=" + runID,
+		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot,
 		"TRIAGE_FACTORY_BLUEPRINT_RUN_ID=" + namespace,
 	}
@@ -460,25 +461,25 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // it reads that from the transcript rather than remembering it, which is
 // what makes the behavior identical whether the engagement is the first or a
 // crash's successor.
-func (s *Spawner) artifactContractNudge(orgID, runID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
+func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
 	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira")
 	if !expects || s.artifacts == nil {
 		return nil
 	}
 	return func(ctx context.Context, _ int, _ string) string {
-		arts, err := s.artifacts.ListByRunSystem(ctx, orgID, runID)
+		arts, err := s.artifacts.ListByConversationSystem(ctx, orgID, conversationID)
 		if err != nil {
 			// Fail quiet: a read failure must not manufacture a nudge that
 			// sends a finished run back to work on a false premise.
-			delegateLog.Warn("read artifacts for the turn-end contract check failed; not nudging", "run", runID, "error", err)
+			delegateLog.Warn("read artifacts for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
 		if len(arts) > 0 {
 			return ""
 		}
-		rows, err := s.agentRuns.ListForAssemblySystem(ctx, orgID, runID)
+		rows, err := s.conversations.ListForAssemblySystem(ctx, orgID, conversationID)
 		if err != nil {
-			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "run", runID, "error", err)
+			delegateLog.Warn("read transcript for the turn-end contract check failed; not nudging", "conversation", conversationID, "error", err)
 			return ""
 		}
 		if askedAboutArtifactAlready(rows) {
@@ -552,7 +553,7 @@ const (
 //
 // A disabled ceiling disables the budget. The derivation exists to keep a
 // single command from consuming a shared allowance, and an operator who set
-// TF_RUN_MEMORY_LIMIT_MB=0 has said there is no allowance to protect —
+// TF_CLAIM_MEMORY_LIMIT_MB=0 has said there is no allowance to protect —
 // inventing one here would impose a limit they explicitly turned off.
 func nativeBashMemBudgetMB(ceilingMB int) int {
 	if ceilingMB <= 0 {
@@ -580,7 +581,7 @@ func nativeBashMemBudgetMB(ceilingMB int) int {
 // a successor owns the conversation's disposition now.
 func (s *Spawner) recordNativeResult(
 	ctx context.Context,
-	orgID, runID string,
+	orgID, conversationID string,
 	task domain.Task,
 	cfg runConfig,
 	namespace, claudeCwd, triggerType, creatorUserID string,
@@ -593,23 +594,24 @@ func (s *Spawner) recordNativeResult(
 	// the refusal IS the record, and writing a terminal here is exactly what
 	// the fence exists to prevent.
 	if result.Err != nil && errors.Is(result.Err, db.ErrClaimReleased) {
-		delegateLog.Error("engagement fenced out mid-run; a successor owns the conversation",
-			"run", runID, "claim", cfg.claimID, "error", result.Err)
+		delegateLog.Error("engagement fenced out mid-flight; a successor owns the conversation",
+			"conversation", conversationID, "claim", cfg.claimID, "error", result.Err)
 		return true
 	}
 
 	switch result.Kind {
 	case agentloop.ResultCancelled:
-		return s.parkRunOpen(ctx, liveParkContext{
-			orgID:         orgID,
-			runID:         runID,
-			taskID:        task.ID,
-			namespace:     namespace,
-			claudeCwd:     claudeCwd,
-			triggerType:   triggerType,
-			creatorUserID: creatorUserID,
-			claimID:       cfg.claimID,
-			reason:        db.ParkStopped("user_cancelled", ""),
+		return s.parkConversationOpen(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			taskID:         task.ID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			triggerType:    triggerType,
+			creatorUserID:  creatorUserID,
+			claimID:        cfg.claimID,
+			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 
 	case agentloop.ResultFailed:
@@ -617,44 +619,45 @@ func (s *Spawner) recordNativeResult(
 		if result.Err != nil {
 			reason = result.Err.Error()
 		}
-		return s.failRun(orgID, runID, task.ID, cfg.claimID, triggerType, creatorUserID, reason, result.FailureKind)
+		return s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, creatorUserID, reason, result.FailureKind)
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,
 		// or a stop reason only a person can resolve. The conversation is
 		// resumable either way, so the snapshot must exist by the time the
-		// status commits — parkRunOpen owns that ordering.
-		_ = s.parkRunOpen(ctx, liveParkContext{
-			orgID:         orgID,
-			runID:         runID,
-			taskID:        task.ID,
-			namespace:     namespace,
-			claudeCwd:     claudeCwd,
-			triggerType:   triggerType,
-			creatorUserID: creatorUserID,
-			reason:        db.ParkIdle(),
+		// status commits — parkConversationOpen owns that ordering.
+		_ = s.parkConversationOpen(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			taskID:         task.ID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			triggerType:    triggerType,
+			creatorUserID:  creatorUserID,
+			reason:         db.ParkIdle(),
+			runtime:        domain.ConversationRuntimeNative,
 		}, "")
 		return false
 	}
 
-	// Concluded. Record the run's memory exactly as processCompletion does —
-	// row presence means "the run terminated", NULL content means the agent
-	// wrote no usable memory file.
-	agentContent, fileState := readRunMemory(claudeCwd, priorMemory)
-	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, runID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
-		delegateLog.Warn("upsert memory for run failed", "run", runID, "error", err)
+	// Concluded. Record the conversation's memory exactly as processCompletion
+	// does — row presence means "the conversation terminated", NULL content
+	// means the agent wrote no usable memory file.
+	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, cfg.blueprintRunID, agentContent); err != nil {
+		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
 	}
 	if fileState != memoryFilePresent {
-		delegateLog.Debug("no usable memory file at termination", "run", runID, "state", fileState)
+		delegateLog.Debug("no usable memory file at termination", "conversation", conversationID, "state", fileState)
 	}
-	s.attachRunMemoryEntities(context.WithoutCancel(ctx), orgID, runID, task.EntityID)
+	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
 	// Snapshot before the terminal write. A `continue` hands the shared
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
-	if err := s.snapshotWorkspace(ctx, orgID, runID, namespace, claudeCwd, ""); err != nil {
-		delegateLog.Warn("snapshot workspace at native conclusion failed", "run", runID, "error", err)
+	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative); err != nil {
+		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)
 	}
 
 	// Only a stop_blueprint terminal carries a reason; concluding by stopping says
@@ -670,18 +673,23 @@ func (s *Spawner) recordNativeResult(
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
 	bgCtx := context.WithoutCancel(ctx)
-	if err := s.agentRuns.CompleteForClaimSystem(bgCtx, orgID, runID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, "", result.ResultSummary, outcome, outcomeReason, ""); err != nil {
+	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
+	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
-				"run", runID, "claim", cfg.claimID)
+				"conversation", conversationID, "claim", cfg.claimID)
 			return true
 		}
-		delegateLog.Warn("record completion for run failed", "run", runID, "error", err)
+		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", err)
 	}
 
+	broadcastStatus := "completed"
+	if updated != nil {
+		broadcastStatus = updated.Status
+	}
 	s.updateBreakerCounter(task.ID, triggerType, "completed")
-	s.broadcastRunUpdate(orgID, runID, "completed")
+	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	s.recomputeTaskBoardColumn(orgID, task.ID)
-	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortRunID(runID)))
+	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return false
 }

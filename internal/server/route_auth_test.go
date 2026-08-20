@@ -23,7 +23,7 @@ import (
 //
 // The variants:
 //
-//	no cookie       — most basic gate; requireAuth not wired at all
+//	no cookie       — most basic gate; withSession not wired at all
 //	garbage value   — cookie present but value isn't a UUID
 //	unknown sid     — well-formed UUID with no matching session row
 //
@@ -248,16 +248,16 @@ func splitMethodAndPath(pattern string) (method, path string) {
 func substitutePathParams(path string) string {
 	zeroUUID := "00000000-0000-0000-0000-000000000000"
 	replacements := map[string]string{
-		"{id}":         zeroUUID,
-		"{runID}":      zeroUUID,
-		"{commentId}":  zeroUUID,
-		"{org_id}":     zeroUUID,
-		"{number}":     "0",
-		"{provider}":   "github",
-		"{owner}":      "octocat",
-		"{repo}":       "hello-world",
-		"{path}":       "readme.md",
-		"{event_type}": "github.pr.opened",
+		"{id}":             zeroUUID,
+		"{conversationID}": zeroUUID,
+		"{commentId}":      zeroUUID,
+		"{org_id}":         zeroUUID,
+		"{number}":         "0",
+		"{provider}":       "github",
+		"{owner}":          "octocat",
+		"{repo}":           "hello-world",
+		"{path}":           "readme.md",
+		"{event_type}":     "github.pr.opened",
 	}
 	out := path
 	for placeholder, value := range replacements {

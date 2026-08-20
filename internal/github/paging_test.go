@@ -135,11 +135,11 @@ func TestListUserRepos_TruncatesAtPageCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListUserRepos: %v", err)
 	}
-	if len(repos) != maxFetchPages*100 {
-		t.Errorf("got %d repos; want %d (capped at maxFetchPages)", len(repos), maxFetchPages*100)
+	if len(repos) != maxRepoMirrorPages*100 {
+		t.Errorf("got %d repos; want %d (capped at maxRepoMirrorPages)", len(repos), maxRepoMirrorPages*100)
 	}
-	if got := atomic.LoadInt32(&calls); got != int32(maxFetchPages) {
-		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxFetchPages)
+	if got := atomic.LoadInt32(&calls); got != int32(maxRepoMirrorPages) {
+		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxRepoMirrorPages)
 	}
 
 	warned := false
@@ -153,8 +153,90 @@ func TestListUserRepos_TruncatesAtPageCap(t *testing.T) {
 	}
 }
 
+// A short page is /user/repos' only end-of-list signal (no total_count to
+// cross-check), and the walk must treat it as one: complete, and without a
+// trailing empty-page request to confirm what the short page already said.
+func TestListUserReposComplete_ShortPageEndsTheWalkComplete(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&calls, 1)
+		n := 100
+		if page == 2 {
+			n = 37
+		}
+		if page > 2 {
+			t.Errorf("walked past the short page to page %d", page)
+			n = 0
+		}
+		repos := make([]UserRepo, n)
+		for i := range repos {
+			repos[i] = UserRepo{FullName: fmt.Sprintf("octo/repo-%d-%d", page, i)}
+		}
+		data, _ := json.Marshal(repos)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+
+	repos, complete, err := clientAgainst(srv.URL).ListUserReposComplete(context.Background())
+	if err != nil {
+		t.Fatalf("ListUserReposComplete: %v", err)
+	}
+	if !complete {
+		t.Error("complete = false for a listing that ended on a short page")
+	}
+	if len(repos) != 137 {
+		t.Errorf("got %d repos; want 137", len(repos))
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Errorf("made %d HTTP calls; want exactly 2 (the short page is the end signal)", got)
+	}
+}
+
+// An account whose last real page lands short ON the final allowed page must
+// read as complete. Deciding the end off an empty page instead would walk one
+// page further, hit the cap check, and misreport the whole band just under the
+// cap as truncated — which for the reachable mirror means an account in that
+// band could never be mirrored at all.
+func TestListUserReposComplete_ShortFinalPageAtTheCapIsComplete(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := atomic.AddInt32(&calls, 1)
+		n := 100
+		if page == maxRepoMirrorPages {
+			n = 50
+		}
+		if page > int32(maxRepoMirrorPages) {
+			t.Errorf("walked past the cap to page %d", page)
+			n = 0
+		}
+		repos := make([]UserRepo, n)
+		for i := range repos {
+			repos[i] = UserRepo{FullName: fmt.Sprintf("octo/repo-%d-%d", page, i)}
+		}
+		data, _ := json.Marshal(repos)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+
+	repos, complete, err := clientAgainst(srv.URL).ListUserReposComplete(context.Background())
+	if err != nil {
+		t.Fatalf("ListUserReposComplete: %v", err)
+	}
+	if !complete {
+		t.Error("complete = false for an account whose listing ends short on the final allowed page")
+	}
+	if want := (maxRepoMirrorPages-1)*100 + 50; len(repos) != want {
+		t.Errorf("got %d repos; want %d", len(repos), want)
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(maxRepoMirrorPages) {
+		t.Errorf("made %d HTTP calls; want exactly %d", got, maxRepoMirrorPages)
+	}
+}
+
 // TestListInstallationRepos_TruncatesAtPageCap pins the installation-grant
-// listing cap: an installation with more repos than maxFetchPages*100 (an
+// listing cap: an installation with more repos than maxRepoMirrorPages*100 (an
 // unusually large App grant) must truncate with a logged WARN rather than
 // silently under-covering the poll's tracked-repo intersection.
 func TestListInstallationRepos_TruncatesAtPageCap(t *testing.T) {
@@ -173,7 +255,7 @@ func TestListInstallationRepos_TruncatesAtPageCap(t *testing.T) {
 		resp := struct {
 			TotalCount   int        `json:"total_count"`
 			Repositories []UserRepo `json:"repositories"`
-		}{TotalCount: 5000, Repositories: repos} // far beyond the page cap — never satisfied
+		}{TotalCount: maxRepoMirrorPages * 100 * 2, Repositories: repos} // far beyond the page cap — never satisfied
 		data, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(data)
@@ -185,11 +267,11 @@ func TestListInstallationRepos_TruncatesAtPageCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListInstallationRepos: %v", err)
 	}
-	if len(repos) != maxFetchPages*100 {
-		t.Errorf("got %d repos; want %d (capped at maxFetchPages)", len(repos), maxFetchPages*100)
+	if len(repos) != maxRepoMirrorPages*100 {
+		t.Errorf("got %d repos; want %d (capped at maxRepoMirrorPages)", len(repos), maxRepoMirrorPages*100)
 	}
-	if got := atomic.LoadInt32(&calls); got != int32(maxFetchPages) {
-		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxFetchPages)
+	if got := atomic.LoadInt32(&calls); got != int32(maxRepoMirrorPages) {
+		t.Errorf("made %d HTTP calls; want exactly %d (page cap)", got, maxRepoMirrorPages)
 	}
 
 	warned := false

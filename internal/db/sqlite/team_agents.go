@@ -58,31 +58,42 @@ func (s *teamAgentStore) AddForTeam(ctx context.Context, orgID, teamID, agentID 
 	return err
 }
 
-func (s *teamAgentStore) SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// scanUpdatedTeamAgent decodes a key-addressed UPDATE … RETURNING. No row
+// scanned means the (team, agent) pair named nothing, which is
+// db.ErrNoSuchTeamAgent.
+func scanUpdatedTeamAgent(row *sql.Row) (domain.TeamAgent, error) {
+	ta, err := scanTeamAgentRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
 	}
-	_, err := s.q.ExecContext(ctx, `
-		UPDATE team_agents SET enabled = ? WHERE team_id = ? AND agent_id = ?
-	`, enabled, teamID, agentID)
-	return err
+	return ta, err
 }
 
-func (s *teamAgentStore) SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) error {
+func (s *teamAgentStore) SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) (domain.TeamAgent, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.TeamAgent{}, err
+	}
+	return scanUpdatedTeamAgent(s.q.QueryRowContext(ctx, `
+		UPDATE team_agents SET enabled = ? WHERE team_id = ? AND agent_id = ?
+		RETURNING `+sqliteTeamAgentColumns,
+		enabled, teamID, agentID))
+}
+
+func (s *teamAgentStore) SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) (domain.TeamAgent, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.TeamAgent{}, err
 	}
 	var modelArg any
 	if model != nil && *model != "" {
 		modelArg = *model
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanUpdatedTeamAgent(s.q.QueryRowContext(ctx, `
 		UPDATE team_agents
 		SET per_team_model = ?,
 		    per_team_autonomy_suitability = ?
 		WHERE team_id = ? AND agent_id = ?
-	`, modelArg, autonomy, teamID, agentID)
-	return err
+		RETURNING `+sqliteTeamAgentColumns,
+		modelArg, autonomy, teamID, agentID))
 }
 
 func (s *teamAgentStore) Remove(ctx context.Context, orgID, teamID, agentID string) error {

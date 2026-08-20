@@ -33,7 +33,7 @@ import (
 // race.
 
 // ClearRunCellFiles removes every per-run file left under the socket root by an
-// earlier engagement of runID: the agenthost socket, the gh-injector cert
+// earlier engagement of conversationID: the agenthost socket, the gh-injector cert
 // beside it, and the tool-host socket directory.
 //
 // Called at cell bring-up, before the credential sidecar is launched, so each
@@ -49,14 +49,14 @@ import (
 //
 // Best-effort and silent on a missing path: the common case is that nothing is
 // there at all.
-func ClearRunCellFiles(runID string) {
-	removeCellEntry(TrustedAgentHostSocketPath(runID), os.Remove)
-	removeCellEntry(TrustedGHInjectorCertPath(runID), os.Remove)
+func ClearRunCellFiles(conversationID string) {
+	removeCellEntry(TrustedAgentHostSocketPath(conversationID), os.Remove)
+	removeCellEntry(TrustedGHInjectorCertPath(conversationID), os.Remove)
 	// Orchestrator-created, unlike the two above, and already recreated from
 	// scratch by the run that needs it (agentproc's prepareToolHostSocket) —
 	// swept here too so one call clears the whole per-run family rather than
 	// most of it.
-	removeCellEntry(TrustedToolHostSocketDir(runID), os.RemoveAll)
+	removeCellEntry(TrustedToolHostSocketDir(conversationID), os.RemoveAll)
 }
 
 // removeCellEntry unlinks one derived per-run path, unless that path turns out
@@ -93,10 +93,10 @@ func removeCellEntry(path string, remove func(string) error) {
 // have been assigned it, so no other cell's sidecar can be running at this uid,
 // so an entry owned by it is this engagement's own. Once the index is released
 // that argument evaporates, and so does the guard.
-func ReleaseRunCellFiles(runID string, subnetIdx uint8) {
+func ReleaseRunCellFiles(conversationID string, subnetIdx uint8) {
 	uid := SidecarUID(subnetIdx)
-	removeIfOwnedBy(TrustedAgentHostSocketPath(runID), uid)
-	removeIfOwnedBy(TrustedGHInjectorCertPath(runID), uid)
+	removeIfOwnedBy(TrustedAgentHostSocketPath(conversationID), uid)
+	removeIfOwnedBy(TrustedGHInjectorCertPath(conversationID), uid)
 }
 
 // removeIfOwnedBy unlinks path only if it exists and its owner is uid.

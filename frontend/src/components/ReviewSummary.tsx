@@ -343,7 +343,10 @@ export default function ReviewSummary({
               </button>
               <button
                 onClick={saveBody}
-                disabled={savingBody}
+                // A blank summary is refused server-side (it would post an
+                // empty review at approval), so the button says so up front
+                // instead of round-tripping to an error.
+                disabled={savingBody || draft.trim() === ''}
                 className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60"
               >
                 {savingBody ? 'Saving…' : 'Save'}

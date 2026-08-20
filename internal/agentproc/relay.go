@@ -107,7 +107,7 @@ type RecordDenialArgs struct {
 // RecordEgressDenialArgs is record_egress_denial's payload: the CONNECT
 // authority the sandbox asked for (host:port) and the policy reason it was
 // refused, mirroring egressproxy.DeniedConnect across the wire. The
-// orchestrator binds the conversation from its own RunInfo, so a sidecar can
+// orchestrator binds the conversation from its own ConversationInfo, so a sidecar can
 // never attribute a probe to another run.
 type RecordEgressDenialArgs struct {
 	Target string `json:"target"`
@@ -197,7 +197,7 @@ type RecordPushArgs struct {
 // reconciler fills the rest; one created through `gh api` (REST) also carries
 // Head/Base/Title/Body/Draft from the 201 response. For a review post, Number
 // comes from the request path and ReviewID/ReviewState/URL from the response.
-// The orchestrator binds ConversationID/OrgID/TeamID from its own RunInfo (the
+// The orchestrator binds ConversationID/OrgID/TeamID from its own ConversationInfo (the
 // sidecar never names them), so a sidecar cannot attribute an artifact to
 // another run.
 type RecordObservationArgs struct {
@@ -257,8 +257,8 @@ func NotifyRelayAudit(conn *sidecarproto.Conn, namespace, op string, args any) e
 }
 
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl
-// (agenthost.RelayServer) holds the run's db.Stores + RunInfo + git gate and
-// binds identity from RunInfo, so a relayed op can never be steered at another
+// (agenthost.RelayServer) holds the run's db.Stores + ConversationInfo + git gate and
+// binds identity from ConversationInfo, so a relayed op can never be steered at another
 // org. DispatchCall serves a request/response op (KindRelayCall); DispatchNotify
 // serves a fire-and-forget audit op (KindRelayNotify) best-effort. The
 // supervisor holds one of these for the run's lifetime.

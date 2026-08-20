@@ -38,10 +38,10 @@ func TestProjectStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := store.Get(ctx, bogusOrg, "any"); err == nil {
 		t.Errorf("Get with non-local orgID should error")
 	}
-	if _, err := store.List(ctx, bogusOrg); err == nil {
+	if _, _, err := store.List(ctx, bogusOrg, db.ListOpts{Limit: 200}); err == nil {
 		t.Errorf("List with non-local orgID should error")
 	}
-	if err := store.Update(ctx, bogusOrg, domain.Project{ID: "any", Name: "x"}); err == nil {
+	if _, err := store.Update(ctx, bogusOrg, domain.Project{ID: "any", Name: "x"}); err == nil {
 		t.Errorf("Update with non-local orgID should error")
 	}
 	if err := store.Delete(ctx, bogusOrg, "any"); err == nil {
@@ -51,7 +51,7 @@ func TestProjectStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 
 func newSQLiteForProjectTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

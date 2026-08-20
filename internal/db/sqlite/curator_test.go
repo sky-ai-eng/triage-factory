@@ -27,11 +27,12 @@ func TestCuratorStore_SQLite_Conformance(t *testing.T) {
 			UserID: runmode.LocalDefaultUserID,
 			SeedProject: func(t *testing.T, name string) string {
 				t.Helper()
-				id, err := stores.Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				created, err := stores.Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 					domain.Project{Name: name})
 				if err != nil {
 					t.Fatalf("create project %q: %v", name, err)
 				}
+				id := created.ID
 				return id
 			},
 		}
@@ -40,7 +41,7 @@ func TestCuratorStore_SQLite_Conformance(t *testing.T) {
 
 func newSQLiteForCuratorTest(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open in-memory db: %v", err)
 	}

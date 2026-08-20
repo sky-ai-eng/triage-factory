@@ -9,6 +9,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // jiraAppPath is the org-scoped jira/app endpoint for the local sentinel org.
@@ -176,21 +177,17 @@ func TestJiraApp_DeadOverrideRowNotShownAsConfigured(t *testing.T) {
 }
 
 // TestJiraApp_ImportRejectsMissingFields: both client_id and client_secret are
-// required; a blank one is a 422 with the offending field.
+// required; a blank one is a 400 MISSING_FIELD naming the field — the epic's
+// line is that a missing required field is shape-level, so it is 400 here as
+// it already was on the identity-PAT and jira-credential siblings.
 func TestJiraApp_ImportRejectsMissingFields(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, "POST", jiraAppPath(), map[string]string{"client_secret": "x"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s, want 400", rec.Code, rec.Body.String())
 	}
-	var body map[string]string
-	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if body["field"] != "client_id" {
-		t.Errorf("field=%q, want client_id", body["field"])
-	}
+	assertFirstError(t, rec, httpx.ReasonMissingField, "client_id")
 }

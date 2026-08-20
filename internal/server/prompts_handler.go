@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/prompts"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 )
@@ -62,28 +64,51 @@ func (ph *promptsHandler) handleEventTypes(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, out)
 }
 
+// promptListRequest is the body of POST /api/prompts/list. TeamID narrows to
+// one team's prompts on the multi-team prompts page; empty returns everything
+// visible (solo/local, or an unfiltered view).
+type promptListRequest struct {
+	TeamID string `json:"team_id"`
+
+	httpx.PageRequest
+}
+
+type promptListFilterKey struct {
+	TeamID string `json:"team_id"`
+}
+
+// POST /api/prompts/list
 func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	// ?team_id= narrows to one team's prompts (+ org-visible) on the
-	// multi-team prompts page; absent/solo returns everything visible.
-	teamID := teamscope.SingleParam(r)
-	var list []domain.Prompt
+
+	var req promptListRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	teamIDFilterField(&v, req.TeamID)
+	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(promptListFilterKey{TeamID: req.TeamID}), 0)
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	var (
+		list  []domain.Prompt
+		total int
+	)
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, e = tx.Prompts.List(r.Context(), orgID, teamID)
+		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
 		return
 	}
-	if list == nil {
-		list = []domain.Prompt{}
-	}
-	writeJSON(w, http.StatusOK, list)
+	httpx.WriteList(w, page, list, total)
 }
 
 func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +117,10 @@ func (ph *promptsHandler) handlePromptGet(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 	var prompt *domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -116,22 +144,28 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var req prompts.CreateRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	// A prompt is the step content unit — it always carries a body (the
 	// mission). Ordering prompts into a multi-step composition is the
 	// blueprint's job, not a prompt-kind discriminator.
 	if req.Body == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
+		})
 		return
 	}
 	if !prompts.ValidModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+		})
 		return
 	}
 
@@ -166,18 +200,14 @@ func (ph *promptsHandler) handlePromptCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var created *domain.Prompt
+	var created domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
-		if e := tx.Prompts.Create(r.Context(), orgID, teamID, prompt); e != nil {
-			return e
-		}
-		var ge error
-		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
-		return ge
+		created, e = tx.Prompts.Create(r.Context(), orgID, teamID, prompt)
+		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -194,22 +224,31 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 
 	var req prompts.UpdateRequest
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "name is required", Field: "name",
+		})
 		return
 	}
 	if req.Body == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body is required"})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonMissingField, Message: "body is required", Field: "body",
+		})
 		return
 	}
 	if !prompts.ValidModel(req.Model) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": prompts.InvalidModelError()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: prompts.InvalidModelError(), Field: "model",
+		})
 		return
 	}
 
@@ -232,15 +271,19 @@ func (ph *promptsHandler) handlePromptPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var updated *domain.Prompt
+	var updated domain.Prompt
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model); e != nil {
-			return e
-		}
-		var ge error
-		updated, ge = tx.Prompts.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		updated, e = tx.Prompts.Update(r.Context(), orgID, id, req.Name, req.Body, req.Model)
+		return e
 	}); err != nil {
+		// The Get above resolved the row, so a miss here is the row going away
+		// between the two transactions rather than a caller naming nothing —
+		// still a 404, because the resource the response would describe is gone.
+		if errors.Is(err, db.ErrNoSuchPrompt) {
+			notFound(w, "prompt")
+			return
+		}
 		internalError(w, "prompts", err)
 		return
 	}
@@ -253,7 +296,10 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
 
 	// Pre-load to resolve the prompt's team for the viewer gate (TFAC-447): a
 	// viewer can read a prompt but not delete it. A missing prompt falls through
@@ -369,8 +415,9 @@ func (ph *promptsHandler) handlePromptDelete(w http.ResponseWriter, r *http.Requ
 		}
 
 		// System and imported prompts are soft-deleted via Hide; user prompts via
-		// Delete (also soft — runs.prompt_id is RESTRICT). Both leave the row +
-		// its runs so historical timelines still resolve the prompt.
+		// Delete (also soft — conversations.prompt_id is RESTRICT). Both leave
+		// the row + the conversations referencing it so historical timelines
+		// still resolve the prompt.
 		var de error
 		status, de = prompts.SoftDeleteBySource(r.Context(), tx, orgID, prompt)
 		return de
@@ -401,14 +448,31 @@ func (ph *promptsHandler) handlePromptStats(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	id := r.PathValue("id")
-	var stats *domain.PromptStats
+	id, ok := uuidPathOr404(w, r, "id", "prompt")
+	if !ok {
+		return
+	}
+	var (
+		stats  *domain.PromptStats
+		prompt *domain.Prompt
+	)
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Read the prompt first: Stats aggregates over runs, so a prompt that
+		// doesn't exist (or isn't visible) produced an all-zero row that read
+		// as a real, quiet prompt — while the sibling GET 404s the same id.
 		var e error
+		prompt, e = tx.Prompts.Get(r.Context(), orgID, id)
+		if e != nil || prompt == nil {
+			return e
+		}
 		stats, e = tx.Prompts.Stats(r.Context(), orgID, id)
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)
+		return
+	}
+	if prompt == nil {
+		notFound(w, "prompt")
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)

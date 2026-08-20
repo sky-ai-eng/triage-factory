@@ -30,9 +30,9 @@ func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) e
 	switch op {
 	case opTeamTracksRepo:
 		return fuzzRelayResult(out, teamTracksRepoResult{Tracks: true})
-	case opListRunWorktrees:
-		return fuzzRelayResult(out, runWorktreesResult{Worktrees: []domain.RunWorktree{
-			{RunID: "run-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
+	case opListConversationWorktrees:
+		return fuzzRelayResult(out, conversationWorktreesResult{Worktrees: []domain.ConversationWorktree{
+			{ConversationID: "conv-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
 		}})
 	}
 	return fmt.Errorf("fuzz fixture: relay %s/%s unavailable", namespace, op)
@@ -93,7 +93,7 @@ func FuzzHandleConn(f *testing.F) {
 	// gate, resolving gh clients through the run's REST proxies.
 	runmode.SetForTest(f, runmode.ModeMulti)
 
-	info := RunInfo{OrgID: "org-1", UserID: "user-1", RunID: "run-fuzz", TeamID: "team-1"}
+	info := ConversationInfo{OrgID: "org-1", UserID: "user-1", ConversationID: "conv-fuzz", TeamID: "team-1"}
 	srv := NewServerWithRuntime(newRelayRuntime(fuzzRelayConn{}, info, nil), &ProxyCredentials{
 		GitHubAPIURL:   upstream.URL,
 		GitHubAPIToken: "placeholder",
@@ -108,10 +108,10 @@ func FuzzHandleConn(f *testing.F) {
 		method string
 		args   string
 	}{
-		{methodLookupRun, `{}`},
+		{methodLookupConversation, `{}`},
 		{methodGetTask, `{"task_id":"task-1"}`},
 		{methodGetRepo, `{"repo_id":"repo-1"}`},
-		{methodInsertRunWorktree, `{"row":{"repo_id":"repo-1","ref":"refs/heads/topic","path":"/work/x"}}`},
+		{methodInsertConversationWorktree, `{"row":{"repo_id":"repo-1","ref":"refs/heads/topic","path":"/work/x"}}`},
 		{methodCreateWorkspaceCheckout, `{"owner":"o","repo":"r","ref":"refs/heads/main","pr":7}`},
 		{methodGithubGetPR, `{"owner":"o","repo":"r","number":7,"verbose":true}`},
 		{methodGithubAddPendingReviewComment, `{"owner":"o","repo":"r","review_id":"rv-1","path":"a.go","body":"b","line":-1,"start_line":-9}`},

@@ -35,7 +35,7 @@ type permRecordFixture struct {
 
 func newPermRecordFixture(t *testing.T) permRecordFixture {
 	t.Helper()
-	database, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)&_time_format=sqlite")
+	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestBrowserPermissionHandler_PromptIsReadableWhileParked(t *testing.T) {
 
 	// Answering still drives the broker — the row is a record alongside the
 	// mechanism, not a replacement for it.
-	if err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_read", f.userID,
+	if _, err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_read", f.userID,
 		agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestResolvePermission_ApproveRecordsWhoAndHowLong(t *testing.T) {
 	go h(agentproc.PermissionRequest{ToolCallID: "toolu_allow", ToolName: "Bash"})
 	waitForPending(t, f.spawner, f.conversationID, "toolu_allow")
 
-	if err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_allow", f.userID,
+	if _, err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_allow", f.userID,
 		agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
@@ -210,7 +210,7 @@ func TestBrowserPermissionHandler_DenyPathsAreDistinguishable(t *testing.T) {
 		go h(agentproc.PermissionRequest{ToolCallID: "toolu_user", ToolName: "Bash"})
 		waitForPending(t, f.spawner, f.conversationID, "toolu_user")
 
-		if err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_user", f.userID,
+		if _, err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_user", f.userID,
 			agentproc.PermissionDecision{Behavior: "deny", Message: "not on prod"}); err != nil {
 			t.Fatalf("ResolvePermission: %v", err)
 		}
@@ -306,7 +306,7 @@ func TestBrowserPermissionHandler_RecordFailureStillAsksTheQuestion(t *testing.T
 	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "toolu_nostore", ToolName: "Bash"}) }()
 	waitForPending(t, s, "run-1", "toolu_nostore")
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "toolu_nostore", "",
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "toolu_nostore", "",
 		agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestBrowserPermissionHandler_NoClaimRecordsNothingAndStillAsks(t *testing.T
 	}
 
 	// The agent's question still stands, and answering it still works.
-	if err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_noclaim", f.userID,
+	if _, err := f.spawner.ResolvePermission(runmode.LocalDefaultOrgID, f.conversationID, "toolu_noclaim", f.userID,
 		agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}

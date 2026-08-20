@@ -10,7 +10,7 @@ import (
 
 // EntityStore owns the entities table — the long-lived "source
 // object" (PR, Jira issue, Linear ticket, Slack message) that every
-// event, task, and run hangs off. Lives from first poll until the
+// event, task, and conversation hangs off. Lives from first poll until the
 // poller observes the upstream as closed/merged.
 //
 // Audiences:
@@ -46,9 +46,46 @@ import (
 // Return convention: Get / GetBySource return (nil, nil) when no
 // row matches — a missing entity is a normal read outcome, not an
 // error. List* methods return an empty slice on no rows, never nil.
-// Reactivate and AssignProject expose distinct success signals
-// (boolean / sql.ErrNoRows) because their callers need to know
-// whether the row changed.
+// Reactivate exposes a distinct success signal (boolean) because its callers
+// need to know whether the row changed.
+//
+// # Every single-row write returns the row it persisted
+//
+// UpdateSnapshot, PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL,
+// AssignProject, MarkClosed and Close — and each one's ...System twin — hand
+// back the stored row, read off RETURNING on the write statement itself rather
+// than from a follow-up SELECT, projecting the point read's column list and
+// scanner so the write shape cannot drift from the read shape. Several of
+// these stamp a column the caller never supplied (last_polled_at, closed_at,
+// classified_at), and the row is the only place those are visible.
+//
+// A miss is sql.ErrNoRows — this store's existing miss sentinel, the one
+// AssignProject already documented and its callers already branch on — rather
+// than a new typed error. Close and CloseSystem are the exception in shape,
+// not in rule: their guard makes "not active" a legitimate outcome, so they
+// answer (nil, nil) the way GetBySource does.
+//
+// Exempt, each said so at the method: MarkPolledSystem (fire-and-forget
+// bookkeeping), UpdateSnapshotCASSystem and Reactivate / ReactivateSystem and
+// StampOwningTeamIfUnsetSystem (compare-and-swap guards whose bool already
+// answers whether the write landed), and RekeyOrMergeSystem (a composition
+// across tables that answers with the surviving id). FindOrCreate /
+// FindOrCreateSystem already return the row.
+// BackfillCandidateFilter is the project-scope filter
+// EntityStore.ListBackfillCandidates applies. Its fields mirror a project's
+// own scoping columns; see the method doc for the empty-means-unfiltered rule.
+type BackfillCandidateFilter struct {
+	// ExcludeProjectID is the project doing the claiming. Its own entities
+	// are not candidates.
+	ExcludeProjectID string
+	// GitHubRepos are the project's pinned "owner/repo" slugs. Empty means
+	// every GitHub entity qualifies.
+	GitHubRepos []string
+	// JiraProjectKey is the project's tracked Jira key. Empty means every
+	// Jira entity qualifies.
+	JiraProjectKey string
+}
+
 type EntityStore interface {
 	// --- Lookup ---
 
@@ -128,12 +165,31 @@ type EntityStore interface {
 	// FactoryReadStore.Entities asymmetry.
 	ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error)
 
+	// ListBackfillCandidates returns one page of the entities a project's
+	// create-flow popup can claim, plus the unpaged total. It replaces two
+	// whole-org ListActive scans the handler used to filter in Go — the
+	// scan-everything read the list contract exists to retire.
+	//
+	// The scope rules are the popup's, moved into SQL unchanged:
+	//
+	//   - active entities only, from the github and jira sources;
+	//   - entities already assigned to this project are excluded (there is
+	//     nothing to backfill for them), while entities in ANOTHER project
+	//     stay — claiming one is a legitimate reassignment;
+	//   - GitHubRepos empty means "no filter on GitHub", not "exclude
+	//     GitHub"; likewise JiraProjectKey. A project that scopes only one
+	//     tracker still wants candidates from the other.
+	//
+	// Ordering is (source, last_polled_at, id): a total order, so the pages
+	// partition the candidate set.
+	ListBackfillCandidates(ctx context.Context, orgID string, f BackfillCandidateFilter, opts ListOpts) ([]domain.Entity, int, error)
+
 	// ListProjectPanel returns the trimmed-column projection used
 	// by the Projects panel: id, source, source_id, kind, title,
 	// url, state, classification_rationale, created_at,
 	// last_polled_at — no snapshot_json / description blob. Ordered
 	// by last_polled_at DESC with NULLs last.
-	ListProjectPanel(ctx context.Context, orgID, projectID string) ([]domain.ProjectPanelEntity, error)
+	ListProjectPanel(ctx context.Context, orgID, projectID string, opts ListOpts) ([]domain.ProjectPanelEntity, int, error)
 
 	// --- Mutation ---
 
@@ -148,7 +204,10 @@ type EntityStore interface {
 	// UpdateSnapshot writes the new snapshot_json and stamps
 	// last_polled_at. Called by the tracker after every successful
 	// poll that found a row diff.
-	UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error
+	//
+	// Returns the updated row — carrying the last_polled_at it stamped — or
+	// sql.ErrNoRows.
+	UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error)
 
 	// PatchSnapshot writes the new snapshot_json **without** touching
 	// last_polled_at — deliberately distinct from UpdateSnapshot. Used
@@ -159,17 +218,23 @@ type EntityStore interface {
 	// window: a concurrent in-flight poll can overwrite our patch
 	// with its pre-mutation snapshot. Caller accepts that as the cost
 	// of in-place patching.
-	PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error
+	//
+	// Returns the patched row, or sql.ErrNoRows.
+	PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error)
 
 	// UpdateTitle writes a new entity title (e.g. a PR title was
 	// edited upstream). No snapshot or last_polled_at change.
-	UpdateTitle(ctx context.Context, orgID, id, title string) error
+	//
+	// Returns the updated row, or sql.ErrNoRows.
+	UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error)
 
 	// UpdateDescription writes the flattened issue/PR body. Stored
 	// out of snapshot_json because it's large and not part of the
 	// diff scope — keeping it off the snapshot keeps diff reads
 	// small even for multi-KB bodies.
-	UpdateDescription(ctx context.Context, orgID, id, description string) error
+	//
+	// Returns the updated row, or sql.ErrNoRows.
+	UpdateDescription(ctx context.Context, orgID, id, description string) (domain.Entity, error)
 
 	// AssignProject sets project_id (NULL when projectID is nil
 	// or ""), records the classifier's rationale, and stamps
@@ -178,23 +243,41 @@ type EntityStore interface {
 	// row — callers that ingest user input (e.g. the backfill
 	// HTTP handler) need this signal to report per-row failures
 	// rather than silently counting bogus ids as applied.
-	AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error
+	//
+	// Returns the reclassified row. That row is what makes the
+	// nil-or-empty projectID rule observable: both clear project_id, and
+	// only the row says so. The miss is now the write's own answer rather
+	// than a rows-affected probe followed by an existence check.
+	AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error)
 
 	// MarkClosed unconditionally sets state='closed' and stamps
 	// closed_at = now. Used at discovery time when the initial
 	// snapshot is already terminal (merged PR / done issue) — the
 	// entity was never active, so there are no tasks to cascade.
-	MarkClosed(ctx context.Context, orgID, id string) error
+	//
+	// Returns the closed row — carrying the closed_at it stamped — or
+	// sql.ErrNoRows.
+	MarkClosed(ctx context.Context, orgID, id string) (domain.Entity, error)
 
 	// Close transitions an active entity to closed, but only when
 	// state='active' — idempotent against double-fire from the
 	// entity-lifecycle handler.
-	Close(ctx context.Context, orgID, id string) error
+	//
+	// Returns the closed row, or nil when the guard declined because the
+	// entity was not active (including because no row carries the id). That
+	// nil is the idempotency: a second close is not an error, and the caller
+	// that wants to know whether this call was the one that closed it can now
+	// tell, which a bare error never let it.
+	Close(ctx context.Context, orgID, id string) (*domain.Entity, error)
 
 	// Reactivate flips a closed entity back to active and clears
 	// closed_at. Called when a previously-terminal entity reappears
 	// as open (reopened PR, reopened Jira issue). Returns true
 	// when the row actually changed.
+	//
+	// Exempt from the returned-row rule: a compare-and-swap guard whose bool
+	// is already the write's own answer about whether it landed, which is
+	// what every caller branches on. No caller renders the row.
 	Reactivate(ctx context.Context, orgID, id string) (bool, error)
 
 	// --- Admin-pool variants (`...System`) ---
@@ -273,6 +356,11 @@ type EntityStore interface {
 	// it diffed (the snapshot-diff is the sole re-emit prevention — see
 	// the tracker) and lets the next poll cycle reconcile. There is no
 	// blind-write variant: every snapshot write goes through the CAS.
+	//
+	// Exempt from the returned-row rule: a compare-and-swap guard. ok is the
+	// write's own answer about whether it landed, and it is the whole point of
+	// the method — the caller suppresses its diffed transitions on a miss and
+	// re-reads the row on the next cycle either way.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
 
 	// MarkPolledSystem stamps last_polled_at without touching the
@@ -289,10 +377,26 @@ type EntityStore interface {
 	// since candidates are ordered oldest-first against a per-cycle
 	// budget, one such entity would consume that budget every cycle and
 	// starve every other candidate behind it.
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping. It
+	// stamps a wall-clock column the next cycle's candidate query reads and
+	// nothing else, and no caller looks at the answer.
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
-	UpdateTitleSystem(ctx context.Context, orgID, id, title string) error
-	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error
+	// RekeyOrMergeSystem follows an external object's changed natural key.
+	// When newSourceID is free, the existing entity is re-keyed in place and
+	// its project classification is cleared for re-evaluation. When that key
+	// already belongs to another entity, that canonically-keyed row survives
+	// and every entity-id referent is moved to it. The operation is atomic.
+	// Returns the surviving entity id and whether a merge occurred.
+	//
+	// Exempt from the returned-row rule: it is a composition, not a single-row
+	// write — the merge arm moves every referent across tables and deletes the
+	// loser, so which row survived is the outcome and that is what it returns.
+	RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (survivorID string, merged bool, err error)
+
+	UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error)
+	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error)
 
 	// UpdateURLSystem sets the entity's url. Admin pool; no-op update
 	// semantics (row must exist). Added for detached external-link
@@ -301,10 +405,15 @@ type EntityStore interface {
 	// with no prior update path. System-only by design: the only caller,
 	// ee/slack's permalink resolver, runs detached from any request
 	// (best-effort, off context.Background()) with no JWT claims context.
-	UpdateURLSystem(ctx context.Context, orgID, id, url string) error
-	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error
-	MarkClosedSystem(ctx context.Context, orgID, id string) error
-	CloseSystem(ctx context.Context, orgID, id string) error
+	//
+	// Returns the updated row, or sql.ErrNoRows — the same miss the rest of
+	// this store's id-keyed writes report. The caller resolved the entity
+	// moments earlier, so a miss means the row went away underneath it, which
+	// is worth its best-effort log line rather than a silent success.
+	UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error)
+	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error)
+	MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error)
+	CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
 	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
 
 	// DescriptionsSystem mirrors Descriptions for the AI scorer —
@@ -319,7 +428,7 @@ type EntityStore interface {
 
 	// ClassificationStatusSystem reports whether the entity has been
 	// project-classified yet — (classified, exists, err). It backs the
-	// delegation spawner's pre-run wait (internal/projectclassify
+	// delegation spawner's pre-launch wait (internal/projectclassify
 	// WaitFor), which blocks until the classifier has decided an entity
 	// before reading project_id for knowledge-base injection.
 	//
@@ -364,11 +473,11 @@ type EntityStore interface {
 	//
 	// Stamp-if-NULL is the whole contract, and it is what lets two unordered
 	// writers converge on one answer. A PR the bot opens has no TF author to
-	// resolve, so the commissioning team is recorded from the run that opened
-	// it; that write races the poller, which mints the same entity by natural
+	// resolve, so the commissioning team is recorded from the conversation
+	// that opened it; that write races the poller, which mints the same entity by natural
 	// key whenever it next sees the PR. Either order lands the same owner —
-	// the run's write back-fills a row the poller already created, or it
-	// creates the row the poller later enriches — and neither can overwrite an
+	// the conversation's write back-fills a row the poller already created, or
+	// it creates the row the poller later enriches — and neither can overwrite an
 	// owner some *other* writer chose, because the only value this can replace
 	// is NULL. An explicit owner (an operator's transfer) is therefore
 	// permanent as far as this path is concerned, and re-delivery of the same

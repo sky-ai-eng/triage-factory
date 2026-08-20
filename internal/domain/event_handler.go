@@ -67,9 +67,9 @@ type EventHandler struct {
 	// signal (mirrors domain.Blueprint.UserModified): true once a team's copy
 	// of a shipped handler has diverged from current shipped content via a
 	// content-mutating write (Update on a non-enabled field, Promote,
-	// RetargetBlueprint). SetEnabled and Reorder never set it — activation
-	// state and presentation order are the user's to own regardless. Always
-	// false for user-authored (non-system_slug) rows.
+	// RetargetBlueprint). An enabled-only Update and Reorder never set it —
+	// activation state and presentation order are the user's to own
+	// regardless. Always false for user-authored (non-system_slug) rows.
 	UserModified bool `json:"user_modified"`
 
 	// Rule-only (nil for triggers).
@@ -98,7 +98,7 @@ const (
 )
 
 // TriggerTypeEvent is the V1 trigger_type value carried by triggers
-// (event_handlers with kind='trigger'). Persisted only on the runs
-// row (runs.trigger_type); the column was dropped from
+// (event_handlers with kind='trigger'). Persisted only on the
+// conversations row (conversations.trigger_type); the column was dropped from
 // the prior prompt_triggers table during unification.
 const TriggerTypeEvent = "event"

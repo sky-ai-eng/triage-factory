@@ -91,13 +91,13 @@ func waitForHubClient(t *testing.T, hub *websocket.Hub) {
 	t.Fatal("hub never registered the dialing client")
 }
 
-// TestBroadcastEvent_SkipsRunLifecycleSentinels pins the TFAC-592 guard: the
+// TestBroadcastEvent_SkipsConversationLifecycleSentinels pins the TFAC-592 guard: the
 // ws-broadcast subscriber must not re-forward system:conversation:* sentinels — the
-// spawner's two choke points already emit the dedicated agent_run_update /
-// agent_message websocket events, so forwarding the bus sentinel too would
+// spawner's two choke points already emit the dedicated conversation_update /
+// message websocket events, so forwarding the bus sentinel too would
 // double every tool call on the wire in a second shape. A system:poll:completed
 // event (existing behavior) must still go out.
-func TestBroadcastEvent_SkipsRunLifecycleSentinels(t *testing.T) {
+func TestBroadcastEvent_SkipsConversationLifecycleSentinels(t *testing.T) {
 	hub := websocket.NewHub()
 	a := &App{wsHub: hub}
 	client := dialHubTestClient(t, hub)

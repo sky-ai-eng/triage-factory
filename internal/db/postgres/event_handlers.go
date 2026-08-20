@@ -156,9 +156,30 @@ func (s *eventHandlerStore) Seed(ctx context.Context, orgID, teamID string, blue
 	return nil
 }
 
-func (s *eventHandlerStore) List(ctx context.Context, orgID string, kind string, teamID string) ([]domain.EventHandler, error) {
-	query, args := s.buildListQuery(orgID, kind, teamID)
-	return s.scanList(ctx, query, args)
+func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHandlerListFilter, opts db.ListOpts) ([]domain.EventHandler, int, error) {
+	where, args := s.buildListWhere(orgID, f)
+
+	var total int
+	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	// Order: rules first (sort_order ASC, name ASC), then triggers
+	// (created_at DESC), with an id tiebreaker so ties can't reshuffle
+	// between pages.
+	q := `SELECT ` + pgEventHandlerColumns + `
+	      FROM event_handlers` + where + `
+	      ORDER BY kind ASC,
+	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
+	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
+	               created_at DESC, id`
+	pageArgs := args
+	if opts.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
+	}
+	rows, err := s.scanList(ctx, q, pageArgs)
+	return rows, total, err
 }
 
 func (s *eventHandlerStore) Get(ctx context.Context, orgID, id string) (*domain.EventHandler, error) {
@@ -253,9 +274,9 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 	return collectEventHandlers(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	var pred any
 	if h.ScopePredicateJSON != nil {
@@ -269,11 +290,14 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	// real team here keeps the write valid. Empty is a handler bug, so
 	// reject it rather than write an invalid row.
 	if teamID == "" {
-		return fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
+		return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
+	// RETURNING projects the point read's column list, so the row handed back
+	// carries the creator identity the COALESCE resolved, the forced source
+	// and the stamped timestamps h never described.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.app.ExecContext(ctx, `
+		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -288,12 +312,12 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
-			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder))
-		return err
+			RETURNING `+pgEventHandlerColumns,
+			h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
+			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder)))
 
 	case domain.EventHandlerKindTrigger:
-		_, err := s.app.ExecContext(ctx, `
+		return scanEventHandlerRowPG(s.app.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -308,19 +332,19 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
-			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability))
-		return err
+			RETURNING `+pgEventHandlerColumns,
+			h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
+			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability)))
 	}
-	return fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
 }
 
-func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if !isValidUUID(h.ID) {
-		return nil
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
 	}
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	var pred any
 	if h.ScopePredicateJSON != nil {
@@ -329,41 +353,54 @@ func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.E
 
 	contentChanged, err := s.contentChanged(ctx, orgID, h)
 	if err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.app.ExecContext(ctx, `
+		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
 			    name = $4, default_priority = $5, sort_order = $6,
 			    user_modified = user_modified OR $7,
 			    updated_at = now()
 			WHERE org_id = $8 AND id = $9 AND kind = 'rule' AND deleted_at IS NULL
-		`, pred, h.Enabled, h.AppliesToUnowned, h.Name,
+			RETURNING `+pgEventHandlerColumns,
+			pred, h.Enabled, h.AppliesToUnowned, h.Name,
 			derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			contentChanged,
-			orgID, h.ID)
-		return err
+			orgID, h.ID))
 
 	case domain.EventHandlerKindTrigger:
 		// blueprint_id is immutable on trigger update — change requires
 		// RetargetBlueprint.
-		_, err := s.app.ExecContext(ctx, `
+		return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 			UPDATE event_handlers
 			SET scope_predicate_json = $1::jsonb, enabled = $2, applies_to_unowned = $3,
 			    breaker_threshold = $4, min_autonomy_suitability = $5,
 			    user_modified = user_modified OR $6,
 			    updated_at = now()
 			WHERE org_id = $7 AND id = $8 AND kind = 'trigger' AND deleted_at IS NULL
-		`, pred, h.Enabled, h.AppliesToUnowned,
+			RETURNING `+pgEventHandlerColumns,
+			pred, h.Enabled, h.AppliesToUnowned,
 			derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			contentChanged,
-			orgID, h.ID)
-		return err
+			orgID, h.ID))
 	}
-	return fmt.Errorf("postgres event_handlers Update: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Update: unknown kind %q", h.Kind)
+}
+
+// scanUpdatedEventHandlerPG decodes an id-keyed UPDATE … RETURNING. No row
+// scanned means no live handler answered the id under this statement's kind
+// filter — or that RLS hides whatever does — and both are
+// db.ErrNoSuchEventHandler, the answer these writes used to give silently as
+// zero rows affected.
+func scanUpdatedEventHandlerPG(row *sql.Row) (domain.EventHandler, error) {
+	h, err := scanEventHandlerRowPG(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
+	}
+	return h, err
 }
 
 // contentChanged reports whether h's content fields (scope_predicate_json,
@@ -406,16 +443,6 @@ func (s *eventHandlerStore) contentChanged(ctx context.Context, orgID string, h 
 	return false, nil
 }
 
-func (s *eventHandlerStore) SetEnabled(ctx context.Context, orgID, id string, enabled bool) error {
-	if !isValidUUID(id) {
-		return nil
-	}
-	_, err := s.app.ExecContext(ctx, `
-		UPDATE event_handlers SET enabled = $1, updated_at = now() WHERE org_id = $2 AND id = $3 AND deleted_at IS NULL
-	`, enabled, orgID, id)
-	return err
-}
-
 // Delete removes a handler. A system_slug row (shipped copy) soft-deletes so
 // its (org_id, team_id, system_slug) slot stays occupied for the sync's
 // never-resurrect rule; a user-created row (no system_slug) hard-deletes.
@@ -442,15 +469,15 @@ func (s *eventHandlerStore) Delete(ctx context.Context, orgID, id string) error 
 	return err
 }
 
-func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) error {
+func (s *eventHandlerStore) RetargetBlueprint(ctx context.Context, orgID, id, newBlueprintID string) (domain.EventHandler, error) {
 	if !isValidUUID(id) || !isValidUUID(newBlueprintID) {
-		return nil
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers SET blueprint_id = $1, user_modified = TRUE, updated_at = now()
 		WHERE org_id = $2 AND id = $3 AND kind = 'trigger' AND deleted_at IS NULL
-	`, newBlueprintID, orgID, id)
-	return err
+		RETURNING `+pgEventHandlerColumns,
+		newBlueprintID, orgID, id))
 }
 
 func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []string) error {
@@ -473,15 +500,15 @@ func (s *eventHandlerStore) Reorder(ctx context.Context, orgID string, ids []str
 	})
 }
 
-func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error {
+func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) (domain.EventHandler, error) {
 	if !isValidUUID(id) {
-		return errors.New("postgres event_handlers Promote: invalid id")
+		return domain.EventHandler{}, db.ErrNoSuchEventHandler
 	}
 	if t.Kind != domain.EventHandlerKindTrigger {
-		return errors.New("postgres event_handlers Promote: target kind must be 'trigger'")
+		return domain.EventHandler{}, errors.New("postgres event_handlers Promote: target kind must be 'trigger'")
 	}
 	if t.BlueprintID == "" || t.BreakerThreshold == nil || t.MinAutonomySuitability == nil {
-		return errors.New("postgres event_handlers Promote: trigger fields required (blueprint_id, breaker_threshold, min_autonomy_suitability)")
+		return domain.EventHandler{}, errors.New("postgres event_handlers Promote: trigger fields required (blueprint_id, breaker_threshold, min_autonomy_suitability)")
 	}
 	var pred any
 	if t.ScopePredicateJSON != nil {
@@ -491,7 +518,10 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 	// flip kind. The per-kind CHECK constraints validate atomically —
 	// any mid-state would fail the rule_shape or trigger_shape check. A kind
 	// change is always a user modification — stamp unconditionally.
-	res, err := s.app.ExecContext(ctx, `
+	// The row is where a caller sees the cleared rule-only columns; t
+	// describes only the trigger half. No row scanned means the id named no
+	// live rule, which is what the rows-affected probe here used to report.
+	return scanUpdatedEventHandlerPG(s.app.QueryRowContext(ctx, `
 		UPDATE event_handlers
 		SET kind = 'trigger',
 		    blueprint_id = $1, breaker_threshold = $2, min_autonomy_suitability = $3,
@@ -500,19 +530,9 @@ func (s *eventHandlerStore) Promote(ctx context.Context, orgID string, id string
 		    user_modified = TRUE,
 		    updated_at = now()
 		WHERE org_id = $5 AND id = $6 AND kind = 'rule' AND deleted_at IS NULL
-	`, t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
-		pred, orgID, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return errors.New("postgres event_handlers Promote: row not found or not a rule")
-	}
-	return nil
+		RETURNING `+pgEventHandlerColumns,
+		t.BlueprintID, *t.BreakerThreshold, *t.MinAutonomySuitability,
+		pred, orgID, id))
 }
 
 // Sync brings teamID's unmodified copies of db.ShippedEventHandlers up to
@@ -687,34 +707,28 @@ func applyHandlerPG(ctx context.Context, q queryer, orgID, id string, kind strin
 	return fmt.Errorf("postgres event_handlers Sync: apply: unknown kind %q", kind)
 }
 
-// buildListQuery composes the WHERE for List, with optional kind filter.
-// kind="" returns both kinds.
-func (s *eventHandlerStore) buildListQuery(orgID, kind, teamID string) (string, []any) {
+// buildListWhere composes the WHERE clause List's count and page share, so the
+// two can't apply different filters to the same request.
+func (s *eventHandlerStore) buildListWhere(orgID string, f db.EventHandlerListFilter) (string, []any) {
 	args := []any{orgID}
-	q := `SELECT ` + pgEventHandlerColumns + `
-	      FROM event_handlers
-	      WHERE org_id = $1 AND deleted_at IS NULL`
-	if kind != "" {
-		args = append(args, kind)
-		q += fmt.Sprintf(" AND kind = $%d", len(args))
+	where := ` WHERE org_id = $1 AND deleted_at IS NULL`
+	if f.Kind != "" {
+		args = append(args, f.Kind)
+		where += fmt.Sprintf(" AND kind = $%d", len(args))
 	}
-	if teamID != "" {
+	if f.TeamID != "" {
 		// Prompts page narrowed to one team: that team's handlers. Every
 		// handler is team-owned (team_id NOT NULL, no org-visible tier), so
 		// this is a plain team filter. RLS still gates the row set; this
 		// narrows within it.
-		args = append(args, teamID)
-		q += fmt.Sprintf(" AND team_id = $%d", len(args))
+		args = append(args, f.TeamID)
+		where += fmt.Sprintf(" AND team_id = $%d", len(args))
 	}
-	// Order: rules first (sort_order ASC, name ASC), then triggers
-	// (created_at DESC). Same shape as the predecessor stores' List
-	// methods so handler-level callers get identical ordering.
-	q += `
-	      ORDER BY kind ASC,
-	               CASE WHEN kind = 'rule' THEN sort_order ELSE 0 END ASC,
-	               CASE WHEN kind = 'rule' THEN name ELSE '' END ASC,
-	               created_at DESC`
-	return q, args
+	if len(f.GatedEventTypes) > 0 {
+		args = append(args, f.GatedEventTypes)
+		where += fmt.Sprintf(" AND NOT (event_type = ANY($%d))", len(args))
+	}
+	return where, args
 }
 
 func (s *eventHandlerStore) scanList(ctx context.Context, query string, args []any) ([]domain.EventHandler, error) {

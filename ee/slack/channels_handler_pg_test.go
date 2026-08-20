@@ -329,12 +329,8 @@ func TestChannelsHandler_ArchivedTeamPUT_Refused(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived team); body=%s", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Archived bool `json:"archived"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if !body.Archived {
-		t.Errorf("403 body missing archived:true marker; body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), httpx.ReasonTeamArchived) {
+		t.Errorf("403 body missing the TEAM_ARCHIVED reason; body=%s", rec.Body.String())
 	}
 }
 
@@ -395,12 +391,8 @@ func TestChannelsHandler_Primary_ArchivedDestinationTeam_Refused(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (archived destination team); body=%s", rec.Code, rec.Body.String())
 	}
-	var body struct {
-		Archived bool `json:"archived"`
-	}
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if !body.Archived {
-		t.Errorf("403 body missing archived:true marker; body=%s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), httpx.ReasonTeamArchived) {
+		t.Errorf("403 body missing the TEAM_ARCHIVED reason; body=%s", rec.Body.String())
 	}
 
 	// The primary must still be team2 — the refused reassignment must not
@@ -429,7 +421,8 @@ func TestChannelsHandler_FirstTrack_SeedsDefaultBlueprint(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -506,7 +499,8 @@ func TestChannelsHandler_SecondPUT_NoDuplicateTrigger(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -531,22 +525,23 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	promptID := "00000000-0000-0000-0000-0000000000c1"
 	blueprintID := "00000000-0000-0000-0000-0000000000c2"
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		if err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
+		if _, err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
 			return err
 		}
-		if err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
+		if _, err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
 			return err
 		}
-		if err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
+		if _, err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
 			return err
 		}
 		threshold, minAutonomy := 5, 0.2
-		return tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+		_, e := tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
 			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
 			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
 			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
 			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
 		})
+		return e
 	}); err != nil {
 		t.Fatalf("seed pre-existing trigger: %v", err)
 	}
@@ -561,7 +556,8 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)
@@ -590,7 +586,8 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 
 	var seeded *domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		handlers, e := tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e := tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		if e != nil {
 			return e
 		}
@@ -623,7 +620,8 @@ func TestChannelsHandler_DefaultDeleted_NoReseed(t *testing.T) {
 	var handlers []domain.EventHandler
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
 		var e error
-		handlers, e = tx.EventHandlers.List(t.Context(), orgID, domain.EventHandlerKindTrigger, teamID)
+		handlers, _, e = tx.EventHandlers.List(t.Context(), orgID,
+			db.EventHandlerListFilter{Kind: domain.EventHandlerKindTrigger, TeamID: teamID}, db.ListOpts{Limit: 200})
 		return e
 	}); err != nil {
 		t.Fatalf("list event handlers: %v", err)

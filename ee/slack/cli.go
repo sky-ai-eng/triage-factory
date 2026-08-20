@@ -3,7 +3,7 @@
 // parsing only; every verb makes exactly one host.CallExtension("slack", ...)
 // call and prints its JSON result verbatim — no Slack logic runs here, see
 // docs/ee-feature-packaging.md's "Agent-facing CLI verbs" section). Verb-first
-// grammar, no implicit targets anywhere: the run prompt supplies the
+// grammar, no implicit targets anywhere: the conversation's prompt supplies the
 // triggering channel/thread-ts (via {{EVENT_METADATA_JSON}}), and the agent
 // passes them back explicitly on every call.
 package slack

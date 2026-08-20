@@ -68,7 +68,7 @@ func listen(socketPath string) (net.Listener, error) {
 	// shared across ALL runs — so without it, POSIX unlink/rename authority (a
 	// property of the PARENT directory, not the entry) would let any one run's
 	// sidecar delete or replace cap-broker.sock (a fixed path — a broker DoS) or
-	// a sibling run's <runID>.sock before that run's daemon binds (cross-run
+	// a sibling run's <conversationID>.sock before that run's daemon binds (cross-run
 	// interference). Sticky restricts unlink/rename to each entry's own owner:
 	// per-run sockets are owned by their run's distinct sidecar uid and the
 	// broker's by root, so each is protected from every other run. Mirrors /tmp's

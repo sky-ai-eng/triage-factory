@@ -27,10 +27,10 @@ func setPresence(h *Hub, c *client, viewing string, visible bool) {
 // (viewing "other") never counts.
 func TestPresentFor_TruthTable(t *testing.T) {
 	const (
-		org   = "orgA"
-		runID = "run-1"
+		org            = "orgA"
+		conversationID = "run-1"
 	)
-	runView := "run:" + runID
+	runView := "run:" + conversationID
 	cases := []struct {
 		viewing string
 		visible bool
@@ -49,7 +49,7 @@ func TestPresentFor_TruthTable(t *testing.T) {
 		h := NewHub()
 		c := addBareClient(h, "userA", org)
 		setPresence(h, c, tc.viewing, tc.visible)
-		if got := h.PresentFor(org, runID); got != tc.want {
+		if got := h.PresentFor(org, conversationID); got != tc.want {
 			t.Errorf("PresentFor(viewing=%q, visible=%v) = %v, want %v", tc.viewing, tc.visible, got, tc.want)
 		}
 	}
@@ -61,19 +61,19 @@ func TestPresentFor_TruthTable(t *testing.T) {
 // test connections.
 func TestPresentFor_OrgScoping(t *testing.T) {
 	const (
-		orgA  = "orgA"
-		orgB  = "orgB"
-		runID = "run-1"
+		orgA           = "orgA"
+		orgB           = "orgB"
+		conversationID = "run-1"
 	)
 
 	// A present client in org B must not satisfy org A.
 	h := NewHub()
 	b := addBareClient(h, "userB", orgB)
 	setPresence(h, b, "board", true)
-	if h.PresentFor(orgA, runID) {
+	if h.PresentFor(orgA, conversationID) {
 		t.Error("a present board tab in org B satisfied a prompt in org A")
 	}
-	if !h.PresentFor(orgB, runID) {
+	if !h.PresentFor(orgB, conversationID) {
 		t.Error("org B's own present board tab should satisfy org B")
 	}
 
@@ -81,7 +81,7 @@ func TestPresentFor_OrgScoping(t *testing.T) {
 	h2 := NewHub()
 	u := addBareClient(h2, "", "")
 	setPresence(h2, u, "board", true)
-	if !h2.PresentFor(orgA, runID) {
+	if !h2.PresentFor(orgA, conversationID) {
 		t.Error("an unscoped present client should satisfy any org")
 	}
 }
@@ -119,16 +119,16 @@ func dialPresenceClient(t *testing.T, h *Hub, orgID string) (*ws.Conn, func()) {
 // waitPresent polls PresentFor until it reaches want or a short deadline,
 // absorbing the async gap between a frame hitting the wire and readPump applying
 // it under the hub mutex.
-func waitPresent(t *testing.T, h *Hub, orgID, runID string, want bool) {
+func waitPresent(t *testing.T, h *Hub, orgID, conversationID string, want bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if h.PresentFor(orgID, runID) == want {
+		if h.PresentFor(orgID, conversationID) == want {
 			return
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	t.Fatalf("PresentFor(%s, %s) never became %v", orgID, runID, want)
+	t.Fatalf("PresentFor(%s, %s) never became %v", orgID, conversationID, want)
 }
 
 // TestReadPump_PresenceFrame drives the full inbound path: a presence frame over
@@ -136,8 +136,8 @@ func waitPresent(t *testing.T, h *Hub, orgID, runID string, want bool) {
 // malformed / unknown frames are ignored rather than corrupting state.
 func TestReadPump_PresenceFrame(t *testing.T) {
 	const (
-		org   = "orgA"
-		runID = "run-1"
+		org            = "orgA"
+		conversationID = "run-1"
 	)
 	h := NewHub()
 	conn, cleanup := dialPresenceClient(t, h, org)
@@ -153,15 +153,15 @@ func TestReadPump_PresenceFrame(t *testing.T) {
 
 	// A focused board frame makes the client present.
 	write(`{"type":"presence","viewing":"board","visible":true}`)
-	waitPresent(t, h, org, runID, true)
+	waitPresent(t, h, org, conversationID, true)
 
 	// Backgrounding the tab (visible:false) drops presence.
 	write(`{"type":"presence","viewing":"board","visible":false}`)
-	waitPresent(t, h, org, runID, false)
+	waitPresent(t, h, org, conversationID, false)
 
 	// Re-focus on this run's detail page makes it present again.
-	write(`{"type":"presence","viewing":"run:` + runID + `","visible":true}`)
-	waitPresent(t, h, org, runID, true)
+	write(`{"type":"presence","viewing":"run:` + conversationID + `","visible":true}`)
+	waitPresent(t, h, org, conversationID, true)
 
 	// A non-JSON frame (ping/keepalive) and an unknown message type are both
 	// ignored — state stays as last reported (present).
@@ -169,7 +169,7 @@ func TestReadPump_PresenceFrame(t *testing.T) {
 	write(`{"type":"something-else","viewing":"other","visible":false}`)
 	// Give readPump a beat to process (and prove it did NOT mutate state).
 	time.Sleep(20 * time.Millisecond)
-	if !h.PresentFor(org, runID) {
+	if !h.PresentFor(org, conversationID) {
 		t.Error("a non-presence / non-JSON frame must not clear presence")
 	}
 }

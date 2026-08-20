@@ -11,7 +11,7 @@ import (
 )
 
 // dashboardBackfillDays is the trailing window the personal dashboard
-// aggregates (it mirrors handleDashboardStats' sinceDays). The backfill seeds
+// aggregates (it mirrors handleDashboardStats' dashboardStatsWindowDays). The backfill seeds
 // merged/closed/reviewed entities across this window so the dashboard's merged
 // count, reviews, and 14-day sparkline aren't blank for history that predates
 // tracking.
@@ -139,7 +139,7 @@ func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredP
 		return false, err
 	}
 	if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-		if err := t.entities.MarkClosedSystem(ctx, t.orgID, entity.ID); err != nil {
+		if _, err := t.entities.MarkClosedSystem(ctx, t.orgID, entity.ID); err != nil {
 			return false, err
 		}
 	}

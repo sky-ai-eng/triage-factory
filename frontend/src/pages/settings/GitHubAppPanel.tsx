@@ -16,10 +16,14 @@ import {
 
 /**
  * GitHubAppPanel is the org/workspace-scope "GitHub access" block — the
- * App-registration alternative to a PAT. A registered App polls under its
- * own bot identity and supports multiple installations. It's self-contained
- * (owns its load/error/register state) so it drops identically into the
- * Settings workspace tab and the org-create configure step.
+ * App-registration alternative to a PAT. A registered App gives the workspace
+ * a bot identity of its own, which outlives the person who set it up (a PAT
+ * leaves with them), and moves per-team repository scoping into GitHub's
+ * hands: a team's work runs on an installation token minted for that team's
+ * repositories, and the token cannot reach past them — the limit is GitHub's,
+ * not something TF enforces in code. It's self-contained (owns its
+ * load/error/register state) so it drops identically into the Settings
+ * workspace tab and the org-create configure step.
  *
  * Installation lives elsewhere now — the wizard's "Install the App" step and
  * Settings' "App installation" section own that affordance (one place per
@@ -127,9 +131,11 @@ export default function GitHubAppPanel({
     <>
       {showHeading && <h2 className="text-body font-medium text-ink-2 mb-1">GitHub access</h2>}
       <p className="text-reported text-ink-3 mb-4 leading-relaxed">
-        A GitHub App connects Triage Factory to your organization under its own bot identity and
-        supports multiple installations. A Personal Access Token is the simpler alternative — you
-        don&rsquo;t need both.
+        A GitHub App connects Triage Factory to your organization under a bot identity of its own —
+        one that doesn&rsquo;t leave with the person who set it up — and lets GitHub itself hold
+        each team to its own repositories: a team&rsquo;s token is issued for the repositories that
+        team tracks, and it can&rsquo;t reach past them. A Personal Access Token is the simpler
+        alternative — you don&rsquo;t need both.
       </p>
 
       {ghAppState.kind === 'loading' && (

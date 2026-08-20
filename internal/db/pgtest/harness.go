@@ -451,8 +451,8 @@ var orgScopedTables = []string{
 	"task_events", "tasks",
 	"event_handlers",
 	"events", "entity_links", "entities",
-	"project_knowledge", "projects",
-	"repo_profiles", "poller_state",
+	"project_knowledge", "project_pinned_repos", "projects",
+	"repositories", "poller_state",
 	"prompts",
 	// marketplace_listings cascades into its version/event/vote/install
 	// children via their own org_id-CASCADE FKs — only the parent needs
@@ -464,6 +464,11 @@ var orgScopedTables = []string{
 	// into orgs), it must be listed explicitly or Reset would leak
 	// delivery-dedup rows across tests sharing this container.
 	"slack_event_deliveries",
+	// github_webhook_deliveries: same shape and same reason — keyed
+	// (installation_id, delivery_id) with no org_id and no FK, deliberately,
+	// so TRUNCATE CASCADE from orgs would never reach it and a leaked row
+	// would make a later test's first delivery read as a redelivery.
+	"github_webhook_deliveries",
 	// slack_channels, team_slack_channels (TFAC-541): both carry an org_id
 	// FK (cascading via orgs, and via teams for the latter) so TRUNCATE
 	// CASCADE would reach them even unlisted; listed explicitly anyway,

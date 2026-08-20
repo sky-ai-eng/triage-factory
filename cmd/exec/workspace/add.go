@@ -25,12 +25,13 @@ import (
 // layer would test less of the actual code than exercising LocalClient
 // end-to-end.
 type addDeps struct {
-	// create materializes the checkout for spec into the run's HOST run root
-	// and returns the created path in host view. Nil in defaultAddDeps;
-	// materializeWorkspace wires it to host.CreateWorkspaceCheckout when unset
-	// (TFAC-546: the git work runs host-side in both transports — the daemon
-	// in sandbox mode, in-process in local mode), so tests stub the git
-	// mutation while production routes through the agenthost seam.
+	// create materializes the checkout for spec into the conversation's
+	// HOST run root and returns the created path in host view. Nil in
+	// defaultAddDeps; materializeWorkspace wires it to
+	// host.CreateWorkspaceCheckout when unset (TFAC-546: the git work runs
+	// host-side in both transports — the daemon in sandbox mode, in-process
+	// in local mode), so tests stub the git mutation while production
+	// routes through the agenthost seam.
 	create   func(ctx context.Context, owner, repo string, spec checkoutSpec) (string, error)
 	statPath func(path string) (os.FileInfo, error)
 	now      func() time.Time
@@ -44,9 +45,10 @@ func defaultAddDeps() addDeps {
 }
 
 // checkoutSpec is the parsed shape of what `workspace add` should materialize.
-// The default (zero value) checks out the repo's default branch; --ref names an
-// existing branch; --pr names a pull request whose head is checked out. ref and
-// pr are mutually exclusive (enforced at parse time).
+// The default (zero value) checks out the branch the repository row names —
+// base_branch, else default_branch (materializeWorkspace resolves it into ref);
+// --ref names an existing branch; --pr names a pull request whose head is
+// checked out. ref and pr are mutually exclusive (enforced at parse time).
 type checkoutSpec struct {
 	ref string // --ref <branch>; "" = the repo's default branch
 	pr  int    // --pr <N>; 0 = not a PR checkout
@@ -57,7 +59,7 @@ type checkoutSpec struct {
 // rather than a stale reservation. Sized to outlast the slowest
 // legitimate create — a fresh bare clone of a multi-GB monorepo can
 // take a couple of minutes; 5 minutes gives that ~3x headroom while
-// still un-jamming runs whose `workspace add` was killed mid-create
+// still un-jamming conversations whose `workspace add` was killed mid-create
 // (process kill, SIGTERM at server stop, machine restart) before the
 // row was either updated or released.
 //
@@ -71,16 +73,17 @@ const staleReservationAge = 5 * time.Minute
 // validation errors returned by materializeWorkspace. Callers translate
 // these into stderr messages + non-zero exit; tests assert on identity.
 var (
-	errMissingRunID        = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
-	errInvalidOwnerRepo    = errors.New("workspace add: invalid owner/repo")
-	errRunNotFound         = errors.New("workspace add: run not found")
-	errRepoNotConfigured   = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
-	errRepoNotTracked      = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
-	errRepoMissingCloneURL = errors.New("workspace add: repo has no clone URL on its profile; try re-profiling from the Settings page")
-	errInvalidRef          = errors.New("workspace add: --ref contains characters disallowed for git refs")
-	errRefAndPR            = errors.New("workspace add: --ref and --pr are mutually exclusive")
-	errInvalidPR           = errors.New("workspace add: --pr requires a positive integer PR number")
-	errMissingOwnerRepo    = errors.New("workspace add: missing argument; expected owner/repo")
+	errMissingConversationID = errors.New("workspace add: TRIAGE_FACTORY_CONVERSATION_ID not set; this command must be invoked by the delegated agent")
+	errInvalidOwnerRepo      = errors.New("workspace add: invalid owner/repo")
+	errConversationNotFound  = errors.New("workspace add: conversation not found")
+	errRepoNotConfigured     = errors.New("workspace add: repo is not configured in Triage Factory; add it on the Settings page first")
+	errRepoNotTracked        = errors.New("workspace add: repo is not tracked by this team; add it to the team on the Settings page first")
+	errRepoMissingCloneURL   = errors.New("workspace add: repo has no clone URL on its repository row; try re-profiling from the Settings page")
+	errInvalidRef            = errors.New("workspace add: --ref contains characters disallowed for git refs")
+	errConfiguredBranchBad   = errors.New("workspace add: the branch the repository row names is not a valid git ref; fix the repo's base branch on the Settings page")
+	errRefAndPR              = errors.New("workspace add: --ref and --pr are mutually exclusive")
+	errInvalidPR             = errors.New("workspace add: --pr requires a positive integer PR number")
+	errMissingOwnerRepo      = errors.New("workspace add: missing argument; expected owner/repo")
 )
 
 // validateGitRef rejects a --ref value git would refuse (or misparse) at fetch
@@ -152,11 +155,13 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // extracted from runAdd so it returns errors instead of os.Exit-ing.
 // Returns the absolute worktree path the agent should cd into.
 //
-// Generalized (TFAC-498): works for ANY run — Jira, GitHub, or taskless — and
-// no longer prescribes a feature branch. By default it checks out the repo's
-// default branch (detached); --ref checks out a named branch; --pr checks out a
-// PR head (fork-aware). The agent then drives git itself (`git checkout -b ...`)
-// and the push gate authorizes whatever branch the worktree lands on.
+// Generalized (TFAC-498): works for ANY conversation — Jira, GitHub, or
+// taskless — and no longer prescribes a feature branch. By default it checks
+// out the branch the repository row names — the admin-configured base branch,
+// else the profiled default — detached; --ref checks out a named branch;
+// --pr checks out a PR head (fork-aware). The agent then drives git itself
+// (`git checkout -b ...`) and the push gate authorizes whatever branch the
+// worktree lands on.
 //
 // Two path namespaces (TFAC-546): the git materialization runs HOST-SIDE via
 // host.CreateWorkspaceCheckout — in the sandbox that's the agenthost daemon
@@ -168,8 +173,8 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // mode they're the same string and the translation is the identity.
 //
 // Concurrency: the cross-process serialization point is the
-// conversation_worktrees PK insert (`InsertRunWorktree`'s INSERT OR IGNORE),
-// hidden behind host.InsertRunWorktree. Two concurrent invocations
+// conversation_worktrees PK insert (`InsertConversationWorktree`'s INSERT OR IGNORE),
+// hidden behind host.InsertConversationWorktree. Two concurrent invocations
 // both passing the idempotency precheck race at insert time; the
 // loser sees inserted=false and returns the winner's path without
 // touching git. Reserving BEFORE the create is load-bearing — if we
@@ -178,16 +183,19 @@ func parseAddArgs(args []string) (ownerRepo string, spec checkoutSpec, err error
 // fail on "directory exists" before ever reaching the PK conflict.
 //
 // Order:
-//  1. Run validation (the run must exist; no Jira/task gate).
-//  2. Idempotent re-add check: if a row exists AND its path is a
+//  1. Conversation validation (the conversation must exist; no Jira/task gate).
+//  2. Repository row lookup + bare-add branch resolution (BaseBranch ||
+//     DefaultBranch) — the resolution needs the row, and everything below
+//     keys on the resolved ref.
+//  3. Idempotent re-add check: if a row exists AND its path is a
 //     live directory, return it. If the row exists but the path is
 //     missing/not-a-dir (e.g. wiped by startup orphan sweep), drop
 //     the stale row so the reservation step below can re-reserve.
-//  3. Repo profile lookup (clone URL required) + team-tracking gate.
-//  4. Reserve the conversation_worktrees row with the deterministic path
-//     {runRoot}/{owner}/{repo}. PK conflict picks the winner.
-//  5. Loser path: return winner's path immediately.
-//  6. Winner path: materialize the checkout on disk. On failure, release
+//  4. Team-tracking gate + clone-URL check.
+//  5. Reserve the conversation_worktrees row with the deterministic path
+//     {runRoot}/{owner}/{repo}/{ref}. PK conflict picks the winner.
+//  6. Loser path: return winner's path immediately.
+//  7. Winner path: materialize the checkout on disk. On failure, release
 //     the reservation so the next attempt can retry.
 func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec checkoutSpec, deps addDeps) (string, error) {
 	owner, repo, ok := splitOwnerRepo(ownerRepoArg)
@@ -202,33 +210,73 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		}
 	}
 
-	// ref is the (run, repo, ref) discriminator: a run can materialize several
-	// worktrees in one repo (two PRs, or a PR + the default branch), so every
-	// lookup / reservation / path below is keyed on it. It doubles as the
-	// worktree path-slug subdirectory.
-	ref := refForSpec(spec)
-
 	ctx := context.Background()
-	info, err := host.LookupRun(ctx)
+	info, err := host.LookupConversation(ctx)
 	if err != nil {
-		// runID is empty at this point — LookupRun is what would have
-		// produced it. Only the ErrRunIdentityMissing branch fires here, and
-		// it ignores the runID argument.
+		// conversationID is empty at this point — LookupConversation is what would have
+		// produced it. Only the ErrConversationIdentityMissing branch fires here, and
+		// it ignores the conversationID argument.
 		return "", translateLookupErr("workspace add", "", err)
 	}
 
-	// The run must exist (the reservation FKs it; a clear error beats an
-	// opaque FK failure later). No task is loaded — `workspace add` is now
-	// run-agnostic and serves taskless runs too.
-	run, err := host.GetConversation(ctx)
+	// The conversation must exist (the reservation FKs it; a clear error beats an
+	// opaque FK failure later). No task is loaded — `workspace add` is
+	// conversation-agnostic and serves taskless conversations too.
+	conv, err := host.GetConversation(ctx)
 	if err != nil {
-		return "", fmt.Errorf("workspace add: load run: %w", err)
+		return "", fmt.Errorf("workspace add: load conversation: %w", err)
 	}
-	if run == nil {
-		return "", fmt.Errorf("%w: %s", errRunNotFound, info.RunID)
+	if conv == nil {
+		return "", fmt.Errorf("%w: %s", errConversationNotFound, info.ConversationID)
 	}
 
-	// Idempotent re-add. If a row exists for this (run, repo), prefer
+	// The repository row is loaded before the ref derivation because a bare
+	// add resolves against it (below); the tracking and clone-URL gates stay
+	// after the idempotent re-add, which deliberately trusts an existing
+	// reservation without re-running them.
+	profile, err := host.GetRepo(ctx, repoID)
+	if err != nil {
+		return "", fmt.Errorf("workspace add: load repository: %w", err)
+	}
+	if profile == nil {
+		return "", fmt.Errorf("%w: %s", errRepoNotConfigured, repoID)
+	}
+
+	// A bare add (no --ref/--pr) resolves HERE — before the ref/path
+	// derivation — to the branch the repository row names: the
+	// admin-configured base branch, else the profiled default. It is the same
+	// BaseBranch || DefaultBranch resolution the curator's pinned worktrees
+	// use, so every surface that materializes "the repo's branch" answers
+	// from the one stored source, and the reservation, the directory name,
+	// and the fetch all carry the real branch (slug "ref-<branch>") instead
+	// of a placeholder. It also makes a bare add and an explicit `--ref` of
+	// the same branch converge on one checkout. A row naming no branch at all
+	// falls through with spec.ref empty: the create then detects origin/HEAD
+	// and the reservation keeps the fallback slug "default".
+	if spec.pr == 0 && spec.ref == "" {
+		resolved := profile.BaseBranch
+		if resolved == "" {
+			resolved = profile.DefaultBranch
+		}
+		if resolved != "" {
+			// The stored value is operator input (the repos PATCH accepts any
+			// string), and it is about to become a path segment and a fetch
+			// refspec — so it passes the same interpolation guard as an
+			// agent-typed --ref.
+			if err := worktree.ValidateCheckoutRef(resolved); err != nil {
+				return "", fmt.Errorf("%w: %q", errConfiguredBranchBad, resolved)
+			}
+			spec.ref = resolved
+		}
+	}
+
+	// ref is the (conversation, repo, ref) discriminator: a conversation
+	// can materialize several worktrees in one repo (two PRs, or a PR + the
+	// base branch), so every lookup / reservation / path below is keyed
+	// on it. It doubles as the worktree path-slug subdirectory.
+	ref := refForSpec(spec)
+
+	// Idempotent re-add. If a row exists for this (conversation, repo), prefer
 	// its path — the row is the authoritative reservation.
 	//
 	// Two scenarios where the on-disk path may NOT exist when the row
@@ -243,7 +291,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	//
 	//  - Killed mid-create: the original creator was killed (SIGTERM,
 	//    process supervisor reaping, machine restart) after
-	//    InsertRunWorktree returned but before the create completed. The row
+	//    InsertConversationWorktree returned but before the create completed. The row
 	//    has no live owner; subsequent retries looping forever on a
 	//    never-realized path is the wrong answer.
 	//
@@ -251,7 +299,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// inside the `staleReservationAge` window; killed-mid-create rows
 	// outlive it. Pre-staleness, trust the row. Past staleness with
 	// the path still missing, drop the row and re-reserve.
-	existing, err := host.GetRunWorktreeByRepoRef(ctx, repoID, ref)
+	existing, err := host.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
@@ -278,8 +326,8 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
-			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "run_id", info.RunID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
-			if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "conversation", info.ConversationID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
+			if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
 		default:
@@ -289,19 +337,13 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		}
 	}
 
-	profile, err := host.GetRepo(ctx, repoID)
-	if err != nil {
-		return "", fmt.Errorf("workspace add: load repo profile: %w", err)
-	}
-	if profile == nil {
-		return "", fmt.Errorf("%w: %s", errRepoNotConfigured, repoID)
-	}
-	// Team-tracking gate: a run may only materialize a repo its team tracks, so
-	// `workspace add` and the git proxy's push gate agree — otherwise the agent
-	// could clone a repo the proxy will then refuse to push to. Same
-	// TracksRepoSystem predicate the proxy's Authorize uses, keyed by the run's
-	// team. (Org-configured ≠ team-tracked: a repo can be configured org-wide
-	// yet not attached to this run's team.)
+	// Team-tracking gate: a conversation may only materialize a repo its
+	// team tracks, so `workspace add` and the git proxy's push gate agree —
+	// otherwise the agent could clone a repo the proxy will then refuse to
+	// push to. Same TracksRepoSystem predicate the proxy's Authorize uses,
+	// keyed by the conversation's team. (Org-configured ≠ team-tracked: a
+	// repo can be configured org-wide yet not attached to this
+	// conversation's team.)
 	if tracks, terr := host.TeamTracksRepo(ctx, owner, repo); terr != nil {
 		return "", fmt.Errorf("workspace add: check team tracking: %w", terr)
 	} else if !tracks {
@@ -311,10 +353,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		return "", fmt.Errorf("%w: %s", errRepoMissingCloneURL, repoID)
 	}
 
-	// Reserved path is deterministic from the InRoot create contract, in HOST
-	// view: filepath.Join(hostRoot, owner, repo, ref-slug). The ref-slug subdir
-	// is what lets two PRs (or a PR + a branch) coexist in one repo for one run.
-	// Compute it here so we can reserve the row BEFORE the create runs.
+	// Reserved path is deterministic from the InRoot create contract, in
+	// HOST view: filepath.Join(hostRoot, owner, repo, ref-slug). The ref-
+	// slug subdir is what lets two PRs (or a PR + a branch) coexist in one
+	// repo for one conversation. Compute it here so we can reserve the row
+	// BEFORE the create runs.
 	//
 	// INVARIANT: this must equal the path host.CreateWorkspaceCheckout will
 	// land at — the create derives the same hostRoot via WorkspaceRoots and the
@@ -325,17 +368,18 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	wtPath := filepath.Join(hostRoot, profile.Owner, profile.Repo, ref)
 
 	// Reserve. Two concurrent processes that both reach this point with the
-	// SAME (run, repo, ref) race at the PK; the loser short-circuits before
-	// touching git. Ref records the checkout intent — the PK discriminator and
-	// the path slug — and is what `workspace list` surfaces; the push gate reads
-	// the worktree's live current branch, never this row.
-	row := domain.RunWorktree{
-		RunID:  info.RunID,
-		RepoID: repoID,
-		Path:   wtPath,
-		Ref:    ref,
+	// SAME (conversation, repo, ref) race at the PK; the loser short-
+	// circuits before touching git. Ref records the checkout intent — the
+	// PK discriminator and the path slug — and is what `workspace list`
+	// surfaces; the push gate reads the worktree's live current branch,
+	// never this row.
+	row := domain.ConversationWorktree{
+		ConversationID: info.ConversationID,
+		RepoID:         repoID,
+		Path:           wtPath,
+		Ref:            ref,
 	}
-	inserted, winningPath, err := host.InsertRunWorktree(ctx, row)
+	inserted, winningPath, err := host.InsertConversationWorktree(ctx, row)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: reserve worktree row: %w", err)
 	}
@@ -360,7 +404,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
-		if delErr := host.DeleteRunWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+		if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
 			workspaceLog.Warn("release reservation after create failure failed", "error", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)
@@ -370,7 +414,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// repo, ref-slug); a divergence means the create's derivation and our
 		// reservation no longer match. Surface loudly rather than silently
 		// storing the wrong path.
-		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "run_id", info.RunID, "repo", repoID, "ref", ref)
+		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "conversation", info.ConversationID, "repo", repoID, "ref", ref)
 	}
 
 	return agentViewPath(hostRoot, agentRoot, wtPath), nil
@@ -395,13 +439,15 @@ func agentViewPath(hostRoot, agentRoot, p string) string {
 }
 
 // refForSpec computes the conversation_worktrees ref for a checkout spec — the
-// (run, repo, ref) PK discriminator AND the worktree path-slug subdirectory.
-// "pr-<N>" for a PR, the slugified branch for --ref, or "@default" for a
-// detached default-branch checkout. It uses the same slug helpers the InRoot
-// create funcs land the worktree at, so the reserved path and the created path
-// agree. The push gate reads the worktree's live current branch, never this
-// value, so it carries no authorization — only the checkout intent `workspace
-// list` surfaces.
+// (conversation, repo, ref) PK discriminator AND the worktree path-slug
+// subdirectory. "pr-<N>" for a PR; the slugified branch when spec.ref names
+// one (an explicit --ref, or a bare add materializeWorkspace resolved to the
+// repository row's branch); "default" only when no branch is named anywhere —
+// the fallback for a row that names none. It uses the same slug
+// helpers the InRoot create funcs land the worktree at, so the reserved path
+// and the created path agree. The push gate reads the worktree's live current
+// branch, never this value, so it carries no authorization — only the checkout
+// intent `workspace list` surfaces.
 func refForSpec(spec checkoutSpec) string {
 	switch {
 	case spec.pr > 0:

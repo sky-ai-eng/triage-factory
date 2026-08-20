@@ -118,12 +118,15 @@ func (r *usageRig) seedSpend(t *testing.T) {
 		uuid.New().String(), r.orgID, when)
 }
 
-// req builds a GET carrying the active org (session-scoped) + caller claims, and
-// the team_id path value when teamID is set — the state withSession/withOrg
-// would normally seed. The handler is invoked directly (not via the mux) so the
-// test exercises authz + RLS without the cookie-session dance.
+// req builds a GET carrying the caller claims plus both scope segments — the
+// org_id every org-scoped read authorizes against, and team_id when teamID is
+// set — alongside the session org the viewer-relative and team reads take. That
+// is the state withSession/withOrg + the mux would normally seed. The handler is
+// invoked directly (not via the mux) so the test exercises authz + RLS without
+// the cookie-session dance.
 func (r *usageRig) req(caller, teamID string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/api/usage?since=2000-01-01", nil)
+	req.SetPathValue("org_id", r.orgID)
 	if teamID != "" {
 		req.SetPathValue("team_id", teamID)
 	}
@@ -292,7 +295,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 
 	t.Run("org_member_403", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.member, ""))
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.member, "", ""))
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("plain member = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -301,7 +304,7 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 	t.Run("team_admin_org_member_403", func(t *testing.T) {
 		// A team admin is still only an org member — the audit log is org-admin-only.
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.teamAdmin, ""))
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.teamAdmin, "", ""))
 		if rec.Code != http.StatusForbidden {
 			t.Errorf("team admin (org member) = %d, want 403; body=%s", rec.Code, rec.Body.String())
 		}
@@ -309,14 +312,10 @@ func TestUsageAccessLog_GatesAndEntitlement_Postgres(t *testing.T) {
 
 	t.Run("org_admin_200_reads_log_with_names", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		r.uh.handleUsageAccessLog(rec, r.req(r.orgAdmin, ""))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("org admin = %d, want 200; body=%s", rec.Code, rec.Body.String())
-		}
-		var resp accessLogResponse
-		mustDecode(t, rec, &resp)
-		if len(resp.Items) != 1 {
-			t.Fatalf("items = %d, want 1: %+v", len(resp.Items), resp.Items)
+		r.uh.handleUsageAccessLog(rec, r.activityReq(r.orgAdmin, "", ""))
+		resp := decodeList[accessChangeJSON](t, rec)
+		if len(resp.Items) != 1 || resp.Total() != 1 {
+			t.Fatalf("items = %d / total %d, want 1/1: %+v", len(resp.Items), resp.Total(), resp.Items)
 		}
 		row := resp.Items[0]
 		if row.Action != domain.AccessActionOrgRoleChanged {

@@ -2,12 +2,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ArtifactList from './ArtifactList'
 import type { Artifact } from '../types'
+import { jsonBody } from '../test/apiResponse'
 
 // One fetch mock returning the given artifact list for GET …/artifacts.
 function mockArtifacts(arts: Artifact[]) {
   const fetchMock = vi.fn().mockResolvedValue({
     ok: true,
-    json: () => Promise.resolve(arts),
+    ...jsonBody(arts),
   })
   vi.stubGlobal('fetch', fetchMock)
   return fetchMock
@@ -30,7 +31,7 @@ describe('ArtifactList', () => {
   beforeEach(() => vi.restoreAllMocks())
   afterEach(() => vi.unstubAllGlobals())
 
-  it('fetches the run-scoped endpoint and renders each artifact (kind / state / link)', async () => {
+  it('fetches the conversation-scoped endpoint and renders each artifact (kind / state / link)', async () => {
     const fetchMock = mockArtifacts([
       art({
         id: 'b1',
@@ -47,7 +48,7 @@ describe('ArtifactList', () => {
         url: 'https://gh/pr',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={vi.fn()} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={vi.fn()} />)
 
     // Targets + state badges for both rows render once the fetch resolves.
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
@@ -55,8 +56,11 @@ describe('ArtifactList', () => {
     expect(screen.getByText('pushed')).toBeInTheDocument()
     expect(screen.getByText('draft')).toBeInTheDocument()
 
-    // The run-scoped read API was hit.
-    expect(fetchMock).toHaveBeenCalledWith('/api/agent/conversations/r1/artifacts')
+    // The conversation-scoped read API was hit.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/agent/conversations/r1/artifacts',
+      expect.anything(),
+    )
 
     // The branch row links out to its url; the PR row carries an external link too.
     const links = screen.getAllByRole('link')
@@ -71,7 +75,7 @@ describe('ArtifactList', () => {
       art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' }),
       art({ id: 'rv1', kind: 'review', state: 'pending', target: 'org/repo#18' }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     fireEvent.click(await screen.findByRole('button', { name: /Open pull request/ }))
     expect(onOpen).toHaveBeenCalledWith('pr', 'pr1')
@@ -98,7 +102,7 @@ describe('ArtifactList', () => {
         url: 'https://gh/pr',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     // The submitted review's row IS the link to the posted review on GitHub —
     // clicking it must not reopen the stale TF-side draft editor.
@@ -123,7 +127,7 @@ describe('ArtifactList', () => {
         url: 'https://jira/1',
       }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={onOpen} />)
+    render(<ArtifactList conversationId="r1" onOpenApproval={onOpen} />)
 
     const branch = await screen.findByRole('link', { name: /Open branch/ })
     expect(branch).toHaveAttribute('href', 'https://gh/branch')
@@ -138,7 +142,13 @@ describe('ArtifactList', () => {
       art({ id: 'rv1', kind: 'review', state: 'pending', target: 'review-row' }),
       art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'pr-row' }),
     ])
-    render(<ArtifactList runId="r1" onOpenApproval={vi.fn()} pendingArtifactIds={['pr1', 'rv1']} />)
+    render(
+      <ArtifactList
+        conversationId="r1"
+        onOpenApproval={vi.fn()}
+        pendingArtifactIds={['pr1', 'rv1']}
+      />,
+    )
 
     // The projection's order (draft PRs first, then ready reviews) leads; the
     // rest keep the fetch order below.
@@ -158,42 +168,76 @@ describe('ArtifactList', () => {
     const onResolved = vi.fn()
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve([{ ...draft, state: 'closed' }]),
+        ...jsonBody([{ ...draft, state: 'closed' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
-    render(<ArtifactList runId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />)
+    render(
+      <ArtifactList conversationId="r1" pendingArtifactIds={['pr1']} onResolved={onResolved} />,
+    )
 
     fireEvent.click(await screen.findByRole('button', { name: /dismiss pull request/i }))
 
     await waitFor(() => expect(onResolved).toHaveBeenCalled())
-    expect(fetchMock).toHaveBeenCalledWith('/api/artifacts/pr1/dismiss', { method: 'POST' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/artifacts/pr1/dismiss',
+      expect.objectContaining({ method: 'POST' }),
+    )
     // The reloaded row shows its resolved state and, no longer actionable,
-    // loses the [x] even before the run projection catches up.
+    // loses the [x] even before the conversation projection catches up.
     expect(await screen.findByText('closed')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /dismiss pull request/i })).not.toBeInTheDocument()
+  })
+
+  it('dismisses a review through its state field, not the PR verb', async () => {
+    const review = art({ id: 'rv1', kind: 'review', state: 'pending', target: 'org/repo#18' })
+    const onResolved = vi.fn()
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([review]) })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        ...jsonBody([{ ...review, state: 'dismissed' }]),
+      })
+    vi.stubGlobal('fetch', fetchMock)
+    render(
+      <ArtifactList conversationId="r1" pendingArtifactIds={['rv1']} onResolved={onResolved} />,
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss review/i }))
+
+    await waitFor(() => expect(onResolved).toHaveBeenCalled())
+    // Abandoning a staged review reaches nothing outside the process, so it is
+    // a field write — the /dismiss verb is the draft PR's, and it closes a real
+    // PR on GitHub.
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/artifacts/rv1/review',
+      expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ state: 'dismissed' }) }),
+    )
+    expect(await screen.findByText('dismissed')).toBeInTheDocument()
   })
 
   it('soft-refetches on a refreshKey change, keeping the stale rows until the new set lands', async () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({
         ok: true,
-        json: () => Promise.resolve([{ ...draft, state: 'open' }]),
+        ...jsonBody([{ ...draft, state: 'open' }]),
       })
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" refreshKey="2:pr1" />)
     expect(await screen.findByText('draft')).toBeInTheDocument()
 
-    rerender(<ArtifactList runId="r1" refreshKey="2:" />)
+    rerender(<ArtifactList conversationId="r1" refreshKey="2:" />)
     expect(await screen.findByText('open')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    // A soft refetch never resets to the loading state — that's runId-change only.
+    // A soft refetch never resets to the loading state — that's conversationId-change only.
     expect(screen.queryByText(/Loading artifacts/)).not.toBeInTheDocument()
   })
 
@@ -201,77 +245,78 @@ describe('ArtifactList', () => {
     const draft = art({ id: 'pr1', kind: 'pull_request', state: 'draft', target: 'org/repo#18' })
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve([draft]) })
+      .mockResolvedValueOnce({ ok: true, ...jsonBody([draft]) })
       .mockResolvedValueOnce({
         ok: false,
         status: 500,
         text: () => Promise.resolve(''),
-        clone: () => ({ json: () => Promise.resolve({ error: 'blip' }) }),
       })
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" refreshKey="2:pr1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" refreshKey="2:pr1" />)
     expect(await screen.findByText('org/repo#18')).toBeInTheDocument()
 
-    rerender(<ArtifactList runId="r1" refreshKey="2:" />)
+    rerender(<ArtifactList conversationId="r1" refreshKey="2:" />)
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
 
     // The rows were true a moment ago — a transient failure must not blank an
     // always-mounted list; the next set-shape change retries.
     expect(screen.getByText('org/repo#18')).toBeInTheDocument()
-    expect(screen.queryByText(/Couldn't load artifacts/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Couldn't load this run's artifacts/)).not.toBeInTheDocument()
   })
 
-  it('ignores the previous run’s in-flight response after a run change', async () => {
+  it('ignores the previous conversation’s in-flight response after a conversation change', async () => {
     const oldRow = art({ id: 'a-old', kind: 'branch', target: 'old-run-row' })
     let resolveOld!: (v: unknown) => void
     const fetchMock = vi
       .fn()
-      // r1's GET hangs until we resolve it by hand, after the run has changed.
+      // r1's GET hangs until we resolve it by hand, after the conversation has changed.
       .mockImplementationOnce(() => new Promise((r) => (resolveOld = r)))
     vi.stubGlobal('fetch', fetchMock)
-    const { rerender } = render(<ArtifactList runId="r1" />)
+    const { rerender } = render(<ArtifactList conversationId="r1" />)
 
-    // The run goes away (a cleared selection) with r1's fetch still in flight;
-    // the falsy runId means no new load ever runs to supersede it.
-    rerender(<ArtifactList runId="" />)
-    resolveOld({ ok: true, json: () => Promise.resolve([oldRow]) })
+    // The conversation goes away (a cleared selection) with r1's fetch still in flight;
+    // the falsy conversationId means no new load ever runs to supersede it.
+    rerender(<ArtifactList conversationId="" />)
+    resolveOld({ ok: true, ...jsonBody([oldRow]) })
     // Let the stale promise chain run to completion before asserting.
     await new Promise((r) => setTimeout(r, 0))
 
-    // The reset must hold: the old run's artifacts never land in the new state.
+    // The reset must hold: the old conversation's artifacts never land in the new state.
     expect(screen.queryByText('old-run-row')).not.toBeInTheDocument()
     expect(screen.getByText(/Loading artifacts/)).toBeInTheDocument()
   })
 
-  it('shows a quiet empty state when the run produced no artifacts', async () => {
+  it('shows a quiet empty state when the conversation produced no artifacts', async () => {
     mockArtifacts([])
-    render(<ArtifactList runId="r1" />)
+    render(<ArtifactList conversationId="r1" />)
     expect(await screen.findByText(/No artifacts yet/)).toBeInTheDocument()
   })
 
-  it('surfaces a load error with context, preferring the server JSON error', async () => {
-    failingFetch({ status: 500, jsonBody: { error: 'boom' } })
-    render(<ArtifactList runId="r1" />)
-    // Context is preserved ("Couldn't load artifacts: …"), not a bare "boom".
-    await waitFor(() =>
-      expect(screen.getByText(/Couldn't load artifacts: boom/)).toBeInTheDocument(),
-    )
+  it('surfaces a load error, preferring the server error envelope', async () => {
+    failingFetch({
+      status: 500,
+      jsonBody: { errors: [{ reason: 'INTERNAL', message: 'boom' }] },
+    })
+    render(<ArtifactList conversationId="r1" />)
+    // The server's message reaches the user verbatim — no fallback prefix.
+    await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })
 
-  it('falls back to a non-JSON error body', async () => {
+  it('falls back to the caller sentence for a non-JSON error body', async () => {
+    // The raw body ("<html>Bad Gateway</html>") must never reach the UI.
     failingFetch({ status: 502, textBody: '<html>Bad Gateway</html>' })
-    render(<ArtifactList runId="r1" />)
+    render(<ArtifactList conversationId="r1" />)
     await waitFor(() =>
-      expect(
-        screen.getByText(/Couldn't load artifacts: <html>Bad Gateway<\/html>/),
-      ).toBeInTheDocument(),
+      expect(screen.getByText("Couldn't load this run's artifacts.")).toBeInTheDocument(),
     )
+    expect(screen.queryByText(/Bad Gateway/)).not.toBeInTheDocument()
   })
 })
 
-// failingFetch stubs fetch with a non-ok Response shaped enough for readError:
-// a clone().json() path (the server's JSON `error`) and a text() fallback for
-// non-JSON bodies.
+// failingFetch stubs a non-ok Response shaped the way apiClient reads one:
+// HttpError carries the body from text(), and httpErrorMessage parses the
+// first message out of the server's error envelope. There is no clone()/json()
+// path any more — the wrapper reads the body exactly once.
 function failingFetch({
   status = 500,
   jsonBody,
@@ -281,18 +326,13 @@ function failingFetch({
   jsonBody?: unknown
   textBody?: string
 }) {
+  const body = jsonBody !== undefined ? JSON.stringify(jsonBody) : textBody
   vi.stubGlobal(
     'fetch',
     vi.fn().mockResolvedValue({
       ok: false,
       status,
-      text: () => Promise.resolve(textBody),
-      clone: () => ({
-        json: () =>
-          jsonBody !== undefined
-            ? Promise.resolve(jsonBody)
-            : Promise.reject(new Error('not json')),
-      }),
+      text: () => Promise.resolve(body),
     }),
   )
 }

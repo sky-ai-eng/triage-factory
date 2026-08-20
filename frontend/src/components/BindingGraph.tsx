@@ -18,10 +18,16 @@ import '@xyflow/react/dist/style.css'
 import { Copy, FileText, Layers, MoreVertical, Trash2 } from 'lucide-react'
 import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
-import { readError } from '../lib/api'
+import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import MarketplacePublishControl from './MarketplacePublishControl'
-import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
+import {
+  type BindingScope,
+  blueprintsBase,
+  promptsBase,
+  handlersBase,
+  triggersCreatePath,
+} from '../lib/scope'
 
 interface EventType {
   id: string
@@ -641,42 +647,42 @@ function BindingGraphInner({
       setLoading(true)
       return
     }
-    const parseOrThrow = async (r: Response, label: string) => {
-      if (!r.ok) throw new Error(`${label}: HTTP ${r.status}`)
-      return r.json()
-    }
     // Narrows prompts + triggers to the active team (empty = unfiltered, the
     // solo/local case). event-types is a system registry — never scoped.
-    const teamQuery = teamId ? `team_id=${encodeURIComponent(teamId)}` : ''
+    const teamFilter = teamId ? { team_id: teamId } : {}
     // The canvas renders PROMPTS (a blueprint's steps) as nodes, with a
     // procedural box drawn around each multi-step blueprint. We need the
     // blueprint list + each blueprint's steps (the step→prompt mapping, the
     // entry prompt, and the order that draws the sequence edges), plus the
     // prompt list for titles + bodies.
-    const blueprintsURL = `${blueprintsBase()}${teamQuery ? `?${teamQuery}` : ''}`
-    const promptsURL = `${promptsBase()}${teamQuery ? `?${teamQuery}` : ''}`
-    const triggersURL = `${handlersBase()}?kind=trigger${teamQuery ? `&${teamQuery}` : ''}`
-    // One bulk steps read for the whole scope (grouped client-side) rather than
-    // a GET .../{id}/steps per blueprint — folded into the parallel fetch below
-    // so the canvas loads in a single round-trip.
-    const stepsURL = `/api/blueprint-steps${teamQuery ? `?${teamQuery}` : ''}`
+    //
+    // Every list read here walks its pages: the canvas draws EDGES, so a
+    // partial set is not a smaller graph, it is a graph with edges pointing at
+    // nodes that were never fetched. The one bulk steps read (grouped
+    // client-side) replaces a per-blueprint N+1.
     try {
+      // The canvas is one view over five reads — a partial answer would draw a
+      // graph with edges to nodes that aren't there, so any failure takes the
+      // whole load down and the catch below leaves the prior canvas up.
       const [etRes, bpRes, promptRes, tRes, stepsRes] = await Promise.all([
-        fetch('/api/event-types').then((r) => parseOrThrow(r, 'event-types')),
-        fetch(blueprintsURL).then((r) => parseOrThrow(r, 'blueprints')),
-        fetch(promptsURL).then((r) => parseOrThrow(r, 'prompts')),
-        fetch(triggersURL).then((r) => parseOrThrow(r, 'triggers')),
-        fetch(stepsURL).then((r) => parseOrThrow(r, 'blueprint-steps')),
+        apiJSON<EventType[]>('/api/event-types'),
+        apiListAll<Blueprint>(`${blueprintsBase()}/list`, teamFilter),
+        apiListAll<Prompt>(`${promptsBase()}/list`, teamFilter),
+        apiListAll<TriggerHandler>(`${handlersBase()}/list`, {
+          kind: 'trigger',
+          ...teamFilter,
+        }),
+        apiListAll<BlueprintStep>('/api/blueprint-steps/list', teamFilter),
       ])
       setEventTypes(etRes)
       setTriggers(tRes)
 
-      const blueprintList = bpRes as Blueprint[]
-      const promptById = new Map((promptRes as Prompt[]).map((p): [string, Prompt] => [p.id, p]))
+      const blueprintList = bpRes
+      const promptById = new Map(promptRes.map((p): [string, Prompt] => [p.id, p]))
 
       // Group the scope's steps (one bulk read) by blueprint_id.
       const stepsByBp = new Map<string, BlueprintStep[]>()
-      for (const st of stepsRes as BlueprintStep[]) {
+      for (const st of stepsRes) {
         const arr = stepsByBp.get(st.blueprint_id)
         if (arr) arr.push(st)
         else stepsByBp.set(st.blueprint_id, [st])
@@ -743,16 +749,11 @@ function BindingGraphInner({
     async (eventTypeId: string) => {
       const toDelete = triggersRef.current.filter((t) => t.event_type === eventTypeId)
       try {
-        const results = await Promise.all(
+        await Promise.all(
           toDelete.map((t) =>
-            fetch(`${handlersBase()}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
+            apiFetch(`${handlersBase()}/${encodeURIComponent(t.id)}`, { method: 'DELETE' }),
           ),
         )
-        const failed = results.find((r) => !r.ok)
-        if (failed) {
-          toast.error(await readError(failed, 'Failed to remove event'))
-          return
-        }
         // Drop the node + its saved position only once the backend confirms the
         // triggers are gone — otherwise the canvas would diverge from the server.
         setActiveEventIds((prev) => {
@@ -765,7 +766,7 @@ function BindingGraphInner({
         saveLayout(storageKeyRef.current, layout)
         fetchAll()
       } catch (err) {
-        toast.error(`Failed to remove event: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not remove the event.'))
       }
     },
     [fetchAll],
@@ -786,15 +787,11 @@ function BindingGraphInner({
       if (!name) return
       await renameGuard.run(async () => {
         try {
-          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
+          await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name }),
           })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to rename blueprint'))
-            return
-          }
           setBoxMenu(null)
           await fetchAll()
         } catch (err) {
@@ -813,16 +810,12 @@ function BindingGraphInner({
   // (one refetch at the end).
   const deleteBlueprintCore = useCallback(async (blueprintId: string): Promise<boolean> => {
     try {
-      const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
+      await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}`, {
         method: 'DELETE',
       })
-      if (!res.ok) {
-        toast.error(await readError(res, 'Failed to delete blueprint'))
-        return false
-      }
       return true
     } catch (err) {
-      toast.error(`Failed to delete blueprint: ${err instanceof Error ? err.message : String(err)}`)
+      toast.error(httpErrorMessage(err, 'Could not delete the blueprint.'))
       return false
     }
   }, [])
@@ -834,17 +827,13 @@ function BindingGraphInner({
   const deletePromptCore = useCallback(
     async (promptId: string): Promise<{ ok: boolean; orphaned: boolean }> => {
       try {
-        const res = await fetch(`${promptsBase()}/${encodeURIComponent(promptId)}`, {
+        const res = await apiFetch(`${promptsBase()}/${encodeURIComponent(promptId)}`, {
           method: 'DELETE',
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to delete prompt'))
-          return { ok: false, orphaned: false }
-        }
         const body = (await res.json().catch(() => null)) as { orphaned_blueprint?: boolean } | null
         return { ok: true, orphaned: !!body?.orphaned_blueprint }
       } catch (err) {
-        toast.error(`Failed to delete prompt: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not delete the prompt.'))
         return { ok: false, orphaned: false }
       }
     },
@@ -1244,26 +1233,19 @@ function BindingGraphInner({
 
       if (plan.kind === 'trigger') {
         const body: Record<string, unknown> = {
-          kind: 'trigger',
           blueprint_id: plan.blueprintId,
           event_type: plan.eventType,
           team_id: teamId,
         }
         try {
-          const res = await fetch(handlersBase(), {
+          await apiFetch(triggersCreatePath(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
           })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to create trigger'))
-            return
-          }
           fetchAll()
         } catch (err) {
-          toast.error(
-            `Failed to create trigger: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not create the trigger.'))
         }
         return
       }
@@ -1272,20 +1254,14 @@ function BindingGraphInner({
       // merge endpoint.
       await mergeGuard.run(async () => {
         try {
-          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(plan.host)}/merge`, {
+          await apiFetch(`${blueprintsBase()}/${encodeURIComponent(plan.host)}/merge`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source_blueprint_id: plan.source }),
           })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to merge blueprints'))
-            return
-          }
           await fetchAll()
         } catch (err) {
-          toast.error(
-            `Failed to merge blueprints: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not merge the blueprints.'))
         }
       })
     },
@@ -1318,16 +1294,14 @@ function BindingGraphInner({
       await duplicateGuard.run(async () => {
         const body: Record<string, unknown> = { prompt_ids: origOrdered, team_id: teamId }
         try {
-          const res = await fetch(`${blueprintsBase()}/duplicate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-          })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to duplicate'))
-            return
-          }
-          const created = (await res.json()) as { blueprint: Blueprint; steps: BlueprintStep[] }[]
+          const created = await apiJSON<{ blueprint: Blueprint; steps: BlueprintStep[] }[]>(
+            `${blueprintsBase()}/duplicate`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            },
+          )
           // Flatten the returned steps in the endpoint's order (blueprints as
           // returned, steps by step_index); this aligns 1:1 with origOrdered.
           const newOrdered: string[] = []
@@ -1367,7 +1341,7 @@ function BindingGraphInner({
           const count = newOrdered.length
           toast.success(`Duplicated ${count} prompt${count === 1 ? '' : 's'}`)
         } catch (err) {
-          toast.error(`Failed to duplicate: ${err instanceof Error ? err.message : String(err)}`)
+          toast.error(httpErrorMessage(err, 'Could not duplicate the selection.'))
         }
       })
     },
@@ -1462,22 +1436,16 @@ function BindingGraphInner({
         // Capture trigger info before deletion for the forgiving banner callback.
         const deleted = triggersRef.current.find((t) => t.id === triggerId)
         try {
-          const res = await fetch(`${handlersBase()}/${encodeURIComponent(triggerId)}`, {
+          await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}`, {
             method: 'DELETE',
           })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to remove trigger'))
-            return
-          }
           await fetchAll()
           // Notify parent so it can check coverage and show the forgiving banner.
           if (deleted) {
             onTriggerDeletedRef.current?.(deleted.event_type)
           }
         } catch (err) {
-          toast.error(
-            `Failed to remove trigger: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not remove the trigger.'))
         }
       })
     },
@@ -1489,20 +1457,14 @@ function BindingGraphInner({
     async (blueprintId: string, atStepIndex: number) => {
       await splitGuard.run(async () => {
         try {
-          const res = await fetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/split`, {
+          await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/split`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ at_step_index: atStepIndex }),
           })
-          if (!res.ok) {
-            toast.error(await readError(res, 'Failed to split blueprint'))
-            return
-          }
           await fetchAll()
         } catch (err) {
-          toast.error(
-            `Failed to split blueprint: ${err instanceof Error ? err.message : String(err)}`,
-          )
+          toast.error(httpErrorMessage(err, 'Could not split the blueprint.'))
         }
       })
     },
@@ -1517,16 +1479,13 @@ function BindingGraphInner({
   const doRetargetTrigger = useCallback(
     async (triggerId: string, targetBlueprintId: string) => {
       try {
-        const res = await fetch(`${handlersBase()}/${encodeURIComponent(triggerId)}/retarget`, {
+        await apiFetch(`${handlersBase()}/${encodeURIComponent(triggerId)}/retarget`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ blueprint_id: targetBlueprintId }),
         })
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to move trigger'))
-        }
       } catch (err) {
-        toast.error(`Failed to move trigger: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not move the trigger.'))
       } finally {
         fetchAll()
       }
@@ -1539,24 +1498,17 @@ function BindingGraphInner({
   const doReconnectSequence = useCallback(
     async (blueprintId: string, atStepIndex: number, targetBlueprintId: string) => {
       try {
-        const res = await fetch(
-          `${blueprintsBase()}/${encodeURIComponent(blueprintId)}/reconnect`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              at_step_index: atStepIndex,
-              target_blueprint_id: targetBlueprintId,
-            }),
-          },
-        )
-        if (!res.ok) {
-          toast.error(await readError(res, 'Failed to reconnect step'))
-          return
-        }
+        await apiFetch(`${blueprintsBase()}/${encodeURIComponent(blueprintId)}/reconnect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            at_step_index: atStepIndex,
+            target_blueprint_id: targetBlueprintId,
+          }),
+        })
         toast.info('Steps after the reconnect point are now a separate blueprint.')
       } catch (err) {
-        toast.error(`Failed to reconnect step: ${err instanceof Error ? err.message : String(err)}`)
+        toast.error(httpErrorMessage(err, 'Could not reconnect the step.'))
       } finally {
         fetchAll()
       }

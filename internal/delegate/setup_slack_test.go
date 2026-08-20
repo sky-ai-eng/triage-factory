@@ -50,8 +50,8 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "shape")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-shape"
-	rootKey := "slack-bp-shape" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-shape"
+	rootKey := "slack-bp-shape" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
 	var classificationCalled atomic.Bool
@@ -59,7 +59,7 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 		classificationCalled.Store(true)
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	// invariant a cold rehydrate (which rebuilds under the blueprint key) and
 	// the launch-time worktree pin both rely on.
 	if cfg.runRoot != worktree.RunRoot(rootKey) {
-		t.Errorf("run-root = %q, want it keyed by the blueprint run id (RunRoot(%q)=%q), not runID %q", cfg.runRoot, rootKey, worktree.RunRoot(rootKey), runID)
+		t.Errorf("run-root = %q, want it keyed by the blueprint run id (RunRoot(%q)=%q), not conversationID %q", cfg.runRoot, rootKey, worktree.RunRoot(rootKey), conversationID)
 	}
 	wantScope := "Slack thread: " + task.EntitySourceID
 	if cfg.scope != wantScope {
@@ -90,37 +90,38 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	}
 }
 
-// TestSetupSlack_PersistsWorktreePath pins that the run-root is stamped onto
-// runs.worktree_path via SetWorktreePathSystem, same as setupJira — required
-// for resume (`claude --resume` keys session storage off cwd).
+// TestSetupSlack_PersistsWorktreePath pins that the run-root is stamped
+// onto conversations.worktree_path via SetWorktreePathSystem, same as
+// setupJira — required for resume (`claude --resume` keys session storage
+// off cwd).
 func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	s, database, task := slackTaskFixture(t, "persist")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
-	// Seed a minimal runs row for SetWorktreePathSystem's UPDATE to hit.
+	// Seed a minimal conversations row for SetWorktreePathSystem's UPDATE to hit.
 	ensureTestPrompt(t, database, domain.Prompt{ID: "persist-prompt", Name: "T", Body: "x", Source: "user"})
-	brID := seedRunBlueprint(t, database, "persist", task.ID)
+	brID := seedConversationBlueprint(t, database, "persist", task.ID)
 	stepIdx := 0
-	runID := "slack-run-persist"
+	conversationID := "slack-run-persist"
 	rootKey := brID // the run-root keys by the blueprint run id
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: runID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
+		ID: conversationID, TaskID: task.ID, PromptID: "persist-prompt", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
 
 	var wtPath string
-	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, runID).Scan(&wtPath); err != nil {
+	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, conversationID).Scan(&wtPath); err != nil {
 		t.Fatalf("read persisted worktree_path: %v", err)
 	}
 	if wtPath != cfg.wtPath {
-		t.Errorf("persisted runs.worktree_path = %q, want %q", wtPath, cfg.wtPath)
+		t.Errorf("persisted conversations.worktree_path = %q, want %q", wtPath, cfg.wtPath)
 	}
 }
 
@@ -132,11 +133,11 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "notools")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-notools"
-	rootKey := "slack-bp-notools" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-notools"
+	rootKey := "slack-bp-notools" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -155,11 +156,11 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "withtools")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	runID := "slack-run-withtools"
-	rootKey := "slack-bp-withtools" // run-root is blueprint-keyed, distinct from runID
+	conversationID := "slack-run-withtools"
+	rootKey := "slack-bp-withtools" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
 
-	cfg, err := s.setupSlack(ctx, org, runID, "", rootKey, task, nil)
+	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, task, nil)
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
@@ -180,20 +181,20 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 	stores := sqlitestore.New(database)
 
 	bpID := "sbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("create blueprint: %v", err)
 	}
 	promptID := suffix + "-p0"
 	ensureTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	plan := []domain.BlueprintPlanStep{{
 		StepIndex: 0, PromptID: promptID, PromptName: promptID, PromptBody: "b", Source: "user",
 	}}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "sbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan,
@@ -201,9 +202,10 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
-	run := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
-	return s, database, brID, task, run
+	conv := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
+	return s, database, brID, task, conv
 }
 
 // TestBuildStepConfig_Slack_FirstClaim pins wire point 1 (dispatch.go's
@@ -212,17 +214,17 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 // tripping on — buildStepConfig routes it through setupSlack and stamps the
 // resolved worktree path onto the blueprint_run.
 func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
-	s, database, brID, task, run := slackBlueprintFixture(t, "first")
+	s, database, brID, task, conv := slackBlueprintFixture(t, "first")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	t.Cleanup(func() { worktree.RemoveRunRoot(run.ID) })
+	t.Cleanup(func() { worktree.RemoveRunRoot(conv.ID) })
 
 	br, err := s.blueprints.GetRunSystem(ctx, org, brID)
 	if err != nil || br == nil {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v (slack must be a supported source)", err)
 	}
@@ -247,7 +249,7 @@ func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
 // worktree-less run-root and recomposes scope/toolsRef identically to the
 // first claim.
 func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
-	s, database, brID, task, run := slackBlueprintFixture(t, "later")
+	s, database, brID, task, conv := slackBlueprintFixture(t, "later")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 
@@ -264,7 +266,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)
 	}
 
-	cfg, err := s.buildStepConfig(ctx, org, br, task, run, nil, nil)
+	cfg, err := s.buildStepConfig(ctx, org, br, task, conv, nil, nil)
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v", err)
 	}

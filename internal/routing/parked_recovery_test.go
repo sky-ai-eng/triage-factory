@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -71,7 +73,7 @@ func TestParkedEvent_ListedThenRequeued_RoutesExactlyOnce(t *testing.T) {
 	}
 
 	// What the operator sees.
-	parked, err := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, 0)
+	parked, _, err := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListFailedEvents: %v", err)
 	}
@@ -119,7 +121,7 @@ func TestParkedEvent_ListedThenRequeued_RoutesExactlyOnce(t *testing.T) {
 	if n := activeTaskCount(t, database, entity.ID); n != 1 {
 		t.Errorf("tasks after the requeued pass = %d, want exactly 1", n)
 	}
-	if left, _ := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, 0); len(left) != 0 {
+	if left, _, _ := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50}); len(left) != 0 {
 		t.Errorf("parked rows after recovery = %d, want 0", len(left))
 	}
 }
@@ -148,7 +150,7 @@ func TestParkedEvent_RequeueAfterTaskArrivedByOtherMeans(t *testing.T) {
 			t.Fatalf("drainEventQueue attempt %d: %v", i+1, err)
 		}
 	}
-	parked, _ := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, 0)
+	parked, _, _ := st.EventQueue.ListFailedEvents(t.Context(), runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
 	if len(parked) != 1 {
 		t.Fatalf("parked rows = %d, want 1", len(parked))
 	}

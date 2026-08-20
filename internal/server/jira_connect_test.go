@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/zalando/go-keyring"
 )
 
@@ -57,7 +58,8 @@ func seedLocalOrgJiraHost(t *testing.T, s *Server, host string) {
 			return err
 		}
 		set.JiraBaseURL = host
-		return tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		_, err = tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		return err
 	}); err != nil {
 		t.Fatalf("seed org jira host: %v", err)
 	}
@@ -541,10 +543,11 @@ func TestJiraIdentityPAT_EmptyToken_Returns400(t *testing.T) {
 	}
 }
 
-// TestJiraIdentityPAT_NoJiraHost_Returns422 pins that capturing before Jira is
-// configured (no jira_base_url) is a 422 with the "ask your admin" shape, not a
-// host round-trip against an empty URL.
-func TestJiraIdentityPAT_NoJiraHost_Returns422(t *testing.T) {
+// TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured pins that capturing before Jira is
+// configured (no jira_base_url) is a 409 NOT_CONFIGURED with the "ask your
+// admin" shape — server-side configuration the caller can't fix by resending —
+// not a host round-trip against an empty URL.
+func TestJiraIdentityPAT_NoJiraHost_ReturnsNotConfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -553,9 +556,10 @@ func TestJiraIdentityPAT_NoJiraHost_Returns422(t *testing.T) {
 	rec := doJSON(t, s, "POST",
 		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/identity/pat",
 		map[string]any{"pat": "tok"})
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s, want 409", rec.Code, rec.Body.String())
 	}
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "jira_pat")
 }
 
 // TestJiraIdentityPAT_EmptyAccount_Returns422 covers the guard for a 200 from

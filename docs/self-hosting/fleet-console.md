@@ -72,7 +72,7 @@ It's a DB-backed live view (10-second poll, no Prometheus dependency) over:
   and heartbeat;
 - per-instance **telemetry** — host memory headroom, the dispatch memory gate,
   and semaphore occupancy the executors publish each heartbeat;
-- **run timings** — queue/exec durations from the `runs` table; and
+- **run timings** — queue/exec durations from the `conversations` table; and
 - **LLM spend** — from `llm_spend`, over a 24H / 7D window.
 
 ## Troubleshooting

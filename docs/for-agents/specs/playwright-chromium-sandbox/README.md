@@ -33,7 +33,7 @@ gated them now passes. Parent context: the SKY-254 sandbox epic
    bound to `127.0.0.1`.
 2. Drive a headless Chromium via Playwright against that loopback URL.
 3. Capture screenshots and/or videos into the worktree.
-4. Have those land in `run_artifacts` like any other structured output.
+4. Have those land in `artifacts` like any other structured output.
 
 **Non-goals (explicit, and they're what make this tractable):**
 

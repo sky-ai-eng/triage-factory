@@ -10,15 +10,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // --------------------------------------------------------------------
-// /api/settings/team/{team_id}/github-groups — the GitHub twin of the
-// per-team Jira project rules. GET (any team member) returns the team's
-// current GitHub-team mappings plus the org's live GitHub teams as
+// /api/teams/{team_id}/github-groups — the GitHub twin of the per-team
+// Jira project rules. GET (any team member) returns the team's current
+// GitHub-team mappings plus the org's live GitHub teams as
 // import-and-choose candidates; PUT (team admin) replace-sets the
 // mappings. The {team_id} segment accepts a UUID or the literal
-// "default", same as the sibling team-settings routes.
+// "default", same as the sibling team routes.
 // --------------------------------------------------------------------
 
 // gitHubGroupJSON is the wire shape for one stored mapping row.
@@ -69,7 +70,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/github-groups", err)
+		authz.WriteResolveError(w, "teams/github-groups", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -85,7 +86,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	// skip the GitHub API round-trip).
 	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
-		internalError(w, "settings/team/github-groups", err)
+		internalError(w, "teams/github-groups", err)
 		return
 	}
 
@@ -114,7 +115,7 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/github-groups", err)
+		internalError(w, "teams/github-groups", err)
 		return
 	}
 
@@ -135,7 +136,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/github-groups", err)
+		authz.WriteResolveError(w, "teams/github-groups", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -153,7 +154,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	var req struct {
 		Groups []gitHubGroupJSON `json:"groups"`
 	}
-	if !decodeJSON(w, r, &req, "") {
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
@@ -172,7 +173,7 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.TeamGitHubGroups.SetForTeam(r.Context(), teamID, groups)
 	}); err != nil {
-		internalError(w, "settings/team/github-groups", err)
+		internalError(w, "teams/github-groups", err)
 		return
 	}
 
@@ -205,10 +206,12 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // owner just had nothing to import). Callers surface credsMissing as a
 // reconnect prompt instead of a silent empty list.
 func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
-	var repos []domain.RepoProfile
+	var repos []domain.Repository
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
-		repos, e = tx.Repos.List(ctx, orgID)
+		// Unwindowed: the candidate set is derived from the whole registry,
+		// not browsed, so a page would silently narrow what can be imported.
+		repos, _, e = tx.Repos.List(ctx, orgID, db.Unwindowed)
 		return e
 	}); err != nil {
 		githubGroupsLog.Error("load configured repos failed", "error", err)
@@ -291,7 +294,7 @@ func (s *Server) annotateGitHubGroupMembership(ctx context.Context, orgID, userI
 // distinctRepoOwners returns the configured repos' owners, lowercased,
 // de-duplicated, in first-seen order. These are the GitHub orgs whose
 // teams the editor offers as candidates.
-func distinctRepoOwners(repos []domain.RepoProfile) []string {
+func distinctRepoOwners(repos []domain.Repository) []string {
 	seen := map[string]bool{}
 	out := []string{}
 	for _, p := range repos {

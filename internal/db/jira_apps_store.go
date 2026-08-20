@@ -45,12 +45,20 @@ type JiraAppsStore interface {
 	// and an OAuth app has no staging/cutover lifecycle that a re-register would
 	// disturb. registered_at is preserved across upserts; registered_by_user_id
 	// is refreshed to the most recent registrant.
-	UpsertForOrg(ctx context.Context, app domain.OrgJiraApp) error
+	//
+	// Returns the persisted row, read off RETURNING on the write statement
+	// itself rather than from a follow-up SELECT and projecting GetForOrg's
+	// column list and scanner. registered_at is the point: the conflict arm
+	// preserves the original, so on a re-register the row's value belongs to
+	// the call that first registered the app, and app cannot describe it.
+	UpsertForOrg(ctx context.Context, app domain.OrgJiraApp) (domain.OrgJiraApp, error)
 
 	// DeleteForOrg hard-deletes the org's Atlassian OAuth app row. The "remove
 	// BYO app" teardown. The row's client_secret lives in the secret store
 	// under ClientSecretRef, which the caller still holds — so the handler
 	// deletes that secret alongside this call (this method only touches the
 	// relational row). A no-op (no error) on an org with no registration.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	DeleteForOrg(ctx context.Context, orgID string) error
 }

@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+)
 
 // handleWS wraps the hub's HandleWS so the websocket package stays
 // free of any dependency on internal/server. Identity (userID, orgID)
@@ -72,10 +76,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 // writeNoActiveOrg renders the 409 the FE treats as "this connection has
 // no usable org — re-pick one." Shared by the NULL-active-org case and
-// the stale-membership gate so both speak the same shape to the client.
+// the stale-membership gate so both speak the same shape to the client —
+// and the same envelope RequireOrg emits, so the handshake isn't a second
+// dialect of the same condition.
 func (s *Server) writeNoActiveOrg(w http.ResponseWriter) {
-	writeJSON(w, http.StatusConflict, map[string]string{
-		"error":   "no_active_org",
-		"message": "websocket handshake requires an active org; call POST /api/me/active-org to choose one",
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonNoActiveOrg,
+		Message: "websocket handshake requires an active org; call POST /api/me/active-org to choose one",
 	})
 }

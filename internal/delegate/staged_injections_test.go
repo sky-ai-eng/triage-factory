@@ -16,7 +16,7 @@ import (
 // wrapped, fire-and-forget; delivered=true and nothing is persisted.
 func TestStageOrDeliverInjection_LiveSteers(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-live", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fc := &fakeController{}
 	s.controller = fc
@@ -46,7 +46,7 @@ func TestStageOrDeliverInjection_LiveSteers(t *testing.T) {
 // persisted to the durable queue; delivered=false and nothing is steered.
 func TestStageOrDeliverInjection_ParkedStages(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-parked", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-parked", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fc := &fakeController{}
 	s.controller = fc
@@ -72,7 +72,7 @@ func TestStageOrDeliverInjection_ParkedStages(t *testing.T) {
 // TestStageOrDeliverInjection_BlankBodyNoOp: an empty body neither steers nor stages.
 func TestStageOrDeliverInjection_BlankBodyNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-blank", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-blank", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	if s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-blank", "p", "") {
@@ -89,7 +89,7 @@ func TestStageOrDeliverInjection_BlankBodyNoOp(t *testing.T) {
 // queue so a second resume prepends nothing.
 func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "run-resume", "sess", "/tmp/wt")
+	seedConversation(t, database, "run-resume", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
 
@@ -117,7 +117,7 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 // elsewhere; this pins SendMessage's assembly).
 func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-compose", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-compose", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
 
@@ -131,11 +131,11 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "r-compose",
 		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
 
-	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
-	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run)
+	prefix := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv)
 
 	inj := strings.Index(prefix, "the staged injection body")
 	ledger := strings.Index(prefix, "o/r#1")
@@ -154,14 +154,14 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 // resolved artifact → empty prefix, so a plain resume prepends nothing.
 func TestResumeSystemPrepends_EmptyWhenNothingPending(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-none", "sess", "/tmp/wt")
+	seedConversation(t, database, "r-none", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
-	run, err := s.agentRuns.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
-	if err != nil || run == nil {
-		t.Fatalf("GetSystem: err=%v run=%v", err, run)
+	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-none")
+	if err != nil || conv == nil {
+		t.Fatalf("GetSystem: err=%v conversation=%v", err, conv)
 	}
-	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, run); got != "" {
+	if got := s.resumeSystemPrepends(ctx, runmode.LocalDefaultOrgID, conv); got != "" {
 		t.Errorf("want empty prefix when nothing pending, got %q", got)
 	}
 }

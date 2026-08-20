@@ -32,11 +32,12 @@ type fleetQueueShareDTO struct {
 	AtCap             bool   `json:"at_cap"`
 }
 
-// handleFleetQueue surfaces one org's run-queue share against its concurrency
-// cap: active vs queued runs, the configured cap, and whether the org is at cap
-// (its queued runs invisible to claims until an active one finishes). This is
-// the org-facing read-out of the per-org cap + fair-claim feature — an org
-// admin (or the org owner) checking their own tenant's standing.
+// handleFleetQueue surfaces one org's conversation-queue share against its
+// concurrency cap: active vs queued runs, the configured cap, and whether the
+// org is at cap (its queued runs invisible to claims until an active one
+// finishes). This is the org-facing read-out of the per-org cap + fair-claim
+// feature — an org admin (or the org owner) checking their own tenant's
+// standing.
 //
 // Org-scoped by design: the FleetQueueShares store read is fleet-wide, but this
 // endpoint returns only the caller's own ?org= row, so no tenant sees another's
@@ -57,7 +58,8 @@ func (s *Server) handleFleetQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.fleetQueue == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "fleet queue reader not ready"})
+		// This pod runs no queue reader — deployment shape, not an outage.
+		writeNotConfigured(w, "the fleet queue reader is not configured on this deployment")
 		return
 	}
 

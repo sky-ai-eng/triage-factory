@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -52,6 +53,162 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("team_archive_and_restore_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on the two guarded team transitions. Role
+		// is blanked on both sides of the comparison: it is the caller's own
+		// membership, which Get resolves separately and no teams column
+		// carries, so it is not part of what a write returns.
+		stores, ids := factory(t)
+		read := func() (*domain.Team, error) {
+			got, err := stores.Teams.GetSystem(ctx, ids.OrgID, ids.TeamID)
+			if err != nil || got == nil {
+				return got, err
+			}
+			bare := *got
+			bare.Role = ""
+			return &bare, nil
+		}
+
+		archived, err := stores.Teams.Archive(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.Archive", archived, read)
+		if archived.DeletedAt == nil {
+			t.Error("Archive returned a row with no deleted_at, the column it stamps")
+		}
+		if _, err := stores.Teams.Archive(ctx, ids.TeamID); !errors.Is(err, db.ErrTeamNotFound) {
+			t.Errorf("re-archive: got %v, want db.ErrTeamNotFound", err)
+		}
+
+		restored, err := stores.Teams.Restore(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.Restore", restored, read)
+		if restored.DeletedAt != nil {
+			t.Errorf("Restore returned deleted_at %v, want it cleared", restored.DeletedAt)
+		}
+		if _, err := stores.Teams.Restore(ctx, ids.TeamID); !errors.Is(err, db.ErrTeamNotFound) {
+			t.Errorf("re-restore: got %v, want db.ErrTeamNotFound", err)
+		}
+	})
+
+	t.Run("team_settings_writes_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on the two team_settings writes: what the
+		// write handed back is what a point read finds. SetDailyCostCapSystem
+		// is the case it is for — it touches one column of a row whose other
+		// twelve come from schema defaults, so nothing the caller holds
+		// describes what landed.
+		stores, ids := factory(t)
+		read := func() (*domain.TeamSettings, error) {
+			set, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+			if err != nil {
+				return nil, err
+			}
+			return &set, nil
+		}
+
+		saved, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, domain.TeamSettings{
+			JiraProjects: []string{"RET"}, AIReprioritizeThreshold: 4,
+			AIPreferenceUpdateInterval: 12, DefaultModel: "opus",
+			PermissionAbsentGraceMS: 1000,
+			BranchTemplate:          "ret/<ticket-id>",
+			ReviewPosture:           domain.ReviewPostureAutoUnlessBlocking,
+			BaseBranchPushPolicy:    domain.BaseBranchPushManualOnly,
+		})
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.UpdateSettings", saved, read)
+
+		capped, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 9.5)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetDailyCostCapSystem", capped, read)
+		// The cap moved and everything the earlier save wrote is still there —
+		// the whole reason a one-column write hands back the whole row.
+		if capped.MaxDailyCostUSD != 9.5 || capped.DefaultModel != "opus" {
+			t.Errorf("SetDailyCostCapSystem returned %+v, want the new cap over the saved settings", capped)
+		}
+
+		cleared, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem (clear): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetDailyCostCapSystem (clear)", cleared, read)
+		if cleared.MaxDailyCostUSD != 0 {
+			t.Errorf("clearing the cap returned %v, want 0 (no cap)", cleared.MaxDailyCostUSD)
+		}
+	})
+
+	t.Run("org_settings_writes_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on OrgsStore's three settings writes,
+		// mirroring the team_settings arm above: what each write hands back is
+		// what a point read finds.
+		stores, ids := factory(t)
+		read := func() (*domain.OrgSettings, error) {
+			set, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			return &set, nil
+		}
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base)
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings", saved, read)
+
+		// UpdateSettingsVersioned's update arm — the case it is for: the new
+		// version is the one thing a successful caller most needs and cannot
+		// compute (expected+1 is a guess), so it rides the returned row rather
+		// than a follow-up read.
+		versioned := base
+		versioned.GitHubBaseURL = "https://versioned-ret.example.com"
+		verSaved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, versioned, saved.Version)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettingsVersioned", verSaved, read)
+		if verSaved.Version != saved.Version+1 {
+			t.Errorf("UpdateSettingsVersioned returned version %d, want %d", verSaved.Version, saved.Version+1)
+		}
+
+		// A stale version conflict writes nothing — no row to hand back, so the
+		// zero value is correct alongside ErrOrgSettingsVersion.
+		zero, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, versioned, saved.Version)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("stale UpdateSettingsVersioned err = %v, want ErrOrgSettingsVersion", err)
+		}
+		if !reflect.DeepEqual(zero, domain.OrgSettings{}) {
+			t.Errorf("refused UpdateSettingsVersioned returned %+v, want the zero value", zero)
+		}
+
+		// SetGitHubCredentialClass touches one column of a row whose other
+		// twelve may come from schema defaults — the case it is for.
+		classed, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp)
+		if err != nil {
+			t.Fatalf("SetGitHubCredentialClass: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.SetGitHubCredentialClass", classed, read)
+		if classed.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Errorf("SetGitHubCredentialClass returned class %q, want %q", classed.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+		// Everything the versioned write landed is still there — the whole
+		// reason a one-column write hands back the whole row.
+		if classed.GitHubBaseURL != versioned.GitHubBaseURL {
+			t.Errorf("SetGitHubCredentialClass returned %+v, want the prior save's base URL preserved", classed)
+		}
+	})
+
 	t.Run("OrgSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.OrgSettings{
@@ -66,8 +223,17 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
+			// Read-only through this struct: UpdateSettings doesn't own
+			// github_credential_class, so the row keeps its schema default and
+			// the read hands it back. Stated as the expected value rather than
+			// left zero, because "" is not something the store can return.
+			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
+			// Read-only through this struct too, and set by the write rather
+			// than carried into it: the first save materializes the row at
+			// version 1.
+			Version: 1,
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -92,7 +258,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		on := base
 		on.MarketplaceEnabled = true
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, on); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, on); err != nil {
 			t.Fatalf("UpdateSettings (on): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -102,7 +268,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if !got.MarketplaceEnabled {
 			t.Errorf("MarketplaceEnabled = false after enabling, want true")
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
 			t.Fatalf("UpdateSettings (off): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -111,6 +277,96 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.MarketplaceEnabled {
 			t.Errorf("MarketplaceEnabled = true after disabling, want false")
+		}
+	})
+
+	// github_credential_class names which credential system an org's GitHub
+	// access belongs to. It is owned by the credential transitions, not by the
+	// settings writer, and this case pins both halves of that: the dedicated
+	// writer round-trips, and a bulk settings save leaves what it wrote alone.
+	//
+	// The second half is the one that matters. Adding the column to
+	// UpdateSettings' upsert lists looks like tidiness and would instead reset
+	// the class to the struct's zero value on every settings save — silently
+	// converting a BYO-App org to PAT, with no error and nothing in the log.
+	// That is the specific regression this case exists to catch, on both
+	// backends.
+	t.Run("OrgSettings_GitHubCredentialClass_OwnedByTransitionsNotSettingsSave", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		// A fresh org is in the PAT system — the column's schema default, which
+		// GetSettings must surface rather than an empty string.
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (fresh): %v", err)
+		}
+		if got.GitHubCredentialClass != domain.GitHubCredentialClassPAT {
+			t.Errorf("fresh org class = %q; want %q (the column default)", got.GitHubCredentialClass, domain.GitHubCredentialClassPAT)
+		}
+
+		// The dedicated writer round-trips, materializing the row from schema
+		// defaults if the org has none yet.
+		if _, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			t.Fatalf("SetGitHubCredentialClass: %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after set): %v", err)
+		}
+		if got.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Fatalf("after SetGitHubCredentialClass, class = %q; want %q", got.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+
+		// THE NEGATIVE SPACE. A bulk settings save — the shape a
+		// POST /api/settings/org handler produces, read-modify-write over the
+		// whole struct — changes an unrelated field and must leave the class
+		// exactly as the transition wrote it.
+		save := got
+		save.GitHubBaseURL = "https://ghe.example.com"
+		save.MaxConcurrentRuns = 4
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
+			t.Fatalf("UpdateSettings (bulk save): %v", err)
+		}
+		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after bulk save): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Errorf("a settings save reset the credential class to %q; want %q preserved — the column belongs to the credential transitions, not to UpdateSettings",
+				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+		if after.GitHubBaseURL != "https://ghe.example.com" || after.MaxConcurrentRuns != 4 {
+			t.Errorf("the settings save didn't apply its own fields: base=%q concurrent=%d", after.GitHubBaseURL, after.MaxConcurrentRuns)
+		}
+
+		// A save that explicitly carries a DIFFERENT class in the struct is
+		// still ignored — the field is read-only through this writer, so a
+		// caller cannot move an org between credential systems by saving
+		// settings. This is the same assertion from the attacker's side.
+		save = after
+		save.GitHubCredentialClass = domain.GitHubCredentialClassPAT
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
+			t.Fatalf("UpdateSettings (class in struct): %v", err)
+		}
+		after, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after class in struct): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+			t.Errorf("UpdateSettings honoured the struct's class (%q); want %q — the column must be unreachable through the settings writer",
+				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+
+		// And the transition can move it back, so the column isn't write-once.
+		if _, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassPAT); err != nil {
+			t.Fatalf("SetGitHubCredentialClass (back to pat): %v", err)
+		}
+		after, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after switch back): %v", err)
+		}
+		if after.GitHubCredentialClass != domain.GitHubCredentialClassPAT {
+			t.Errorf("class after switch-back = %q; want %q", after.GitHubCredentialClass, domain.GitHubCredentialClassPAT)
 		}
 	})
 
@@ -142,7 +398,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:   5 * time.Minute,
 			// GitHubCloneProtocol intentionally empty.
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -166,7 +422,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -193,7 +449,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		set := base
 		set.MaxDailyCostUSD = 25
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
 			t.Fatalf("UpdateSettings (set cap): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -204,7 +460,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("after set, MaxDailyCostUSD = %v; want 25", got.MaxDailyCostUSD)
 		}
 		// Clear: 0 writes NULL, reads back 0.
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
 			t.Fatalf("UpdateSettings (clear cap): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -229,7 +485,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		set := base
 		set.MaxConcurrentRuns = 12
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
 			t.Fatalf("UpdateSettings (set limit): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -240,7 +496,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("after set, MaxConcurrentRuns = %v; want 12", got.MaxConcurrentRuns)
 		}
 		// Clear: 0 writes NULL, reads back 0.
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
 			t.Fatalf("UpdateSettings (clear limit): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -264,7 +520,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 			MaxConcurrentRuns:   -7,
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
 			t.Fatalf("UpdateSettings (negative): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -286,8 +542,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxLLMModelTier:     "haiku",
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
+			// Not written by UpdateSettings; the row's default reads back.
+			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
 		}
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
 			t.Fatalf("first UpdateSettings: %v", err)
 		}
 		second := first
@@ -295,7 +553,11 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		second.MaxLLMModelTier = "opus"
 		second.MaxDailyCostUSD = 10
 		second.MaxConcurrentRuns = 20
-		if err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
+		// Two saves, so the row's concurrency token has been bumped twice. The
+		// struct's own Version is ignored on the way in — stating it here
+		// describes what the read must hand back.
+		second.Version = 2
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
 			t.Fatalf("second UpdateSettings: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -307,6 +569,165 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// The optimistic-concurrency contract behind PATCH /api/orgs/{id}/settings.
+	// The settings save is a read-modify-write over the whole row, so two
+	// admins editing different sections of one page would otherwise silently
+	// overwrite each other. The guard has to live in the statement: both
+	// dialects run READ COMMITTED, so a re-read inside the loser's own
+	// transaction cannot see the winner's commit and a Go-side comparison
+	// would pass for both.
+	t.Run("OrgSettings_Versioned_GuardsTheLoser", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		// No row yet: version 0 is the "materialize it" assertion, and it
+		// lands at 1.
+		first := base
+		first.GitHubBaseURL = "https://first.example.com"
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, first, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (insert): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 1 {
+			t.Fatalf("version after insert = %d; want 1", got.Version)
+		}
+
+		// The winner reads 1, writes at 1, lands at 2.
+		winner := base
+		winner.GitHubBaseURL = "https://winner.example.com"
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, winner, 1); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (winner): %v", err)
+		}
+
+		// The loser read 1 too — its write is refused, and refused WITHOUT
+		// writing: the winner's field is still what a refetch shows.
+		loser := base
+		loser.GitHubBaseURL = "https://loser.example.com"
+		_, err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, 1)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("stale UpdateSettingsVersioned err = %v; want ErrOrgSettingsVersion", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after loser): %v", err)
+		}
+		if got.GitHubBaseURL != "https://winner.example.com" {
+			t.Errorf("after the refused write, base URL = %q; want the winner's value preserved", got.GitHubBaseURL)
+		}
+		if got.Version != 2 {
+			t.Errorf("version after one winner = %d; want 2 (the refused write must not bump it)", got.Version)
+		}
+
+		// A version assertion must never CREATE. Asserting version 0 against a
+		// row that now exists is the create-vs-create race, and it loses.
+		_, err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, 0)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("asserting version 0 against an existing row = %v; want ErrOrgSettingsVersion", err)
+		}
+
+		// Re-reading and re-applying is the loser's whole remedy, so it has to
+		// work on the next attempt.
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, loser, got.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (loser retry): %v", err)
+		}
+		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem (after retry): %v", err)
+		}
+		if got.GitHubBaseURL != "https://loser.example.com" || got.Version != 3 {
+			t.Errorf("after retry: base=%q version=%d; want the loser's value at version 3", got.GitHubBaseURL, got.Version)
+		}
+	})
+
+	// A version assertion is an assertion about a row that EXISTS, and it must
+	// never quietly become a create. The guard can only ride an upsert's
+	// conflict arm, so a single guarded upsert lets a caller asserting a stale
+	// non-zero version against a since-deleted row fall through to the INSERT
+	// and materialize it at version 1 — a create reported as a successful
+	// update, with the caller's whole form written over a row it never read.
+	t.Run("OrgSettings_Versioned_NonZeroExpectedNeverCreates", func(t *testing.T) {
+		stores, ids := factory(t)
+		row := domain.OrgSettings{
+			GitHubBaseURL:       "https://ghost.example.com",
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+
+		// No row yet, and the caller claims to have read one at version 3.
+		_, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, row, 3)
+		if !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("asserting version 3 against a missing row = %v; want ErrOrgSettingsVersion", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 0 || got.GitHubBaseURL != "" {
+			t.Errorf("the refused assertion created a row: %+v", got)
+		}
+	})
+
+	// The unguarded writer is the credential transitions' path and stays
+	// last-writer-wins — but it must still move the token, or an admin's stale
+	// settings edit would land on top of a credential change it never saw.
+	t.Run("OrgSettings_UnversionedWrite_StillBumpsTheToken", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (first): %v", err)
+		}
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings (second): %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 2 {
+			t.Errorf("version after two unguarded saves = %d; want 2", got.Version)
+		}
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, 1); !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("a settings write at the pre-transition version = %v; want ErrOrgSettingsVersion", err)
+		}
+	})
+
+	// SetGitHubCredentialClass is the counter-example: a surgical single-column
+	// write that does NOT move the token, so a credential transition can't
+	// invalidate an admin's in-flight settings edit.
+	t.Run("OrgSettings_CredentialClassWrite_LeavesTheTokenAlone", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if _, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp); err != nil {
+			t.Fatalf("SetGitHubCredentialClass: %v", err)
+		}
+		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if got.Version != 1 {
+			t.Errorf("version after a class write = %d; want 1 (unchanged)", got.Version)
+		}
+	})
+
 	t.Run("TeamSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.TeamSettings{
@@ -315,6 +736,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AIPreferenceUpdateInterval:      30,
 			DefaultModel:                    "opus",
 			AutoDelegateEnabled:             true,
+			AutoModeEnabled:                 false,
 			PermissionAbsentGraceMS:         30000,
 			PermissionAbsentAutodenyEnabled: false,
 			MaxDailyCostUSD:                 12.50, // TFAC-482 per-team daily cap
@@ -322,7 +744,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
 			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
 		}
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -343,7 +765,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 		// Fresh team, no settings row yet → the partial INSERT must materialize the
 		// row from defaults + the cap, touching only max_daily_cost_usd.
-		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 42.50); err != nil {
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 42.50); err != nil {
 			t.Fatalf("SetDailyCostCapSystem (insert): %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -363,7 +785,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// A read-modify-write team-settings save that changes another field but not
 		// the cap must preserve it — the team-admin path can never alter the cap.
 		got.DefaultModel = "haiku"
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
 			t.Fatalf("UpdateSettings (rmw): %v", err)
 		}
 		after, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -378,7 +800,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// ≤ 0 clears the cap (stored NULL → read back as 0 / no cap).
-		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0); err != nil {
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0); err != nil {
 			t.Fatalf("SetDailyCostCapSystem (clear): %v", err)
 		}
 		cleared, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -415,7 +837,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AIPreferenceUpdateInterval: 20,
 			DefaultModel:               "sonnet",
 		}
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)

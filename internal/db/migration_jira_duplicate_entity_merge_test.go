@@ -117,7 +117,7 @@ func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
 		`INSERT INTO conversation_memory_entities (conversation_id, entity_id, role) VALUES ('conv-var',  'var',  'touched')`,
 
 		// In-flight work, for the cancel intent a forced close owes. Four
-		// blueprints, one per arm of CloseWithRunCancelIntentSystem's
+		// blueprints, one per arm of CloseWithConversationCancelIntentSystem's
 		// predicate: running under a live conversation on the task the merge
 		// force-closes (must be called off); the same on the task that
 		// survives active (must NOT be — that work is still on the board);

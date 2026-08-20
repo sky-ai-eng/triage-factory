@@ -1,14 +1,17 @@
-// The Anthropic-key connect action, factored out the same way connectJira is
+// The Anthropic-key actions, factored out the same way connectJira is
 // (jiraConnect.ts): every surface — the setup wizard's Continue and the
-// Settings section's Save — drives this one helper, so the key is captured
-// through a single validated path. POST /api/anthropic/connect validates the
-// key server-side (GET https://api.anthropic.com/v1/models) and persists it on
-// success, so a successful result IS the validation — there's no separate
-// probe. An empty key is the "use system Claude Code credentials" selection
-// (local only): the backend clears any stored key so the resolver falls back to
-// the subscription/env path.
+// Settings section's Save — drives these helpers, so the key is captured
+// through a single validated path. PUT /api/orgs/{org}/llm/anthropic validates
+// the key server-side (GET https://api.anthropic.com/v1/models) and persists it
+// on success, so a successful result IS the validation — there's no separate
+// probe.
 //
-// Returns a discriminated result mirroring connectJira / saveOrgConfig — the
+// A blank key is not a spelling of anything. Removing the stored key is the
+// DELETE; the route used to read a blank `api_key` as "clear this key and every
+// Bedrock secret too", which is why "use system credentials" is now two
+// explicit disconnects (disconnectLLM below) rather than one overloaded write.
+//
+// Returns a discriminated result mirroring connectJira / patchOrgSettings — the
 // caller surfaces the error inline (wizard error line) or as a toast (Settings).
 
 // CLAUDE_SOURCE_OPTIONS is the shared label set for the "system creds vs BYOK"
@@ -16,6 +19,9 @@
 // the same two choices without drift — the Claude analog of
 // JIRA_DEPLOYMENT_OPTIONS. Lives here (a non-component module) rather than in
 // ClaudeStep.tsx so the component file only exports components.
+import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+import { disconnectBedrock } from './bedrockConnect'
+
 export const CLAUDE_SOURCE_OPTIONS: { kind: 'system' | 'byok'; title: string; detail: string }[] = [
   {
     kind: 'system',
@@ -29,21 +35,39 @@ export const CLAUDE_SOURCE_OPTIONS: { kind: 'system' | 'byok'; title: string; de
   },
 ]
 
-export async function connectAnthropic(
-  apiKey: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+export type LLMResult = { ok: true } | { ok: false; error: string }
+
+export async function connectAnthropic(orgId: string, apiKey: string): Promise<LLMResult> {
   try {
-    const res = await fetch('/api/anthropic/connect', {
-      method: 'POST',
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/llm/anthropic`, {
+      method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
     })
-    const resBody = await res.json().catch(() => ({}))
-    if (!res.ok) {
-      return { ok: false, error: resBody.error || 'Could not validate the API key' }
-    }
     return { ok: true }
-  } catch {
-    return { ok: false, error: 'Could not connect to server' }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not validate the API key.') }
   }
+}
+
+// disconnectAnthropic removes the org's stored Anthropic key. Idempotent.
+export async function disconnectAnthropic(orgId: string): Promise<LLMResult> {
+  try {
+    await apiFetch(`/api/orgs/${encodeURIComponent(orgId)}/llm/anthropic`, { method: 'DELETE' })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not remove the stored API key.') }
+  }
+}
+
+// disconnectLLM is the "use the system Claude Code credentials" selection
+// (local only): hold no org-level LLM credential of ANY provider, so the
+// resolver falls back to the subscription/env path. That is two credentials and
+// therefore two deletes — the server no longer has a single write that wipes
+// both, because the one it had was an Anthropic route silently destroying AWS
+// material. Both are idempotent, so this is safe on an org with nothing stored.
+export async function disconnectLLM(orgId: string): Promise<LLMResult> {
+  const anthropic = await disconnectAnthropic(orgId)
+  if (!anthropic.ok) return anthropic
+  return disconnectBedrock(orgId)
 }

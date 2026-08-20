@@ -7,7 +7,7 @@
 // onto the ticket under the org's system/bot credential (jira.Resolver.ForSystem,
 // TFAC-34), so the bot-side lifecycle is visible in Jira exactly as the
 // user-claim path already mirrors it for human-claimed tasks (the claim guard
-// in server.handleSwipe).
+// in server.handleTaskClaim).
 //
 // Two chokepoints drive it, and both move the ticket into the InProgress bucket
 // — no board/task hook writes Done anymore (runJiraMirror still has a done mode,
@@ -125,7 +125,7 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 // NOT done. The ticket only reaches Done when its PR merges (a separate,
 // entity-driven mirror — forthcoming), never on run completion. A user takeover
 // mid-run flips claimed_by_agent_id to the user, after which the terminal Jira
-// write belongs to the user's advance/swipe path, so a no-longer-bot-owned task
+// write belongs to the user's own task-lifecycle writes, so a no-longer-bot-owned task
 // is skipped. Called from terminateBlueprint's completed branch; a
 // failed/aborted/cancelled run never reaches it. The in-progress mirror is
 // idempotent, so in the common case (the dispatch-time mirror already moved the
@@ -253,7 +253,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 // recordMirrorAction appends one external_actions row for a board→Jira mirror
 // write (TFAC-483): a system/bot action under the org Jira service-account
 // credential, with no human actor (actor_user_id NULL). team_id scopes it to the
-// bot-owned task's team. The detached mirror holds no run handle, so run_id is
+// bot-owned task's team. The detached mirror holds no conversation handle, so conversation_id is
 // left NULL, and it doesn't resolve the issue's browse URL (the issue key is the
 // target). Admin pool (RecordSystem — no JWT claims). Best-effort: a recording
 // failure is logged and swallowed so it never unwinds the Jira move it observed,
@@ -323,7 +323,29 @@ type refMutex struct {
 // lock acquires the per-key mutex and returns its unlock func, which the caller
 // must invoke exactly once (defer is the usual shape).
 func (k *keyedMutex) lock(key string) func() {
+	rm := k.reserve(key)
+	rm.mu.Lock()
+	return func() { k.releaseUnlock(key, rm) }
+}
+
+// tryLock is lock for a caller with something better to do than wait: it takes
+// the key's mutex if it is free and reports false without blocking if it is
+// not. ok=false hands back no unlock func — there is nothing to release.
+func (k *keyedMutex) tryLock(key string) (unlock func(), ok bool) {
+	rm := k.reserve(key)
+	if !rm.mu.TryLock() {
+		k.release(key, rm)
+		return nil, false
+	}
+	return func() { k.releaseUnlock(key, rm) }, true
+}
+
+// reserve returns the key's refMutex with this caller counted against it, so
+// the entry cannot be collected out from under a caller that is about to lock
+// (or is holding) it. Every reserve is paired with exactly one release.
+func (k *keyedMutex) reserve(key string) *refMutex {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	if k.locks == nil {
 		k.locks = make(map[string]*refMutex)
 	}
@@ -333,16 +355,22 @@ func (k *keyedMutex) lock(key string) func() {
 		k.locks[key] = rm
 	}
 	rm.refs++
-	k.mu.Unlock()
+	return rm
+}
 
-	rm.mu.Lock()
-	return func() {
-		rm.mu.Unlock()
-		k.mu.Lock()
-		rm.refs--
-		if rm.refs == 0 {
-			delete(k.locks, key)
-		}
-		k.mu.Unlock()
+// release drops this caller's reservation, collecting the entry once nobody
+// holds one. A holder's own reservation is still counted while it holds the
+// mutex, so an entry can never be collected while locked.
+func (k *keyedMutex) release(key string, rm *refMutex) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	rm.refs--
+	if rm.refs == 0 {
+		delete(k.locks, key)
 	}
+}
+
+func (k *keyedMutex) releaseUnlock(key string, rm *refMutex) {
+	rm.mu.Unlock()
+	k.release(key, rm)
 }

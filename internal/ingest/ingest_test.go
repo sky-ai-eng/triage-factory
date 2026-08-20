@@ -22,7 +22,7 @@ import (
 
 func newIngestTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	conn, err := sql.Open("sqlite", ":memory:?_pragma=foreign_keys(on)")
+	conn, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
@@ -226,7 +226,10 @@ func (failingEnqueueQueue) PruneDone(context.Context, time.Time) (int, error) { 
 func (failingEnqueueQueue) ListForEntity(context.Context, string, string) ([]domain.QueuedEvent, error) {
 	return nil, nil
 }
-func (failingEnqueueQueue) ListFailedEvents(context.Context, string, int) ([]domain.FailedEvent, error) {
+func (failingEnqueueQueue) ListFailedEvents(context.Context, string, db.ListOpts) ([]domain.FailedEvent, int, error) {
+	return nil, 0, nil
+}
+func (failingEnqueueQueue) GetFailedEvent(context.Context, string, int64) (*domain.FailedEvent, error) {
 	return nil, nil
 }
 func (failingEnqueueQueue) RequeueFailedEvents(context.Context, string, []int64) (int, error) {
@@ -262,7 +265,7 @@ func TestIngestor_EnqueueFailure_DropsNoBusPhantom(t *testing.T) {
 	}
 }
 
-// TestIngestor_RegisteredSource_DurablyEnqueued pins the routerBound seam: an
+// TestIngestor_RegisteredSource_DurablyEnqueued pins the routing.RouterBound seam: an
 // event from a source registered with internal/routing (standing in for an
 // ee/ package's "slack:" prefix) gets the same durable-outbox treatment as a
 // built-in github:/jira: event — without this, a registered source's events

@@ -26,7 +26,7 @@ func TestResolver_RateLimitFor_RecordsPerOrgFromLiveCalls(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	r := NewResolver(
+	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: nil}, // no registered App — PAT tier
 		&fakeOrgs{base: srv.URL},

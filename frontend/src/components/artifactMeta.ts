@@ -10,7 +10,7 @@ import {
 import type { ArtifactKind } from '../types'
 
 // Shared artifact-kind presentation, factored out of ArtifactList.tsx so both
-// the run-scoped list and the bot-activity audit feed (TFAC-483) render rows the
+// the conversation-scoped list and the bot-activity audit feed (TFAC-483) render rows the
 // same way — and the feed's kind filter reads the same labels. This is a
 // data/helpers module (no components), so importing it into a component file
 // keeps React Fast Refresh happy (the columnFilter.ts split for the same reason).

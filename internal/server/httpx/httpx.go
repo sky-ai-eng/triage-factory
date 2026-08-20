@@ -9,11 +9,14 @@
 package httpx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
@@ -69,7 +72,7 @@ func InternalError(w http.ResponseWriter, scope string, err error) {
 	if runmode.Current() == runmode.ModeMulti {
 		msg = "internal server error"
 	}
-	WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": msg})
+	WriteErrors(w, http.StatusInternalServerError, ErrorItem{Reason: ReasonInternal, Message: msg})
 }
 
 // LocalDetail returns ": " + err.Error() in local mode and "" in multi mode.
@@ -113,47 +116,152 @@ func IsClientGone(err error) bool {
 // NotFound writes a 404 with a "<thing> not found" message. Centralized so the
 // wording stays consistent across handlers.
 func NotFound(w http.ResponseWriter, thing string) {
-	WriteJSON(w, http.StatusNotFound, map[string]string{"error": thing + " not found"})
+	WriteErrors(w, http.StatusNotFound, ErrorItem{Reason: ReasonNotFound, Message: thing + " not found"})
 }
 
-// BadRequest writes a 400 with the given message.
+// BadRequest writes a 400 with the given message under the generic
+// INVALID_BODY reason. Handlers with a more specific fault class (a named
+// field, a query param, a path id) call WriteErrors with the matching reason
+// instead.
 func BadRequest(w http.ResponseWriter, msg string) {
-	WriteJSON(w, http.StatusBadRequest, map[string]string{"error": msg})
+	WriteErrors(w, http.StatusBadRequest, ErrorItem{Reason: ReasonInvalidBody, Message: msg})
 }
 
-// WriteUnauth writes a 401.
+// WriteUnauth writes a JSON 401. Every protected route emits this via the
+// session middleware, so it speaks the same envelope as handler errors —
+// a plain-text body here would be the one 401 the shared client parser
+// can't read.
 func WriteUnauth(w http.ResponseWriter) {
-	http.Error(w, "unauthenticated", http.StatusUnauthorized)
+	WriteErrors(w, http.StatusUnauthorized, ErrorItem{Reason: ReasonUnauthenticated, Message: "unauthenticated"})
 }
 
-// DecodeJSON decodes a single top-level JSON value from the request body into
-// v (which must be a pointer). It rejects any trailing content after that
-// value — a second value, junk bytes, or a stray }/] — and allows only
-// trailing whitespace. On failure it writes a 400 (msg, or "invalid request
-// body" when msg is empty) and returns false; callers should return
-// immediately.
+// DefaultMaxBodyBytes is DecodeJSONStrict's request-body cap. 1 MiB clears
+// every ordinary JSON body by orders of magnitude; routes that genuinely
+// carry more (bundle imports, file uploads) use DecodeJSONStrictLimit.
+const DefaultMaxBodyBytes = 1 << 20
+
+// DecodeJSONStrict decodes a single top-level JSON value from the request body
+// into v (which must be a pointer). Unknown fields are rejected (400
+// UNKNOWN_FIELD naming the field) rather than silently ignored, the body is
+// capped at DefaultMaxBodyBytes (413 PAYLOAD_TOO_LARGE), and a type mismatch
+// on a known field reports 400 INVALID_FIELD with the field named. Any
+// trailing content after the value — a second value, junk bytes, a stray }/] —
+// is rejected; only trailing whitespace is allowed. On any failure the error
+// is already written; callers return immediately.
 //
-// The trailing check requires the next decode to hit io.EOF rather than using
-// dec.More(): More() reports false at a top-level } or ], so a body like
-// `{...}}` would otherwise be accepted.
-func DecodeJSON(w http.ResponseWriter, r *http.Request, v any, msg string) bool {
-	dec := json.NewDecoder(r.Body)
+// It is the only body decoder: the lenient DecodeJSON it replaced ignored
+// unknown fields, so a misspelled field silently did nothing and every
+// kind-discriminated body silently dropped the other kind's fields.
+func DecodeJSONStrict(w http.ResponseWriter, r *http.Request, v any) bool {
+	return DecodeJSONStrictLimit(w, r, v, DefaultMaxBodyBytes)
+}
+
+// DecodeJSONStrictLimit is DecodeJSONStrict with an explicit body cap, for
+// the few routes whose legitimate payloads exceed the default.
+func DecodeJSONStrictLimit(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return decodeStrict(w, r.Body, v)
+}
+
+// BodyBytes reads the request body under the default cap and hands back the
+// raw bytes, writing the error response and returning ok=false on failure.
+//
+// It exists for a body whose schema depends on a discriminator inside itself:
+// the strict decode can only run once the flavor is known, and the flavor can
+// only be read by decoding. Reading the bytes first lets a handler take a
+// lenient look at the discriminator alone and then decode STRICTLY into that
+// flavor's struct — so the other flavor's fields come back as UNKNOWN_FIELD
+// rather than being silently accepted and dropped, which is what a
+// one-struct-for-both body does.
+func BodyBytes(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxBodyBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeDecodeError(w, err)
+		return nil, false
+	}
+	return body, true
+}
+
+// DecodeJSONStrictBytes is DecodeJSONStrict against bytes already read (see
+// BodyBytes) — same strictness, same error mapping, so the second pass of a
+// discriminated decode answers exactly as a single-pass route would.
+func DecodeJSONStrictBytes(w http.ResponseWriter, body []byte, v any) bool {
+	return decodeStrict(w, bytes.NewReader(body), v)
+}
+
+// decodeStrict is the shared decode: unknown fields rejected, exactly one
+// top-level JSON value, every failure already written to w.
+func decodeStrict(w http.ResponseWriter, src io.Reader, v any) bool {
+	dec := json.NewDecoder(src)
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
-		if msg == "" {
-			msg = "invalid request body"
-		}
-		BadRequest(w, msg)
+		writeDecodeError(w, err)
 		return false
 	}
+	// The trailing-content check requires the next decode to hit io.EOF rather
+	// than using dec.More(): More() reports false at a top-level } or ], so a
+	// body like `{...}}` would otherwise be accepted.
 	var rest json.RawMessage
 	if err := dec.Decode(&rest); err != io.EOF {
-		if msg == "" {
-			msg = "invalid request body"
+		if maxErr := (*http.MaxBytesError)(nil); errors.As(err, &maxErr) {
+			writeDecodeError(w, err)
+			return false
 		}
-		BadRequest(w, msg)
+		WriteErrors(w, http.StatusBadRequest, ErrorItem{
+			Reason: ReasonInvalidBody, Message: "request body must be a single JSON value",
+		})
 		return false
 	}
 	return true
+}
+
+// writeDecodeError maps a strict-decode failure to its envelope response:
+// the body-size cap to 413, an unknown field and a type mismatch to 400 with
+// the field named, everything else to the generic 400.
+func writeDecodeError(w http.ResponseWriter, err error) {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		WriteErrors(w, http.StatusRequestEntityTooLarge, ErrorItem{
+			Reason:  ReasonPayloadTooLarge,
+			Message: fmt.Sprintf("request body exceeds the %d-byte limit", maxErr.Limit),
+		})
+		return
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) && typeErr.Field != "" {
+		WriteErrors(w, http.StatusBadRequest, ErrorItem{
+			Reason:  ReasonInvalidField,
+			Message: fmt.Sprintf("%s must be a %s", typeErr.Field, typeErr.Type),
+			Field:   typeErr.Field,
+		})
+		return
+	}
+	if field, ok := unknownFieldName(err); ok {
+		WriteErrors(w, http.StatusBadRequest, ErrorItem{
+			Reason:  ReasonUnknownField,
+			Message: "unknown field " + strconv.Quote(field),
+			Field:   field,
+		})
+		return
+	}
+	WriteErrors(w, http.StatusBadRequest, ErrorItem{
+		Reason: ReasonInvalidBody, Message: "invalid request body",
+	})
+}
+
+// unknownFieldName extracts the field from encoding/json's unknown-field
+// error. The error is unexported with no structured accessor, so the message
+// text — `json: unknown field "<name>"`, stable across Go releases — is the
+// only handle; if a release ever reshapes it, strict decoding still rejects
+// the request and only the response's field attribution degrades (to the
+// generic INVALID_BODY arm).
+func unknownFieldName(err error) (string, bool) {
+	rest, ok := strings.CutPrefix(err.Error(), `json: unknown field "`)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSuffix(rest, `"`), true
 }
 
 // IsUniqueViolation reports whether err is a unique-constraint failure on
@@ -235,17 +343,17 @@ func AuthIdentityIDFrom(ctx context.Context) string {
 }
 
 // RequireOrg returns the active org ID from request context, or writes a 409
-// with the stable "no_active_org" error code and returns ok=false. In local
-// mode the shim guarantees a sentinel org so the empty branch never fires.
+// NO_ACTIVE_ORG and returns ok=false. In local mode the shim guarantees a
+// sentinel org so the empty branch never fires.
 // Usage: orgID, ok := httpx.RequireOrg(w, r); if !ok { return }
 func RequireOrg(w http.ResponseWriter, r *http.Request) (string, bool) {
 	orgID := OrgIDFrom(r.Context())
 	if orgID != "" {
 		return orgID, true
 	}
-	WriteJSON(w, http.StatusConflict, map[string]string{
-		"error":   "no_active_org",
-		"message": "no active org selected; call POST /api/me/active-org to choose one",
+	WriteErrors(w, http.StatusConflict, ErrorItem{
+		Reason:  ReasonNoActiveOrg,
+		Message: "no active org selected; call POST /api/me/active-org to choose one",
 	})
 	return "", false
 }

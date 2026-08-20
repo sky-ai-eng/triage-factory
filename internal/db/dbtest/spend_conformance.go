@@ -23,9 +23,9 @@ type SpendStoreFixture struct {
 	UserID  string
 	AgentID string
 	// TriggerID is a pre-seeded trigger event_handler (kind='trigger') in
-	// TeamID. The suite points an autonomous RunSpendFixture.TriggerID at it so
-	// runs.trigger_id has a valid FK target and the view's trigger_id column can
-	// be asserted (TFAC-478).
+	// TeamID. The suite points an autonomous ConversationSpendFixture.TriggerID at it
+	// so conversations.trigger_id has a valid FK target and the view's
+	// trigger_id column can be asserted (TFAC-478).
 	TriggerID string
 	Seeder    SpendSeeder
 }
@@ -39,18 +39,18 @@ type SpendTokens struct {
 	Input, Output, CacheRead, CacheCreation int
 }
 
-// RunSpendFixture stages one delegation conversation plus ONE ledger row on
+// ConversationSpendFixture stages one delegation conversation plus ONE ledger row on
 // it — an assistant messages row carrying the fixture's model/tokens and, when
 // Cost is non-nil, the settled cost stamp (nil → NULL cost: streamed but not
 // yet settled, the in-flight shape). CreatorUserID "" → NULL (pair with
 // TriggerType "event"); ActorAgentID "" → NULL. The seeder writes
 // origin='manual' to sidestep the blueprint-parents CHECK.
-type RunSpendFixture struct {
+type ConversationSpendFixture struct {
 	TeamID        string
 	CreatorUserID string
 	TriggerType   string // "manual" | "event"
 	ActorAgentID  string
-	// TriggerID is the event_handler that fired this run (runs.trigger_id). ""
+	// TriggerID is the event_handler that fired this run (conversations.trigger_id). ""
 	// → NULL (a manual run carries none); set it to the fixture's seeded
 	// TriggerID for an autonomous run to exercise the view's trigger_id column.
 	TriggerID string
@@ -94,9 +94,9 @@ type SystemSpendFixture struct {
 // arms, the job row id for the system arm — so the suite can index results
 // without knowing either schema.
 type SpendSeeder struct {
-	Run     func(t *testing.T, f RunSpendFixture) string
-	Curator func(t *testing.T, f CuratorSpendFixture) string
-	System  func(t *testing.T, f SystemSpendFixture) string
+	Conversation func(t *testing.T, f ConversationSpendFixture) string
+	Curator      func(t *testing.T, f CuratorSpendFixture) string
+	System       func(t *testing.T, f SystemSpendFixture) string
 }
 
 // spendEps bounds float comparisons. Postgres total_cost_usd is `real` (float4,
@@ -125,12 +125,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		manualID := fx.Seeder.Run(t, RunSpendFixture{
+		manualID := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
 			ActorAgentID: fx.AgentID, Model: "claude-opus-4-8", Cost: spendCostPtr(1.50),
 			Tokens: SpendTokens{100, 200, 300, 400}, Status: "completed", StartedAt: t1,
 		})
-		eventID := fx.Seeder.Run(t, RunSpendFixture{
+		eventID := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event",
 			ActorAgentID: fx.AgentID, Model: "claude-haiku-4-5", Cost: spendCostPtr(0.25),
 			Tokens: SpendTokens{10, 20, 30, 40}, Status: "completed", StartedAt: t2,
@@ -230,12 +230,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		// Parked without concluding — the shape a stopped run leaves behind.
 		// The point is that it is NOT 'completed': its tokens are real spend
 		// and must survive whatever else is true of the row.
-		parkedRun := fx.Seeder.Run(t, RunSpendFixture{
+		parkedConversation := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
 			Model: "m", Cost: spendCostPtr(0.40),
 			Tokens: SpendTokens{50, 60, 70, 80}, Status: "open", StartedAt: t1,
 		})
-		failedRun := fx.Seeder.Run(t, RunSpendFixture{
+		failedConversation := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
 			Model: "m", Cost: spendCostPtr(0.10),
 			Tokens: SpendTokens{5, 6, 7, 8}, Status: "failed", StartedAt: t2,
@@ -250,9 +250,9 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpend: %v", err)
 		}
 		byID := indexSpend(t, rows)
-		assertTokens(t, "parked-run", byID[parkedRun], SpendTokens{50, 60, 70, 80})
-		assertCost(t, "cancelled-run.cost", byID[parkedRun].TotalCostUSD, 0.40)
-		assertTokens(t, "failed-run", byID[failedRun], SpendTokens{5, 6, 7, 8})
+		assertTokens(t, "parked-run", byID[parkedConversation], SpendTokens{50, 60, 70, 80})
+		assertCost(t, "cancelled-run.cost", byID[parkedConversation].TotalCostUSD, 0.40)
+		assertTokens(t, "failed-run", byID[failedConversation], SpendTokens{5, 6, 7, 8})
 		assertTokens(t, "cancelled-curator", byID[cancelledCurator], SpendTokens{9, 8, 7, 6})
 	})
 
@@ -263,7 +263,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		inflight := fx.Seeder.Run(t, RunSpendFixture{
+		inflight := fx.Seeder.Conversation(t, ConversationSpendFixture{
 			TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual",
 			Model: "m", Cost: nil, // NULL cost — the in-flight shape
 			Tokens: SpendTokens{0, 0, 0, 0}, Status: "running", StartedAt: t1,
@@ -284,9 +284,9 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{100, 10, 1, 0}, Status: "completed", StartedAt: t1})
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(2.00), Tokens: SpendTokens{200, 20, 2, 0}, Status: "completed", StartedAt: t2})
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{100, 10, 1, 0}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(2.00), Tokens: SpendTokens{200, 20, 2, 0}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.70, Tokens: SpendTokens{7, 7, 7, 7}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "classifier", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
@@ -327,8 +327,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
@@ -350,7 +350,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		winBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, t2, time.Time{})
 		win := spendByCat(t, winBuckets, err)
 		if _, ok := win[domain.SpendCategoryManual]; ok {
-			t.Errorf("SpendByCategorySystem(since=t2) included the t1 manual run; lower bound not applied")
+			t.Errorf("SpendByCategorySystem(since=t2) included the t1 manual conversation; lower bound not applied")
 		}
 		assertCost(t, "system.win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
@@ -366,8 +366,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		ctx := context.Background()
 
 		// The team's own spend: a manual run, an autonomous run, a team curator.
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
 		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, TeamID: fx.TeamID, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
 		// NOT the team's: a NULL-team (org/private project) curator + a system row.
 		// Both carry a NULL team_id and must be excluded by the team filter.
@@ -406,7 +406,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		winBuckets, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, fx.TeamID, t2, time.Time{})
 		winTeam := spendByCat(t, winBuckets, err)
 		if _, ok := winTeam[domain.SpendCategoryManual]; ok {
-			t.Errorf("SpendByCategorySystemForTeam(since=t2) included the t1 manual run; lower bound not applied")
+			t.Errorf("SpendByCategorySystemForTeam(since=t2) included the t1 manual conversation; lower bound not applied")
 		}
 		assertCost(t, "team.win.autonomous", winTeam[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
@@ -419,7 +419,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		conversationID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		// Team-attributed curator (project carries fx.TeamID) → included.
 		teamCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		// Null-team curator (org/private project) + system → NULL team_id, excluded.
@@ -435,8 +435,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		for _, r := range got {
 			gotIDs[r.SourceID] = true
 		}
-		if len(got) != 2 || !gotIDs[runID] || !gotIDs[teamCuratorID] {
-			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, runID, teamCuratorID)
+		if len(got) != 2 || !gotIDs[conversationID] || !gotIDs[teamCuratorID] {
+			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, conversationID, teamCuratorID)
 		}
 
 		other := "00000000-0000-0000-0000-0000000009ff"
@@ -453,7 +453,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
@@ -518,7 +518,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		runID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		conversationID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
@@ -527,7 +527,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpendSystem: %v", err)
 		}
 		byID := indexSpend(t, all)
-		for _, id := range []string{runID, curatorID, systemID} {
+		for _, id := range []string{conversationID, curatorID, systemID} {
 			if _, ok := byID[id]; !ok {
 				t.Errorf("ListSpendSystem missing %s; want every source org-wide", id)
 			}
@@ -538,11 +538,11 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if err != nil {
 			t.Fatalf("ListSpendSystem since: %v", err)
 		}
-		if _, ok := indexSpend(t, since)[runID]; ok {
-			t.Errorf("ListSpendSystem(since=t2) included the t1 run; lower bound not applied")
+		if _, ok := indexSpend(t, since)[conversationID]; ok {
+			t.Errorf("ListSpendSystem(since=t2) included the t1 conversation; lower bound not applied")
 		}
 
-		// TeamID filter narrows to the team's rows (run + team-attributed
+		// TeamID filter narrows to the team's rows (conversation + team-attributed
 		// curator); the NULL-team system row is excluded.
 		team := fx.TeamID
 		teamRows, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{TeamID: &team})
@@ -553,22 +553,22 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		if _, ok := tIDs[systemID]; ok {
 			t.Errorf("ListSpendSystem(TeamID) included the NULL-team system row")
 		}
-		if _, ok := tIDs[runID]; !ok {
-			t.Errorf("ListSpendSystem(TeamID) missing the team's run")
+		if _, ok := tIDs[conversationID]; !ok {
+			t.Errorf("ListSpendSystem(TeamID) missing the team's conversation")
 		}
 	})
 
-	// CreatorUserID narrows to one human's spend — the /api/usage/me personal
+	// CreatorUserID narrows to one human's spend — the /api/me/usage personal
 	// view (TFAC-478): manual runs + curator turns they created. Autonomous runs
 	// (NULL creator) and system rows (NULL creator) are excluded.
 	t.Run("ListSpend_CreatorUserIDFilter", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		manualID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		manualID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		// Autonomous run + system row both carry a NULL creator → excluded.
-		fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
+		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
 		self := fx.UserID
@@ -590,14 +590,14 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 
 	// trigger_id surfaces on the runs arm (the autonomous by-rule attribution,
 	// TFAC-478) and is NULL for manual runs, curator turns, and system jobs.
-	t.Run("TriggerID_PopulatedForRuns_NullForCuratorSystem", func(t *testing.T) {
+	t.Run("TriggerID_PopulatedForConversations_NullForCuratorSystem", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
 		// Autonomous run fired by the fixture's seeded trigger.
-		autoID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", TriggerID: fx.TriggerID, Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
+		autoID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", TriggerID: fx.TriggerID, Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		// Manual run with no firing trigger → NULL trigger_id.
-		manualID := fx.Seeder.Run(t, RunSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
+		manualID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
 		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t3})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 

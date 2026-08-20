@@ -64,10 +64,15 @@ func IsSelectionError(err error) bool {
 // when err is a caller-fault team-selection error; returns false otherwise so
 // the caller falls through to its normal (500) handling. Lets every
 // team-stamping handler map the picker errors with one line after its WithTx
-// returns.
+// returns. All three selection errors are faults in the request's team pick,
+// so they carry the team_id field attribution.
 func WriteIfSelectionError(w http.ResponseWriter, err error) bool {
 	if IsSelectionError(err) {
-		httpx.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: err.Error(),
+			Field:   "team_id",
+		})
 		return true
 	}
 	return false
@@ -146,7 +151,10 @@ func ResolveActingNoStamp(ctx context.Context, teams db.TeamsStore, users db.Use
 //     projects) rather than have this function silently guess by picking an
 //     arbitrary team the caller has no relationship to.
 func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
-	myTeams, err := teams.ListForUser(ctx, orgID)
+	// Unwindowed on purpose (ListOpts zero Limit): this is a membership set,
+	// not a page. A windowed read would make "is the caller on this team"
+	// depend on where the team sorted, which is how a write silently retargets.
+	myTeams, _, err := teams.ListForUser(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return "", fmt.Errorf("acting team: list teams: %w", err)
 	}
@@ -202,7 +210,8 @@ func resolveActingID(ctx context.Context, teams db.TeamsStore, users db.UsersSto
 // default) rather than erroring, since a stale filter value should never 4xx a
 // read.
 func ResolveRead(ctx context.Context, teams db.TeamsStore, users db.UsersStore, orgID, userID, picked string) (string, error) {
-	myTeams, err := teams.ListForUser(ctx, orgID)
+	// Unwindowed for the same reason as resolveActingID: a membership set.
+	myTeams, _, err := teams.ListForUser(ctx, orgID, db.Unwindowed)
 	if err != nil {
 		return "", fmt.Errorf("read team: list teams: %w", err)
 	}
@@ -280,4 +289,68 @@ func SingleParam(r *http.Request) string {
 		return "" // drop malformed (stale localStorage, hand-edited URL)
 	}
 	return v
+}
+
+// FilterParamStrict is FilterParam under the strict-params contract: a
+// malformed ?team_id= is rejected as a 400 INVALID_PARAM instead of silently
+// dropped — dropping a corrupt filter *widens* the result set, the exact
+// failure the contract forbids. On a malformed value the response is already
+// written and ok is false; callers return immediately. The lenient FilterParam
+// remains only for handlers not yet converted; converted handlers never go
+// back, and the lenient variants are deleted once the sweep finishes.
+func FilterParamStrict(w http.ResponseWriter, r *http.Request) (teams []string, ok bool) {
+	raw := r.URL.Query()["team_id"]
+	if len(raw) == 0 {
+		return nil, true
+	}
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if _, err := uuid.Parse(v); err != nil {
+			writeBadTeamID(w, v)
+			return nil, false
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out, true
+}
+
+// SingleParamStrict is SingleParam under the same strict-params contract as
+// FilterParamStrict: only a genuinely absent param means "no narrow" (""),
+// everything else must be one well-formed id. A present-but-empty
+// `?team_id=` and a repeated `?team_id=a&team_id=b` are both rejected —
+// treating either as absent (or taking the first value) would silently
+// retarget a single-team read to the caller's default team, the exact
+// fall-through this variant exists to close. Malformed ids are a 400 as in
+// FilterParamStrict.
+func SingleParamStrict(w http.ResponseWriter, r *http.Request) (team string, ok bool) {
+	raw, present := r.URL.Query()["team_id"]
+	if !present {
+		return "", true
+	}
+	if len(raw) > 1 {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidParam,
+			Message: "team_id may be given at most once on this route",
+			Field:   "team_id",
+		})
+		return "", false
+	}
+	if _, err := uuid.Parse(raw[0]); err != nil {
+		writeBadTeamID(w, raw[0])
+		return "", false
+	}
+	return raw[0], true
+}
+
+func writeBadTeamID(w http.ResponseWriter, v string) {
+	httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+		Reason:  httpx.ReasonInvalidParam,
+		Message: fmt.Sprintf("team_id %q is not a valid team id", v),
+		Field:   "team_id",
+	})
 }

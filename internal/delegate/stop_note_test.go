@@ -12,12 +12,12 @@ import (
 // stopNotes returns the conversation's stop-note rows, oldest-first, read
 // straight from the table so the assertions see exactly what was stored
 // (attribution and delivery included) rather than a projection of it.
-func stopNotes(t *testing.T, database *sql.DB, runID string) []domain.Message {
+func stopNotes(t *testing.T, database *sql.DB, conversationID string) []domain.Message {
 	t.Helper()
 	rows, err := database.Query(
 		`SELECT role, subtype, content, COALESCE(user_id, ''), delivered
 		   FROM messages WHERE conversation_id = ? AND subtype = ? ORDER BY id`,
-		runID, domain.MessageSubtypeStopNote)
+		conversationID, domain.MessageSubtypeStopNote)
 	if err != nil {
 		t.Fatalf("read stop notes: %v", err)
 	}
@@ -49,7 +49,7 @@ func stopNotes(t *testing.T, database *sql.DB, runID string) []domain.Message {
 // per click would be a transcript full of the user pressing a button.
 func TestStop_DBOnlyPathWritesOneAttributedNote(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-note", "sess-note", "/tmp/wt-note")
+	seedConversation(t, database, "r-note", "sess-note", "/tmp/wt-note")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
@@ -104,7 +104,7 @@ func TestStop_DBOnlyPathWritesOneAttributedNote(t *testing.T) {
 // even if this pod dies immediately after asking for it.
 func TestStop_LocalKillPathWritesTheNote(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-kill", "sess-kill", "/tmp/wt-kill")
+	seedConversation(t, database, "r-kill", "sess-kill", "/tmp/wt-kill")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	killed := false
@@ -129,7 +129,7 @@ func TestStop_LocalKillPathWritesTheNote(t *testing.T) {
 // attributes the row to nobody rather than to whoever happens to own the run.
 func TestStop_SystemStopSpeaksAsTheSystem(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-sys", "sess-sys", "/tmp/wt-sys")
+	seedConversation(t, database, "r-sys", "sess-sys", "/tmp/wt-sys")
 	if _, err := database.Exec(`UPDATE conversations SET trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-sys'`); err != nil {
 		t.Fatalf("make the run event-triggered: %v", err)
 	}
@@ -151,16 +151,16 @@ func TestStop_SystemStopSpeaksAsTheSystem(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_NoteNamesTheCause: nothing resumes a conversation
+// TestStopConversationAndCancelBlueprint_NoteNamesTheCause: nothing resumes a conversation
 // torn down by the layer above it, so its note is the only explanation its
 // history will ever carry. "Stopped" alone is what the row's presence already
 // says; the cause is the part worth writing.
-func TestStopAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-closed", "sess-closed", "/tmp/wt-closed")
+	seedConversation(t, database, "r-closed", "sess-closed", "/tmp/wt-closed")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -176,22 +176,22 @@ func TestStopAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote is the case the plain
+// TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote is the case the plain
 // verb's skip must not swallow. Every teardown caller enumerates its task's
 // non-terminal runs — `open` among them — so a parked conversation is the
 // ordinary thing a closed or swiped task tears down, not an edge case. That
 // teardown is permanent, so the note is the only explanation the transcript
 // will ever carry; skipping it as a "re-stop" would end the conversation in
 // silence.
-func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-parked-teardown", "sess-pt", "/tmp/wt-pt")
+	seedConversation(t, database, "r-parked-teardown", "sess-pt", "/tmp/wt-pt")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-parked-teardown'`); err != nil {
 		t.Fatalf("park run: %v", err)
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 
 	// A second teardown reaching the same row — the router closes the task,
 	// then the team is archived — says nothing new, so it writes nothing.
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("second teardown: %v", err)
 	}
 	if notes := stopNotes(t, database, "r-parked-teardown"); len(notes) != 1 {
@@ -219,7 +219,7 @@ func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 // turn looking like it ended on its own.
 func TestStop_NoteRepeatsOnceAPersonHasSpoken(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-restop", "", "/tmp/wt-restop")
+	seedConversation(t, database, "r-restop", "", "/tmp/wt-restop")
 	markNative(t, database, "r-restop")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -248,7 +248,7 @@ func TestStop_NoteRepeatsOnceAPersonHasSpoken(t *testing.T) {
 // explaining the gap, and re-reads the cut-off work as its own failure.
 func TestStop_ResumedConversationAssemblesTheNote(t *testing.T) {
 	database := newDelegateTestDB(t)
-	seedRun(t, database, "r-resume", "", "/tmp/wt-resume")
+	seedConversation(t, database, "r-resume", "", "/tmp/wt-resume")
 	markNative(t, database, "r-resume")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -259,7 +259,7 @@ func TestStop_ResumedConversationAssemblesTheNote(t *testing.T) {
 		t.Fatalf("follow-up after the stop: %v", err)
 	}
 
-	rows, err := s.agentRuns.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, "r-resume")
+	rows, err := s.conversations.ListForAssemblySystem(context.Background(), runmode.LocalDefaultOrgID, "r-resume")
 	if err != nil {
 		t.Fatalf("list for assembly: %v", err)
 	}

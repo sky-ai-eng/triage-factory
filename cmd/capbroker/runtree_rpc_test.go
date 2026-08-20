@@ -18,7 +18,7 @@ import (
 // capture with a stand-in that writes directly to the caller-supplied
 // *os.File — exercising the RPC/socket-passthrough wiring without needing
 // root.
-func withStubCaptureRunDeltaTo(t *testing.T, fn func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error)) {
+func withStubCaptureRunDeltaTo(t *testing.T, fn func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error)) {
 	t.Helper()
 	orig := captureRunDeltaTo
 	captureRunDeltaTo = fn
@@ -94,60 +94,32 @@ func TestIPCRoundTrip_RemoveRunTree(t *testing.T) {
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical is the v2 successor
-// to the pre-v2 TestIPCRoundTrip_CaptureRunDelta_OpaqueBytes: it pins both
-// "never interpreted" and "never re-encoded" at once by round-tripping a
-// deliberately non-JSON payload (a lone brace, raw NULs, invalid UTF-8)
-// byte-identical through the real fd-passthrough plumbing — a stubbed
-// capture, but a real broker, a real dial, and a real accepted socket. Since
-// this data no longer rides a JSON response field at all (it streams over a
-// raw socket), there is no encoder left to accidentally validate or mangle
-// it — this test is the structural proof of that.
-func TestIPCRoundTrip_CaptureRunDelta_StreamsByteIdentical(t *testing.T) {
+// TestIPCRoundTrip_CaptureRunDelta_StreamsManifestByteIdentical pins the
+// socket control channel and the additive staging-dir argument together.
+func TestIPCRoundTrip_CaptureRunDelta_StreamsManifestByteIdentical(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	opaque := []byte{'{', 0x00, 0xff, 0xfe, '"', ':'}
-	var gotWorktree string
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
-		gotWorktree = worktree
-		_, err := stdout.Write(opaque)
+	manifest := []byte(`{"delta":null,"session_id":"sess"}`)
+	var gotWorktree, gotStaging, gotSession string
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+		gotWorktree, gotStaging, gotSession = worktree, stagingDir, sessionID
+		_, err := stdout.Write(manifest)
 		_ = stdout.Close()
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5", "")
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5", "/tmp/capture-stage-5", "sess")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
 	if gotWorktree != "/tmp/tf-runs/run-5" {
 		t.Errorf("broker saw worktree %q", gotWorktree)
 	}
-	if !bytes.Equal(delta, opaque) {
-		t.Errorf("payload not preserved byte-identical: got %v, want %v", delta, opaque)
+	if gotStaging != "/tmp/capture-stage-5" || gotSession != "sess" {
+		t.Errorf("broker saw staging=%q session=%q", gotStaging, gotSession)
 	}
-}
-
-// TestIPCRoundTrip_CaptureRunDelta_LargeDelta pins that a delta bigger than
-// maxFrameSize (it can embed a git bundle + binary patch) still crosses
-// intact — via the streamed socket, not an RPC frame. Unlike the pre-v2
-// shape there is no larger response-frame cap to fall back on; the point of
-// this change is that this data never rides an RPC frame at all.
-func TestIPCRoundTrip_CaptureRunDelta_LargeDelta(t *testing.T) {
-	withTempCaptureSocketDir(t)
-	big := bytes.Repeat([]byte{0xAB}, 3*maxFrameSize) // 3 MiB > the RPC frame cap
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
-		_, err := stdout.Write(big)
-		_ = stdout.Close()
-		return "", err
-	})
-	client := serveTestBroker(t, &fakeOps{})
-
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-3", "")
-	if err != nil {
-		t.Fatalf("CaptureRunDelta: %v", err)
-	}
-	if !bytes.Equal(delta, big) {
-		t.Errorf("delta corrupted in transit: got %d bytes, want %d identical bytes", len(delta), len(big))
+	if !bytes.Equal(delta, manifest) {
+		t.Errorf("manifest not preserved byte-identical: got %v, want %v", delta, manifest)
 	}
 }
 
@@ -156,13 +128,13 @@ func TestIPCRoundTrip_CaptureRunDelta_LargeDelta(t *testing.T) {
 // not an error — the caller's null-delta handling depends on it.
 func TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", nil
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-4", "")
+	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-4", "/tmp/capture-stage-4", "")
 	if err != nil {
 		t.Fatalf("CaptureRunDelta: %v", err)
 	}
@@ -172,24 +144,24 @@ func TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta(t *testing.T) {
 }
 
 // TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly pins the loss
-// contract: a stream exceeding sandbox.CaptureMaxBytes fails the capture
+// contract: a stream exceeding sandbox.CaptureManifestMaxBytes fails the capture
 // cleanly (the park degrades to snapshot-less) instead of buffering
 // arbitrarily. Shrinks the cap so the test doesn't need to push real
 // hundreds of MiB to exercise it.
 func TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	origCap := sandbox.CaptureMaxBytes
-	sandbox.CaptureMaxBytes = 1024
-	t.Cleanup(func() { sandbox.CaptureMaxBytes = origCap })
+	origCap := sandbox.CaptureManifestMaxBytes
+	sandbox.CaptureManifestMaxBytes = 1024
+	t.Cleanup(func() { sandbox.CaptureManifestMaxBytes = origCap })
 
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
 		defer stdout.Close()
 		_, err := stdout.Write(bytes.Repeat([]byte{0x01}, 4096)) // well past the shrunk cap
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-cap", ""); err == nil {
+	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-cap", "/tmp/capture-stage-cap", ""); err == nil {
 		t.Fatal("expected an over-cap error, got nil")
 	}
 }
@@ -210,7 +182,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
 		go func() {
 			<-release
 			_ = stdout.Close()
@@ -220,7 +192,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 	client := serveTestBroker(t, &fakeOps{})
 
 	start := time.Now()
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-wait", "")
+	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-wait", "/tmp/capture-stage-wait", "")
 	if err == nil {
 		t.Fatal("expected a timeout waiting for the stream after RPC success, got nil")
 	}
@@ -232,7 +204,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 // TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure pins
 // that an RPC failure closes an already-accepted stream connection right
 // away rather than leaving it to read (and buffer, toward
-// sandbox.CaptureMaxBytes) a result nobody will use. The stub never closes
+// sandbox.CaptureManifestMaxBytes) a result nobody will use. The stub never closes
 // its end of the stream itself — it blocks reading from it in the
 // background, so this test's success signal (the read unblocking) can only
 // come from the CLIENT side closing its accepted conn. A generous
@@ -243,7 +215,7 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	withTempCaptureSocketDir(t)
 
 	peerClosed := make(chan struct{})
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
 		t.Cleanup(func() { _ = stdout.Close() })
 		go func() {
 			buf := make([]byte, 16)
@@ -254,7 +226,7 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail", ""); err == nil {
+	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail", "/tmp/capture-stage-fail", ""); err == nil {
 		t.Fatal("expected the simulated RPC failure to propagate")
 	}
 
@@ -270,13 +242,13 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 // with an always-appended, now-empty "(stderr: )" suffix.
 func TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", errors.New("simulated capture failure")
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt", "")
+	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt", "/tmp/capture-stage-errfmt", "")
 	if err == nil {
 		t.Fatal("expected the simulated failure to propagate")
 	}

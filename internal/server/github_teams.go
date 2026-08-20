@@ -19,7 +19,7 @@ import (
 // GitHub teams in the github-groups mapping step.
 //
 // This is NOT a standalone endpoint. It rides on
-// GET /api/settings/team/{id}/github-groups?include_membership=true (see
+// GET /api/teams/{team_id}/github-groups?include_membership=true (see
 // handleTeamGitHubGroupsGet), so the wizard and the Settings editor read
 // the *same* org-wide candidate list and differ only in pre-checking —
 // the candidate set is no longer sourced from one user's perspective.
@@ -33,7 +33,7 @@ import (
 //     ask GraphQL's organization.teams(userLogins:) connection per
 //     configured-repo owner — O(orgs) queries, not a per-team probe.
 //
-// The write target is the existing PUT /api/settings/team/{id}/github-groups
+// The write target is the existing PUT /api/teams/{team_id}/github-groups
 // (replace-set, idempotent, team-admin gated).
 // --------------------------------------------------------------------
 
@@ -90,7 +90,7 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]ghclient.UserTeam, error) {
 	var (
 		login string
-		repos []domain.RepoProfile
+		repos []domain.Repository
 	)
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		orgSet, lerr := tx.Orgs.GetSettings(ctx, orgID)
@@ -103,7 +103,9 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 				return lerr
 			}
 		}
-		repos, lerr = tx.Repos.List(ctx, orgID)
+		// Unwindowed for the same reason as the group candidates: this
+		// derives a set from the whole registry rather than browsing it.
+		repos, _, lerr = tx.Repos.List(ctx, orgID, db.Unwindowed)
 		return lerr
 	}); err != nil {
 		return nil, err

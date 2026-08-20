@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { TelemetryRail } from './StationInstruments'
 import { stationState } from './stationStyle'
-import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/runStatus'
+import { QUEUE_DWELL_VISIBLE_MS } from '../../lib/conversationStatus'
 import type { Conversation, Message } from '../../types'
 
 const T0 = new Date('2026-06-25T00:00:00Z').getTime()
 const iso = (offsetMs: number) => new Date(T0 + offsetMs).toISOString()
 
-const run = (over: Partial<Conversation>): Conversation =>
+const conversation = (over: Partial<Conversation>): Conversation =>
   ({
     ID: 'r1',
     TaskID: 't1',
@@ -20,8 +20,8 @@ const run = (over: Partial<Conversation>): Conversation =>
   }) as Conversation
 
 function renderRail(over: Partial<Conversation>, now: number = T0 + 60_000) {
-  const r = run(over)
-  render(<TelemetryRail run={r} messages={[]} state={stationState(r)} now={now} />)
+  const r = conversation(over)
+  render(<TelemetryRail conversation={r} messages={[]} state={stationState(r)} now={now} />)
 }
 
 // The rail's settled queued readout must share AgentCard's visibility
@@ -44,17 +44,17 @@ describe('TelemetryRail queued readout', () => {
     expect(screen.getByText('queued')).toBeInTheDocument()
   })
 
-  it('always shows the live wait while the run is still queued, even below the threshold', () => {
+  it('always shows the live wait while the conversation is still queued, even below the threshold', () => {
     renderRail({ Status: 'queued', QueuedAt: iso(0) }, T0 + 2000)
     expect(screen.getByText('queued')).toBeInTheDocument()
     expect(screen.getByText('2s')).toBeInTheDocument()
   })
 })
 
-// The token readouts come off the run row — the SUM the run read already
-// computes, the same numbers the usage dashboard reports — rather than a walk
-// of the held transcript. The transcript here carries different counts on
-// purpose: a rail that still summed it would show those instead.
+// The token readouts come off the conversation row — the SUM the detail read
+// already computes, the same numbers the usage dashboard reports — rather
+// than a walk of the held transcript. The transcript here carries different
+// counts on purpose: a rail that still summed it would show those instead.
 describe('TelemetryRail token readouts', () => {
   const held: Message[] = [
     {
@@ -72,11 +72,13 @@ describe('TelemetryRail token readouts', () => {
   ]
 
   function renderTokens(over: Partial<Conversation>) {
-    const r = run(over)
-    render(<TelemetryRail run={r} messages={held} state={stationState(r)} now={T0 + 60_000} />)
+    const r = conversation(over)
+    render(
+      <TelemetryRail conversation={r} messages={held} state={stationState(r)} now={T0 + 60_000} />,
+    )
   }
 
-  it('reads the run row’s sums', () => {
+  it('reads the conversation row’s sums', () => {
     renderTokens({
       input_tokens: 12_300,
       output_tokens: 450,
@@ -89,7 +91,7 @@ describe('TelemetryRail token readouts', () => {
     expect(screen.getByText('cache·w 2.1k')).toBeInTheDocument()
   })
 
-  it('shows zeros for a run that never streamed usage, and hides the cache line', () => {
+  it('shows zeros for a conversation that never streamed usage, and hides the cache line', () => {
     renderTokens({ input_tokens: 0, output_tokens: 0 })
     expect(screen.getAllByText('0')).toHaveLength(2)
     expect(screen.queryByText(/cache·/)).not.toBeInTheDocument()

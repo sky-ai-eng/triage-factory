@@ -18,7 +18,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
-	runID := seedPgArtifactRun(t, h, orgID, teamID, userID)
+	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
@@ -33,7 +33,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 		URL:            "https://github.com/octo/repo/pull/123",
 		FromState:      domain.ArtifactStatePRDraft,
 		ToState:        domain.ArtifactStatePROpen,
-		ConversationID: runID,
+		ConversationID: conversationID,
 		ActorUserID:    userID,
 		Credential:     domain.CredentialGitHubApp,
 		DetailJSON:     `{"k":"v"}`,
@@ -42,7 +42,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	if err := stores.ExternalActions.Record(ctx, orgID, in); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	got, err := stores.ExternalActions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{})
+	got, _, err := stores.ExternalActions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestExternalActionStore_Postgres_RoundTrip(t *testing.T) {
 	}
 	if a.Provider != "github" || a.Action != domain.ActionPRMarkedReady || a.Target != "octo/repo#123" ||
 		a.ExternalID != "123" || a.URL != in.URL || a.FromState != "draft" || a.ToState != "open" ||
-		a.ConversationID != runID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
+		a.ConversationID != conversationID || a.ActorUserID != userID || a.Credential != "github_app" || a.DetailJSON != `{"k":"v"}` {
 		t.Errorf("round-trip mismatch: %+v", a)
 	}
 }
@@ -133,7 +133,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 
 	// Alice reads her org's actions via the team read (app pool, RLS-active).
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -156,7 +156,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 
 	// Bob (a different org) reads zero of orgA's actions — cross-org isolation.
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByTeam(ctx, orgA, teamA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	}
 
 	// ListByOrgSystem (admin pool) sees orgA's rows org-wide.
-	all, err := stores.ExternalActions.ListByOrgSystem(ctx, orgA, domain.ExternalActionListOpts{})
+	all, _, err := stores.ExternalActions.ListByOrgSystem(ctx, orgA, domain.ExternalActionListOpts{})
 	if err != nil {
 		t.Fatalf("ListByOrgSystem: %v", err)
 	}
@@ -178,26 +178,27 @@ func TestExternalActionStore_Postgres_RLS(t *testing.T) {
 	}
 }
 
-// TestExternalActionStore_Postgres_ListByRun pins the run-scoped read on the app
+// TestExternalActionStore_Postgres_ListByConversation pins the conversation-scoped read on the app
 // pool: one conversation's rows, and — because the read runs under the same
 // org-scoped policy as ListByTeam — nothing at all for a member of another org
-// who guesses a run id. The handler's own run-visibility check is what narrows
-// this within an org; RLS is the backstop across orgs.
-func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
+// who guesses a conversation id. The handler's own conversation-visibility
+// check is what narrows this within an org; RLS is the backstop across orgs.
+func TestExternalActionStore_Postgres_ListByConversation(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
-	runA := seedPgArtifactRun(t, h, orgA, teamA, alice)
+	convA := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 	ctx := context.Background()
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-	// One row on the run, one with no run at all — the shape a purged run leaves
-	// behind (FK ON DELETE SET NULL), which must not surface under any run.
+	// One row on the conversation, one with no conversation at all — the shape
+	// a purged conversation leaves behind (FK ON DELETE SET NULL), which must
+	// not surface under any conversation.
 	for _, act := range []domain.ExternalAction{
 		{
 			OrgID: orgA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
-			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: runA,
+			Action: domain.ActionGHChannelWrite, Target: "octo/repo", ConversationID: convA,
 			Credential: domain.CredentialGitHubApp, DedupKey: "run-1",
 		},
 		{
@@ -212,20 +213,20 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 	}
 
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, convA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
 		if len(rows) != 1 || rows[0].Action != domain.ActionGHChannelWrite {
-			t.Errorf("alice ListByRun saw %+v, want just the run's own row", rows)
+			t.Errorf("alice ListByConversation saw %+v, want just the conversation's own row", rows)
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("alice ListByRun: %v", err)
+		t.Fatalf("alice ListByConversation: %v", err)
 	}
 
 	if err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-		rows, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByRun(ctx, orgA, runA, domain.ExternalActionListOpts{})
+		rows, _, err := pgstore.NewForTx(tx, pgtest.SecretKey).ExternalActions.ListByConversation(ctx, orgA, convA, domain.ExternalActionListOpts{})
 		if err != nil {
 			return err
 		}
@@ -234,6 +235,6 @@ func TestExternalActionStore_Postgres_ListByRun(t *testing.T) {
 		}
 		return nil
 	}); err != nil {
-		t.Fatalf("bob ListByRun: %v", err)
+		t.Fatalf("bob ListByConversation: %v", err)
 	}
 }

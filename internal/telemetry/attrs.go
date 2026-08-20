@@ -27,6 +27,7 @@ const (
 	keyEntityID       = attribute.Key("entity.id")
 	keyTaskID         = attribute.Key("task.id")
 	keyConversationID = attribute.Key("conversation.id")
+	keyBlueprintRunID = attribute.Key("blueprint_run.id")
 	keyClaimAttempt   = attribute.Key("claim.attempt")
 	keySource         = attribute.Key("source")
 	keyDisposition    = attribute.Key("disposition")
@@ -41,6 +42,11 @@ const (
 	keyOp             = attribute.Key("op")
 	keyWorkspace      = attribute.Key("workspace.provenance")
 	keySizeBytes      = attribute.Key("size_bytes")
+	keySnapBundle     = attribute.Key("snapshot.bundle_bytes")
+	keySnapPatch      = attribute.Key("snapshot.patch_bytes")
+	keySnapTranscript = attribute.Key("snapshot.transcript_bytes")
+	keySnapRaw        = attribute.Key("snapshot.raw_bytes")
+	keySnapWaitedMS   = attribute.Key("snapshot.waited_ms")
 	keyAgentCostUSD   = attribute.Key("agent.cost_usd")
 	keyAgentDuration  = attribute.Key("agent.duration_ms")
 )
@@ -56,6 +62,13 @@ func EventID(id string) attribute.KeyValue        { return keyEventID.String(id)
 func EntityID(id string) attribute.KeyValue       { return keyEntityID.String(id) }
 func TaskID(id string) attribute.KeyValue         { return keyTaskID.String(id) }
 func ConversationID(id string) attribute.KeyValue { return keyConversationID.String(id) }
+
+// BlueprintRunID is the blueprint_runs row a span belongs to — a different
+// table from ConversationID, and the reason both exist: the firing path
+// spans a blueprint run whose steps are conversations minted later, so one
+// key cannot honestly carry both. Opaque like the rest; a blueprint's name
+// is not what it holds.
+func BlueprintRunID(id string) attribute.KeyValue { return keyBlueprintRunID.String(id) }
 
 // EventType is FK-constrained to the events catalog, which is what makes
 // it safe as a dimension in a way no other event field is.
@@ -117,6 +130,27 @@ func QueueWait(d time.Duration) attribute.KeyValue {
 // SizeBytes is how much a span moved — a workspace snapshot's compressed
 // footprint, say. A magnitude, never a filename or a key.
 func SizeBytes(n int64) attribute.KeyValue { return keySizeBytes.Int64(n) }
+
+// The workspace-snapshot member sizes, one per thing the snapshot carries,
+// plus the pre-compression total. They exist because SizeBytes alone could
+// not say where a slow snapshot's bytes came from: the git delta, the
+// scratch tree, or the transcript are captured, archived, and uploaded by
+// three different phases, and sizing a fix (shallower delta, faster codec,
+// multipart PUT) needs the split. snapshot.raw_bytes against the archive
+// span's SizeBytes is the compression ratio. All magnitudes — the member
+// NAMES are fixed format strings, so no key here can carry tenant data.
+func SnapshotBundleBytes(n int64) attribute.KeyValue     { return keySnapBundle.Int64(n) }
+func SnapshotPatchBytes(n int64) attribute.KeyValue      { return keySnapPatch.Int64(n) }
+func SnapshotTranscriptBytes(n int64) attribute.KeyValue { return keySnapTranscript.Int64(n) }
+func SnapshotRawBytes(n int64) attribute.KeyValue        { return keySnapRaw.Int64(n) }
+
+// SnapshotWaitedMs is how long a workspace ensure spent waiting on a persist
+// that was still in flight, on the ensure span beside the provenance. Zero on
+// every ensure that never had to wait, which is nearly all of them — the value
+// is there so a resume that sat out most of a minute behind a hung writer
+// reads differently from one that walked straight through, since the
+// provenance it ends on is the same either way.
+func SnapshotWaitedMs(ms int64) attribute.KeyValue { return keySnapWaitedMS.Int64(ms) }
 
 // AgentCostUSD and AgentDuration are the agent runtime's OWN accounting of
 // a finished engagement, carried onto the terminal span because neither is

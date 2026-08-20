@@ -24,22 +24,32 @@ import (
 // Atomicity matches SQLite: each mutating method wraps the
 // swipe_events INSERT + tasks UPDATE in a single tx so a partial
 // state can't leak.
-type swipeStore struct{ q queryer }
+type swipeStore struct {
+	q queryer
+	// admin is the RLS-bypassed pool, used by UndoLastSwipe alone. See the
+	// rationale on that method: its guard has to see swipe_events rows the
+	// requesting user did not write, and swipe_events_select scopes SELECT
+	// to creator_user_id = tf.current_user_id().
+	admin queryer
+}
 
-func newSwipeStore(q queryer) db.SwipeStore { return &swipeStore{q: q} }
+func newSwipeStore(q, admin queryer) db.SwipeStore { return &swipeStore{q: q, admin: admin} }
 
 var _ db.SwipeStore = (*swipeStore)(nil)
 
-func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int) (string, error) {
+func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, action string, hesitationMs int, snoozeUntil *time.Time) (string, bool, error) {
 	// See sqlite/swipes.go for the full rationale. Summary: claim +
 	// delegate + reassign (TFAC-561) are responsibility-only and MUST
 	// NOT touch the lifecycle status (or in_progress / in_review tasks
 	// lose their stage during takeover/delegate/reassign via the
 	// assignee picker). Terminal swipes (dismiss / complete) write
-	// status + closed_at + close_reason. Snooze flows through
-	// SnoozeTask.
+	// status + closed_at + close_reason. Snooze writes the caller's
+	// wake time; the task PATCH's snooze arm goes through SnoozeTask.
 	terminal := action == "dismiss" || action == "complete"
 	var newStatus, closeReason string
+	// snoozeVal is what lands in tasks.snooze_until — the wake time on
+	// a snooze, NULL on every other action. See the SQLite mirror.
+	var snoozeVal any
 	switch action {
 	case "claim", "delegate", "reassign":
 		// Audit-only path.
@@ -50,13 +60,14 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		newStatus = "done"
 		closeReason = "user_completed"
 	case "snooze":
-		// Defensive: handleSwipe accepts action='snooze' and routes
-		// it here; the production FE uses /snooze + SnoozeTask
-		// instead, but a stray /swipe action=snooze should at least
-		// produce a consistent status='snoozed' rather than falling
-		// through to the 'queued' default. See SQLite mirror for the
-		// full rationale.
+		// A snoozed row with no wake time is parked forever — the
+		// wake sweep requeues on snooze_until. Refuse rather than
+		// write it. See the SQLite mirror for the full rationale.
+		if snoozeUntil == nil {
+			return "", false, db.ErrSnoozeUntilRequired
+		}
 		newStatus = "snoozed"
+		snoozeVal = *snoozeUntil
 	default:
 		newStatus = "queued"
 	}
@@ -70,14 +81,23 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 			// "snoozed ↔ unclaimed" invariant holds when a
 			// path bypasses the claim helpers. See SQLite mirror for
 			// the full rationale.
-			if _, err := tx.ExecContext(ctx,
+			res, err := tx.ExecContext(ctx,
 				`UPDATE tasks
 				    SET status = CASE WHEN status = 'snoozed' THEN 'queued' ELSE status END,
 				        snooze_until = NULL
-				  WHERE org_id = $1 AND id = $2`,
+				  WHERE org_id = $1 AND id = $2
+				    AND status NOT IN ('done', 'dismissed')`,
 				orgID, taskID,
-			); err != nil {
+			)
+			if err != nil {
 				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n == 0 {
+				return errTerminalRefused
 			}
 			row := tx.QueryRowContext(ctx,
 				`SELECT status FROM tasks WHERE org_id = $1 AND id = $2`,
@@ -88,24 +108,46 @@ func (s *swipeStore) RecordSwipe(ctx context.Context, orgID string, taskID, acti
 		var closedAt any
 		var reason any
 		if terminal {
-			closedAt = time.Now()
+			closedAt = time.Now().UTC()
 			reason = closeReason
 		}
-		_, err := tx.ExecContext(ctx,
+		// The status predicate is what makes a second close a no-op
+		// rather than a rewrite — see the SQLite mirror.
+		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = $1,
-			        snooze_until = NULL,
-			        closed_at = $2,
-			        close_reason = $3
-			  WHERE org_id = $4 AND id = $5`,
-			newStatus, closedAt, reason, orgID, taskID,
+			        snooze_until = $2,
+			        closed_at = $3,
+			        close_reason = $4
+			  WHERE org_id = $5 AND id = $6
+			    AND status NOT IN ('done', 'dismissed')`,
+			newStatus, snoozeVal, closedAt, reason, orgID, taskID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errTerminalRefused
+		}
+		return nil
 	}); err != nil {
-		return "", err
+		if errors.Is(err, errTerminalRefused) {
+			return "", false, nil
+		}
+		return "", false, err
 	}
-	return newStatus, nil
+	return newStatus, true, nil
 }
+
+// errTerminalRefused signals RecordSwipe's status predicate refused: the task
+// closed between the caller's read and this write. Sentinel distinct from real
+// DB errors so RecordSwipe can return ("", false, nil) while triggering the
+// deferred tx rollback for the audit row it already inserted.
+var errTerminalRefused = errors.New("postgres swipes: task is closed")
 
 func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string, until time.Time, hesitationMs int) (bool, error) {
 	var ok bool
@@ -116,14 +158,17 @@ func (s *swipeStore) SnoozeTask(ctx context.Context, orgID string, taskID string
 			return err
 		}
 		// Claim guard: snooze is queue-only post-invariant ("snoozed
-		// ↔ both claim cols NULL"). Inline UPDATE so the WHERE
-		// clause's claim-column guards live with the snooze write.
+		// ↔ both claim cols NULL"), plus the status predicate that keeps
+		// a task closed under us out of the snoozed lane. Inline UPDATE
+		// so both guards live with the snooze write. See the SQLite
+		// mirror for the full rationale.
 		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
 			    SET status = 'snoozed', snooze_until = $1
 			  WHERE org_id = $2 AND id = $3
 			    AND claimed_by_agent_id IS NULL
-			    AND claimed_by_user_id  IS NULL`,
+			    AND claimed_by_user_id  IS NULL
+			    AND status NOT IN ('done', 'dismissed')`,
 			until, orgID, taskID,
 		)
 		if err != nil {
@@ -186,33 +231,98 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 	return ok, err
 }
 
-func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID string) error {
-	return s.runInTx(ctx, func(tx *sql.Tx) error {
-		if err := insertSwipeEvent(ctx, tx, orgID, taskID, "undo", nil); err != nil {
+func (s *swipeStore) ClearSnooze(ctx context.Context, orgID string, taskID string) (bool, error) {
+	// Status predicate in the WHERE clause, not a read-then-write: the
+	// refusal and the write are then one statement, so a concurrent
+	// requeue or dismiss can't land between the check and the update.
+	res, err := s.q.ExecContext(ctx,
+		`UPDATE tasks
+		    SET status = 'queued',
+		        snooze_until = NULL
+		  WHERE org_id = $1 AND id = $2
+		    AND status = 'snoozed'`,
+		orgID, taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (bool, error) {
+	var ok bool
+	// The whole method runs on the admin pool, which is the only way its
+	// guard can be correct: the guard has to know whether the task's newest
+	// gesture belongs to the caller, and swipe_events_select scopes SELECT to
+	// the requesting user's own rows — under RLS "the newest row I can see"
+	// is always mine, which is exactly the question being asked. Authorizing
+	// in Go and then routing around RLS is the same shape
+	// ReassignClaimToUserSystem uses: the handler has already resolved the
+	// org from session claims, run its viewer gate, and read the task under
+	// RLS (so a task the caller can't see 404s before this is reached).
+	// org_id stays in every WHERE as defense in depth.
+	err := runInTxOn(ctx, s.admin, func(tx *sql.Tx) error {
+		// Serialize concurrent undos on this task before either evaluates
+		// its guard. Without it two callers can both pass and both write —
+		// the row lock plus READ COMMITTED's per-statement snapshot means
+		// the second one's guard below sees the first one's committed
+		// 'undo' row and refuses.
+		if _, err := tx.ExecContext(ctx,
+			`SELECT 1 FROM tasks WHERE org_id = $1 AND id = $2 FOR UPDATE`,
+			orgID, taskID,
+		); err != nil {
 			return err
 		}
-		// Undo mirrors requeue's full reset — claim cols
-		// also clear. A claim/delegate swipe stamps the relevant
-		// claim col; leaving it on the row would keep the task in
-		// the owner's lane even after status returns to 'queued'.
-		// Clear both cols so the task lands back in the team's
-		// unclaimed triage queue, matching RequeueTask's shape.
-		// Clear close metadata too — undoing a dismiss /
-		// complete swipe means the task isn't terminal anymore.
-		_, err := tx.ExecContext(ctx,
+		// Undo reverses the caller's own last gesture, and only while that
+		// gesture is still the last thing that happened to the task. See the
+		// SQLite mirror for why both halves are load-bearing, why the
+		// predicate rides the UPDATE, and why the audit row goes in after.
+		res, err := tx.ExecContext(ctx,
 			`UPDATE tasks
-			    SET status = $1,
+			    SET status = 'queued',
 			        snooze_until = NULL,
 			        claimed_by_agent_id = NULL,
 			        claimed_by_user_id  = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
-			  WHERE org_id = $2 AND id = $3`,
-			"queued", orgID, taskID,
+			  WHERE org_id = $1 AND id = $2
+			    AND (SELECT creator_user_id FROM swipe_events
+			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) = $3
+			    AND (SELECT action FROM swipe_events
+			          WHERE org_id = $1 AND task_id = $2 ORDER BY id DESC LIMIT 1) <> 'undo'`,
+			orgID, taskID, userID,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errNothingToUndo
+		}
+		if err := insertSwipeEventAs(ctx, tx, orgID, taskID, "undo", userID, nil); err != nil {
+			return err
+		}
+		ok = true
+		return nil
 	})
+	if errors.Is(err, errNothingToUndo) {
+		return false, nil
+	}
+	return ok, err
 }
+
+// errNothingToUndo signals UndoLastSwipe's guard tripped: the task's newest
+// gesture isn't the caller's, or is itself an undo. Sentinel distinct from
+// real DB errors so UndoLastSwipe can return (false, nil) while triggering
+// the deferred tx rollback.
+var errNothingToUndo = errors.New("postgres swipes: the task's newest gesture isn't the caller's to undo")
 
 // runInTx is the Postgres-side counterpart of sqlite's inTx — opens
 // a tx on s.q if it's a *sql.DB, or runs the closure against the
@@ -220,7 +330,13 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID str
 // store methods share atomicity-boundary code regardless of
 // composition context.
 func (s *swipeStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error {
-	switch v := s.q.(type) {
+	return runInTxOn(ctx, s.q, fn)
+}
+
+// runInTxOn is runInTx against a named queryer, so UndoLastSwipe can open its
+// transaction on the admin pool while every other method stays on s.q.
+func runInTxOn(ctx context.Context, q queryer, fn func(*sql.Tx) error) error {
+	switch v := q.(type) {
 	case *sql.Tx:
 		return fn(v)
 	case *sql.DB:
@@ -236,6 +352,24 @@ func (s *swipeStore) runInTx(ctx context.Context, fn func(*sql.Tx) error) error 
 	default:
 		return errors.New("postgres swipes: unexpected queryer type")
 	}
+}
+
+// insertSwipeEventAs writes an audit row attributed to an explicit user. The
+// admin pool has no JWT claims for tf.current_user_id() to resolve, so the
+// caller that routed around RLS has to name the creator it already
+// authorized — the COALESCE fallback would otherwise stamp the org owner.
+func insertSwipeEventAs(ctx context.Context, tx *sql.Tx, orgID, taskID, action, creatorUserID string, hesitationMs *int) error {
+	var hesitation any
+	if hesitationMs != nil {
+		hesitation = *hesitationMs
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO swipe_events (org_id, creator_user_id, task_id, action, hesitation_ms)
+		VALUES ($1, $2, $3, $4, $5)
+	`, orgID, creatorUserID, taskID, action, hesitation); err != nil {
+		return fmt.Errorf("insert swipe_events: %w", err)
+	}
+	return nil
 }
 
 func insertSwipeEvent(ctx context.Context, tx *sql.Tx, orgID, taskID, action string, hesitationMs *int) error {
