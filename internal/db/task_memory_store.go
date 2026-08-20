@@ -50,12 +50,10 @@ import (
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: UpsertAgentMemory,
-// UpsertAgentMemorySystem, UpdateConversationMemoryHumanContent,
-// UpdateConversationMemoryHumanContentSystem. Each is a genuine single-row
-// insert/update/upsert, not one of the exempt buckets — the ticket tracks the
-// conversion.
+// TODO(TFAC-867): these single-row writes still return a bare error rather
+// than the row they persisted: UpsertAgentMemory, UpsertAgentMemorySystem,
+// UpdateConversationMemoryHumanContent,
+// UpdateConversationMemoryHumanContentSystem.
 type TaskMemoryStore interface {
 	// UpsertAgentMemory writes the agent-side memory row for a conversation.
 	// Empty / whitespace-only content canonicalizes to SQL NULL on

@@ -32,10 +32,10 @@ import (
 // aggregate that can't be computed under any single user's RLS view, so it
 // routes through the admin pool like the other `...System`-suffixed methods
 // elsewhere in this package (cf. PromptStore.IncrementUsageSystem).
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: Delist, Relist, Vote,
-// RecordInstall. Each is a genuine single-row insert/update/upsert, not one of
-// the exempt buckets — the ticket tracks the conversion.
+// TODO(TFAC-864): these single-row writes still return a bare error rather
+// than the row they persisted: Delist, Relist, Vote, RecordInstall. Vote and
+// RecordInstall each move a listing stat as well, so the ticket settles which
+// row is the outcome.
 type MarketplaceStore interface {
 	// Publish creates a new listing plus its v1 version row. l.ID is
 	// ignored — the store mints the id and returns it. l.CurrentVersion is

@@ -22,10 +22,10 @@ import (
 // writer is a delegate goroutine with no JWT-claims context, and tf_app holds
 // no INSERT/UPDATE grant on the table. SQLite is N=1 and collapses to the one
 // connection.
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: Create, Resolve. Each is a
-// genuine single-row insert/update/upsert, not one of the exempt buckets — the
-// ticket tracks the conversion.
+// TODO(TFAC-865): these single-row writes still return a bare error rather
+// than the row they persisted: Create (which mints the id and stamps
+// requested_at) and Resolve (a guarded transition whose declined arm a bare
+// error cannot express).
 type PermissionStore interface {
 	// Create inserts a freshly surfaced prompt. p.State must be
 	// domain.PermissionStatePending; p.ID is minted when empty and p.RequestedAt

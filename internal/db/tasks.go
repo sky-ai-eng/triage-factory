@@ -127,12 +127,14 @@ type TaskListFilter struct {
 //     three-state HandoffResult so callers can distinguish no-op
 //     from refused.
 //
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: Bump, BumpSystem, Close,
-// CloseSystem, RecordEvent, RecordEventSystem, SetClaimedByAgent,
-// SetClaimedByUser, SetOwnerTeam, SetOwnerTeamSystem, SetStatus,
-// SetStatusSystem. Each is a genuine single-row insert/update/upsert, not one
-// of the exempt buckets — the ticket tracks the conversion.
+// TODO(TFAC-860): these single-row writes still return a bare error rather
+// than the row they persisted — Bump, BumpSystem, Close, CloseSystem,
+// RecordEvent, RecordEventSystem, SetClaimedByAgent, SetClaimedByUser,
+// SetOwnerTeam, SetOwnerTeamSystem, SetStatus, SetStatusSystem. Converging
+// them needs a shape decision first: the point read projects a task joined to
+// its entity, which SQLite's RETURNING cannot produce, so the ticket picks
+// between splitting the row from its annotation and reading the annotation
+// alongside.
 type TaskStore interface {
 	// --- Lookup ---
 

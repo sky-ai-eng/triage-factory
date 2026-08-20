@@ -24,11 +24,10 @@ import (
 // The manifest flow works in both modes. The SQLite impl reads/writes
 // the org_github_apps table directly (the table exists in the SQLite
 // baseline schema).
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: CreateForOrg, SetActive,
-// UpsertInstallation, SetInstallationSuspension, MarkInstallationRemoved. Each
-// is a genuine single-row insert/update/upsert, not one of the exempt buckets
-// — the ticket tracks the conversion.
+// TODO(TFAC-863): these single-row writes still return a bare error rather
+// than the row they persisted: CreateForOrg, SetActive, UpsertInstallation,
+// SetInstallationSuspension, MarkInstallationRemoved.
+// JiraAppsStore.UpsertForOrg is the converged sibling to copy.
 type GitHubAppsStore interface {
 	// GetForOrg returns the org's registered GitHub App, or nil if
 	// the org has no App registration (uses the deployment default

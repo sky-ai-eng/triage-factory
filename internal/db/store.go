@@ -24,9 +24,10 @@ import (
 // write in those stores that still returns a bare error carries its exemption
 // at the method.
 //
-// TODO(TFAC-838): the stores not in that list have their unconverged writes
-// named in a marker on their own interface — converge them, and don't add new
-// writes in the old shape anywhere.
+// TODO(TFAC-838): the stores not in that list each carry a marker on their own
+// interface naming their unconverged writes and the sub-issue that tracks
+// them — TFAC-860 through TFAC-871. Don't add a new write in the old shape
+// anywhere.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.

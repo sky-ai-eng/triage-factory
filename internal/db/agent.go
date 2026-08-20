@@ -118,16 +118,16 @@ type MessageWindow struct {
 	Limit    int
 }
 
-// TODO(TFAC-838): these single-row writes still return a bare error and have
-// not been converged on the returned-row standard: Complete, CompleteSystem,
+// TODO(TFAC-861): these single-row writes still return a bare error rather
+// than the row they persisted — Complete, CompleteSystem,
 // CompleteForClaimSystem, SetSession, SetSessionSystem,
 // SetSessionForClaimSystem, SetWorktreePath, SetWorktreePathSystem,
 // SetWorktreePathForClaimSystem, SetExecutorSystem, SetExecutorForClaimSystem,
 // SetClaimPhaseSystem, SetActiveClaimPhaseSystem,
 // RecordClaimSandboxStatsSystem, CompactForClaimSystem,
-// SettleCompactionRequestForClaimSystem. Each is a genuine single-row
-// insert/update/upsert, not one of the exempt buckets — the ticket tracks the
-// conversion.
+// SettleCompactionRequestForClaimSystem. They land on two different tables
+// (conversations and claims), so the ticket settles which row each one answers
+// with.
 type ConversationStore interface {
 	// --- Lifecycle ---
 
