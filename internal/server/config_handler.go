@@ -119,7 +119,7 @@ func (s *Server) handleTeamMembers(w http.ResponseWriter, r *http.Request) {
 		jiraID = &jiraAccount
 	}
 
-	// Bot resolution mirrors the swipe-delegate / factory-delegate
+	// Bot resolution mirrors the task-delegate / factory-delegate
 	// gate so the picker shows exactly the options the delegate
 	// handlers would accept. Errors here are non-fatal — the picker
 	// degrades to "no bot" rather than failing the roster fetch.

@@ -1319,7 +1319,7 @@ func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID s
 // broadcastTaskUpdate emits a task_updated WS event so the
 // board can refetch / patch the card without polling. Payload
 // matches the shared event shape (task_id + status) the other
-// emitters use (handleSwipe, handleSnooze, handleTaskAdvance,
+// emitters use (broadcastTaskStatus on the task PATCH arms,
 // finalizeRequeue), so the FE's typed WSEvent ('task_updated':
 // {task_id, status}) holds across producers.
 func (s *Spawner) broadcastTaskUpdate(orgID, taskID, status string) {

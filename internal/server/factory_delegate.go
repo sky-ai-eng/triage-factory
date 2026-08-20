@@ -268,7 +268,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Alignment with swipe-delegate: the user's gesture is
+	// Alignment with the task delegate route: the user's gesture is
 	// commitment regardless of run outcome. Stamp the agent claim
 	// BEFORE attempting the spawn so a failed Delegate leaves the
 	// task in the bot's lane (with no run, surfacing as a "delegate
@@ -281,8 +281,8 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	// execution axis. They're orthogonal; a failed run doesn't
 	// invalidate the assignment.
 	// Re-check team_agents.enabled at gesture
-	// time. Factory drag-to-bot is the same semantic as swipe-up
-	// "delegate to bot" — both refuse with 409 when the bot is off for
+	// time. Factory drag-to-bot is the same semantic as the task
+	// delegate route — both refuse with 409 when the bot is off for
 	// this team. Gate on claimTeamID — the team HandoffAgentClaim will
 	// consolidate the task onto — not the org default and not the
 	// pre-handoff task.TeamID (which for a found multi-team task can be a
@@ -345,21 +345,21 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Record the swipe_events audit row BEFORE the spawn attempt.
-	// The audit captures the user's gesture (drag-to-bot), which is
-	// real regardless of whether the run materializes. The earlier
-	// "after-spawn-success only" placement meant partial-success
-	// gestures (claim stamped, spawn failed) had no audit trail —
-	// inconsistent with swipe-delegate (which audits at the top of
-	// the swipe handler) and with the semantic that
-	// claim is commitment regardless of run outcome. RecordSwipe
-	// failure stays non-fatal because the claim col + WS broadcast
-	// already captured the state-level effect; the audit is best-
-	// effort.
+	// The audit captures the user's gesture (drag-to-bot), which is real
+	// regardless of whether the run materializes — a partial success (claim
+	// stamped, spawn failed) still leaves a trail, matching the task delegate
+	// route and the semantic that claim is commitment regardless of run
+	// outcome. An audit that doesn't land — a write failure, or the task
+	// closing under us, which RecordSwipe's own status predicate refuses —
+	// stays non-fatal: the claim col + WS broadcast already captured the
+	// state-level effect.
+	var audited bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		_, e := tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0, nil)
+		var e error
+		_, audited, e = tx.Swipes.RecordSwipe(r.Context(), orgID, task.ID, "delegate", 0, nil)
 		return e
-	}); err != nil {
-		factoryLog.Warn("failed to record delegate swipe", "task", task.ID, "error", err)
+	}); err != nil || !audited {
+		factoryLog.Warn("delegate swipe not recorded", "task", task.ID, "refused", err == nil, "error", err)
 	}
 
 	// Now attempt the spawn. Delegate's failure modes (blueprint not
@@ -382,7 +382,7 @@ func (s *Server) handleFactoryDelegate(w http.ResponseWriter, r *http.Request) {
 		// recorded — the commitment is real, the run just didn't fire. That
 		// partial state is reported as the error it is (422 for a bad
 		// blueprint reference, 500 for a spawn/DB fault — the same mapping
-		// the swipe delegate arm uses), never a 200. Reason SPAWN_FAILED is
+		// the task delegate route uses), never a 200. Reason SPAWN_FAILED is
 		// what tells the FE the claim survived, so it refetches and renders
 		// the "delegate didn't fire, retry" affordance on the bot-claimed
 		// card instead of the plain failure toast.

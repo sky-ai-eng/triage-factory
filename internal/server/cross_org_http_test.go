@@ -130,22 +130,22 @@ func TestCrossOrgHTTP_AgentActions(t *testing.T) {
 	}
 }
 
-// TestCrossOrgHTTP_TaskSwipe covers the mutating path: bob's swipe
+// TestCrossOrgHTTP_TaskClaim covers the mutating path: bob's claim
 // gesture against alice's task should appear as "task not found" to
 // bob, not as a 200 with a state change applied, and not as a 500. The
 // handler does a tx.Tasks.Get inside WithTx before any side effect; RLS
 // returns nil for the cross-org pair, handler 404s, no state mutated.
-func TestCrossOrgHTTP_TaskSwipe(t *testing.T) {
+func TestCrossOrgHTTP_TaskClaim(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	taskA := seedTaskInOrg(t, r, orgA, alice, "task-swipe")
+	taskA := seedTaskInOrg(t, r, orgA, alice, "task-claim")
 
-	body := `{"action":"claim","hesitation_ms":0}`
-	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/swipe", sidA, body); got != http.StatusOK {
-		t.Errorf("alice POST swipe on own task = %d, want 200", got)
+	body := `{"hesitation_ms":0}`
+	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/claim", sidA, body); got != http.StatusOK {
+		t.Errorf("alice POST claim on own task = %d, want 200", got)
 	}
-	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/swipe", sidB, body); got != http.StatusNotFound {
-		t.Errorf("bob POST swipe on cross-org task = %d, want 404", got)
+	if got := postWithSid(t, r, "/api/tasks/"+taskA+"/claim", sidB, body); got != http.StatusNotFound {
+		t.Errorf("bob POST claim on cross-org task = %d, want 404", got)
 	}
 }
 

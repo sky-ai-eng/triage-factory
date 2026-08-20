@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -289,12 +290,84 @@ func (s *Server) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, taskToJSON(*task))
 }
 
-type snoozeRequest struct {
-	Until        string `json:"until"`
-	HesitationMs int    `json:"hesitation_ms"`
+// Task status vocabulary, split by who owns each write. Terminal statuses
+// close a task; the stage statuses are the user's own progress markers.
+const (
+	taskStatusQueued     = "queued"
+	taskStatusInProgress = "in_progress"
+	taskStatusInReview   = "in_review"
+	taskStatusSnoozed    = "snoozed"
+	taskStatusDone       = "done"
+	taskStatusDismissed  = "dismissed"
+)
+
+// The swipe_events action vocabulary. These strings are stored data — every
+// row written since the swipe deck shipped carries one of them, and the
+// analytics views group on them — so a route may change which gesture writes
+// which string, but never the strings themselves.
+const (
+	swipeActionClaim    = "claim"
+	swipeActionDismiss  = "dismiss"
+	swipeActionSnooze   = "snooze"
+	swipeActionDelegate = "delegate"
+	swipeActionComplete = "complete"
+	swipeActionReassign = "reassign"
+)
+
+// isTerminalTaskStatus reports whether a task is closed. A closed task takes
+// no further mutation except the two routes that re-open it (requeue / undo),
+// so every other handler refuses on this predicate rather than writing over
+// closed_at / close_reason.
+func isTerminalTaskStatus(status string) bool {
+	return status == taskStatusDone || status == taskStatusDismissed
 }
 
-func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
+// writeTaskTerminal is the shared refusal for a mutation aimed at a closed
+// task. One reason and one status across every task route, so a client can
+// branch on ALREADY_TERMINAL without knowing which verb it called.
+func writeTaskTerminal(w http.ResponseWriter, verb string) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+		Reason:  httpx.ReasonAlreadyTerminal,
+		Message: "task is closed; " + verb + " transitions aren't allowed past close",
+	})
+}
+
+// taskPatchRequest is the body of PATCH /api/tasks/{id}. json.RawMessage
+// rather than *string on snooze_until so an absent field (keep the wake time)
+// and an explicit null (clear it) stay distinguishable — the repos PATCH is
+// the reference for the convention.
+type taskPatchRequest struct {
+	Status      json.RawMessage `json:"status,omitempty"`
+	SnoozeUntil json.RawMessage `json:"snooze_until,omitempty"`
+	// HesitationMs is the dwell time before the gesture, recorded on the
+	// swipe_events row the dismiss / complete / snooze arms write. The stage
+	// arms (in_progress / in_review) write no audit row, so carrying it there
+	// would be a field the server accepts and silently drops.
+	HesitationMs int `json:"hesitation_ms,omitempty"`
+}
+
+// handleTaskPatch is the task's field-write path: the lifecycle axis (done,
+// dismissed, the in_progress → in_review stages) and the wake time. Effects
+// that a field write can't express keep their own verb routes — claim and
+// delegate reach external systems and spawn runs, requeue and undo tear down
+// artifacts and reverse an audit row.
+//
+// Guards apply in two rounds, and the order is deliberate: the body is
+// validated first (400 for shape, 422 for a value out of range), and only a
+// body that means something is measured against the task's state. So a
+// malformed request answers for its own shape even when the task also happens
+// to be closed — the task's state is not what is wrong with it. A body naming
+// no field is a 400 too: it wrote nothing, and "updated" is the one answer a
+// client can't tell from a real write.
+//
+// Then the state round: a closed task refuses everything (409
+// ALREADY_TERMINAL — requeue and undo are how a task re-opens), and the stage
+// statuses require the caller's own active claim (403). Neither round is the
+// last word on safety; the store carries its own predicates, because the row
+// can change between this handler's read and its write.
+//
+// PATCH /api/tasks/{id}
+func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
@@ -305,49 +378,149 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req snoozeRequest
+	var req taskPatchRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
 
-	// Snooze mutates the task (lifecycle axis) — a viewer can't (TFAC-447).
+	// Two validations because the two fault classes carry different
+	// statuses: shape faults are 400 ("you didn't say it right") and range
+	// faults 422 ("you said it right and the value can't be one"). Each
+	// flushes as a blanket status over everything it accumulated, and the
+	// shape pass goes first — a value can't be out of range until it parses.
+	var shape, semantic httpx.Validation
+	if !httpx.PatchNamed(req.Status, req.SnoozeUntil) {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide status or snooze_until (null clears the snooze)",
+		})
+		return
+	}
+	// One axis per request. A body carrying both says two contradictory
+	// things about where the task lands — snoozing moves it to 'snoozed', and
+	// status names something else — and picking a winner would make the other
+	// field a silently-dropped one.
+	if req.Status != nil && req.SnoozeUntil != nil {
+		shape.Invalid("status", "status and snooze_until can't be set in one request: snoozing moves the task to snoozed by itself")
+	}
+
+	status, statusState := httpx.PatchString(&shape, req.Status, "status")
+	if statusState == httpx.PatchClear {
+		shape.Invalid("status", "status can't be cleared: a task always has one")
+	}
+	if statusState == httpx.PatchSet && !slices.Contains(patchableTaskStatuses, status) {
+		shape.Invalid("status", "status must be one of: "+strings.Join(patchableTaskStatuses, ", "))
+	}
+	snoozeUntil, snoozeState := parseSnoozeUntilPatch(&shape, &semantic, req.SnoozeUntil)
+	validateHesitation(&shape, req.HesitationMs)
+	// hesitation_ms is the dwell time behind a card gesture, and only the
+	// arms that write a swipe_events row have somewhere to put it. Rejecting
+	// it elsewhere beats accepting a number and dropping it.
+	if req.HesitationMs != 0 && !patchWritesAudit(status, statusState, snoozeState) {
+		shape.Invalid("hesitation_ms", "hesitation_ms applies to the dismissed / done / snooze gestures only")
+	}
+	if shape.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if semantic.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	// Every arm here is a team-scoped write — viewers can't.
 	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
 		return
 	}
 
-	if !validHesitationField(w, req.HesitationMs) {
-		return
-	}
-
-	until, ok := parseSnoozeUntilField(w, req.Until)
-	if !ok {
-		return
-	}
-
-	// Pre-load for 404 parity with /undo and /requeue. Without this,
-	// SnoozeTask's swipe_events INSERT would trip the tasks(id) FK
-	// for a missing task and surface a SQLite error string as 500 —
-	// leaking implementation detail and confusing legitimate 404
-	// callers. The pre-check fails fast before the store gets
-	// involved.
 	var task *domain.Task
-	var snoozed bool
-	// errSnoozeRefusedSentinel is used to roll the outer tx back when
-	// SnoozeTask returns (false, nil) — the swipes store relies on a
-	// tx-level rollback to discard the audit row it inserted before
-	// the claim-guard UPDATE refused, and a flat (no-error) return
-	// here would commit that audit row.
-	errSnoozeRefusedSentinel := errors.New("snooze refused")
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return
+	}
+	if task == nil {
+		notFound(w, "task")
+		return
+	}
+	// A closed task is closed: no arm of this route may write over its
+	// closed_at / close_reason, snooze it, or move it back to a stage.
+	if isTerminalTaskStatus(task.Status) {
+		writeTaskTerminal(w, "status")
+		return
+	}
+
+	switch {
+	case snoozeState == httpx.PatchSet:
+		if !s.patchSnooze(w, r, orgID, userID, id, snoozeUntil, req.HesitationMs) {
+			return
 		}
-		if task == nil {
-			return nil
+	case snoozeState == httpx.PatchClear:
+		if !s.patchWake(w, r, orgID, userID, id) {
+			return
 		}
-		snoozed, e = tx.Swipes.SnoozeTask(r.Context(), orgID, id, until, req.HesitationMs)
+	case status == taskStatusInProgress || status == taskStatusInReview:
+		if !s.patchStage(w, r, orgID, userID, id, task, status) {
+			return
+		}
+	default:
+		if !s.patchClose(w, r, orgID, userID, id, status, req.HesitationMs) {
+			return
+		}
+	}
+
+	// Serve the resource in the shape the reads serve it — not a status stub,
+	// and not the request body echoed back. The lifecycle stores answer with
+	// the new status rather than the row, so the row comes from a point read.
+	var updated *domain.Task
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Tasks.Get(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return
+	}
+	if updated == nil {
+		notFound(w, "task")
+		return
+	}
+	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+}
+
+// patchableTaskStatuses is the set PATCH accepts. 'queued' isn't among them:
+// a task returns to the queue through requeue / undo, which also release the
+// claim and tear down whatever the agent left behind — a bare status write
+// would strand both. 'snoozed' isn't either: it is what setting snooze_until
+// means, and accepting it as a status would be a second way to say it, one
+// that can't carry the wake time the row needs.
+var patchableTaskStatuses = []string{taskStatusInProgress, taskStatusInReview, taskStatusDone, taskStatusDismissed}
+
+// patchWritesAudit reports whether the PATCH body describes a gesture that
+// lands a swipe_events row — the dismiss / complete / snooze arms. The stage
+// advances and the wake are field writes with no gesture behind them.
+func patchWritesAudit(status string, statusState, snoozeState httpx.PatchState) bool {
+	if snoozeState == httpx.PatchSet {
+		return true
+	}
+	return statusState == httpx.PatchSet && (status == taskStatusDone || status == taskStatusDismissed)
+}
+
+// patchSnooze parks a task until the given wake time. Snooze is queue-only
+// ("snoozed ↔ both claim cols NULL") and never applies to a closed task, so
+// the store's atomic UPDATE carries both predicates and the caller gets a 409
+// telling them to requeue first.
+func (s *Server) patchSnooze(w http.ResponseWriter, r *http.Request, orgID, userID, id string, until time.Time, hesitationMs int) bool {
+	// errSnoozeRefusedSentinel rolls the outer tx back when SnoozeTask returns
+	// (false, nil): the swipes store relies on a tx-level rollback to discard
+	// the audit row it inserted before the claim-guard UPDATE refused, and a
+	// flat (no-error) return here would commit that audit row.
+	errSnoozeRefusedSentinel := errors.New("snooze refused")
+	var snoozed bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		snoozed, e = tx.Swipes.SnoozeTask(r.Context(), orgID, id, until, hesitationMs)
 		if e != nil {
 			return e
 		}
@@ -357,35 +530,126 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}); err != nil && !errors.Is(err, errSnoozeRefusedSentinel) {
 		internalError(w, "tasks", err)
-		return
-	}
-	if task == nil {
-		notFound(w, "task")
-		return
+		return false
 	}
 	if !snoozed {
-		// Snooze is queue-only ("snoozed ↔ both claim
-		// cols NULL"). The store's atomic UPDATE refused because
-		// the task is currently claimed by a user or the bot.
-		// Requeue first (releases the claim) then snooze.
+		// Either guard in the store's predicate: the task is claimed, or it
+		// closed between the pre-read above and this write.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason:  httpx.ReasonConflict,
-			Message: "can't snooze a claimed task; requeue or complete it first",
+			Message: "can't snooze this task; snoozing needs an open, unclaimed task — requeue or complete it first",
 		})
+		return false
+	}
+	s.broadcastTaskStatus(orgID, id, taskStatusSnoozed)
+	return true
+}
+
+// patchWake clears a wake time early, returning the task to the queue. The
+// store guards on status='snoozed' so clearing a wake time a task doesn't have
+// is a 409 rather than a silent drag out of whatever lane it was in.
+func (s *Server) patchWake(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+	var woke bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		woke, e = tx.Swipes.ClearSnooze(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return false
+	}
+	if !woke {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task isn't snoozed, so there's no wake time to clear",
+			Field:   "snooze_until",
+		})
+		return false
+	}
+	s.broadcastTaskStatus(orgID, id, taskStatusQueued)
+	return true
+}
+
+// patchStage moves a task between the user's own progress markers — "I'm
+// working on this now" and "I've submitted this for review". Both require the
+// caller to hold the user claim: a bot-claimed task advances through the
+// spawner, and an unclaimed one has nobody whose progress this would be.
+func (s *Server) patchStage(w http.ResponseWriter, r *http.Request, orgID, userID, id string, task *domain.Task, status string) bool {
+	if task.ClaimedByUserID != userID {
+		forbidden(w, "only the user holding this task's claim can move it between in_progress and in_review")
+		return false
+	}
+	var advanced bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		advanced, e = tx.Tasks.AdvanceStatusForUser(r.Context(), orgID, id, userID, status)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return false
+	}
+	if !advanced {
+		// The pre-read said the caller holds the claim and the task isn't
+		// closed, so a refusal here means something moved underneath us.
+		// Losing is terminal for this attempt — the client refetches.
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "task moved since it was read; refetch and retry",
+		})
+		return false
+	}
+	s.broadcastTaskStatus(orgID, id, status)
+	return true
+}
+
+// patchClose is the terminal arm: dismissed (walked away) or done (resolved).
+// The write and its audit row land in one store call, and that call carries the
+// terminal predicate itself — the pre-read in the handler answers the common
+// case early, but only the predicate rules out a close landing between the two,
+// which is what a second close rewriting closed_at / close_reason would be.
+func (s *Server) patchClose(w http.ResponseWriter, r *http.Request, orgID, userID, id, status string, hesitationMs int) bool {
+	action := swipeActionDismiss
+	outcome := discardOutcomeDismissed
+	if status == taskStatusDone {
+		action = swipeActionComplete
+		outcome = discardOutcomeCompleted
+	}
+	var newStatus string
+	var closed bool
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		newStatus, closed, e = tx.Swipes.RecordSwipe(r.Context(), orgID, id, action, hesitationMs, nil)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return false
+	}
+	if !closed {
+		// Someone else closed it in the window since the pre-read. Same
+		// answer the pre-read would have given a moment later, and nothing
+		// was written.
+		writeTaskTerminal(w, "status")
+		return false
+	}
+	// Closing a task takes it off the agent's hands: resolve every unresolved
+	// artifact it holds and cancel any in-flight run.
+	s.teardownTaskConversations(r, orgID, userID, id, outcome)
+	s.broadcastTaskStatus(orgID, id, newStatus)
+	return true
+}
+
+// broadcastTaskStatus nudges peer sessions onto a task's new lane. Without it
+// a dismissed / completed / snoozed / advanced task stays where it was on
+// other browsers until the next user-driven refresh.
+func (s *Server) broadcastTaskStatus(orgID, id, status string) {
+	if s.ws == nil {
 		return
 	}
-
-	// Lifecycle changed (status='snoozed' now). Broadcast so other
-	// connected clients refetch and re-render — without this the
-	// Board on a peer session keeps showing the task in its old
-	// lane until the next user-driven refresh.
 	s.ws.Broadcast(websocket.Event{
 		Type:  "task_updated",
 		OrgID: orgID,
-		Data:  map[string]any{"task_id": id, "status": "snoozed"},
+		Data:  map[string]any{"task_id": id, "status": status},
 	})
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "snoozed", "until": until.Format(time.RFC3339)})
 }
 
 // handleUndo backs the Cards swipe-toast UX: the user just swiped
@@ -395,9 +659,15 @@ func (s *Server) handleSnooze(w http.ResponseWriter, r *http.Request) {
 // row tagged 'undo' for the swipe analytics, then runs the same
 // requeue cleanup that /requeue does.
 //
-// State-driven requeue (Board's drag-to-Queue, the "Return
-// to queue" button) lives at /requeue and skips the swipe row.
-// Same finalizer, same observable outcome — different audit shape.
+// It reverses the CALLER'S OWN last gesture and nothing else: with no such
+// gesture on the task, or with the caller's last one already reversed, the
+// store refuses and the route answers 409. Without that the route is a
+// force-reset for any task the caller can address, and the deliberate
+// version of that gesture — "put this back in the queue" — already exists at
+// /requeue, which skips the swipe row. Same finalizer, same observable
+// outcome, different audit shape.
+//
+// POST /api/tasks/{id}/undo
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -421,6 +691,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 	// we'd surface the SQLite error string as a 500 — leaking
 	// implementation detail and confusing legitimate 404 callers.
 	var task *domain.Task
+	var undone bool
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		task, e = tx.Tasks.Get(r.Context(), orgID, id)
@@ -430,7 +701,8 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		if task == nil {
 			return nil
 		}
-		return tx.Swipes.UndoLastSwipe(r.Context(), orgID, id)
+		undone, e = tx.Swipes.UndoLastSwipe(r.Context(), orgID, id, userID)
+		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
 		return
@@ -439,10 +711,17 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "task")
 		return
 	}
+	if !undone {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: "no gesture of yours on this task to undo; use requeue to return it to the queue",
+		})
+		return
+	}
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
 }
 
 // handleRequeue is the state-driven counterpart to handleUndo: same
@@ -503,94 +782,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
-}
-
-// handleTaskAdvance is the board's manual user transition —
-// "I'm working on this now" (in_progress) and "I've submitted this for
-// review" (in_review). Refuses if the caller doesn't hold the user
-// claim, if the task is bot-claimed (those transition automatically
-// via the spawner), or if the requested status is anything other
-// than in_progress / in_review. Done / dismissed go through swipe;
-// requeue goes through /requeue.
-//
-// Body: {"to": "in_progress" | "in_review"}
-func (s *Server) handleTaskAdvance(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := s.requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := taskIDOr404(w, r)
-	if !ok {
-		return
-	}
-
-	var body struct {
-		To string `json:"to"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &body) {
-		return
-	}
-	if body.To != "in_progress" && body.To != "in_review" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidField,
-			Message: "to must be one of: in_progress, in_review",
-			Field:   "to",
-		})
-		return
-	}
-
-	// Advancing a task's status is a team-scoped write — viewers can't (TFAC-447).
-	if !s.az.RequireTaskWrite(w, r, orgID, userID, id) {
-		return
-	}
-
-	// Pre-load mirrors the /requeue + /undo shape: gives us a clean
-	// 404 for genuinely missing rows. 409 on the store's ok=false
-	// means "guard tripped" (task exists but isn't claimed by you,
-	// or is terminal) — distinct from "task not found" rather than
-	// merged like the pre-fix shape.
-	var task *domain.Task
-	var advanced bool
-	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		task, e = tx.Tasks.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if task == nil {
-			return nil
-		}
-		advanced, e = tx.Tasks.AdvanceStatusForUser(r.Context(), orgID, id, userID, body.To)
-		return e
-	}); err != nil {
-		internalError(w, "tasks", err)
-		return
-	}
-	if task == nil {
-		notFound(w, "task")
-		return
-	}
-	if !advanced {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason:  httpx.ReasonConflict,
-			Message: "task not advanceable — must be claimed by you and currently in queued/in_progress/in_review",
-		})
-		return
-	}
-
-	// Broadcast on the status axis so peer Board sessions move the
-	// card to the new column without polling.
-	if s.ws != nil {
-		s.ws.Broadcast(websocket.Event{
-			Type:  "task_updated",
-			OrgID: orgID,
-			Data:  map[string]any{"task_id": id, "status": body.To},
-		})
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": body.To})
+	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
 }
 
 // discardOutcome describes how the task ended up after the user
@@ -625,9 +817,9 @@ const (
 	// prepared review is being thrown away in favor of the human
 	// handling the entity themselves. This case exists primarily
 	// to close the race where a stale frontend conversations
-	// map could let /swipe claim slip past without /requeue's
-	// cleanup; the swipe handler now runs the cleanup on every
-	// claim regardless of frontend state.
+	// map could let a claim slip past without /requeue's cleanup;
+	// the task routes run the cleanup on every claim regardless of
+	// frontend state.
 	discardOutcomeClaimed
 	// discardOutcomeRedelegated: user re-delegated the task while
 	// the prior conversation was still in flight (or had landed a pending
@@ -978,7 +1170,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		}
 		return
 	}
-	// Same hot-path note as handleSwipe: requeue/undo is human-paced
+	// Same hot-path note as the claim route: requeue/undo is human-paced
 	// and rule lookup is O(projects). The rule read goes through the
 	// app-pool ListForTeam inside a WithTx so jira_rules_select RLS
 	// is enforced — matching the user's requeue claim path. If a
@@ -997,7 +1189,7 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		inProgressMembers = rule.InProgressMembers
 	}
 	go func(issueKey, originalStatus string, ipMembers []string) {
-		// Detached from the request (see handleSwipe's claim guard): the
+		// Detached from the request (see syncJiraClaim's guard): the
 		// revert outlives the undo response, so use a background context.
 		bgCtx := context.Background()
 		state := jiraUserClient.GetClaimState(bgCtx, issueKey)
@@ -1041,87 +1233,48 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
 }
 
-// parseSnoozeUntilField validates the "until" body field for both ways of
-// snoozing — the standalone route and the swipe arm — so the two gestures
-// take the same input and reject the same faults: absent (a snooze needs a
-// wake time or the row parks forever) and unparseable. On failure the error
-// response is already written; callers return immediately.
-func parseSnoozeUntilField(w http.ResponseWriter, raw string) (time.Time, bool) {
-	if raw == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonMissingField,
-			Message: "until is required: 1h, 2h, 4h, tomorrow, or an RFC3339 timestamp",
-			Field:   "until",
-		})
-		return time.Time{}, false
+// parseSnoozeUntilPatch reads the `snooze_until` PATCH field: an RFC3339
+// timestamp strictly in the future, or the literal null that clears a snooze.
+// Faults land on whichever Validation carries their status: an unparseable
+// value is a 400 on `shape`, a past one a 422 on `semantic`.
+//
+// Timestamps only. The `1h|2h|4h|tomorrow` grammar the snooze picker offers
+// lives in the picker now, which resolves a preset to an instant before it
+// calls — the presets are wall-clock choices made in the user's own timezone,
+// and a server that reads them resolves "tomorrow" against its own clock
+// instead. A past wake time is 422 rather than 400: the body is well-formed
+// and the value is simply outside the range a wake time can occupy, and the
+// row it would produce is one the wake sweep requeues on its next pass — a
+// snooze that reports success and does nothing.
+func parseSnoozeUntilPatch(shape, semantic *httpx.Validation, raw json.RawMessage) (time.Time, httpx.PatchState) {
+	value, state := httpx.PatchString(shape, raw, "snooze_until")
+	if state != httpx.PatchSet {
+		return time.Time{}, state
 	}
-	until, err := parseSnoozeUntil(raw)
+	until, err := time.Parse(time.RFC3339, value)
 	if err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidField,
-			Message: "invalid snooze duration: " + err.Error(),
-			Field:   "until",
-		})
-		return time.Time{}, false
+		shape.Invalid("snooze_until", "snooze_until must be an RFC3339 timestamp or null")
+		return time.Time{}, state
 	}
-	// A wake time already in the past parks the task in a state the sweeper
-	// wakes on its next pass — a snooze that reports success and does nothing.
-	// The four presets are future by construction, so this only bites the
-	// RFC3339 arm, which is the arm the UI never sends and an API caller does.
 	if !until.After(time.Now()) {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonOutOfRange,
-			Message: "until must be in the future",
-			Field:   "until",
-		})
-		return time.Time{}, false
+		semantic.OutOfRange("snooze_until", "snooze_until must be in the future")
+		return time.Time{}, state
 	}
-	return until, true
+	// UTC on the way out: the wake time is compared against the database's own
+	// clock, which is UTC. A local-zone value there reads as its wall clock —
+	// the snooze expires the moment it is written (west of UTC) or outlasts
+	// its duration by the offset (east of it).
+	return until.UTC(), state
 }
 
-// validHesitationField rejects a negative hesitation. It is the milliseconds a
+// validateHesitation rejects a negative hesitation. It is the milliseconds a
 // user spent deciding before the gesture, so below zero is not a slow decision
 // but a broken clock or a hand-written body — and it lands in swipe_events,
 // where it skews the dwell-time aggregates nothing downstream re-validates.
-// On failure the error response is already written.
-func validHesitationField(w http.ResponseWriter, ms int) bool {
+// Shared by every route that accepts the field, so the three gestures reject
+// the same values with the same fault.
+func validateHesitation(v *httpx.Validation, ms int) {
 	if ms < 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonOutOfRange,
-			Message: "hesitation_ms must be zero or greater",
-			Field:   "hesitation_ms",
-		})
-		return false
-	}
-	return true
-}
-
-// parseSnoozeUntil resolves the "until" vocabulary to the instant the task
-// wakes. Every arm returns UTC, because the wake time is compared against
-// SQLite's own clock, which is UTC — a local-zone value there reads as its
-// wall clock and the snooze expires the moment it is written (west of UTC) or
-// outlasts its duration by the offset (east of it).
-//
-// "tomorrow" is still built as 9am in the server's location and converted:
-// the preset means a wall-clock morning, not an offset from now, so the zone
-// is load-bearing on the way in and irrelevant once it names an instant.
-func parseSnoozeUntil(s string) (time.Time, error) {
-	now := time.Now()
-	switch s {
-	case "1h":
-		return now.Add(1 * time.Hour).UTC(), nil
-	case "2h":
-		return now.Add(2 * time.Hour).UTC(), nil
-	case "4h":
-		return now.Add(4 * time.Hour).UTC(), nil
-	case "tomorrow":
-		tomorrow := now.AddDate(0, 0, 1)
-		return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, tomorrow.Location()).UTC(), nil
-	default:
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return time.Time{}, err
-		}
-		return t.UTC(), nil
+		v.OutOfRange("hesitation_ms", "hesitation_ms must be zero or greater")
 	}
 }

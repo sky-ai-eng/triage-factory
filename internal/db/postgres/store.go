@@ -114,8 +114,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// IncrementUsageSystem) run on the admin pool for claims-less
 		// delegation goroutines, every other method on the app pool. The
 		// impl picks per-method internally.
-		Prompts:   newPromptStore(app, admin),
-		Swipes:    newSwipeStore(app),
+		Prompts: newPromptStore(app, admin),
+		// Swipes needs both pools: UndoLastSwipe's guard reads swipe_events
+		// rows the requesting user did not write, which RLS hides, so that
+		// one method runs on the admin pool. Everything else stays on app.
+		Swipes:    newSwipeStore(app, admin),
 		Dashboard: newDashboardStore(app),
 		// Secrets needs both pools. Put/Get/Delete + the per-user trio
 		// run on the app pool against public.org_secrets — RLS gates the
@@ -451,7 +454,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 	return db.TxStores{
 		Scores:        newScoreStore(tx),
 		Prompts:       newTxPromptStore(tx),
-		Swipes:        newSwipeStore(tx),
+		Swipes:        newSwipeStore(tx, tx),
 		Dashboard:     newDashboardStore(tx),
 		Secrets:       newSecretStore(tx, tx, secretKey),
 		EventHandlers: newTxEventHandlerStore(tx),

@@ -18,7 +18,7 @@ import type { Task, TeamMember, TeamBot } from '../../types'
 //   - claimed by user + click Bot    → delegate (opens prompt picker
 //                                      via onDelegateRequested; flips
 //                                      claim from user → agent through
-//                                      the existing /swipe delegate path)
+//                                      POST /api/tasks/{id}/delegate)
 //   - claimed by bot + click Bot     → no-op (already there; would just
 //                                      prompt for a duplicate run)
 //   - claimed by a user (me or someone else) + click a teammate row →
@@ -186,7 +186,7 @@ export default function AssigneePicker({
               current claimant (if it's a teammate) is marked selected.
               Skip the current user — already rendered as "Me". Server
               is the permission boundary (claimant or team admin only —
-              see swipeReassign); a caller without either surfaces a 403
+              see reassignClaim); a caller without either surfaces a 403
               the same way an unauthorized takeover would. */}
           {(() => {
             const teammates = members.filter(

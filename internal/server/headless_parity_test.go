@@ -73,56 +73,52 @@ func TestOrgSettingsPost_BaseURLCanonicalized(t *testing.T) {
 	}
 }
 
-// TestSnooze_PastWakeTimeRejected covers the RFC3339 arm of `until`, which the
-// UI never sends — it offers four presets, all future by construction. A past
-// wake time parks the task in a state the sweeper wakes on its next pass: a
-// snooze that answers 200 and does nothing.
+// TestSnooze_PastWakeTimeRejected covers the wake-time range check on the arm
+// the UI never sends — the picker resolves its presets client-side, all future
+// by construction. A past wake time parks the task in a state the sweeper
+// wakes on its next pass: a snooze that answers 200 and does nothing.
 func TestSnooze_PastWakeTimeRejected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
-	for _, tc := range []struct {
-		verb string
-		body map[string]any
-	}{
-		{"snooze", map[string]any{"until": "2020-01-02T03:04:05Z"}},
-		{"swipe", map[string]any{"action": "snooze", "until": "2020-01-02T03:04:05Z"}},
-	} {
-		t.Run(tc.verb, func(t *testing.T) {
-			taskID := seedAdvanceTask(t, s.db, "past-"+tc.verb, advanceTaskOpts{})
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+tc.verb, tc.body)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("%s with a past wake time = %d, want 400; body=%s", tc.verb, rec.Code, rec.Body.String())
-			}
-			assertFirstError(t, rec, httpx.ReasonOutOfRange, "until")
-			status, until := readSnoozeState(t, s.db, taskID)
-			if status != "queued" || !until.IsZero() {
-				t.Fatalf("task = (%q, %v) after a refused snooze; want it untouched at (queued, NULL)", status, until)
-			}
-		})
+	taskID := seedLifecycleTask(t, s.db, "past-wake", lifecycleTaskOpts{})
+	rec := doJSON(t, s, http.MethodPatch, "/api/tasks/"+taskID,
+		map[string]any{"snooze_until": "2020-01-02T03:04:05Z"})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("a past wake time = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonOutOfRange, "snooze_until")
+	status, until := readSnoozeState(t, s.db, taskID)
+	if status != "queued" || !until.IsZero() {
+		t.Fatalf("task = (%q, %v) after a refused snooze; want it untouched at (queued, NULL)", status, until)
 	}
 }
 
-// TestSwipe_NegativeHesitationRejected pins the other half of the same pair.
-// hesitation_ms is the milliseconds the user spent deciding, computed by the
-// UI as a positive elapsed time; a negative one lands in swipe_events and skews
-// dwell-time aggregates that nothing downstream re-validates.
-func TestSwipe_NegativeHesitationRejected(t *testing.T) {
+// TestTaskGestures_NegativeHesitationRejected pins the other half of the same
+// pair. hesitation_ms is the milliseconds the user spent deciding, computed by
+// the UI as a positive elapsed time; a negative one lands in swipe_events and
+// skews dwell-time aggregates that nothing downstream re-validates. Every
+// route that accepts the field rejects it identically.
+func TestTaskGestures_NegativeHesitationRejected(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
 	for _, tc := range []struct {
-		verb string
-		body map[string]any
+		name   string
+		method string
+		path   string
+		body   map[string]any
 	}{
-		{"swipe", map[string]any{"action": "dismiss", "hesitation_ms": -1}},
-		{"snooze", map[string]any{"until": "2h", "hesitation_ms": -1}},
+		{"patch_dismiss", http.MethodPatch, "", map[string]any{"status": "dismissed", "hesitation_ms": -1}},
+		{"patch_snooze", http.MethodPatch, "", map[string]any{"snooze_until": "2999-01-01T00:00:00Z", "hesitation_ms": -1}},
+		{"claim", http.MethodPost, "/claim", map[string]any{"hesitation_ms": -1}},
+		{"delegate", http.MethodPost, "/delegate", map[string]any{"hesitation_ms": -1}},
 	} {
-		t.Run(tc.verb, func(t *testing.T) {
-			taskID := seedAdvanceTask(t, s.db, "hesitation-"+tc.verb, advanceTaskOpts{})
-			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/"+tc.verb, tc.body)
+		t.Run(tc.name, func(t *testing.T) {
+			taskID := seedLifecycleTask(t, s.db, "hesitation-"+tc.name, lifecycleTaskOpts{})
+			rec := doJSON(t, s, tc.method, "/api/tasks/"+taskID+tc.path, tc.body)
 			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("%s with hesitation_ms=-1 = %d, want 400; body=%s", tc.verb, rec.Code, rec.Body.String())
+				t.Fatalf("%s with hesitation_ms=-1 = %d, want 400; body=%s", tc.name, rec.Code, rec.Body.String())
 			}
 			assertFirstError(t, rec, httpx.ReasonOutOfRange, "hesitation_ms")
 		})

@@ -17,6 +17,7 @@ import PromptPicker from '../components/PromptPicker'
 import TaskRulesPanel from '../components/TaskRulesPanel'
 import TeamScopeSelect from '../components/TeamScopeSelect'
 import { apiFetch } from '../lib/apiClient'
+import { snoozeUntilFromPreset } from '../lib/snooze'
 
 type SwipeAction = 'claim' | 'dismiss' | 'snooze' | 'delegate'
 type LoadState = 'loading' | 'empty' | 'ready'
@@ -25,6 +26,10 @@ const SWIPE_THRESHOLD = 100
 const SWIPE_VELOCITY = 300
 // How few cards may be left before the deck fetches its next page.
 const DECK_TOP_UP_AT = 25
+// The deck's swipe-down gesture carries no picker with it, so it snoozes for
+// a fixed spell. Named here rather than inlined so the one place the deck
+// decides "how long" is legible.
+const DECK_SNOOZE_PRESET = '2h'
 
 export default function Cards() {
   // The deck is one page of the queue projection, threaded through the shared
@@ -128,25 +133,48 @@ export default function Cards() {
     }
 
     const hesitationMs = Date.now() - cardStart
+    // Each gesture addresses its own route: the two lifecycle ones are field
+    // writes on the task, and claim/delegate are verbs because of what they
+    // reach — Jira, the spawner, artifact teardown.
+    const request: [string, RequestInit] =
+      action === 'snooze'
+        ? [
+            `/api/tasks/${task.id}`,
+            {
+              method: 'PATCH',
+              body: JSON.stringify({
+                snooze_until: snoozeUntilFromPreset(DECK_SNOOZE_PRESET),
+                hesitation_ms: hesitationMs,
+              }),
+            },
+          ]
+        : action === 'dismiss'
+          ? [
+              `/api/tasks/${task.id}`,
+              {
+                method: 'PATCH',
+                body: JSON.stringify({ status: 'dismissed', hesitation_ms: hesitationMs }),
+              },
+            ]
+          : action === 'claim'
+            ? [
+                `/api/tasks/${task.id}/claim`,
+                { method: 'POST', body: JSON.stringify({ hesitation_ms: hesitationMs }) },
+              ]
+            : [
+                `/api/tasks/${task.id}/delegate`,
+                {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    hesitation_ms: hesitationMs,
+                    ...(promptId && { blueprint_id: promptId }),
+                  }),
+                },
+              ]
 
     try {
-      if (action === 'snooze') {
-        await apiFetch(`/api/tasks/${task.id}/snooze`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ until: '2h', hesitation_ms: hesitationMs }),
-        })
-      } else {
-        await apiFetch(`/api/tasks/${task.id}/swipe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action,
-            hesitation_ms: hesitationMs,
-            ...(promptId && { blueprint_id: promptId }),
-          }),
-        })
-      }
+      const [path, init] = request
+      await apiFetch(path, { ...init, headers: { 'Content-Type': 'application/json' } })
     } catch {
       return
     }

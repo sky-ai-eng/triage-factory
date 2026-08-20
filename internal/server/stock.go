@@ -45,6 +45,16 @@ type stockTicket struct {
 	PrefilledAction string `json:"prefilled_action,omitempty"`
 }
 
+// stockDeck is the GET response, and it is the whole response in every state.
+// Status distinguishes "the Jira poller hasn't finished its first cycle since
+// the last config change" from "here is the deck"; the two partitions are
+// always present, empty while polling, so a client parses one shape.
+type stockDeck struct {
+	Status    string        `json:"status"`
+	Assigned  []stockTicket `json:"assigned"`
+	Available []stockTicket `json:"available"`
+}
+
 // handleJiraStockGet returns two carry-over buckets:
 //
 //   - assigned: non-terminal Jira tickets assigned to the user, with a
@@ -54,9 +64,11 @@ type stockTicket struct {
 //     new work the user could grab.
 //
 // Tickets without snapshots yet, tickets with active tasks, and parents
-// with open subtasks are skipped. Returns {status: "polling"}
+// with open subtasks are skipped. Status is "polling" with both buckets empty
 // while the Jira poller hasn't completed its first cycle since the last
 // config change — snapshots are seeded on first poll.
+//
+// GET /api/jira/stock
 func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -140,7 +152,15 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.jiraPollReady(r.Context(), orgID) {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "polling"})
+		// Same keys as the ready answer, empty. A response whose shape
+		// depends on its status makes every client write two parsers and
+		// hope it picked the right one; the deck's own poll loop just
+		// re-reads until status flips.
+		writeJSON(w, http.StatusOK, stockDeck{
+			Status:    "polling",
+			Assigned:  []stockTicket{},
+			Available: []stockTicket{},
+		})
 		return
 	}
 
@@ -291,10 +311,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		availableOut[i] = s.ticket
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":    "ready",
-		"assigned":  assignedOut,
-		"available": availableOut,
+	writeJSON(w, http.StatusOK, stockDeck{
+		Status:    "ready",
+		Assigned:  assignedOut,
+		Available: availableOut,
 	})
 }
 
@@ -324,49 +344,103 @@ func prefillForAssigned(rule *domain.JiraProjectStatusRules, status string) stri
 	}
 }
 
-type stockAction struct {
-	IssueKey string `json:"issue_key"`
-	Action   string `json:"action"` // "queue" | "claim" | "done"
+// The three carry-over action routes. Each is one operation on a list of
+// issue keys, because the arms have nothing in common past the eligibility
+// gate: queue mints a task off a synthesized event with no Jira write at all,
+// claim makes two external Jira writes before it touches a row, and done
+// transitions the ticket and closes the entity without minting anything. A
+// single route with a per-row action discriminator meant one request could ask
+// for all three and a caller could not tell which half of it had happened.
+
+// maxStockBatch caps one carry-over submission. The deck is dealt whole from
+// the team's tracked projects, so a legitimate batch is bounded by what a
+// person selected; the cap is here so a hand-written body can't turn one
+// request into thousands of sequential Jira round-trips.
+const maxStockBatch = 500
+
+// stockActionRequest is the body every carry-over action route takes.
+type stockActionRequest struct {
+	IssueKeys []string `json:"issue_keys"`
+	// TeamID is the acting team the write picker supplied — the team
+	// claimed/queued stock tasks are stamped under. Required in the UI
+	// when the caller belongs to ≥2 teams; empty (sole-team fallback)
+	// otherwise. The same value scopes the Jira rules the actions
+	// validate against, so claim writes land on the picked team.
+	TeamID string `json:"team_id,omitempty"`
 }
 
-type stockFailure struct {
-	IssueKey string `json:"issue_key"`
-	Action   string `json:"action"`
-	Error    string `json:"error"`
+// stockItemResult is one row of a batch's per-item accounting. Every
+// submitted key appears exactly once, ok either way, so applied + failed =
+// submitted holds by construction and no id is silently skipped. Errors
+// carries the envelope's item shape, so a per-row failure is as
+// machine-readable as a request-level one.
+type stockItemResult struct {
+	IssueKey string            `json:"issue_key"`
+	OK       bool              `json:"ok"`
+	Errors   []httpx.ErrorItem `json:"errors,omitempty"`
 }
 
-// handleJiraStockPost applies carry-over actions. Eligibility varies by
-// bucket:
+// stockFailed builds a one-item per-row failure.
+func stockFailed(issueKey, reason, msg string) stockItemResult {
+	return stockItemResult{IssueKey: issueKey, Errors: []httpx.ErrorItem{{Reason: reason, Message: msg}}}
+}
+
+// handleJiraStockQueue puts the named tickets on the team's queue: a
+// synthesized event plus the task hanging off it, and no Jira write at all —
+// the user is parking work to triage later, not picking it up.
 //
-//   - Assigned (snap.Assignee == self): queue/claim/done are all valid.
-//     queue emits jira:issue:assigned (no Jira mutation). claim emits
-//     jira:issue:assigned + assigns-to-self + transitions to InProgress.
-//     done transitions to Done + closes the entity; a no-op guard skips
-//     the transition when already in a Done-member status.
+// POST /api/jira/stock/queue
+func (s *Server) handleJiraStockQueue(w http.ResponseWriter, r *http.Request) {
+	s.applyStockAction(w, r, stockActionQueue)
+}
+
+// handleJiraStockClaim takes the named tickets: assigns each to the acting
+// user in Jira, transitions it to the project's in-progress status, then mints
+// the task and stamps the user claim.
 //
-//   - Available (unassigned, Pickup status): queue emits jira:issue:available
-//     (no Jira mutation — user is parking it in the queue to decide later).
-//     claim behaves like the assigned-claim path (assign + transition +
-//     claimed task). done is rejected — closing an unassigned ticket from
-//     here is not a supported cleanup action.
+// POST /api/jira/stock/claim
+func (s *Server) handleJiraStockClaim(w http.ResponseWriter, r *http.Request) {
+	s.applyStockAction(w, r, stockActionClaim)
+}
+
+// handleJiraStockDone closes out the named tickets: transitions each to the
+// project's done status and closes the entity. No task is minted — this is
+// cleanup for work that finished outside TF.
 //
-// Transition failures are surfaced per-row; other actions still apply.
-func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
+// POST /api/jira/stock/done
+func (s *Server) handleJiraStockDone(w http.ResponseWriter, r *http.Request) {
+	s.applyStockAction(w, r, stockActionDone)
+}
+
+// The carry-over actions. These are route identities now rather than a body
+// field, but the strings still name the prefilled_action the deck serves.
+const (
+	stockActionQueue = "queue"
+	stockActionClaim = "claim"
+	stockActionDone  = "done"
+)
+
+// applyStockAction is the shared body of the three routes: resolve the acting
+// team's Jira configuration once, then walk the batch applying one action.
+//
+// Eligibility is enforced server-side against the same team-scoped read the
+// GET deck uses, so a stale tab or a hand-written body can't act on a ticket
+// the deck would never have surfaced. Per-row failures are collected rather
+// than failing the batch — a Jira transition that bounces on one ticket
+// shouldn't discard the twenty that applied.
+func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action string) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	var req struct {
-		Actions []stockAction `json:"actions"`
-		// TeamID is the acting team the write picker supplied — the team
-		// claimed/queued stock tasks are stamped under. Required in the UI
-		// when the caller belongs to ≥2 teams; empty (sole-team fallback)
-		// otherwise. The same value must scope the Jira rules the actions
-		// validate against, so claim writes land on the picked team.
-		TeamID string `json:"team_id"`
-	}
+
+	var req stockActionRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	issueKeys, ok := validateStockBatch(w, req.IssueKeys)
+	if !ok {
 		return
 	}
 
@@ -416,10 +490,35 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Batch-fetch, for O(1) per-action eligibility checks: (a) the Jira
+	// Claim (assign + transition) and done (transition) are user-initiated
+	// Jira writes — they must act as the acting user, not the org service
+	// account (AssignToSelf assigns to the token's user). A user with no
+	// connected Jira can't perform either, and because the route is one
+	// action that's a whole-request refusal rather than the same per-row
+	// error repeated for every key. Queue makes no Jira write, so it must
+	// not depend on secret-store availability at all: a transient token
+	// lookup shouldn't 500 a pure queue.
+	var jiraUserClient *jira.Client
+	if action == stockActionClaim || action == stockActionDone {
+		c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
+		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonNotConfigured,
+				Message: "connect your Jira to act on tickets",
+			})
+			return
+		}
+		if jerr != nil {
+			internalError(w, "stock", jerr)
+			return
+		}
+		jiraUserClient = c
+	}
+
+	// Batch-fetch, for O(1) per-item eligibility checks: (a) the Jira
 	// entities that already have an active task, and (b) the team-scoped Jira
 	// set the viewer is allowed to act on — the *same* ListActiveJiraTeamScoped
-	// read the GET deck uses, so POST eligibility can't diverge from what the
+	// read the GET deck uses, so eligibility here can't diverge from what the
 	// deck surfaced. Fail the request if either read fails.
 	var (
 		taskedEntityIDs map[string]struct{}
@@ -445,308 +544,378 @@ func (s *Server) handleJiraStockPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Claim (assign + transition) and done (transition) are
-	// user-initiated Jira writes — they must act as the acting user, not the
-	// org service account (AssignToSelf assigns to the token's user). Resolve
-	// the acting user's Jira client only when the batch actually contains a
-	// write-bearing action: a queue action synthesizes an event + task with no
-	// Jira mutation, so a queue-only request must not depend on secret-store
-	// availability (a transient token-lookup failure shouldn't 500 a pure
-	// queue). On ErrNoJiraUserCredential the client stays nil and the claim/done
-	// rows fail per-row with a connect prompt; queue rows still apply.
-	var jiraUserClient *jira.Client
-	needsUserClient := false
-	for _, a := range req.Actions {
-		if a.Action == "claim" || a.Action == "done" {
-			needsUserClient = true
-			break
-		}
-	}
-	if needsUserClient {
-		if c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID); jerr == nil {
-			jiraUserClient = c
-		} else if !errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-			internalError(w, "stock", jerr)
-			return
-		}
+	batch := &stockBatch{
+		orgID:            orgID,
+		userID:           userID,
+		teamID:           teamID,
+		action:           action,
+		jiraRules:        jiraRules,
+		localAccountID:   localAccountID,
+		localDisplayName: localDisplayName,
+		jiraUserClient:   jiraUserClient,
+		taskedEntityIDs:  taskedEntityIDs,
+		scopedJiraIDs:    scopedJiraIDs,
 	}
 
+	results := make([]stockItemResult, 0, len(issueKeys))
 	applied := 0
-	queued := 0 // number of queue actions applied — gates the scorer trigger
-	claimed := 0
-	closed := 0
-	failed := make([]stockFailure, 0)
-
-	for _, a := range req.Actions {
-		if a.Action != "queue" && a.Action != "claim" && a.Action != "done" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "unknown action"})
-			continue
+	for _, issueKey := range issueKeys {
+		result := s.applyStockItem(r, batch, issueKey)
+		if result.OK {
+			applied++
 		}
-
-		issueKey := strings.TrimSpace(a.IssueKey)
-		if issueKey == "" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "missing issue_key"})
-			continue
-		}
-
-		var entity *domain.Entity
-		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			var e error
-			entity, e = tx.Entities.GetBySource(r.Context(), orgID, "jira", issueKey)
-			return e
-		}); err != nil {
-			failed = append(failed, stockFailure{issueKey, a.Action, "failed to load entity"})
-			continue
-		}
-		if entity == nil {
-			failed = append(failed, stockFailure{issueKey, a.Action, "entity not found"})
-			continue
-		}
-
-		// Team-scope gate: mirror the GET deck (ListActiveJiraTeamScoped). A
-		// ticket whose project isn't tracked by the viewer's team(s) isn't on
-		// their deck and must not be actionable here — even if it's assigned to
-		// them — which closes the bypass where a user POSTs an off-team issue
-		// key. In local mode the scoped set is the full active Jira set, so this
-		// gate is a no-op there.
-		if _, inScope := scopedJiraIDs[entity.ID]; !inScope {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is outside your team's tracked projects"})
-			continue
-		}
-
-		// Enforce the same eligibility rules as the GET list. Prevents acting
-		// on tickets that shouldn't be in carry-over at all — stale frontend
-		// state, tampered requests, or tickets that changed since GET.
-		if entity.SnapshotJSON == "" || entity.SnapshotJSON == "{}" {
-			failed = append(failed, stockFailure{issueKey, a.Action, "no snapshot yet"})
-			continue
-		}
-		var snap domain.JiraSnapshot
-		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "invalid snapshot"})
-			continue
-		}
-
-		// Per-project rule lookup. Tickets whose project_key has no
-		// configured rules fall through every branch below — there's
-		// no terminal check, no available bucket — so the only action
-		// they support is "queue" on an assigned ticket (the
-		// synthesized event doesn't depend on status rules).
-		projectRule := domain.RuleForProject(jiraRules, projectFromKey(snap.Key))
-
-		isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == localAccountID) ||
-			(snap.AssigneeAccountID == "" && snap.Assignee == localDisplayName)
-		isUnassigned := snap.Assignee == ""
-		isAvailable := isUnassigned && projectRule != nil && projectRule.PickupContains(snap.Status)
-
-		if !isSelf && !isAvailable {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is not assigned to you and not in the available pickup queue"})
-			continue
-		}
-
-		// Defensive subtask gate: queue/claim on a parent
-		// with open subtasks would create the exact non-atomic task the main
-		// flow works hard to suppress. The GET handler already filters these
-		// out so legitimate UI flows never submit them, but subtasks could be
-		// added between GET and POST, or the request could come from a stale
-		// frontend. "done" is still allowed on the assigned branch — closing
-		// a parent with dangling subtasks is a valid cleanup action.
-		if snap.OpenSubtaskCount > 0 && a.Action != "done" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket has open subtasks — delegate those atomic subtasks directly rather than the parent"})
-			continue
-		}
-
-		// Available-bucket branches never make sense for "done" — closing an
-		// unassigned ticket from carry-over isn't a supported cleanup (the
-		// "done" flow is for orphan cleanup on your own assigned tickets that
-		// are already in a Done-rule status).
-		if isAvailable && a.Action == "done" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is not assigned to you; done is only for cleaning up your own already-complete tickets"})
-			continue
-		}
-
-		// Assigned-bucket: tickets in Done.Members are allowed through for
-		// the "done" action (no-op guard skips the Jira transition when the
-		// status is already a Done member); queue/claim on an already-done
-		// ticket is pointless, so reject those outright.
-		if isSelf && projectRule != nil && projectRule.DoneContains(snap.Status) && a.Action != "done" {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket is already in a done status — only the done action is valid"})
-			continue
-		}
-
-		if _, hasTask := taskedEntityIDs[entity.ID]; hasTask {
-			failed = append(failed, stockFailure{a.IssueKey, a.Action, "ticket already has an active task"})
-			continue
-		}
-
-		switch a.Action {
-		case "queue":
-			// Available tickets synthesize jira:issue:available (they're
-			// unassigned — a synthesized jira:issue:assigned would be a
-			// lie). Assigned tickets use jira:issue:assigned as before.
-			var eventType string
-			var eventID string
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				var e error
-				if isAvailable {
-					eventType = domain.EventJiraIssueAvailable
-					eventID, e = recordCarryOverAvailableEvent(r.Context(), tx.Events, orgID, entity.ID, snap)
-				} else {
-					eventType = domain.EventJiraIssueAssigned
-					eventID, e = recordCarryOverAssignedEvent(r.Context(), tx.Events, orgID, entity.ID, snap)
-				}
-				if e != nil {
-					return e
-				}
-				_, _, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, entity.ID, eventType, "", eventID, 0.5)
-				return e
-			}); err != nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
-				continue
-			}
-			queued++
-
-		case "claim":
-			// Claim performs Jira writes as the acting user; refuse
-			// (don't act as the bot) when they have no connected Jira.
-			if jiraUserClient == nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
-				continue
-			}
-			if projectRule == nil || projectRule.InProgressCanonical == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "in_progress canonical status not configured for this project"})
-				continue
-			}
-
-			// Do Jira mutations first: if Jira fails we bail before touching
-			// the task table, so there's no claimed-task orphan pointing at a
-			// Jira issue that never got assigned or transitioned. Claim-guard
-			// pattern skips the API calls when state is already correct —
-			// containment against InProgress.Members so a ticket in any
-			// in-progress variant isn't transitioned back to canonical. For
-			// available tickets the state check is a no-op (they're
-			// unassigned by definition), but GetClaimState is cheap and keeps
-			// one code path for both branches.
-			state := jiraUserClient.GetClaimState(r.Context(), a.IssueKey)
-			if state == nil || !state.AssignedToSelf {
-				if err := jiraUserClient.AssignToSelf(r.Context(), a.IssueKey); err != nil {
-					failed = append(failed, stockFailure{a.IssueKey, a.Action, "assign: " + err.Error()})
-					continue
-				}
-			}
-			if state == nil || !projectRule.InProgressContains(state.StatusName) {
-				if err := jiraUserClient.TransitionTo(r.Context(), a.IssueKey, projectRule.InProgressCanonical); err != nil {
-					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
-					continue
-				}
-				snap.Status = projectRule.InProgressCanonical
-			} else {
-				snap.Status = state.StatusName
-			}
-
-			// Refresh the snap with the known post-mutation state so the
-			// synthesized event metadata matches the ticket's actual Jira
-			// state at the moment of claim. Both the display name (for UI)
-			// and the account ID (for predicate matching) flip to self.
-			snap.Assignee = localDisplayName
-			snap.AssigneeAccountID = localAccountID
-
-			// Both assigned and available claim paths end with a
-			// jira:issue:assigned event — after the AssignToSelf call, the
-			// user is the assignee in Jira too, so the event metadata is
-			// accurate for either starting state.
-			var task *domain.Task
-			var claimOK bool
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				eventID, e := recordCarryOverAssignedEvent(r.Context(), tx.Events, orgID, entity.ID, snap)
-				if e != nil {
-					return fmt.Errorf("record event: %w", e)
-				}
-				task, _, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
-				if e != nil {
-					return e
-				}
-				// Claim is on the responsibility axis now,
-				// not status. status='claimed' was dropped along with
-				// status='delegated' once the claim cols took over the
-				// "who's responsible" answer. Stamp the user claim
-				// optimistically — if the task pre-existed in some
-				// non-queued state or was already claimed by someone
-				// else, surface that as a failed action rather than
-				// stealing.
-				claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), orgID, task.ID, userID)
-				return e
-			}); err != nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
-				continue
-			}
-			if !claimOK {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "task already claimed or no longer queued"})
-				continue
-			}
-			claimed++
-
-		case "done":
-			// Done transitions the ticket as the acting user; refuse
-			// (don't act as the bot) when they have no connected Jira.
-			if jiraUserClient == nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "connect your Jira to act on tickets"})
-				continue
-			}
-			if projectRule == nil || projectRule.DoneCanonical == "" {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, "done canonical status not configured for this project"})
-				continue
-			}
-			// Skip the transition when the ticket is already in any Done
-			// member (not just the canonical) — a ticket in "Verified" when
-			// Done.Members=[Resolved,Verified] is already done from TF's
-			// perspective; transitioning to Resolved would be a no-op at best
-			// and a workflow violation at worst.
-			state := jiraUserClient.GetClaimState(r.Context(), a.IssueKey)
-			if state == nil || !projectRule.DoneContains(state.StatusName) {
-				if err := jiraUserClient.TransitionTo(r.Context(), a.IssueKey, projectRule.DoneCanonical); err != nil {
-					failed = append(failed, stockFailure{a.IssueKey, a.Action, "transition: " + err.Error()})
-					continue
-				}
-			}
-			if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-				return tx.Entities.MarkClosed(r.Context(), orgID, entity.ID)
-			}); err != nil {
-				failed = append(failed, stockFailure{a.IssueKey, a.Action, err.Error()})
-				continue
-			}
-			closed++
-		}
-
-		applied++
+		results = append(results, result)
 	}
 
 	// Carry-over creates tasks without going through the poller, so no
 	// system:poll:completed fires to wake the scorer via its event-bus
-	// subscription. Poke it directly, but only when we actually produced
-	// queued tasks — done doesn't create a task at all, and claim now
-	// (post-B+) creates a status='queued' task with the user
-	// claim col stamped. UnscoredTasks would pick up those rows on its
-	// next natural cycle, so leaving the trigger off this branch is fine
-	// — scoring a user-claimed task is harmless dormant work rather than
-	// the wrong-status skip the old comment described.
-	if queued > 0 && s.scorerTrigger != nil {
+	// subscription. Poke it directly, but only for queued tasks — done
+	// creates no task at all, and claim creates a status='queued' task with
+	// the user claim col stamped, which UnscoredTasks picks up on its next
+	// natural cycle anyway (scoring a user-claimed task is harmless dormant
+	// work rather than a wrong-status skip).
+	if action == stockActionQueue && applied > 0 && s.scorerTrigger != nil {
 		s.scorerTrigger(orgID)
 	}
 
-	// Success toast with the per-action breakdown when at least one ticket
-	// applied cleanly. The frontend also shows a partial-failure warning toast
-	// if there are any failures; this one only fires on at-least-one-success.
+	// Success toast when at least one ticket applied cleanly. The frontend
+	// also shows a partial-failure warning toast if there are any failures;
+	// this one only fires on at-least-one-success.
 	if applied > 0 {
-		toast.Success(s.ws, orgID, fmt.Sprintf(
-			"Carry-over applied: %d queued, %d claimed, %d closed", queued, claimed, closed,
-		))
+		toast.Success(s.ws, orgID, fmt.Sprintf("Carry-over applied: %d %s", applied, stockActionPastTense(action)))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"applied": applied,
-		"failed":  failed,
+		"failed":  len(results) - applied,
+		"results": results,
 	})
+}
+
+// stockActionPastTense renders an action for the success toast.
+func stockActionPastTense(action string) string {
+	switch action {
+	case stockActionClaim:
+		return "claimed"
+	case stockActionDone:
+		return "closed"
+	default:
+		return "queued"
+	}
+}
+
+// validateStockBatch enforces the request-level half of the batch policy: an
+// empty list, an over-cap list, a blank or whitespace-padded key and a
+// repeated key all fail the whole call, so the per-item accounting invariant
+// (applied + failed = submitted) holds for every batch that actually runs, on
+// the keys the caller actually sent. Dropping any of them mid-loop instead
+// would make a five-key submission answer "applied: 3" with no mention of the
+// other two.
+func validateStockBatch(w http.ResponseWriter, raw []string) ([]string, bool) {
+	var v httpx.Validation
+	if len(raw) == 0 {
+		v.Invalid("issue_keys", "issue_keys must contain at least one issue key")
+	}
+	if len(raw) > maxStockBatch {
+		v.OutOfRange("issue_keys", fmt.Sprintf("issue_keys accepts at most %d keys per request", maxStockBatch))
+	}
+	seen := make(map[string]struct{}, len(raw))
+	keys := make([]string, 0, len(raw))
+	for _, key := range raw {
+		switch {
+		case strings.TrimSpace(key) == "":
+			v.Invalid("issue_keys", "issue_keys contains a blank issue key")
+			continue
+		case key != strings.TrimSpace(key):
+			// Rejected rather than trimmed. Every result row echoes the key
+			// as submitted, which is how a client matches results back to
+			// its request — silently rewriting one here would answer for a
+			// key the caller never sent.
+			v.Invalid("issue_keys", "issue_keys contains "+strings.TrimSpace(key)+" with surrounding whitespace")
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			v.Invalid("issue_keys", "issue_keys contains "+key+" more than once")
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return nil, false
+	}
+	return keys, true
+}
+
+// stockBatch is the per-request state every item in a carry-over batch reads:
+// the acting identity and team, the resolved Jira rules and client, and the
+// two eligibility index maps. Built once so a 500-key batch doesn't re-resolve
+// any of it per row.
+type stockBatch struct {
+	orgID            string
+	userID           string
+	teamID           string
+	action           string
+	jiraRules        []domain.JiraProjectStatusRules
+	localAccountID   string
+	localDisplayName string
+	// jiraUserClient is the acting user's own client, nil on the queue route
+	// (which makes no Jira write).
+	jiraUserClient  *jira.Client
+	taskedEntityIDs map[string]struct{}
+	scopedJiraIDs   map[string]struct{}
+}
+
+// applyStockItem runs one issue key through the eligibility gate and then the
+// batch's action. Every return is a result row — nothing about one key ever
+// aborts the batch — and every row is keyed by the SUBMITTED key rather than
+// by whatever the entity or its snapshot calls the ticket, so a client can
+// always match results back to what it sent.
+func (s *Server) applyStockItem(r *http.Request, b *stockBatch, issueKey string) stockItemResult {
+	result := func() stockItemResult {
+		entity, snap, rule, bucket, failure := s.resolveStockTicket(r, b, issueKey)
+		if failure != nil {
+			return *failure
+		}
+		switch b.action {
+		case stockActionQueue:
+			return s.stockQueueTicket(r, b, entity, snap, bucket)
+		case stockActionClaim:
+			return s.stockClaimTicket(r, b, entity, snap, rule)
+		default:
+			return s.stockDoneTicket(r, b, entity, rule)
+		}
+	}()
+	result.IssueKey = issueKey
+	return result
+}
+
+// stockBucket is which half of the deck a ticket sits in, as re-derived
+// server-side at action time rather than trusted from the client.
+type stockBucket int
+
+const (
+	// bucketAssigned: the ticket is assigned to the acting user.
+	bucketAssigned stockBucket = iota
+	// bucketAvailable: the ticket is unassigned and in a Pickup-rule status.
+	bucketAvailable
+)
+
+// resolveStockTicket loads a submitted issue key and enforces every
+// eligibility rule the GET deck applies, plus the per-action ones. It returns
+// the entity, its snapshot, the project's status rules (nil when the project
+// has none configured) and the bucket the ticket is in — or a populated
+// failure row, in which case the rest is unusable.
+func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey string) (*domain.Entity, domain.JiraSnapshot, *domain.JiraProjectStatusRules, stockBucket, *stockItemResult) {
+	var snap domain.JiraSnapshot
+	fail := func(reason, msg string) (*domain.Entity, domain.JiraSnapshot, *domain.JiraProjectStatusRules, stockBucket, *stockItemResult) {
+		f := stockFailed(issueKey, reason, msg)
+		return nil, snap, nil, bucketAssigned, &f
+	}
+
+	var entity *domain.Entity
+	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
+		var e error
+		entity, e = tx.Entities.GetBySource(r.Context(), b.orgID, "jira", issueKey)
+		return e
+	}); err != nil {
+		stockLog.Error("stock: entity lookup failed", "issue", issueKey, "error", err)
+		return fail(httpx.ReasonInternal, "failed to load ticket"+httpx.LocalDetail(err))
+	}
+	if entity == nil {
+		return fail(httpx.ReasonNotFound, "ticket not found")
+	}
+
+	// Team-scope gate: mirror the GET deck (ListActiveJiraTeamScoped). A
+	// ticket whose project isn't tracked by the viewer's team(s) isn't on
+	// their deck and must not be actionable here — even if it's assigned to
+	// them — which closes the bypass where a user submits an off-team issue
+	// key. In local mode the scoped set is the full active Jira set, so this
+	// gate is a no-op there.
+	if _, inScope := b.scopedJiraIDs[entity.ID]; !inScope {
+		return fail(httpx.ReasonNotFound, "ticket is outside your team's tracked projects")
+	}
+
+	// Enforce the same eligibility rules as the GET list. Prevents acting
+	// on tickets that shouldn't be in carry-over at all — stale frontend
+	// state, tampered requests, or tickets that changed since GET.
+	if entity.SnapshotJSON == "" || entity.SnapshotJSON == "{}" {
+		return fail(httpx.ReasonConflict, "no snapshot yet")
+	}
+	if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil {
+		stockLog.Error("stock: invalid snapshot", "issue", issueKey, "entity", entity.ID, "error", err)
+		return fail(httpx.ReasonInternal, "invalid snapshot")
+	}
+
+	// Per-project rule lookup. Tickets whose project_key has no configured
+	// rules fall through every status branch below — there's no terminal
+	// check and no available bucket — so the only action they support is
+	// queue on an assigned ticket (the synthesized event doesn't depend on
+	// status rules).
+	rule := domain.RuleForProject(b.jiraRules, projectFromKey(snap.Key))
+
+	isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == b.localAccountID) ||
+		(snap.AssigneeAccountID == "" && snap.Assignee == b.localDisplayName)
+	isAvailable := snap.Assignee == "" && rule != nil && rule.PickupContains(snap.Status)
+	if !isSelf && !isAvailable {
+		return fail(httpx.ReasonConflict, "ticket is not assigned to you and not in the available pickup queue")
+	}
+	bucket := bucketAssigned
+	if !isSelf {
+		bucket = bucketAvailable
+	}
+
+	// Defensive subtask gate: queue/claim on a parent with open subtasks
+	// would create the exact non-atomic task the main flow works hard to
+	// suppress. The GET handler already filters these out so legitimate UI
+	// flows never submit them, but subtasks could be added between GET and
+	// POST, or the request could come from a stale frontend. done is still
+	// allowed on the assigned branch — closing a parent with dangling
+	// subtasks is a valid cleanup action.
+	if snap.OpenSubtaskCount > 0 && b.action != stockActionDone {
+		return fail(httpx.ReasonConflict, "ticket has open subtasks — delegate those atomic subtasks directly rather than the parent")
+	}
+
+	// The available bucket never makes sense for done — closing an
+	// unassigned ticket from carry-over isn't a supported cleanup (done is
+	// for orphan cleanup on your own assigned tickets that are already in a
+	// Done-rule status).
+	if bucket == bucketAvailable && b.action == stockActionDone {
+		return fail(httpx.ReasonConflict, "ticket is not assigned to you; done is only for cleaning up your own already-complete tickets")
+	}
+
+	// Assigned bucket: tickets in Done.Members are allowed through for done
+	// (a no-op guard skips the Jira transition when the status is already a
+	// Done member); queue/claim on an already-done ticket is pointless, so
+	// reject those outright.
+	if bucket == bucketAssigned && rule != nil && rule.DoneContains(snap.Status) && b.action != stockActionDone {
+		return fail(httpx.ReasonConflict, "ticket is already in a done status — only the done action is valid")
+	}
+
+	if _, hasTask := b.taskedEntityIDs[entity.ID]; hasTask {
+		return fail(httpx.ReasonConflict, "ticket already has an active task")
+	}
+	return entity, snap, rule, bucket, nil
+}
+
+// stockQueueTicket synthesizes the event a carry-over ticket has no upstream
+// for and mints the task off it. No Jira write.
+func (s *Server) stockQueueTicket(r *http.Request, b *stockBatch, entity *domain.Entity, snap domain.JiraSnapshot, bucket stockBucket) stockItemResult {
+	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
+		// Available tickets synthesize jira:issue:available (they're
+		// unassigned — a synthesized jira:issue:assigned would be a lie).
+		// Assigned tickets use jira:issue:assigned.
+		eventType := domain.EventJiraIssueAssigned
+		record := recordCarryOverAssignedEvent
+		if bucket == bucketAvailable {
+			eventType = domain.EventJiraIssueAvailable
+			record = recordCarryOverAvailableEvent
+		}
+		eventID, e := record(r.Context(), tx.Events, b.orgID, entity.ID, snap)
+		if e != nil {
+			return e
+		}
+		_, _, e = tx.Tasks.FindOrCreate(r.Context(), b.orgID, b.teamID, entity.ID, eventType, "", eventID, 0.5)
+		return e
+	}); err != nil {
+		stockLog.Error("stock: queue failed", "issue", snap.Key, "error", err)
+		return stockFailed(snap.Key, httpx.ReasonInternal, "could not queue the ticket"+httpx.LocalDetail(err))
+	}
+	return stockItemResult{IssueKey: snap.Key, OK: true}
+}
+
+// stockClaimTicket assigns the ticket to the acting user in Jira, transitions
+// it to the project's in-progress status, then mints the task and stamps the
+// user claim.
+func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain.Entity, snap domain.JiraSnapshot, rule *domain.JiraProjectStatusRules) stockItemResult {
+	if rule == nil || rule.InProgressCanonical == "" {
+		return stockFailed(snap.Key, httpx.ReasonNotConfigured, "in_progress canonical status not configured for this project")
+	}
+
+	// Do Jira mutations first: if Jira fails we bail before touching the task
+	// table, so there's no claimed-task orphan pointing at a Jira issue that
+	// never got assigned or transitioned. Claim-guard pattern skips the API
+	// calls when state is already correct — containment against
+	// InProgress.Members so a ticket in any in-progress variant isn't
+	// transitioned back to canonical. For available tickets the state check is
+	// a no-op (they're unassigned by definition), but GetClaimState is cheap
+	// and keeps one code path for both buckets.
+	state := b.jiraUserClient.GetClaimState(r.Context(), snap.Key)
+	if state == nil || !state.AssignedToSelf {
+		if err := b.jiraUserClient.AssignToSelf(r.Context(), snap.Key); err != nil {
+			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "assign: "+err.Error())
+		}
+	}
+	if state == nil || !rule.InProgressContains(state.StatusName) {
+		if err := b.jiraUserClient.TransitionTo(r.Context(), snap.Key, rule.InProgressCanonical); err != nil {
+			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
+		}
+		snap.Status = rule.InProgressCanonical
+	} else {
+		snap.Status = state.StatusName
+	}
+
+	// Refresh the snap with the known post-mutation state so the synthesized
+	// event metadata matches the ticket's actual Jira state at the moment of
+	// claim. Both the display name (for UI) and the account ID (for predicate
+	// matching) flip to self.
+	snap.Assignee = b.localDisplayName
+	snap.AssigneeAccountID = b.localAccountID
+
+	// Both buckets end with a jira:issue:assigned event — after the
+	// AssignToSelf call the user is the assignee in Jira too, so the event
+	// metadata is accurate for either starting state.
+	var claimOK bool
+	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
+		eventID, e := recordCarryOverAssignedEvent(r.Context(), tx.Events, b.orgID, entity.ID, snap)
+		if e != nil {
+			return fmt.Errorf("record event: %w", e)
+		}
+		task, _, e := tx.Tasks.FindOrCreate(r.Context(), b.orgID, b.teamID, entity.ID, domain.EventJiraIssueAssigned, "", eventID, 0.5)
+		if e != nil {
+			return e
+		}
+		// Claim is on the responsibility axis, not status. Stamp the user
+		// claim optimistically — if the task pre-existed in some non-queued
+		// state or was already claimed by someone else, surface that as a
+		// failed row rather than stealing.
+		claimOK, e = tx.Tasks.ClaimQueuedForUser(r.Context(), b.orgID, task.ID, b.userID)
+		return e
+	}); err != nil {
+		stockLog.Error("stock: claim failed", "issue", snap.Key, "error", err)
+		return stockFailed(snap.Key, httpx.ReasonInternal, "could not claim the ticket"+httpx.LocalDetail(err))
+	}
+	if !claimOK {
+		return stockFailed(snap.Key, httpx.ReasonConflict, "task already claimed or no longer queued")
+	}
+	return stockItemResult{IssueKey: snap.Key, OK: true}
+}
+
+// stockDoneTicket transitions the ticket to the project's done status and
+// closes the entity. No task is minted.
+func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.Entity, rule *domain.JiraProjectStatusRules) stockItemResult {
+	issueKey := entity.SourceID
+	if rule == nil || rule.DoneCanonical == "" {
+		return stockFailed(issueKey, httpx.ReasonNotConfigured, "done canonical status not configured for this project")
+	}
+	// Skip the transition when the ticket is already in any Done member (not
+	// just the canonical) — a ticket in "Verified" when
+	// Done.Members=[Resolved,Verified] is already done from TF's perspective;
+	// transitioning to Resolved would be a no-op at best and a workflow
+	// violation at worst.
+	state := b.jiraUserClient.GetClaimState(r.Context(), issueKey)
+	if state == nil || !rule.DoneContains(state.StatusName) {
+		if err := b.jiraUserClient.TransitionTo(r.Context(), issueKey, rule.DoneCanonical); err != nil {
+			return stockFailed(issueKey, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
+		}
+	}
+	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
+		return tx.Entities.MarkClosed(r.Context(), b.orgID, entity.ID)
+	}); err != nil {
+		stockLog.Error("stock: close failed", "issue", issueKey, "entity", entity.ID, "error", err)
+		return stockFailed(issueKey, httpx.ReasonInternal, "could not close the ticket"+httpx.LocalDetail(err))
+	}
+	return stockItemResult{IssueKey: issueKey, OK: true}
 }
 
 // recordCarryOverAssignedEvent writes a synthesized jira:issue:assigned event

@@ -275,7 +275,7 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 	triggerID := opts.TriggerID
 
 	// Pair creator_user_id with trigger_type per the audit-honesty
-	// invariant. Manual runs (swipe-delegate / drag-to-Agent / factory
+	// invariant. Manual runs (the delegate route / drag-to-Agent / factory
 	// drop) carry the initiating user's id as the creator. Event-
 	// triggered runs carry NULL — there's no human delegator. The
 	// schema CHECK enforces this pairing so the seeder can't drift.

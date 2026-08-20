@@ -39,7 +39,7 @@ type Server struct {
 	prompts          db.PromptStore
 	swipes           db.SwipeStore
 	agents           db.AgentStore           // resolves the org's agent for claim stamps
-	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on swipe-delegate / factory-delegate
+	teamAgents       db.TeamAgentStore       // re-checks team_agents.enabled on task-delegate / factory-delegate
 	users            db.UsersStore           // display_name + Jira binding on the user row; host-scoped GitHub identity via user_github_identities
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
@@ -48,7 +48,7 @@ type Server struct {
 	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
 	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
-	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, swipe-discard cleanup)
+	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
 	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, projects, prompts)
 	orgs             db.OrgsStore            // per-org settings (GitHub/Jira base URLs, poll intervals, clone protocol) post-internal/config deletion
@@ -392,7 +392,7 @@ func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (
 
 // agentEnabledForTeam returns the resolved agent and whether the
 // team_agents.enabled flag is true for it *on the given team*. This is
-// the acceptance rule "swipe-to-delegate re-checks
+// the acceptance rule "delegating re-checks
 // team_agents.enabled at delegate time," now correctly scoped to the
 // acting team rather than always the org default — so a
 // multi-team user delegating for team B is gated on B's bot setting.
@@ -970,11 +970,18 @@ func (s *Server) routes() {
 	// see handleTaskList.
 	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
-	s.apiMutating("POST /api/tasks/{id}/swipe", s.handleSwipe)
-	s.apiMutating("POST /api/tasks/{id}/snooze", s.handleSnooze)
+	// The task's field-write path. It replaces the former /swipe
+	// multiplexer, /snooze and /advance: the lifecycle axis and the wake
+	// time are columns, and a route per column value is how one gesture
+	// grew six arms with different required fields, different authz and
+	// different response shapes. The verbs below survive because each
+	// carries an effect a field write can't express — an external Jira
+	// write, a spawned run, artifact teardown, an audit reversal.
+	s.apiMutating("PATCH /api/tasks/{id}", s.handleTaskPatch)
+	s.apiMutating("POST /api/tasks/{id}/claim", s.handleTaskClaim)
+	s.apiMutating("POST /api/tasks/{id}/delegate", s.handleTaskDelegate)
 	s.apiMutating("POST /api/tasks/{id}/undo", s.handleUndo)
 	s.apiMutating("POST /api/tasks/{id}/requeue", s.handleRequeue)
-	s.apiMutating("POST /api/tasks/{id}/advance", s.handleTaskAdvance)
 
 	ag := &agentHandler{tx: s.tx, ws: s.ws, spawner: func() *delegate.Spawner { return s.spawner }, reconciler: func() *reconcile.Reconciler { return s.reconciler }}
 	s.api("GET /api/agent/conversations/{conversationID}", ag.handleAgentStatus)
@@ -1096,15 +1103,21 @@ func (s *Server) routes() {
 	// apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
-	// **Declared exception.** The stock deck is a composite the discovery UI
-	// deals from — a readiness status plus two partitions of the same set —
-	// not a row list a client walks, and the deck's own restructure is its own
-	// ticket. Converting the envelope here without that restructure would mint
-	// a contract the next change immediately breaks. It reads the team's whole
-	// active Jira set, bounded by the team's tracked projects rather than by a
-	// window; the deck is meant to be dealt whole.
+	// **Declared exception** to the list-envelope rule. The stock deck is a
+	// composite the discovery UI deals from — a readiness status plus two
+	// partitions of the same set — not a row list a client walks. It reads the
+	// team's whole active Jira set, bounded by the team's tracked projects
+	// rather than by a window; the deck is meant to be dealt whole. What it
+	// does hold to is one shape in every state: the status field never changes
+	// which keys are present.
 	s.api("GET /api/jira/stock", s.handleJiraStockGet)
-	s.apiMutating("POST /api/jira/stock", s.handleJiraStockPost)
+	// One route per carry-over action. The arms share only an eligibility
+	// gate: queue mints a task off a synthesized event with no Jira write,
+	// claim makes two external Jira writes before it touches a row, and done
+	// transitions the ticket and closes the entity without minting anything.
+	s.apiMutating("POST /api/jira/stock/queue", s.handleJiraStockQueue)
+	s.apiMutating("POST /api/jira/stock/claim", s.handleJiraStockClaim)
+	s.apiMutating("POST /api/jira/stock/done", s.handleJiraStockDone)
 
 	// Artifact-id-addressed endpoints back both the GitHub-native PR preview and
 	// the review preview (kind-dispatched inside the handlers). The review path
