@@ -31,7 +31,7 @@ func TestConversationStore_SQLite(t *testing.T) {
 }
 
 // TestConversationStore_SQLite_ReturnedRow runs the returned-row conformance
-// suite (TFAC-861) against the SQLite impl.
+// suite against the SQLite impl.
 func TestConversationStore_SQLite_ReturnedRow(t *testing.T) {
 	dbtest.RunConversationReturnedRowConformance(t, func(t *testing.T) (db.ConversationStore, db.ConversationQueueStore, string, string, dbtest.ConversationSeeder) {
 		t.Helper()

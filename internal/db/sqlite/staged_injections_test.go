@@ -55,7 +55,7 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 }
 
 // TestStagedInjectionStore_SQLite_ReturnedRow runs the returned-row arm of
-// the staged-injection conformance suite (TFAC-869) against the SQLite impl.
+// the staged-injection conformance suite against the SQLite impl.
 func TestStagedInjectionStore_SQLite_ReturnedRow(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)

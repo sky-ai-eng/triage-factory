@@ -129,7 +129,7 @@ type MessageWindow struct {
 	Limit    int
 }
 
-// Returned-row shapes (TFAC-861). The lifecycle writes below split by which
+// Returned-row shapes. The lifecycle writes below split by which
 // table they land on, and the split decides what each returns:
 //
 //   - conversations writes (Complete, SetSession, SetWorktreePath and their

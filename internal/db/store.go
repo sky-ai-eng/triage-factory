@@ -17,21 +17,11 @@ import (
 //
 // A single-row Insert/Update/Upsert returns the row it persisted, off
 // RETURNING on the write statement, sharing the point read's column list and
-// scanner. RepositoryStore's doc states the rule and its exemptions in full;
-// ArtifactStore, PromptStore, ProjectStore, EventHandlerStore, BlueprintStore,
-// EntityStore, AgentStore, TeamAgentStore, CuratorHomeStore,
-// PlacementOverrideStore, JiraAppsStore and TeamsStore hold it too. Every
-// write in those stores that still returns a bare error carries its exemption
-// at the method.
-//
-// Outside that list a store either states its own exemption at the interface
+// scanner. RepositoryStore's doc states the rule in full; every store in this
+// package holds it now, or states its own exemption at the interface
 // (WorkspaceSnapshotStore, whose writes deliberately answer with the CAS
-// outcome rather than a row) or is unconverged.
-//
-// TODO(TFAC-838): the unconverged stores each carry a marker on their own
-// interface naming their unconverged writes and the sub-issue that tracks
-// them — TFAC-860 through TFAC-871. Don't add a new write in the old shape
-// anywhere.
+// outcome rather than a row). Exceptions are documented at the method or
+// interface that carries them, not here.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.

@@ -44,7 +44,7 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 }
 
 // TestTaskMemoryStore_SQLite_ReturnedRowConformance runs the returned-row
-// suite (TFAC-867) against the SQLite impl. SQLite has one connection and no
+// suite against the SQLite impl. SQLite has one connection and no
 // RLS, so there is no separate app-pool wiring the way the Postgres suite
 // needs — this single run covers both the plain and System variants.
 func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {

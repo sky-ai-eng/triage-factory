@@ -41,7 +41,7 @@ func TestConversationStore_Postgres(t *testing.T) {
 }
 
 // TestConversationStore_Postgres_ReturnedRow runs the returned-row
-// conformance suite (TFAC-861) against the admin pool — see
+// conformance suite against the admin pool — see
 // TestConversationStore_Postgres_ReturnedRow_AppPool for the RLS-under-claims
 // wiring that exercises the RETURNING visibility property directly.
 func TestConversationStore_Postgres_ReturnedRow(t *testing.T) {

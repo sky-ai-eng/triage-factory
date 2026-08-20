@@ -136,7 +136,7 @@ type TaskListFilter struct {
 //     three-state HandoffResult so callers can distinguish no-op
 //     from refused.
 //
-// Returned-row shape (TFAC-860): Get's point read projects a task joined to
+// Returned-row shape: Get's point read projects a task joined to
 // its entity (title, url, source fields, the open-subtask and Slack-message
 // counts) — a join a single UPDATE ... RETURNING cannot reproduce, and
 // SQLite has no data-modifying CTE to fake it with. Every write below that

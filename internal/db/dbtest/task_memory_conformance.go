@@ -550,7 +550,7 @@ func RunTaskMemoryStoreConformance(t *testing.T, mk TaskMemoryStoreFactory) {
 }
 
 // RunTaskMemoryReturnedRowConformance covers the returned-row standard
-// (TFAC-867) for TaskMemoryStore's four single-row writes: UpsertAgentMemory,
+// for TaskMemoryStore's four single-row writes: UpsertAgentMemory,
 // UpsertAgentMemorySystem, UpdateConversationMemoryHumanContent, and
 // UpdateConversationMemoryHumanContentSystem. Each hands back the identical
 // shape GetMemoriesForEntity(System) would show for the same row — including

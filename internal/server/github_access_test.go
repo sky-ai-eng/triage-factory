@@ -216,8 +216,8 @@ func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgI
 
 // setActiveNilStore is a GitHubAppsStore whose SetActive always answers
 // (nil, nil) — the shape SetActive takes when the row it was about to flip
-// isn't there any more (TFAC-863). Every other method delegates to the real
-// store through the embedded interface.
+// isn't there any more. Every other method delegates to the real store
+// through the embedded interface.
 type setActiveNilStore struct{ db.GitHubAppsStore }
 
 func (setActiveNilStore) SetActive(context.Context, string, bool) (*domain.OrgGitHubApp, error) {
@@ -580,7 +580,7 @@ func TestGitHubAppCutover_RegistrationVanishesUnderTheGuard(t *testing.T) {
 // can make the registration vanish between that read and the cutover's
 // SetActive, so there is no real interleaving left to race for; this forces
 // the store's answer directly instead, to prove the handler holds on its own
-// if SetActive were ever to report it flipped nothing (TFAC-863) — the same
+// if SetActive were ever to report it flipped nothing — the same
 // unchecked-UPDATE hole the file's header describes, now closed on the write
 // side rather than only guarded on the read side.
 func TestGitHubAppCutover_SetActiveReportsNoRow(t *testing.T) {

@@ -936,7 +936,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 	})
 
-	// --- Returned-row standard (TFAC-860) ---
+	// --- Returned-row standard ---
 
 	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
 		// The returned-row standard on TaskStore's ten converted writes:
