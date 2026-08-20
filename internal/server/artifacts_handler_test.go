@@ -765,7 +765,7 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	taskID = fixtureUUID("t_" + suffix)
 	// conversation_memory row so the human-verdict UPDATE has a target (the termination
 	// upsert guarantees this in production).
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",
@@ -792,7 +792,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'queued', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "00000000-0000-4000-8000-000000000023")
 	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES ('r_ab', '00000000-0000-4000-8000-000000000023', 'p_ab', 'completed', 'manual', ?, 0)`, brID)
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "e_ab", "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "e_ab", "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	a := domain.NewPullRequestArtifact(owner+"/"+repo, number, "PR_node", "feature/x", "main",

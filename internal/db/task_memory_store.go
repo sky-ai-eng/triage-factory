@@ -50,10 +50,6 @@ import (
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
-// TODO(TFAC-867): these single-row writes still return a bare error rather
-// than the row they persisted: UpsertAgentMemory, UpsertAgentMemorySystem,
-// UpdateConversationMemoryHumanContent,
-// UpdateConversationMemoryHumanContentSystem.
 type TaskMemoryStore interface {
 	// UpsertAgentMemory writes the agent-side memory row for a conversation.
 	// Empty / whitespace-only content canonicalizes to SQL NULL on
@@ -71,14 +67,19 @@ type TaskMemoryStore interface {
 	// after a retry overwrites agent_content but preserves the row's
 	// id, created_at, and any human_content the user has already
 	// attached.
-	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
+	//
+	// Returns the stored row, sourced from RETURNING on the write statement
+	// itself — including the producing conversation's naming facts
+	// (StepIndex, PromptName) a caller would otherwise have to re-read
+	// GetMemoriesForEntity(System) to see, projected through the same join.
+	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
 
 	// UpsertAgentMemorySystem is the admin-pool variant for the
 	// delegate spawner's post-completion gate teardown. Fires inside
 	// the runAgent goroutine, which has no JWT-claims context, so the
 	// write routes around RLS via BYPASSRLS. Same idempotency +
-	// NULL-on-empty contract as the non-System variant.
-	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
+	// NULL-on-empty contract and returned row as the non-System variant.
+	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
 
 	// UpdateConversationMemoryHumanContent records the human's verdict on a
 	// conversation's agent draft into the conversation_memory row keyed by
@@ -89,15 +90,16 @@ type TaskMemoryStore interface {
 	// Empty / whitespace-only content canonicalizes to NULL, matching
 	// UpsertAgentMemory's agent_content handling.
 	//
-	// A missing row is logged-and-returned-nil rather than failing
-	// the call: the only way a conversationID with no row reaches here is a
-	// non-agent review path or a cleanup race, and failing the
-	// response after GitHub already accepted the review would be
-	// worse than the missed memory write.
+	// Returns the stored row on a hit, sourced from RETURNING on the write
+	// statement itself. A missing row is a nil row with a nil error — an
+	// answer, not an error — logged and not fatal: the only way a
+	// conversationID with no row reaches here is a non-agent review path or a
+	// cleanup race, and failing the response after GitHub already accepted
+	// the review would be worse than the missed memory write.
 	//
 	// App pool only — every caller (reviews handler, artifact-PR approve
 	// handler, swipe-discard cleanup) runs under request claims.
-	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error
+	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
 
 	// UpdateConversationMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
 	// of UpdateConversationMemoryHumanContent for the artifact reconciler (TFAC-464 β),
@@ -111,11 +113,11 @@ type TaskMemoryStore interface {
 	// version, superseding any approval-time account. The reconciler composes
 	// the note over the conversation's WHOLE artifact set each time one
 	// resolves, so a branch-then-PR conversation accumulates correctly without
-	// an append and a repeated cycle is idempotent. Same empty→NULL +
-	// missing-row-logged-not-fatal contract as the app-pool variant. org_id
-	// stays bound as defense in depth; SQLite collapses onto the one
-	// connection.
-	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error
+	// an append and a repeated cycle is idempotent. Same empty→NULL,
+	// missing-row-is-a-nil-answer, and returned-row contract as the app-pool
+	// variant. org_id stays bound as defense in depth; SQLite collapses onto
+	// the one connection.
+	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
 	// this entity through conversation_memory_entities — the conversation

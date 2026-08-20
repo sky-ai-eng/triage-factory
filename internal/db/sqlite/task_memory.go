@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -37,9 +38,15 @@ func newTaskMemoryStore(q, _ queryer) db.TaskMemoryStore { return &taskMemorySto
 
 var _ db.TaskMemoryStore = (*taskMemoryStore)(nil)
 
-func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error {
+// UpsertAgentMemory returns the stored row, sourced from RETURNING on the
+// write statement itself. SQLite's RETURNING clause forbids the join
+// taskMemorySelect uses, so the producing conversation's naming facts
+// (StepIndex, PromptName) become correlated scalar subqueries in
+// taskMemoryRowColumns instead — same restriction sqliteClaimReturningColumns
+// (conversation.go) exists for.
+func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.TaskMemory{}, err
 	}
 	var agentContent any
 	if strings.TrimSpace(content) != "" {
@@ -49,64 +56,58 @@ func (s *taskMemoryStore) UpsertAgentMemory(ctx context.Context, orgID, conversa
 	if blueprintRunID != "" {
 		blueprintRun = blueprintRunID
 	}
-	_, err := s.q.ExecContext(ctx, `
+	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx, `
 		INSERT INTO conversation_memory (id, conversation_id, entity_id, blueprint_run_id, agent_content, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id) DO UPDATE SET agent_content = excluded.agent_content, blueprint_run_id = excluded.blueprint_run_id
-	`, uuid.New().String(), conversationID, entityID, blueprintRun, agentContent, time.Now().UTC())
-	return err
+		RETURNING `+taskMemoryRowColumns,
+		uuid.New().String(), conversationID, entityID, blueprintRun, agentContent, time.Now().UTC()))
+	if err != nil {
+		return domain.TaskMemory{}, fmt.Errorf("upsert conversation_memory: %w", err)
+	}
+	return mem, nil
 }
 
-func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error {
+func (s *taskMemoryStore) UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error) {
 	return s.UpsertAgentMemory(ctx, orgID, conversationID, entityID, blueprintRunID, content)
 }
 
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error {
+// UpdateConversationMemoryHumanContent returns the stored row on a hit.
+// RETURNING answers "did this land" and "what does the row say now" in one
+// statement: SQLite reports a row here whenever the WHERE clause matched,
+// regardless of whether the SET assignment actually changed a value, so zero
+// rows back means no row matched — a nil row with a nil error, logged and not
+// fatal (see the interface doc).
+func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	var humanContent any
 	if strings.TrimSpace(content) != "" {
 		humanContent = content
 	}
-	res, err := s.q.ExecContext(ctx,
-		`UPDATE conversation_memory SET human_content = ? WHERE conversation_id = ?`,
-		humanContent, conversationID,
-	)
+	mem, err := scanTaskMemory(s.q.QueryRowContext(ctx,
+		`UPDATE conversation_memory SET human_content = ? WHERE conversation_id = ? RETURNING `+taskMemoryRowColumns,
+		humanContent, conversationID))
+	if errors.Is(err, sql.ErrNoRows) {
+		// Logged-and-returned-nil: if the conversation_memory row genuinely
+		// doesn't exist (cleanup race, taken-over conversation, etc.), the
+		// human's submit shouldn't fail. The agent-side upsert path
+		// will surface its own warning if it failed earlier.
+		memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
+		return nil, nil
+	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		// In SQLite, RowsAffected can be 0 both when no row matches
-		// and when the UPDATE is a no-op (writing the same human_content
-		// again, or NULL to an already-NULL row). Verify existence
-		// before claiming the row is missing.
-		var exists int
-		err := s.q.QueryRowContext(ctx,
-			`SELECT 1 FROM conversation_memory WHERE conversation_id = ? LIMIT 1`,
-			conversationID,
-		).Scan(&exists)
-		switch err {
-		case nil:
-			// Matching row exists; the UPDATE was a no-op.
-		case sql.ErrNoRows:
-			// Logged-and-returned-nil: if the conversation_memory row genuinely
-			// doesn't exist (cleanup race, taken-over conversation, etc.), the
-			// human's submit shouldn't fail. The agent-side upsert path
-			// will surface its own warning if it failed earlier.
-			memoryLog.Warn("no conversation_memory row; human_content not recorded", "conversation_id", conversationID)
-		default:
-			memoryLog.Warn("verify conversation_memory row after no-op human_content update failed", "conversation_id", conversationID, "error", err)
-		}
-	}
-	return nil
+	return &mem, nil
 }
 
 // UpdateConversationMemoryHumanContentSystem is identical to UpdateConversationMemoryHumanContent
 // in SQLite: local mode is single-tenant (N=1) with no RLS, so there is no
 // admin/app pool split. The method exists for parity with the Postgres store,
 // where the reconciler (no JWT-claims context) needs the admin pool. TFAC-464.
-func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error {
+func (s *taskMemoryStore) UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error) {
 	return s.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, content)
 }
 
@@ -185,27 +186,51 @@ const taskMemorySelect = `
 	LEFT JOIN prompts p ON p.id = c.prompt_id
 `
 
-// scanTaskMemories drains a conversation_memory result set (the shared column list) into
-// materialized TaskMemory rows.
+// taskMemoryRowColumns is the RETURNING-safe mirror of taskMemorySelect's
+// projection, in the same order scanTaskMemory reads them: SQLite's
+// RETURNING clause forbids the LEFT JOIN taskMemorySelect uses, so the
+// producing conversation's naming facts become correlated scalar subqueries
+// against the bare conversations/prompts table names instead — the same
+// restriction sqliteClaimReturningColumns (conversation.go) exists for. Every
+// write below RETURNs it.
+const taskMemoryRowColumns = `
+	id, conversation_id, entity_id, blueprint_run_id, agent_content, human_content, created_at,
+	(SELECT c.blueprint_step_index FROM conversations c WHERE c.id = conversation_memory.conversation_id),
+	(SELECT p.name FROM conversations c JOIN prompts p ON p.id = c.prompt_id WHERE c.id = conversation_memory.conversation_id)
+`
+
+// scanTaskMemory decodes one row in taskMemorySelect/taskMemoryRowColumns
+// order — shared by the multi-row entity reads (via scanTaskMemories) and the
+// single-row writes' RETURNING.
+func scanTaskMemory(row interface{ Scan(...any) error }) (domain.TaskMemory, error) {
+	var m domain.TaskMemory
+	var blueprintRunID, agentContent, humanContent, promptName sql.NullString
+	var stepIndex sql.NullInt64
+	var createdAt time.Time
+	if err := row.Scan(&m.ID, &m.ConversationID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
+		&stepIndex, &promptName); err != nil {
+		return domain.TaskMemory{}, err
+	}
+	m.BlueprintRunID = blueprintRunID.String
+	m.Content = materializeMemory(agentContent.String, humanContent.String)
+	m.CreatedAt = createdAt
+	if stepIndex.Valid {
+		idx := int(stepIndex.Int64)
+		m.StepIndex = &idx
+	}
+	m.PromptName = promptName.String
+	return m, nil
+}
+
+// scanTaskMemories drains a conversation_memory result set into materialized
+// TaskMemory rows, one scanTaskMemory call per row.
 func scanTaskMemories(rows *sql.Rows) ([]domain.TaskMemory, error) {
 	var out []domain.TaskMemory
 	for rows.Next() {
-		var m domain.TaskMemory
-		var blueprintRunID, agentContent, humanContent, promptName sql.NullString
-		var stepIndex sql.NullInt64
-		var createdAt time.Time
-		if err := rows.Scan(&m.ID, &m.ConversationID, &m.EntityID, &blueprintRunID, &agentContent, &humanContent, &createdAt,
-			&stepIndex, &promptName); err != nil {
+		m, err := scanTaskMemory(rows)
+		if err != nil {
 			return nil, err
 		}
-		m.BlueprintRunID = blueprintRunID.String
-		m.Content = materializeMemory(agentContent.String, humanContent.String)
-		m.CreatedAt = createdAt
-		if stepIndex.Valid {
-			idx := int(stepIndex.Int64)
-			m.StepIndex = &idx
-		}
-		m.PromptName = promptName.String
 		out = append(out, m)
 	}
 	return out, rows.Err()

@@ -28,7 +28,7 @@ func seedPgConversationWithMemory(t *testing.T, h *pgtest.Harness, stores db.Sto
 		t.Fatalf("seed conversation: %v", err)
 	}
 	ctx := context.Background()
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, "", narrative); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, "", narrative); err != nil {
 		t.Fatalf("UpsertAgentMemorySystem: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {

@@ -43,6 +43,33 @@ func TestTaskMemoryStore_SQLite(t *testing.T) {
 	})
 }
 
+// TestTaskMemoryStore_SQLite_ReturnedRowConformance runs the returned-row
+// suite (TFAC-867) against the SQLite impl. SQLite has one connection and no
+// RLS, so there is no separate app-pool wiring the way the Postgres suite
+// needs — this single run covers both the plain and System variants.
+func TestTaskMemoryStore_SQLite_ReturnedRowConformance(t *testing.T) {
+	dbtest.RunTaskMemoryReturnedRowConformance(t, func(t *testing.T) (db.TaskMemoryStore, string, dbtest.TaskMemorySeeder) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		seed := dbtest.TaskMemorySeeder{
+			Conversation: func(t *testing.T, suffix string) (conversationID, entityID string) {
+				t.Helper()
+				return seedSQLiteConversationForTaskMemory(t, conn, suffix)
+			},
+			BlueprintRun: func(t *testing.T, suffix string) (blueprintRunID string) {
+				t.Helper()
+				return seedSQLiteBlueprintRunForTaskMemory(t, conn, suffix)
+			},
+			Role: func(t *testing.T, conversationID, entityID string) string {
+				t.Helper()
+				return roleForSQLiteJoinRow(t, conn, conversationID, entityID)
+			},
+		}
+		return stores.TaskMemory, runmode.LocalDefaultOrgID, seed
+	})
+}
+
 // roleForSQLiteJoinRow reads back conversation_memory_entities.role directly — the
 // store interface has no role-returning read, so the
 // RecordEntityTouchSystem precedence conformance subtest needs a raw
@@ -71,13 +98,13 @@ func TestTaskMemoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 
 	const badOrg = "11111111-1111-1111-1111-111111111111"
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemory(non-local org) should error")
 	}
-	if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, badOrg, "r", "e", "", "x"); err == nil {
 		t.Error("UpsertAgentMemorySystem(non-local org) should error")
 	}
-	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
+	if _, err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, badOrg, "r", "x"); err == nil {
 		t.Error("UpdateConversationMemoryHumanContent(non-local org) should error")
 	}
 	if _, err := stores.TaskMemory.GetMemoriesForEntity(ctx, badOrg, "e"); err == nil {
@@ -104,7 +131,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	ctx := context.Background()
 
 	conv1, entityID := seedSQLiteConversationForTaskMemory(t, conn, "count-1")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv1, entityID, "", "first"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv1, entityID, domain.MemoryRolePrimary); err != nil {
@@ -118,7 +145,7 @@ func TestTaskMemoryStore_SQLite_CountMemoriesForEntitySystem(t *testing.T) {
 	}
 
 	conv2, _ := seedSQLiteConversationForTaskMemory(t, conn, "count-2")
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conv2, entityID, "", "second"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 	if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, runmode.LocalDefaultOrgID, conv2, entityID, domain.MemoryRoleTouched); err != nil {

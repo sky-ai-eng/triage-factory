@@ -28,7 +28,7 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	t.Helper()
 	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
 	taskID = fixtureUUID("t_" + suffix)
-	if err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, fixtureUUID("e_"+suffix), "", "agent self-report"); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
 	line := 3
