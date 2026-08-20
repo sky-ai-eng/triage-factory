@@ -17,8 +17,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// reviewFreshnessOut is the slice of reviewArtifactJSON the TFAC-500 freshness
-// tests assert on.
+// reviewFreshnessOut is the slice of the review artifact's `details` payload
+// the TFAC-500 freshness tests assert on.
 type reviewFreshnessOut struct {
 	CommitsSinceFinalize *int `json:"commits_since_finalize"`
 	Comments             []struct {
@@ -89,11 +89,13 @@ func getReviewFreshness(t *testing.T, s *Server, artID string) reviewFreshnessOu
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var out reviewFreshnessOut
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+	var envelope struct {
+		Details reviewFreshnessOut `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	return out
+	return envelope.Details
 }
 
 // TestArtifactDiff_ReviewServesFinalizeFrame pins that a review with a stored

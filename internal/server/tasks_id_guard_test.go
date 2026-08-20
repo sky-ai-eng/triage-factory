@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // assertFirstError decodes the error envelope off rec and asserts the first
@@ -79,6 +81,30 @@ func firstErrorMessage(t *testing.T, rec *httptest.ResponseRecorder) string {
 		t.Fatalf("empty errors list; body=%s", rec.Body.String())
 	}
 	return body.Errors[0].Message
+}
+
+// decodeErrorItems returns every item in the error envelope. Its reason for
+// existing beside firstErrorMessage is the accumulating validators: a body
+// with several bad fields answers with several items, and asserting only the
+// first would pass a handler that stopped at it.
+func decodeErrorItems(t *testing.T, rec *httptest.ResponseRecorder) []httpx.ErrorItem {
+	t.Helper()
+	var body struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode envelope: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(body.Errors) == 0 {
+		t.Fatalf("empty errors list; body=%s", rec.Body.String())
+	}
+	return body.Errors
+}
+
+// firstErrorReason is firstErrorMessage's sibling for the machine code.
+func firstErrorReason(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	return decodeErrorItems(t, rec)[0].Reason
 }
 
 // TestTaskRoutes_404OnMalformedID pins the family-wide contract: every

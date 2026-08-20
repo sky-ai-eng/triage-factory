@@ -260,8 +260,8 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 
 	// Draft is a pointer so an absent field is distinguishable from an
-	// explicit false: {} must not silently mark a draft PR ready — the same
-	// zero-value trap the event-handler toggle shipped with.
+	// explicit false: with a plain bool, {} would zero-value into "not a
+	// draft" and silently mark the PR ready.
 	var body struct {
 		Draft *bool `json:"draft"`
 	}

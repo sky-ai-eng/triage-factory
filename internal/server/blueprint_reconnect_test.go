@@ -98,8 +98,7 @@ func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	s := newTestServer(t)
 	b, p := build3StepBlueprint(t, s, "Chain")
 	target, _ := createWrappedBlueprint(t, s, "TriggeredTarget")
-	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             target,
 		"breaker_threshold":        3,
@@ -152,8 +151,7 @@ func TestBlueprintReconnect_MissingIndexRejected(t *testing.T) {
 
 func createTrigger(t *testing.T, s *Server, blueprintID string) string {
 	t.Helper()
-	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             blueprintID,
 		"breaker_threshold":        3,
@@ -218,8 +216,7 @@ func TestEventHandlerRetarget_AlreadyTriggeredRejected(t *testing.T) {
 func TestEventHandlerRetarget_RuleRejected(t *testing.T) {
 	s := newTestServer(t)
 	to, _ := createWrappedBlueprint(t, s, "To")
-	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":       "rule",
+	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type": "github:pr:ci_check_failed",
 		"name":       "a rule",
 	})

@@ -104,8 +104,7 @@ func TestBlueprintDuplicate_CopyIsTriggerlessSourceUntouched(t *testing.T) {
 	// A triggered source blueprint (1-step). Duplicating its prompt yields a
 	// trigger-less copy; the source keeps its trigger.
 	src, p := createWrappedBlueprint(t, s, "Triggered")
-	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers", map[string]any{
-		"kind":                     "trigger",
+	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
 		"blueprint_id":             src,
 		"breaker_threshold":        3,

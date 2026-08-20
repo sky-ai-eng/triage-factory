@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -73,21 +74,48 @@ func (ah *artifactsHandler) injectArtifactNote(orgID string, a domain.Artifact) 
 	sp.InjectArtifactNote(orgID, a.ConversationID, a)
 }
 
-// prArtifactJSON is the wire shape the PR overlay consumes. Title/Body are the
-// live values pulled from GitHub (GetPRBasic) so the editor renders the current
-// PR, not a stale snapshot; the rest are the artifact's stable coordinates.
-type prArtifactJSON struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	Owner          string `json:"owner"`
-	Repo           string `json:"repo"`
-	Number         int    `json:"number"`
-	HeadBranch     string `json:"head_branch"`
-	BaseBranch     string `json:"base_branch"`
-	Title          string `json:"title"`
-	Body           string `json:"body"`
-	URL            string `json:"url"`
-	State          string `json:"state"`
+// prArtifactDetailsJSON is the `details` payload for a pull_request artifact.
+// Title/Body are the live values pulled from GitHub (GetPRBasic) so the editor
+// renders the current PR, not a stale snapshot; owner/repo/number are the
+// artifact's target parsed once here rather than by every client.
+type prArtifactDetailsJSON struct {
+	Owner      string `json:"owner"`
+	Repo       string `json:"repo"`
+	Number     int    `json:"number"`
+	HeadBranch string `json:"head_branch"`
+	BaseBranch string `json:"base_branch"`
+	Title      string `json:"title"`
+	Body       string `json:"body"`
+}
+
+// composedArtifactDetails marshals a kind's composed `details` payload into
+// the read shape's embedded-JSON slot. The payloads are plain structs, so a
+// marshal failure is a programming error rather than a runtime condition —
+// it surfaces as a 500 rather than an artifact quietly served with null
+// details.
+func composedArtifactDetails(w http.ResponseWriter, art *domain.Artifact, details any) (json.RawMessage, bool) {
+	raw, err := json.Marshal(details)
+	if err != nil {
+		internalError(w, "artifacts", fmt.Errorf("marshal %s details (artifact %s): %w", art.Kind, art.ID, err))
+		return nil, false
+	}
+	return raw, true
+}
+
+// requireArtifactKind refuses a kind-scoped write against an artifact of some
+// other kind: 409, because the row exists and it is its kind that says no. A
+// 404 here would conflate "no such artifact" with "that operation does not
+// apply to this one", and a 200 over an ignored body would claim a write
+// nobody made.
+//
+// Every caller runs it before resolving an upstream client, so a wrong-kind
+// write cannot reach GitHub.
+func requireArtifactKind(w http.ResponseWriter, art *domain.Artifact, kind, article string) bool {
+	if art.Kind == kind {
+		return true
+	}
+	conflict(w, "artifact is not "+article+" (kind: "+art.Kind+")")
+	return false
 }
 
 // loadArtifact fetches an artifact by id and 404s if missing. It is the shared
@@ -138,10 +166,20 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 	return client, o, rp, n, true
 }
 
-// handleArtifactGet returns the PR artifact augmented with the live PR title and
-// body fetched from GitHub (1:1 display). On a live-fetch failure it degrades to
-// the proposed/edited snapshot stored in details_json so the overlay still renders
-// (a closed/merged PR or a transient GitHub blip shouldn't blank the editor).
+// handleArtifactGet serves one artifact of ANY kind, in the same shape the
+// conversation-scoped list serves it (artifactJSON): the kind-independent
+// envelope, with `kind` as the explicit discriminator over a kind-shaped
+// `details` payload. Only the two kinds with a composed representation — a
+// pull request read live from GitHub, a review assembled from its staged draft
+// — do work here; every other kind hands back the details_json the row already
+// stores.
+//
+// Serving every kind is what keeps this route from answering not-found for an
+// artifact that plainly exists: nonexistence and "no representation for that
+// kind" are different answers, and a branch or comment artifact reads the same
+// way here as it does in the conversation-scoped list.
+//
+// GET /api/artifacts/{id}
 func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -157,19 +195,39 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
+	out := artifactEnvelope(*art)
 	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewGet(w, r, orgID, art)
-		return
 	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
+		details, ok := ah.prArtifactDetails(w, r, orgID, art)
+		if !ok {
+			return
+		}
+		if out.Details, ok = composedArtifactDetails(w, art, details); !ok {
+			return
+		}
+	case domain.ArtifactKindReview:
+		details, ok := ah.reviewArtifactDetails(w, r, orgID, art)
+		if !ok {
+			return
+		}
+		if out.Details, ok = composedArtifactDetails(w, art, details); !ok {
+			return
+		}
 	default:
-		notFound(w, "artifact")
-		return
+		out.Details = storedArtifactDetails(*art)
 	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// prArtifactDetails composes the pull_request `details` payload: the live PR
+// title and body fetched from GitHub (1:1 display), over the artifact's stored
+// coordinates. On a live-fetch failure it degrades to the proposed/edited
+// snapshot in details_json so the overlay still renders — a closed/merged PR or
+// a transient GitHub blip shouldn't blank the editor.
+func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (prArtifactDetailsJSON, bool) {
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
 	if !ok {
-		return
+		return prArtifactDetailsJSON{}, false
 	}
 
 	// A details parse failure is deliberately swallowed on this read: the
@@ -187,27 +245,31 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 		body = pr.Body
 	}
 
-	writeJSON(w, http.StatusOK, prArtifactJSON{
-		ID:             art.ID,
-		ConversationID: art.ConversationID,
-		Owner:          owner,
-		Repo:           repo,
-		Number:         number,
-		HeadBranch:     details.HeadBranch,
-		BaseBranch:     details.Base,
-		Title:          title,
-		Body:           body,
-		URL:            art.URL,
-		State:          art.State,
-	})
+	return prArtifactDetailsJSON{
+		Owner:      owner,
+		Repo:       repo,
+		Number:     number,
+		HeadBranch: details.HeadBranch,
+		BaseBranch: details.Base,
+		Title:      title,
+		Body:       body,
+	}, true
 }
 
-// handleArtifactUpdate edits the live PR's title/body 1:1 via UpdatePR and
+// handleArtifactPRUpdate edits the live PR's title/body 1:1 via UpdatePR and
 // refreshes the artifact's details_json snapshot. Pessimistic by contract: a
 // GitHub failure returns non-2xx and leaves the snapshot untouched, so the
 // frontend never shows a green "saved" over a write GitHub rejected. The proposed
 // snapshot (the agent's draft) is preserved — only the mutable snapshot moves.
-func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.Request) {
+//
+// Two refusals come before the GitHub client is even resolved, and that
+// ordering is the point of the route: an artifact of another kind is a 409,
+// and a body naming neither field is a 400. Between them, no request that
+// describes no edit can reach UpdatePR — which would otherwise rewrite the PR
+// with its own current content and record an audit row for it.
+//
+// PATCH /api/artifacts/{id}/pr
+func (ah *artifactsHandler) handleArtifactPRUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -222,14 +284,7 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
-	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewUpdate(w, r, orgID, userID, art)
-		return
-	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
-	default:
-		notFound(w, "artifact")
+	if !requireArtifactKind(w, art, domain.ArtifactKindPullRequest, "a pull request") {
 		return
 	}
 
@@ -238,6 +293,13 @@ func (ah *artifactsHandler) handleArtifactUpdate(w http.ResponseWriter, r *http.
 		Body  *string `json:"body"`
 	}
 	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	if req.Title == nil && req.Body == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide title, body, or both",
+		})
 		return
 	}
 
@@ -480,7 +542,9 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	case domain.ArtifactKindPullRequest:
 		// fall through to the PR path below
 	default:
-		notFound(w, "artifact")
+		// The row exists; its kind has nothing to submit. 409, not 404 — a
+		// branch artifact is not a missing artifact.
+		conflict(w, "artifacts of kind "+art.Kind+" cannot be approved")
 		return
 	}
 	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
@@ -612,14 +676,15 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	})
 }
 
-// handleArtifactDismiss resolves ONE artifact as a decoupled sidecar operation,
-// the per-item counterpart to approve: it abandons the GitHub object and flips
-// the artifact's state, never touching the conversation's lifecycle. A draft
-// PR is closed on GitHub (best-effort) and flipped to closed; a pending review
-// has its GitHub pending review deleted and is flipped to dismissed. Branches
-// are never touched. An already-terminal artifact (a non-draft PR / non-pending
-// review) is a 409 — there is nothing left to resolve. After the flip it runs
-// the shared terminal-on-last task-closure check.
+// handleArtifactDismiss resolves ONE draft pull request as a decoupled sidecar
+// operation, the per-item counterpart to approve: it abandons the GitHub object
+// and flips the artifact's state, never touching the conversation's lifecycle.
+// The draft PR is closed on GitHub (best-effort) and flipped to closed;
+// branches are never touched. An already-terminal artifact (a non-draft PR) is
+// a 409 — there is nothing left to resolve. After the flip it runs the shared
+// terminal-on-last task-closure check.
+//
+// POST /api/artifacts/{id}/dismiss
 func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -635,14 +700,11 @@ func (ah *artifactsHandler) handleArtifactDismiss(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
-	switch art.Kind {
-	case domain.ArtifactKindReview:
-		ah.reviewDismiss(w, r, orgID, userID, art)
-		return
-	case domain.ArtifactKindPullRequest:
-		// fall through to the PR path below
-	default:
-		notFound(w, "artifact")
+	// Pull requests only. A review's abandonment reaches nothing outside this
+	// process — it is a local state flip — so it is a field write on the review
+	// sub-resource (PATCH …/review {state:"dismissed"}), not a verb. This verb
+	// exists because closing a PR is a real write to GitHub.
+	if !requireArtifactKind(w, art, domain.ArtifactKindPullRequest, "a pull request") {
 		return
 	}
 

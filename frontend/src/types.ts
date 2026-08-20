@@ -226,10 +226,12 @@ export interface Conversation {
   has_unresolved_artifacts?: boolean
   // pending_artifact_ids is the set of unresolved approvable artifact ids — every
   // draft PR first (in slice order), then every ready review — the per-item
-  // resolve UI lists one card per id. Each is editable (PATCH /api/artifacts/{id})
-  // and approvable (POST /api/artifacts/{id}/approve) / dismissable
-  // (POST /api/artifacts/{id}/dismiss). [] (not undefined) when nothing is
-  // unresolved but the set was read; undefined under the transient-failure guard.
+  // resolve UI lists one card per id. Each is editable through its kind's
+  // sub-resource (PATCH /api/artifacts/{id}/pr | /review) and approvable
+  // (POST /api/artifacts/{id}/approve); a draft PR is abandoned with
+  // POST /api/artifacts/{id}/dismiss, a review with PATCH …/review
+  // {state:"dismissed"}. [] (not undefined) when nothing is unresolved but the
+  // set was read; undefined under the transient-failure guard.
   pending_artifact_ids?: string[]
   // Per-kind counts of the unresolved set, for count-aware labels ("N ready",
   // "Review N items →") and the resolve-all confirmation copy. unresolved_pr_count

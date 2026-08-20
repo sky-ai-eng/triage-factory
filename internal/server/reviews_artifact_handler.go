@@ -16,26 +16,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// reviewArtifactJSON is the wire shape the review overlay consumes. The whole
-// review is staged TF-side (TFAC-494): body/event and the inline comments all
-// come from the artifact's details_json, applied to GitHub only by the atomic
-// submit at approval. Each comment's severity is parsed back out of its body for
-// the chip. ReviewID is empty until approval stamps the submitted review's id.
-type reviewArtifactJSON struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id,omitempty"`
-	Owner          string `json:"owner"`
-	Repo           string `json:"repo"`
-	PRNumber       int    `json:"pr_number"`
-	ReviewID       string `json:"review_id"`
-	ReviewBody     string `json:"review_body"`
-	ReviewEvent    string `json:"review_event"`
-	State          string `json:"state"`
-	// URL is the posted review's GitHub deep link (#pullrequestreview-<id>),
-	// stamped at approval — empty while the draft is pending (nothing exists on
-	// GitHub yet). The read-only overlay renders it as "View on GitHub".
-	URL      string                      `json:"url"`
-	Comments []reviewArtifactCommentJSON `json:"comments"`
+// reviewArtifactDetailsJSON is the `details` payload for a review artifact.
+// The whole review is staged TF-side (TFAC-494): body/event and the inline
+// comments all come from the artifact's details_json, applied to GitHub only by
+// the atomic submit at approval. Each comment's severity is parsed back out of
+// its body for the chip. The artifact's own identity — id, state, and the
+// posted review's external_id + URL, both stamped at approval — rides the
+// shared envelope around this, not a second copy in here.
+type reviewArtifactDetailsJSON struct {
+	Owner       string                      `json:"owner"`
+	Repo        string                      `json:"repo"`
+	PRNumber    int                         `json:"pr_number"`
+	ReviewBody  string                      `json:"review_body"`
+	ReviewEvent string                      `json:"review_event"`
+	Comments    []reviewArtifactCommentJSON `json:"comments"`
 	// CommitsSinceFinalize is how many commits the live PR head is ahead of the
 	// finalize-time head (TFAC-500) — the "N commits since this review was written"
 	// indicator. nil when it can't be computed (no finalize head stored, or the
@@ -62,37 +56,33 @@ type reviewArtifactCommentJSON struct {
 	MappedPath string `json:"mapped_path,omitempty"`
 }
 
-// reviewGet returns the review artifact with its TF-side staged comments
-// (TFAC-494) — no GitHub call. Each comment body carries the severity badge baked
-// in; ParseSeverityBadge splits it back into a chip level + clean body for
-// display. Body + event are the staged values; the whole review is local until
-// the atomic submit at approval.
-func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) {
+// reviewArtifactDetails composes the review `details` payload from the
+// artifact's TF-side staged draft (TFAC-494) — no GitHub call for the content
+// itself. Each comment body carries the severity badge baked in;
+// ParseSeverityBadge splits it back into a chip level + clean body for display.
+// Body + event are the staged values; the whole review is local until the
+// atomic submit at approval.
+func (ah *artifactsHandler) reviewArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (reviewArtifactDetailsJSON, bool) {
 	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
-		return
+		return reviewArtifactDetailsJSON{}, false
 	}
 	// Surface a corrupt details_json as a 500 rather than serving a misleadingly
 	// empty review (no body, no comments) the user might approve or act on.
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	if err != nil {
 		internalError(w, "artifacts", fmt.Errorf("parse review artifact details (artifact %s): %w", art.ID, err))
-		return
+		return reviewArtifactDetailsJSON{}, false
 	}
 
-	out := reviewArtifactJSON{
-		ID:             art.ID,
-		ConversationID: art.ConversationID,
-		Owner:          owner,
-		Repo:           repo,
-		PRNumber:       number,
-		ReviewID:       art.ExternalID,
-		ReviewBody:     details.ReviewBody,
-		ReviewEvent:    details.ReviewEvent,
-		State:          art.State,
-		URL:            art.URL,
-		Comments:       []reviewArtifactCommentJSON{},
+	out := reviewArtifactDetailsJSON{
+		Owner:       owner,
+		Repo:        repo,
+		PRNumber:    number,
+		ReviewBody:  details.ReviewBody,
+		ReviewEvent: details.ReviewEvent,
+		Comments:    []reviewArtifactCommentJSON{},
 	}
 	for _, c := range details.StagedComments {
 		sev, clean := domain.ParseSeverityBadge(c.Body)
@@ -117,28 +107,99 @@ func (ah *artifactsHandler) reviewGet(w http.ResponseWriter, r *http.Request, or
 	if art.State == domain.ArtifactStateReviewPending {
 		ah.annotateReviewFreshness(r.Context(), orgID, art, details, &out)
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out, true
 }
 
-// reviewUpdate stages a new review body and/or event into the artifact's
-// details_json. TF-side only: a pending review's body + event are not
-// live-editable on GitHub (the event *is* the submit), so they stage here and
-// apply atomically at approval. No GitHub call.
-func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
-	// Only a still-pending review can be staged. A PATCH on a submitted/dismissed
-	// artifact would write body/event that can never be applied (approve guards
-	// state), so reject it as a conflict rather than return a misleading 200 on an
-	// artifact the user can no longer act on. Mirrors the reviewApprove guard.
+// patchReviewRequest is the body of PATCH /api/artifacts/{id}/review. The
+// fields carry no review_ prefix: the sub-resource in the path already says
+// which artifact half they belong to.
+//
+// state is the review's own lifecycle position, and the only value it accepts
+// is "dismissed". Abandoning a staged review reaches nothing outside this
+// process — the draft never left it — so it is an honest field write here
+// rather than a verb, which is why /dismiss is now pull-request-only.
+type patchReviewRequest struct {
+	Body  *string `json:"body"`
+	Event *string `json:"event"`
+	State *string `json:"state"`
+}
+
+// handleArtifactReviewUpdate stages a new review body and/or event into the
+// artifact's details_json, or dismisses the staged draft. TF-side only: a
+// pending review's body + event are not live-editable on GitHub (the event
+// *is* the submit), so they stage here and apply atomically at approval. No
+// GitHub call on any arm.
+//
+// PATCH /api/artifacts/{id}/review
+func (ah *artifactsHandler) handleArtifactReviewUpdate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	id, ok := artifactIDOr404(w, r)
+	if !ok {
+		return
+	}
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	if !requireArtifactKind(w, art, domain.ArtifactKindReview, "a review") {
+		return
+	}
+	// Only a still-pending review can be staged or dismissed. A PATCH on a
+	// submitted/dismissed artifact would write body/event that can never be
+	// applied (approve guards state), so reject it as a conflict rather than
+	// return a misleading 200 on an artifact the user can no longer act on.
+	// Mirrors the reviewApprove guard.
 	if art.State != domain.ArtifactStateReviewPending {
 		writeReviewNotPending(w, art.State)
 		return
 	}
 
-	var req struct {
-		ReviewBody  *string `json:"review_body"`
-		ReviewEvent *string `json:"review_event"`
-	}
+	var req patchReviewRequest
 	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+
+	var v httpx.Validation
+	if req.Body == nil && req.Event == nil && req.State == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide body, event, or state",
+		})
+		return
+	}
+	if req.Body != nil && strings.TrimSpace(*req.Body) == "" {
+		// The summary body is what the review says. A whitespace-only one is as
+		// empty as "" and would post a blank review at approval, so it is
+		// refused here and the trimmed value is what gets stored.
+		v.Invalid("body", "body cannot be empty or whitespace-only")
+	}
+	if req.Event != nil && !validReviewEvent(*req.Event) {
+		// Validate here rather than deferring to approval-time GitHub
+		// rejection. The event also doubles as the ready sentinel, so an empty
+		// or bogus value would silently un-park the conversation as well as
+		// fail the submit.
+		v.Invalid("event", "event must be one of APPROVE, COMMENT, REQUEST_CHANGES")
+	}
+	if req.State != nil {
+		if *req.State != domain.ArtifactStateReviewDismissed {
+			v.Invalid("state", `state accepts only "dismissed"; submitting a review is POST …/approve`)
+		} else if req.Body != nil || req.Event != nil {
+			// Dismissal retires the draft; staging edits into the same request
+			// asks for two different outcomes on one row. Say so rather than
+			// pick an order.
+			v.Invalid("state", "state cannot be combined with body or event — dismiss the review on its own")
+		}
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	if req.State != nil {
+		ah.reviewDismiss(w, r, orgID, userID, art)
 		return
 	}
 
@@ -147,23 +208,11 @@ func (ah *artifactsHandler) reviewUpdate(w http.ResponseWriter, r *http.Request,
 		internalError(w, "artifacts", fmt.Errorf("parse review artifact details: %w", err))
 		return
 	}
-	if req.ReviewBody != nil {
-		details.ReviewBody = *req.ReviewBody
+	if req.Body != nil {
+		details.ReviewBody = strings.TrimSpace(*req.Body)
 	}
-	if req.ReviewEvent != nil {
-		// Validate early (400) rather than deferring to approval-time
-		// GitHub rejection. review_event also doubles as the ready
-		// sentinel, so an empty or bogus value would silently un-park
-		// the conversation as well as fail the submit.
-		if !validReviewEvent(*req.ReviewEvent) {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidField,
-				Message: "review_event must be one of APPROVE, COMMENT, REQUEST_CHANGES",
-				Field:   "review_event",
-			})
-			return
-		}
-		details.ReviewEvent = *req.ReviewEvent
+	if req.Event != nil {
+		details.ReviewEvent = *req.Event
 	}
 
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
@@ -464,15 +513,14 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 // conversation's lifecycle. No GitHub call and NO external-actions audit row — the review
 // is staged entirely TF-side (TFAC-494), so a dismiss is a purely local state
 // change, not an org-credential write (external_actions records only writes). The
-// flip is the whole resolution. An already-submitted / already-dismissed review
-// is terminal → 409. A pending review is dismissable whether or not it reached the
-// ready sentinel (a started-but-unfinalized review is still abandonable).
+// flip is the whole resolution. A pending review is dismissable whether or not it
+// reached the ready sentinel (a started-but-unfinalized review is still
+// abandonable).
+//
+// It is the state="dismissed" arm of the review PATCH, which has already
+// established the kind and the pending state; a terminal row never reaches
+// here.
 func (ah *artifactsHandler) reviewDismiss(w http.ResponseWriter, r *http.Request, orgID, userID string, art *domain.Artifact) {
-	if art.State != domain.ArtifactStateReviewPending {
-		writeReviewNotPending(w, art.State)
-		return
-	}
-
 	// Flip pending → dismissed, pessimistic — the flip is the resolution. A CAS,
 	// not an upsert: a dismiss racing an approve must lose cleanly (409) rather
 	// than overwrite a just-submitted review as dismissed. The proposed snapshot
@@ -528,8 +576,7 @@ func (ah *artifactsHandler) handleReviewRefresh(w http.ResponseWriter, r *http.R
 	if !ok {
 		return
 	}
-	if art.Kind != domain.ArtifactKindReview {
-		notFound(w, "review artifact")
+	if !requireArtifactKind(w, art, domain.ArtifactKindReview, "a review") {
 		return
 	}
 	ah.reviewRefresh(w, r, orgID, userID, art)
@@ -630,11 +677,19 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// handleArtifactCommentUpdate edits one staged inline comment on the review draft
-// (PUT /api/artifacts/{id}/comments/{commentId}). Review-only, no GitHub call —
-// the whole review is staged TF-side until approval (TFAC-494). The severity
-// badge is re-baked onto the human's edited (clean) body — severity isn't
-// editable, just preserved — by recovering it from the staged comment's body.
+// handleArtifactCommentUpdate edits one staged inline comment on the review
+// draft. Review-only, no GitHub call — the whole review is staged TF-side until
+// approval (TFAC-494). The comment's severity is fixed at creation and is
+// re-baked onto the human's edited body from the stored comment, so an edit
+// preserves the chip without being able to move it.
+//
+// A body arriving with a severity badge of its own is refused rather than
+// silently stripped and re-baked: the caller asked for a severity the route
+// will not honour, and answering 200 to that reads as "accepted" for a value
+// that was thrown away. The overlay never sends one — it edits the clean body
+// the read hands it.
+//
+// PATCH /api/artifacts/{id}/comments/{commentId}
 func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -646,6 +701,23 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	commentID := r.PathValue("commentId")
+
+	// The resource answers before the payload does, as on every kind-scoped
+	// write here: which artifact this is decides whether the route applies at
+	// all.
+	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
+	if !ok {
+		return
+	}
+	if !requireArtifactKind(w, art, domain.ArtifactKindReview, "a review") {
+		return
+	}
+	// Only a still-pending review can be edited: once submitted, its comments are
+	// public and immutable through this path.
+	if art.State != domain.ArtifactStateReviewPending {
+		writeReviewNotPending(w, art.State)
+		return
+	}
 
 	var req struct {
 		Body string `json:"body"`
@@ -663,19 +735,12 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	req.Body = strings.TrimSpace(req.Body)
-
-	art, ok := ah.loadArtifact(w, r, orgID, userID, id)
-	if !ok {
-		return
-	}
-	if art.Kind != domain.ArtifactKindReview {
-		notFound(w, "review artifact")
-		return
-	}
-	// Only a still-pending review can be edited: once submitted, its comments are
-	// public and immutable through this path.
-	if art.State != domain.ArtifactStateReviewPending {
-		writeReviewNotPending(w, art.State)
+	if sev, _ := domain.ParseSeverityBadge(req.Body); sev != "" {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "severity is set at creation and cannot be changed by editing the body",
+			Field:   "body",
+		})
 		return
 	}
 	details, err := domain.ParseReviewArtifactDetails(art.DetailsJSON)
@@ -684,7 +749,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	// Find the staged comment by its local id and re-bake its current severity onto
-	// the human's clean edit.
+	// the human's edit.
 	idx := -1
 	for i, c := range details.StagedComments {
 		if c.ID == commentID {
@@ -697,8 +762,7 @@ func (ah *artifactsHandler) handleArtifactCommentUpdate(w http.ResponseWriter, r
 		return
 	}
 	severity, _ := domain.ParseSeverityBadge(details.StagedComments[idx].Body)
-	_, clean := domain.ParseSeverityBadge(req.Body)
-	details.StagedComments[idx].Body = domain.SeverityBadgeMarkdown(severity) + clean
+	details.StagedComments[idx].Body = domain.SeverityBadgeMarkdown(severity) + req.Body
 
 	if !ah.updateReviewDetailsPending(w, r, orgID, userID, art.ID, details) {
 		return
@@ -725,8 +789,7 @@ func (ah *artifactsHandler) handleArtifactCommentDelete(w http.ResponseWriter, r
 	if !ok {
 		return
 	}
-	if art.Kind != domain.ArtifactKindReview {
-		notFound(w, "review artifact")
+	if !requireArtifactKind(w, art, domain.ArtifactKindReview, "a review") {
 		return
 	}
 	if art.State != domain.ArtifactStateReviewPending {

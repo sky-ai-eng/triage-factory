@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -46,24 +47,28 @@ func (eh *eventHandlersHandler) gateHandlerWrite(w http.ResponseWriter, r *http.
 	return eh.az.RequireTeamWrite(w, r, orgID, userID, existing.TeamID)
 }
 
-// /api/event-handlers — unified successor to /api/task-rules + /api/triggers.
-// The two frontend pages (rules tab + triggers tab) keep their
-// split UX but hit this one endpoint family with a kind filter.
+// /api/event-handlers — the ordered evaluation surface task_rules and
+// prompt_triggers were unified into. The unification is a READ property: one
+// list, one row shape, `kind` as the explicit discriminator. The write surface
+// is split per kind, because the two kinds require different fields, validate
+// differently, and default `enabled` in opposite directions.
 //
 // Wire shape:
 //
-//   GET    /api/event-handlers[?kind=rule|trigger]   — list
-//   POST   /api/event-handlers                        — create (kind in body)
-//   PATCH  /api/event-handlers/{id}                   — partial update
-//   PUT    /api/event-handlers/{id}                   — replacement update
-//                                                       (alias for PATCH for
-//                                                       trigger-style "send
-//                                                       the full mutable set"
-//                                                       calls — same handler)
-//   DELETE /api/event-handlers/{id}                   — delete (soft for shipped rows)
-//   POST   /api/event-handlers/{id}/toggle            — flip enabled bit
-//   POST   /api/event-handlers/{id}/promote           — rule → trigger
-//   PUT    /api/event-handlers/reorder                — rules-only sort_order
+//	POST   /api/event-handlers/list                   — list (both kinds)
+//	GET    /api/event-handlers/{id}                   — single read (both kinds)
+//	POST   /api/event-handlers/rules                  — create a rule
+//	POST   /api/event-handlers/triggers               — create a trigger
+//	PATCH  /api/event-handlers/{id}                   — partial update, decoded
+//	                                                    against the row's kind
+//	DELETE /api/event-handlers/{id}                   — delete (soft for shipped rows)
+//	POST   /api/event-handlers/{id}/promote           — rule → trigger
+//	POST   /api/event-handlers/{id}/retarget          — re-point a trigger
+//	PUT    /api/event-handlers/reorder                — rules-only sort_order
+//
+// promote and retarget stay verbs because each writes a field PATCH declares
+// immutable (kind, blueprint_id) under a fence PATCH cannot express — which is
+// what makes them transitions rather than field writes.
 
 // eventHandlerListRequest is the body of POST /api/event-handlers/list. Kind
 // and TeamID are the old ?kind= / ?team_id= params, unchanged in meaning and
@@ -136,7 +141,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 // way the list is. The gate is a visibility rule for a BROWSE surface: it keeps
 // a handler bound to an unlicensed event type out of a list nobody asked for it
 // by name. A caller who already holds the id has it from a run, a trigger, or a
-// link, and the five mutation routes on that same id are ungated — so gating
+// link, and the mutation routes on that same id are ungated — so gating
 // only the read would make a handler editable but unreadable, which is the
 // exact asymmetry this route was added to close.
 //
@@ -168,218 +173,136 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 	writeJSON(w, http.StatusOK, handler)
 }
 
-// POST /api/event-handlers
-//
-// kind in body; per-kind fields are validated accordingly.
-//
-//   - kind='rule':    name + event_type are required; default_priority
-//     defaults to 0.5 and sort_order to 0 when omitted.
-//     enabled defaults to true.
-//   - kind='trigger': blueprint_id + event_type are required;
-//     breaker_threshold defaults to 4,
-//     min_autonomy_suitability to 0.0, enabled to false
-//     when omitted. The defaults are load-bearing for
-//     drag-to-create paths in the prompts UI that supply
-//     only the minimum identifying fields — match the
-//     the original /api/triggers behavior.
-type createEventHandlerRequest struct {
-	Kind               string `json:"kind"`
-	EventType          string `json:"event_type"`
-	ScopePredicateJSON string `json:"scope_predicate_json"`
-	Enabled            *bool  `json:"enabled"`
+// fieldScopePredicate is the wire name of the predicate on every write. One
+// name, one type: a JSON object, or null for match-all. The stored column
+// stays the canonical JSON text the matcher reads, which is why the read row
+// spells it scope_predicate_json — that field is a string, this one is not.
+const fieldScopePredicate = "scope_predicate"
 
-	// AppliesToUnowned opts the rule into reaching entities the team doesn't
-	// own (TFAC-517) — the explicit "watch" flag, default off. Visibility
-	// only; never confers firing rights (the TFAC-514 invariant).
+// scopePredicateField reads the scope_predicate body field and canonicalises
+// it against the event type's registered predicate schema. It reports whether
+// the field was named at all, which is what separates "leave the stored
+// predicate alone" from "clear it" on a PATCH; a create ignores the flag,
+// since an unnamed predicate and an explicitly cleared one both mean match-all
+// on a row that has none yet.
+//
+// A returned nil predicate is match-all — that covers explicit null, {}, and a
+// predicate whose fields all decoded empty, which the validator canonicalises
+// to the same thing. A string body is refused outright rather than unwrapped:
+// accepting both a JSON object and a JSON string holding one is how a single
+// field grows two wire types and callers pick different ones.
+//
+// Faults land on v; the caller must Flush before reading the result.
+func scopePredicateField(v *httpx.Validation, raw json.RawMessage, eventType string) (predicate *string, named bool) {
+	if raw == nil {
+		return nil, false
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "null" {
+		return nil, true
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		v.Invalid(fieldScopePredicate, fieldScopePredicate+" must be a JSON object or null")
+		return nil, true
+	}
+	canonical, err := events.ValidatePredicateJSON(eventType, trimmed)
+	if err != nil {
+		v.Invalid(fieldScopePredicate, err.Error())
+		return nil, true
+	}
+	if canonical == "" {
+		return nil, true
+	}
+	return &canonical, true
+}
+
+// eventHandlerCreateCommon is the half of a create body both kinds share.
+// Embedding it keeps the two schemas honest about their differences without
+// restating what they agree on — and strict decoding still promotes the
+// embedded fields, so the other kind's fields remain UNKNOWN_FIELD.
+type eventHandlerCreateCommon struct {
+	EventType      string          `json:"event_type"`
+	ScopePredicate json.RawMessage `json:"scope_predicate"`
+	Enabled        *bool           `json:"enabled"`
+
+	// AppliesToUnowned opts the handler into reaching entities the team
+	// doesn't own (TFAC-517) — the explicit "watch" flag, default off.
+	// Visibility only; never confers firing rights (the TFAC-514 invariant).
 	AppliesToUnowned *bool `json:"applies_to_unowned"`
 
-	// Rule-only.
-	Name            *string  `json:"name"`
-	DefaultPriority *float64 `json:"default_priority"`
-	SortOrder       *int     `json:"sort_order"`
-
-	// Trigger-only.
-	BlueprintID            string   `json:"blueprint_id"`
-	BreakerThreshold       *int     `json:"breaker_threshold"`
-	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
-
-	// TeamID is the acting team the write picker supplied — the team
-	// this rule/trigger is created under. Required in the UI when the
-	// caller belongs to ≥2 teams; empty (sole-team fallback) otherwise.
+	// TeamID is the acting team the write picker supplied — the team this
+	// rule/trigger is created under. Required in the UI when the caller
+	// belongs to ≥2 teams; empty (sole-team fallback) otherwise.
 	TeamID string `json:"team_id"`
 }
 
-func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	var req createEventHandlerRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if req.Kind != domain.EventHandlerKindRule && req.Kind != domain.EventHandlerKindTrigger {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "kind must be 'rule' or 'trigger'", Field: "kind"})
-		return
-	}
-	if req.EventType == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "event_type is required", Field: "event_type"})
-		return
-	}
-	if _, ok := events.Get(req.EventType); !ok {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "unknown event_type: " + req.EventType, Field: "event_type"})
-		return
-	}
-	// TFAC-524: a gated-off event source can't be handed a new handler. Only
-	// create needs this — event_type is immutable on update, and toggle/
-	// promote/retarget can't change it either (the router freeze in Part 6
-	// makes an enabled-but-gated handler inert regardless).
-	if !entitlements.EventTypeAllowed(orgID, req.EventType) {
-		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{Reason: httpx.ReasonForbidden, Message: "event source not enabled for this organization", Field: "event_type"})
-		return
-	}
-	canonical, err := events.ValidatePredicateJSON(req.EventType, req.ScopePredicateJSON)
-	if err != nil {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "scope_predicate_json"})
-		return
-	}
+// createRuleRequest is the body of POST /api/event-handlers/rules.
+// name and event_type are required; default_priority defaults to 0.5,
+// sort_order to 0, and enabled to TRUE — a rule the user just authored is
+// meant to start classifying.
+type createRuleRequest struct {
+	eventHandlerCreateCommon
 
-	// Reject viewers before authoring a rule/trigger (TFAC-447): resolve the
-	// acting team read-only and gate, so a viewer gets a clean 403 rather than
-	// the event_handlers_insert RLS WITH CHECK surfacing as a 500.
-	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
-		return
-	}
+	Name            string   `json:"name"`
+	DefaultPriority *float64 `json:"default_priority"`
+	SortOrder       *int     `json:"sort_order"`
+}
 
-	h := domain.EventHandler{
-		ID:        uuid.New().String(),
-		Kind:      req.Kind,
-		EventType: req.EventType,
-		Source:    domain.EventHandlerSourceUser,
-	}
-	if canonical != "" {
-		h.ScopePredicateJSON = &canonical
-	}
-	// applies_to_unowned is a routing-scope flag on both kinds; defaults off.
-	if req.AppliesToUnowned != nil {
-		h.AppliesToUnowned = *req.AppliesToUnowned
-	}
+// createTriggerRequest is the body of POST /api/event-handlers/triggers.
+// blueprint_id and event_type are required; breaker_threshold defaults to 4,
+// min_autonomy_suitability to 0, and enabled to FALSE — auto-delegation is
+// opt-in, so a trigger is authored dark and armed deliberately. The defaults
+// are load-bearing for the canvas drag-to-connect gesture, which supplies only
+// the two identifying fields.
+type createTriggerRequest struct {
+	eventHandlerCreateCommon
 
-	switch req.Kind {
-	case domain.EventHandlerKindRule:
-		if req.Name == nil || strings.TrimSpace(*req.Name) == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "name is required for kind=rule", Field: "name"})
-			return
-		}
-		h.Name = strings.TrimSpace(*req.Name)
-		priority := 0.5
-		if req.DefaultPriority != nil {
-			if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "default_priority must be between 0 and 1", Field: "default_priority"})
-				return
-			}
-			priority = *req.DefaultPriority
-		}
-		h.DefaultPriority = &priority
-		sortOrder := 0
-		if req.SortOrder != nil {
-			sortOrder = *req.SortOrder
-		}
-		h.SortOrder = &sortOrder
-		h.Enabled = true
-		if req.Enabled != nil {
-			h.Enabled = *req.Enabled
-		}
+	BlueprintID            string   `json:"blueprint_id"`
+	BreakerThreshold       *int     `json:"breaker_threshold"`
+	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
+}
 
-	case domain.EventHandlerKindTrigger:
-		if req.BlueprintID == "" {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "blueprint_id is required for kind=trigger", Field: "blueprint_id"})
-			return
-		}
-		// Verify the blueprint exists (clearer 404 than the downstream FK
-		// integrity error) AND that the acting team owns it. A trigger may
-		// only fire a blueprint its own team owns: the DB enforces this via
-		// the (blueprint_id, team_id) composite FK, but we resolve the acting
-		// team here and pre-check for a clean 400 instead of a generic
-		// constraint error. Both lookups share one tx so the blueprint's team
-		// and the resolved acting team are read under the same claims.
-		var blueprint *domain.Blueprint
-		var crossTeamBlueprint bool
-		var blueprintHasTrigger bool
-		if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-			var e error
-			blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
-			if e != nil || blueprint == nil {
-				return e
-			}
-			teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
-			if e != nil {
-				return e
-			}
-			if blueprint.TeamID != "" && blueprint.TeamID != teamID {
-				crossTeamBlueprint = true
-			}
-			// A blueprint is fired by exactly one event: pre-check for a clean
-			// 409 instead of letting the partial-unique index surface a raw 500.
-			existing, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
-			if e != nil {
-				return e
-			}
-			if len(existing) > 0 {
-				blueprintHasTrigger = true
-			}
-			return nil
-		}); err != nil {
-			if teamscope.WriteIfSelectionError(w, err) {
-				return
-			}
-			internalError(w, "event_handlers", err)
-			return
-		}
-		if blueprint == nil {
-			notFound(w, "blueprint")
-			return
-		}
-		if crossTeamBlueprint {
-			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
-			return
-		}
-		if blueprintHasTrigger {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
-			return
-		}
-		h.BlueprintID = req.BlueprintID
-		h.TriggerType = domain.TriggerTypeEvent
-		threshold := 4
-		if req.BreakerThreshold != nil {
-			if *req.BreakerThreshold <= 0 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "breaker_threshold must be positive", Field: "breaker_threshold"})
-				return
-			}
-			threshold = *req.BreakerThreshold
-		}
-		h.BreakerThreshold = &threshold
-		minAutonomy := 0.0
-		if req.MinAutonomySuitability != nil {
-			if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "min_autonomy_suitability must be between 0 and 1", Field: "min_autonomy_suitability"})
-				return
-			}
-			minAutonomy = *req.MinAutonomySuitability
-		}
-		h.MinAutonomySuitability = &minAutonomy
-		// Triggers default disabled (project convention) — explicit
-		// opt-in via Enabled=true survives the default.
-		h.Enabled = false
-		if req.Enabled != nil {
-			h.Enabled = *req.Enabled
-		}
+// eventTypeField validates the event_type both create bodies carry: present
+// and registered. It reports whether the type resolved, because the predicate
+// can only be validated against a known schema.
+func eventTypeField(v *httpx.Validation, eventType string) bool {
+	if eventType == "" {
+		v.Missing("event_type")
+		return false
 	}
+	if _, found := events.Get(eventType); !found {
+		v.Invalid("event_type", "unknown event_type: "+eventType)
+		return false
+	}
+	return true
+}
 
+// gateEventTypeEntitlement refuses a create bound to an event source this org
+// isn't licensed for (TFAC-524), writing the 403 and reporting false. Only
+// create needs it — event_type is immutable on update, and promote/retarget
+// can't change it either (the router freeze makes an enabled-but-gated handler
+// inert regardless).
+//
+// It answers on its own rather than accumulating onto the body's validation:
+// a licensing boundary is not a field the caller can fix by editing the body,
+// and 403 is not a status a field-fault envelope can carry.
+func gateEventTypeEntitlement(w http.ResponseWriter, orgID, eventType string) bool {
+	if entitlements.EventTypeAllowed(orgID, eventType) {
+		return true
+	}
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason: httpx.ReasonForbidden, Message: "event source not enabled for this organization", Field: "event_type",
+	})
+	return false
+}
+
+// insertEventHandler resolves the acting team and writes the composed row,
+// answering 201 with the stored row. Shared by both create routes: everything
+// above it differs per kind, everything from here down does not.
+func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler) {
 	var fresh *domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
 		}
@@ -411,26 +334,254 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 	writeJSON(w, http.StatusCreated, h)
 }
 
-// PATCH /api/event-handlers/{id} (also bound to PUT for trigger-style replace)
+// handleEventHandlerCreateRule authors a kind='rule' handler.
 //
-// Partial update. Any field left nil/absent is unchanged. kind and
-// event_type are immutable (kind transitions go through /promote;
-// event_type changes would invalidate the predicate schema). For
-// triggers, blueprint_id is also immutable here.
-type patchEventHandlerRequest struct {
-	ScopePredicateJSON json.RawMessage `json:"scope_predicate_json"`
-	Enabled            *bool           `json:"enabled"`
+// POST /api/event-handlers/rules
+func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	var req createRuleRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+
+	// Two accumulators, because the two fault classes carry different
+	// statuses: a malformed body is a 400, a well-formed value outside its
+	// range is a 422. Each class still reports every field it found wrong.
+	var bad, unproc httpx.Validation
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		bad.Missing("name")
+	}
+	eventTypeOK := eventTypeField(&bad, req.EventType)
+	if eventTypeOK && !gateEventTypeEntitlement(w, orgID, req.EventType) {
+		return
+	}
+	var predicate *string
+	if eventTypeOK {
+		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+	}
+	priority := 0.5
+	if req.DefaultPriority != nil {
+		if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
+			unproc.OutOfRange("default_priority", "default_priority must be between 0 and 1")
+		} else {
+			priority = *req.DefaultPriority
+		}
+	}
+	if bad.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if unproc.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	// Reject viewers before authoring a rule (TFAC-447): resolve the acting
+	// team read-only and gate, so a viewer gets a clean 403 rather than the
+	// event_handlers_insert RLS WITH CHECK surfacing as a 500.
+	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
+		return
+	}
+
+	sortOrder := 0
+	if req.SortOrder != nil {
+		sortOrder = *req.SortOrder
+	}
+	h := domain.EventHandler{
+		ID:                 uuid.New().String(),
+		Kind:               domain.EventHandlerKindRule,
+		EventType:          req.EventType,
+		Source:             domain.EventHandlerSourceUser,
+		ScopePredicateJSON: predicate,
+		Name:               name,
+		DefaultPriority:    &priority,
+		SortOrder:          &sortOrder,
+		Enabled:            true,
+	}
+	if req.Enabled != nil {
+		h.Enabled = *req.Enabled
+	}
+	if req.AppliesToUnowned != nil {
+		h.AppliesToUnowned = *req.AppliesToUnowned
+	}
+	eh.insertEventHandler(w, r, orgID, userID, req.TeamID, h)
+}
+
+// handleEventHandlerCreateTrigger authors a kind='trigger' handler.
+//
+// POST /api/event-handlers/triggers
+func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+
+	var req createTriggerRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+
+	var bad, unproc httpx.Validation
+	if req.BlueprintID == "" {
+		bad.Missing("blueprint_id")
+	}
+	eventTypeOK := eventTypeField(&bad, req.EventType)
+	if eventTypeOK && !gateEventTypeEntitlement(w, orgID, req.EventType) {
+		return
+	}
+	var predicate *string
+	if eventTypeOK {
+		predicate, _ = scopePredicateField(&bad, req.ScopePredicate, req.EventType)
+	}
+	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
+	if bad.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if unproc.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
+		return
+	}
+
+	// Verify the blueprint exists (clearer 404 than the downstream FK
+	// integrity error) AND that the acting team owns it. A trigger may only
+	// fire a blueprint its own team owns: the DB enforces this via the
+	// (blueprint_id, team_id) composite FK, but we resolve the acting team
+	// here and pre-check for a clean 422 instead of a generic constraint
+	// error. Both lookups share one tx so the blueprint's team and the
+	// resolved acting team are read under the same claims.
+	var (
+		blueprint           *domain.Blueprint
+		crossTeamBlueprint  bool
+		blueprintHasTrigger bool
+	)
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		blueprint, e = tx.Blueprints.Get(r.Context(), orgID, req.BlueprintID)
+		if e != nil || blueprint == nil {
+			return e
+		}
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		if e != nil {
+			return e
+		}
+		if blueprint.TeamID != "" && blueprint.TeamID != teamID {
+			crossTeamBlueprint = true
+		}
+		// A blueprint is fired by exactly one event: pre-check for a clean
+		// 409 instead of letting the partial-unique index surface a raw 500.
+		existing, e := tx.EventHandlers.ListForBlueprint(r.Context(), orgID, req.BlueprintID)
+		if e != nil {
+			return e
+		}
+		blueprintHasTrigger = len(existing) > 0
+		return nil
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "event_handlers", err)
+		return
+	}
+	if blueprint == nil {
+		notFound(w, "blueprint")
+		return
+	}
+	if crossTeamBlueprint {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
+		return
+	}
+	if blueprintHasTrigger {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+		return
+	}
+
+	h := domain.EventHandler{
+		ID:                     uuid.New().String(),
+		Kind:                   domain.EventHandlerKindTrigger,
+		EventType:              req.EventType,
+		Source:                 domain.EventHandlerSourceUser,
+		ScopePredicateJSON:     predicate,
+		BlueprintID:            req.BlueprintID,
+		TriggerType:            domain.TriggerTypeEvent,
+		BreakerThreshold:       &threshold,
+		MinAutonomySuitability: &minAutonomy,
+		// Triggers default disabled (project convention) — explicit opt-in via
+		// Enabled=true survives the default.
+		Enabled: false,
+	}
+	if req.Enabled != nil {
+		h.Enabled = *req.Enabled
+	}
+	if req.AppliesToUnowned != nil {
+		h.AppliesToUnowned = *req.AppliesToUnowned
+	}
+	eh.insertEventHandler(w, r, orgID, userID, req.TeamID, h)
+}
+
+// triggerTuningFields resolves the two trigger knobs both paths into
+// trigger-hood share — create and promote — so the defaults and the ranges
+// cannot disagree between them. Out-of-range values land on v (422) and the
+// returned value for that field is the default, which the caller never reaches
+// because it Flushes first.
+func triggerTuningFields(v *httpx.Validation, breaker *int, minAutonomy *float64) (int, float64) {
+	threshold := 4
+	if breaker != nil {
+		if *breaker <= 0 {
+			v.OutOfRange("breaker_threshold", "breaker_threshold must be positive")
+		} else {
+			threshold = *breaker
+		}
+	}
+	suitability := 0.0
+	if minAutonomy != nil {
+		if *minAutonomy < 0 || *minAutonomy > 1 {
+			v.OutOfRange("min_autonomy_suitability", "min_autonomy_suitability must be between 0 and 1")
+		} else {
+			suitability = *minAutonomy
+		}
+	}
+	return threshold, suitability
+}
+
+// The PATCH bodies. There is one per kind, and the row's kind — not a body
+// field — chooses which one the request is decoded against, so a rule PATCH
+// carrying breaker_threshold is an UNKNOWN_FIELD rather than a field accepted
+// and dropped. kind itself appears in neither struct, which is what keeps it
+// immutable here (kind transitions go through /promote). event_type is
+// immutable too — a new event type would invalidate the predicate schema the
+// row was validated against — and for triggers so is blueprint_id (see
+// /retarget).
+//
+// PATCH /api/event-handlers/{id}
+type patchEventHandlerCommon struct {
+	ScopePredicate json.RawMessage `json:"scope_predicate"`
+	Enabled        *bool           `json:"enabled"`
 
 	// AppliesToUnowned toggles the watch-scope flag (TFAC-517); absent leaves
 	// it unchanged.
 	AppliesToUnowned *bool `json:"applies_to_unowned"`
+}
 
-	// Rule fields.
+type patchRuleRequest struct {
+	patchEventHandlerCommon
+
 	Name            *string  `json:"name"`
 	DefaultPriority *float64 `json:"default_priority"`
 	SortOrder       *int     `json:"sort_order"`
+}
 
-	// Trigger fields.
+type patchTriggerRequest struct {
+	patchEventHandlerCommon
+
 	BreakerThreshold       *int     `json:"breaker_threshold"`
 	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
 }
@@ -446,11 +597,8 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	var req patchEventHandlerRequest
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-
+	// The row is loaded before the body is decoded, because the row's kind is
+	// the schema the body is decoded against.
 	var existing *domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -471,57 +619,43 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 	}
 
 	updated := *existing
+	// Two accumulators for the two statuses — see handleEventHandlerCreateRule.
+	var bad, unproc httpx.Validation
 
-	if req.Enabled != nil {
-		updated.Enabled = *req.Enabled
-	}
-	if req.AppliesToUnowned != nil {
-		updated.AppliesToUnowned = *req.AppliesToUnowned
-	}
-
-	// Predicate update — three distinguishable cases:
-	//   - absent (len==0):         leave unchanged
-	//   - explicit null ("null"):  clear to match-all
-	//   - JSON string / object:    validate + canonicalise
-	if len(req.ScopePredicateJSON) > 0 {
-		raw := string(req.ScopePredicateJSON)
-		if raw == "null" {
-			updated.ScopePredicateJSON = nil
-		} else {
-			var asString string
-			if err := json.Unmarshal(req.ScopePredicateJSON, &asString); err == nil {
-				raw = asString
-			}
-			canonical, err := events.ValidatePredicateJSON(existing.EventType, raw)
-			if err != nil {
-				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "scope_predicate_json"})
-				return
-			}
-			if canonical == "" {
-				updated.ScopePredicateJSON = nil
-			} else {
-				updated.ScopePredicateJSON = &canonical
-			}
+	applyCommon := func(c patchEventHandlerCommon) {
+		if c.Enabled != nil {
+			updated.Enabled = *c.Enabled
+		}
+		if c.AppliesToUnowned != nil {
+			updated.AppliesToUnowned = *c.AppliesToUnowned
+		}
+		if predicate, named := scopePredicateField(&bad, c.ScopePredicate, existing.EventType); named {
+			updated.ScopePredicateJSON = predicate
 		}
 	}
 
 	switch existing.Kind {
 	case domain.EventHandlerKindRule:
+		var req patchRuleRequest
+		if !httpx.DecodeJSONStrict(w, r, &req) {
+			return
+		}
+		applyCommon(req.patchEventHandlerCommon)
 		if req.Name != nil {
 			trimmed := strings.TrimSpace(*req.Name)
 			if trimmed == "" {
-				httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "name cannot be empty", Field: "name"})
-				return
+				bad.Invalid("name", "name cannot be empty")
+			} else {
+				updated.Name = trimmed
 			}
-			updated.Name = trimmed
 		}
 		if req.DefaultPriority != nil {
 			if *req.DefaultPriority < 0 || *req.DefaultPriority > 1 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "default_priority must be between 0 and 1", Field: "default_priority"})
-				return
+				unproc.OutOfRange("default_priority", "default_priority must be between 0 and 1")
+			} else {
+				v := *req.DefaultPriority
+				updated.DefaultPriority = &v
 			}
-			v := *req.DefaultPriority
-			updated.DefaultPriority = &v
 		}
 		if req.SortOrder != nil {
 			v := *req.SortOrder
@@ -529,22 +663,38 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		}
 
 	case domain.EventHandlerKindTrigger:
+		var req patchTriggerRequest
+		if !httpx.DecodeJSONStrict(w, r, &req) {
+			return
+		}
+		applyCommon(req.patchEventHandlerCommon)
 		if req.BreakerThreshold != nil {
 			if *req.BreakerThreshold <= 0 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "breaker_threshold must be positive", Field: "breaker_threshold"})
-				return
+				unproc.OutOfRange("breaker_threshold", "breaker_threshold must be positive")
+			} else {
+				v := *req.BreakerThreshold
+				updated.BreakerThreshold = &v
 			}
-			v := *req.BreakerThreshold
-			updated.BreakerThreshold = &v
 		}
 		if req.MinAutonomySuitability != nil {
 			if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
-				httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: "min_autonomy_suitability must be between 0 and 1", Field: "min_autonomy_suitability"})
-				return
+				unproc.OutOfRange("min_autonomy_suitability", "min_autonomy_suitability must be between 0 and 1")
+			} else {
+				v := *req.MinAutonomySuitability
+				updated.MinAutonomySuitability = &v
 			}
-			v := *req.MinAutonomySuitability
-			updated.MinAutonomySuitability = &v
 		}
+
+	default:
+		internalError(w, "event_handlers", fmt.Errorf("event handler %s has unknown kind %q", existing.ID, existing.Kind))
+		return
+	}
+
+	if bad.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	if unproc.Flush(w, http.StatusUnprocessableEntity) {
+		return
 	}
 
 	var fresh *domain.EventHandler
@@ -612,57 +762,6 @@ func (eh *eventHandlersHandler) handleEventHandlerDelete(w http.ResponseWriter, 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
-// POST /api/event-handlers/{id}/toggle
-func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := requireOrg(w, r)
-	if !ok {
-		return
-	}
-	userID := ClaimsFrom(r.Context()).Subject
-	id, ok := uuidPathOr404(w, r, "id", "event handler")
-	if !ok {
-		return
-	}
-	// Enabled is a pointer so an absent field stays distinguishable from an
-	// explicit false: a non-pointer bool zero-values an empty body into a
-	// disable, silently turning the handler off with a 200.
-	var req struct {
-		Enabled *bool `json:"enabled"`
-	}
-	if !httpx.DecodeJSONStrict(w, r, &req) {
-		return
-	}
-	if req.Enabled == nil {
-		badRequest(w, "enabled is required")
-		return
-	}
-	enabled := *req.Enabled
-	// Viewers can't enable/disable a rule/trigger (TFAC-447).
-	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
-		return
-	}
-	var existing *domain.EventHandler
-	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		var e error
-		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if existing == nil {
-			return nil
-		}
-		return tx.EventHandlers.SetEnabled(r.Context(), orgID, id, enabled)
-	}); err != nil {
-		internalError(w, "event_handlers", err)
-		return
-	}
-	if existing == nil {
-		notFound(w, "event handler")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled})
-}
-
 // POST /api/event-handlers/{id}/promote
 //
 // Rule → trigger transition. Body carries the trigger-side fields the
@@ -670,11 +769,16 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 // min_autonomy_suitability, optionally a new predicate). The store enforces
 // atomicity via a single UPDATE that flips kind and populates the trigger
 // fields together.
+//
+// The tuning fields default exactly as they do on trigger create
+// (triggerTuningFields): the two doors into trigger-hood mint the same row for
+// the same body, so a promoted trigger is indistinguishable from one authored
+// directly.
 type promoteEventHandlerRequest struct {
-	BlueprintID            string   `json:"blueprint_id"`
-	BreakerThreshold       *int     `json:"breaker_threshold"`
-	MinAutonomySuitability *float64 `json:"min_autonomy_suitability"`
-	ScopePredicateJSON     *string  `json:"scope_predicate_json"`
+	BlueprintID            string          `json:"blueprint_id"`
+	BreakerThreshold       *int            `json:"breaker_threshold"`
+	MinAutonomySuitability *float64        `json:"min_autonomy_suitability"`
+	ScopePredicate         json.RawMessage `json:"scope_predicate"`
 }
 
 func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter, r *http.Request) {
@@ -692,25 +796,15 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
+	var bad, unproc httpx.Validation
 	if req.BlueprintID == "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "blueprint_id is required", Field: "blueprint_id"})
+		bad.Missing("blueprint_id")
+	}
+	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
+	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	var v httpx.Validation
-	if req.BreakerThreshold == nil {
-		v.Missing("breaker_threshold")
-	} else if *req.BreakerThreshold <= 0 {
-		// The range checks create and PATCH enforce. Promote skipped them, so
-		// it could persist breaker_threshold:-1 / min_autonomy_suitability:7 —
-		// values the same fields reject through every other door.
-		v.OutOfRange("breaker_threshold", "breaker_threshold must be positive")
-	}
-	if req.MinAutonomySuitability == nil {
-		v.Missing("min_autonomy_suitability")
-	} else if *req.MinAutonomySuitability < 0 || *req.MinAutonomySuitability > 1 {
-		v.OutOfRange("min_autonomy_suitability", "min_autonomy_suitability must be between 0 and 1")
-	}
-	if v.Flush(w, http.StatusUnprocessableEntity) {
+	if unproc.Flush(w, http.StatusUnprocessableEntity) {
 		return
 	}
 
@@ -764,7 +858,7 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 	}
 	// Same-team guard: a promoted trigger may only fire a blueprint the rule's
 	// own team owns. The DB enforces this via the (blueprint_id, team_id)
-	// composite FK on the Promote UPDATE; pre-check for a clean 400.
+	// composite FK on the Promote UPDATE; pre-check for a clean 422.
 	if existing.TeamID != "" && blueprint.TeamID != "" && blueprint.TeamID != existing.TeamID {
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonCrossTeamRef, Message: "blueprint_id references a blueprint owned by another team", Field: "blueprint_id"})
 		return
@@ -776,25 +870,22 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		return
 	}
 
+	// The predicate is validated against the rule's event type, which promote
+	// never changes. Absent keeps what the rule already matched on.
 	predicate := existing.ScopePredicateJSON
-	if req.ScopePredicateJSON != nil {
-		canonical, verr := events.ValidatePredicateJSON(existing.EventType, *req.ScopePredicateJSON)
-		if verr != nil {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: verr.Error(), Field: "scope_predicate_json"})
-			return
-		}
-		if canonical == "" {
-			predicate = nil
-		} else {
-			predicate = &canonical
-		}
+	var predBad httpx.Validation
+	if next, named := scopePredicateField(&predBad, req.ScopePredicate, existing.EventType); named {
+		predicate = next
+	}
+	if predBad.Flush(w, http.StatusBadRequest) {
+		return
 	}
 
 	target := domain.EventHandler{
 		Kind:                   domain.EventHandlerKindTrigger,
 		BlueprintID:            req.BlueprintID,
-		BreakerThreshold:       req.BreakerThreshold,
-		MinAutonomySuitability: req.MinAutonomySuitability,
+		BreakerThreshold:       &threshold,
+		MinAutonomySuitability: &minAutonomy,
 		ScopePredicateJSON:     predicate,
 	}
 	var fresh *domain.EventHandler
@@ -940,35 +1031,123 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 	writeJSON(w, http.StatusOK, fresh)
 }
 
+// reorderEventHandlersRequest is the body of PUT /api/event-handlers/reorder.
+// ids is the caller's whole rule list in its new order.
+type reorderEventHandlersRequest struct {
+	IDs []string `json:"ids"`
+}
+
 // PUT /api/event-handlers/reorder
 //
-// Rules-only — trigger IDs in the list are silently skipped by the
-// store (sort_order is rule-only by CHECK constraint).
+// Rules-only: sort_order is rule-only by CHECK constraint, and the position of
+// a rule is meaningful only relative to the other rules evaluated beside it.
+// So the body must name EXACTLY the caller's visible rule set — an unknown id,
+// a trigger id, a deleted id, a duplicate, or an omitted rule is a rejected
+// request, not a partially-applied order. The store would otherwise skip each
+// of those with zero rows and this route would answer "reordered" for a write
+// that half-happened.
+//
+// Every referenced team is gated, not just the first id's: the list spans
+// whatever teams the caller can see, so a viewer on any of them must not be
+// able to reorder through a member's team.
 func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
 	}
 	userID := ClaimsFrom(r.Context()).Subject
-	var ids []string
-	// A bare JSON array body — strict decoding still applies (single value,
-	// no trailing junk, capped size); DisallowUnknownFields has nothing to
-	// reject on a slice.
-	if !httpx.DecodeJSONStrict(w, r, &ids) {
+
+	var req reorderEventHandlersRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	if len(ids) == 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "ids must contain at least one id", Field: "ids"})
+	if len(req.IDs) == 0 {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "ids is required and must name every rule visible to you, in the new order",
+			Field:   "ids",
+		})
 		return
 	}
-	// Reorder rewrites sort_order across a team's handler list — a viewer can't
-	// (TFAC-447). The list is one team's handlers, so gating on the first id's
-	// team is representative; RLS is the backstop for a hand-crafted mixed list.
-	if !eh.gateHandlerWrite(w, r, orgID, userID, ids[0]) {
-		return
-	}
+
+	// The caller's whole visible handler set, under the same entitlement gate
+	// the list read applies — so "visible" means the same thing to both routes.
+	// Unwindowed because the answer is a set comparison, not a page.
+	var visible []domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.EventHandlers.Reorder(r.Context(), orgID, ids)
+		var e error
+		visible, _, e = tx.EventHandlers.List(r.Context(), orgID,
+			db.EventHandlerListFilter{GatedEventTypes: gatedEventTypes(orgID)}, db.Unwindowed)
+		return e
+	}); err != nil {
+		internalError(w, "event_handlers", err)
+		return
+	}
+	rules := map[string]domain.EventHandler{}
+	triggers := map[string]struct{}{}
+	for _, h := range visible {
+		if h.Kind == domain.EventHandlerKindRule {
+			rules[h.ID] = h
+			continue
+		}
+		triggers[h.ID] = struct{}{}
+	}
+
+	var v httpx.Validation
+	seen := make(map[string]struct{}, len(req.IDs))
+	var teams []string
+	teamSeen := map[string]struct{}{}
+	for i, id := range req.IDs {
+		field := fmt.Sprintf("ids[%d]", i)
+		if _, dup := seen[id]; dup {
+			v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "duplicate id " + id, Field: field})
+			continue
+		}
+		seen[id] = struct{}{}
+		if rule, isRule := rules[id]; isRule {
+			if _, known := teamSeen[rule.TeamID]; !known {
+				teamSeen[rule.TeamID] = struct{}{}
+				teams = append(teams, rule.TeamID)
+			}
+			continue
+		}
+		if _, isTrigger := triggers[id]; isTrigger {
+			v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: id + " is a trigger; only rules carry a sort order", Field: field})
+			continue
+		}
+		v.Add(httpx.ErrorItem{Reason: httpx.ReasonInvalidField, Message: "no rule " + id + " is visible to you", Field: field})
+	}
+	// Walk `visible` rather than the rules map so the omitted-rule faults come
+	// out in the list's own order — one request must always answer the same
+	// way, and Go map iteration would shuffle it per call.
+	for _, h := range visible {
+		if h.Kind != domain.EventHandlerKindRule {
+			continue
+		}
+		if _, named := seen[h.ID]; !named {
+			v.Add(httpx.ErrorItem{
+				Reason:  httpx.ReasonInvalidField,
+				Message: "rule " + h.ID + " is missing; ids must name every rule visible to you",
+				Field:   "ids",
+			})
+		}
+	}
+	// 422, not 400: the body is well-formed JSON of the right shape — what it
+	// names doesn't match the data it claims to reorder.
+	if v.Flush(w, http.StatusUnprocessableEntity) {
+		return
+	}
+
+	// Reorder rewrites sort_order across the whole list, so a viewer on ANY
+	// team the list spans can't run it (TFAC-447).
+	for _, teamID := range teams {
+		if !eh.az.RequireTeamWrite(w, r, orgID, userID, teamID) {
+			return
+		}
+	}
+
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		return tx.EventHandlers.Reorder(r.Context(), orgID, req.IDs)
 	}); err != nil {
 		internalError(w, "event_handlers", err)
 		return

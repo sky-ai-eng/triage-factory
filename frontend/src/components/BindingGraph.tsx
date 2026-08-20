@@ -21,7 +21,13 @@ import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import MarketplacePublishControl from './MarketplacePublishControl'
-import { type BindingScope, blueprintsBase, promptsBase, handlersBase } from '../lib/scope'
+import {
+  type BindingScope,
+  blueprintsBase,
+  promptsBase,
+  handlersBase,
+  triggersCreatePath,
+} from '../lib/scope'
 
 interface EventType {
   id: string
@@ -1227,13 +1233,12 @@ function BindingGraphInner({
 
       if (plan.kind === 'trigger') {
         const body: Record<string, unknown> = {
-          kind: 'trigger',
           blueprint_id: plan.blueprintId,
           event_type: plan.eventType,
           team_id: teamId,
         }
         try {
-          await apiFetch(handlersBase(), {
+          await apiFetch(triggersCreatePath(), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),

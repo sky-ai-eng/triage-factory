@@ -116,16 +116,22 @@ func TestArtifactGet_AppOnlyOrg_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	var out map[string]any
+	var out struct {
+		Kind    string         `json:"kind"`
+		Details map[string]any `json:"details"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	// Title/body come from the live PR (GetPR), not the artifact snapshot.
-	if out["title"] != "Live title" || out["body"] != "Live body" {
-		t.Errorf("title/body = %v/%v, want live values", out["title"], out["body"])
+	if out.Kind != domain.ArtifactKindPullRequest {
+		t.Errorf("kind = %q, want pull_request", out.Kind)
 	}
-	if out["number"] != float64(42) {
-		t.Errorf("number = %v, want 42", out["number"])
+	// Title/body come from the live PR (GetPR), not the artifact snapshot.
+	if out.Details["title"] != "Live title" || out.Details["body"] != "Live body" {
+		t.Errorf("title/body = %v/%v, want live values", out.Details["title"], out.Details["body"])
+	}
+	if out.Details["number"] != float64(42) {
+		t.Errorf("number = %v, want 42", out.Details["number"])
 	}
 	// The live read reached GitHub through the App installation token (App bot
 	// identity), not a PAT.

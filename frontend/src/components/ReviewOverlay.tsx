@@ -8,42 +8,44 @@ import ReviewSummary from './ReviewSummary'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
-// ReviewArtifact mirrors internal/server/reviews_artifact_handler.go's
-// reviewArtifactJSON. review_body / review_event are the STAGED values (applied
-// to GitHub only on approval); the comments are staged TF-side (TFAC-494), each
-// with its severity parsed back out of the body (chip) and the clean body shown.
-// commits_since_finalize + per-comment freshness are computed against the live PR
-// head at GET time (TFAC-500) so the human sees how far the PR has drifted since
-// the agent wrote the review.
+// ReviewArtifact mirrors GET /api/artifacts/{id} for a review artifact: the
+// shared artifact envelope, with the review-shaped payload under `details`.
+// review_body / review_event there are the STAGED values (applied to GitHub
+// only on approval); the comments are staged TF-side (TFAC-494), each with its
+// severity parsed back out of the body (chip) and the clean body shown.
+// commits_since_finalize + per-comment freshness are computed against the live
+// PR head at GET time (TFAC-500) so the human sees how far the PR has drifted
+// since the agent wrote the review.
 interface ReviewArtifact {
   id: string
-  conversation_id?: string
-  owner: string
-  repo: string
-  pr_number: number
-  review_id: string
-  review_body: string
-  review_event: string
+  kind: string
   state: string
   // The posted review's GitHub deep link, stamped at approval; empty while the
   // draft is pending (nothing exists on GitHub yet).
   url: string
-  // null when it couldn't be computed (live head unreachable); 0 means the PR
-  // hasn't advanced since finalize.
-  commits_since_finalize: number | null
-  comments: {
-    id: string
-    path: string
-    line: number
-    start_line?: number
-    body: string
-    severity?: string
-    // 'current' | 'moved' | 'outdated' | 'unknown' (TFAC-500).
-    freshness?: string
-    // New-side position on the live head when freshness is 'moved'.
-    mapped_line?: number
-    mapped_path?: string
-  }[]
+  details: {
+    owner: string
+    repo: string
+    pr_number: number
+    review_body: string
+    review_event: string
+    // null when it couldn't be computed (live head unreachable); 0 means the PR
+    // hasn't advanced since finalize.
+    commits_since_finalize: number | null
+    comments: {
+      id: string
+      path: string
+      line: number
+      start_line?: number
+      body: string
+      severity?: string
+      // 'current' | 'moved' | 'outdated' | 'unknown' (TFAC-500).
+      freshness?: string
+      // New-side position on the live head when freshness is 'moved'.
+      mapped_line?: number
+      mapped_path?: string
+    }[]
+  }
 }
 
 interface Props {
@@ -148,7 +150,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
     async (commentId: string, body: string) => {
       try {
         await apiFetch(`/api/artifacts/${artifactId}/comments/${commentId}`, {
-          method: 'PUT',
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ body }),
         })
@@ -161,7 +163,12 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
         prev
           ? {
               ...prev,
-              comments: prev.comments.map((c) => (c.id === commentId ? { ...c, body } : c)),
+              details: {
+                ...prev.details,
+                comments: prev.details.comments.map((c) =>
+                  c.id === commentId ? { ...c, body } : c,
+                ),
+              },
             }
           : prev,
       )
@@ -177,7 +184,15 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
         throw new Error(httpErrorMessage(err, 'Could not delete the comment.'))
       }
       setReview((prev) =>
-        prev ? { ...prev, comments: prev.comments.filter((c) => c.id !== commentId) } : prev,
+        prev
+          ? {
+              ...prev,
+              details: {
+                ...prev.details,
+                comments: prev.details.comments.filter((c) => c.id !== commentId),
+              },
+            }
+          : prev,
       )
     },
     [artifactId],
@@ -188,7 +203,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   const patchReview = useCallback(
     async (patch: object) => {
       try {
-        await apiFetch(`/api/artifacts/${artifactId}`, {
+        await apiFetch(`/api/artifacts/${artifactId}/review`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(patch),
@@ -207,22 +222,26 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
 
   const handleUpdateBody = useCallback(
     async (body: string) => {
-      const p = patchReview({ review_body: body })
+      const p = patchReview({ body })
       inFlightSaves.current.add(p)
       void p.finally(() => inFlightSaves.current.delete(p))
       await p
-      setReview((prev) => (prev ? { ...prev, review_body: body } : prev))
+      setReview((prev) =>
+        prev ? { ...prev, details: { ...prev.details, review_body: body } } : prev,
+      )
     },
     [patchReview],
   )
 
   const handleUpdateEvent = useCallback(
     async (event: string) => {
-      const p = patchReview({ review_event: event })
+      const p = patchReview({ event })
       inFlightSaves.current.add(p)
       void p.finally(() => inFlightSaves.current.delete(p))
       await p
-      setReview((prev) => (prev ? { ...prev, review_event: event } : prev))
+      setReview((prev) =>
+        prev ? { ...prev, details: { ...prev.details, review_event: event } } : prev,
+      )
     },
     [patchReview],
   )
@@ -276,8 +295,10 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // Per-verdict counts for the Refresh confirmation (computed from the freshness
   // the GET already returned — no extra round-trip): how many comments would be
   // remapped vs. dropped as outdated.
-  const movedCount = (review?.comments ?? []).filter((c) => c.freshness === 'moved').length
-  const outdatedCount = (review?.comments ?? []).filter((c) => c.freshness === 'outdated').length
+  const movedCount = (review?.details.comments ?? []).filter((c) => c.freshness === 'moved').length
+  const outdatedCount = (review?.details.comments ?? []).filter(
+    (c) => c.freshness === 'outdated',
+  ).length
 
   // A resolved review is view-only; every mutating affordance below keys off this.
   const readOnly = review != null && review.state !== 'pending'
@@ -285,7 +306,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
   // Group comments by file path for the diff renderer. The overlay renders the
   // finalize-time frame, so a comment anchors by the path + line it was written
   // against (TFAC-500); freshness + mappedLine ride along for the badge only.
-  const commentsByFile = (review?.comments ?? []).reduce<Record<string, FileComment[]>>(
+  const commentsByFile = (review?.details.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
       ;(acc[c.path] ??= []).push({
         id: c.id,
@@ -355,7 +376,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                 </h1>
                 {review && (
                   <span className="text-[12px] text-text-tertiary">
-                    {review.owner}/{review.repo} #{review.pr_number}
+                    {review.details.owner}/{review.details.repo} #{review.details.pr_number}
                   </span>
                 )}
               </div>
@@ -393,13 +414,13 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
                 <div className="p-6 space-y-4 max-w-5xl mx-auto">
                   {/* Review summary + actions */}
                   <ReviewSummary
-                    owner={review.owner}
-                    repo={review.repo}
-                    prNumber={review.pr_number}
-                    reviewEvent={review.review_event}
-                    reviewBody={review.review_body}
-                    commentCount={review.comments.length}
-                    commitsSinceFinalize={review.commits_since_finalize}
+                    owner={review.details.owner}
+                    repo={review.details.repo}
+                    prNumber={review.details.pr_number}
+                    reviewEvent={review.details.review_event}
+                    reviewBody={review.details.review_body}
+                    commentCount={review.details.comments.length}
+                    commitsSinceFinalize={review.details.commits_since_finalize}
                     movedCount={movedCount}
                     outdatedCount={outdatedCount}
                     onRefresh={handleRefresh}

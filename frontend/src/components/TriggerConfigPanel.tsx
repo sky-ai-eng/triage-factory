@@ -103,8 +103,8 @@ export default function TriggerConfigPanel({
     if (!trigger) return
     setEnabled(checked)
     try {
-      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`, {
-        method: 'POST',
+      await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: checked }),
       })
@@ -120,13 +120,14 @@ export default function TriggerConfigPanel({
     setSaving(true)
     try {
       const body = {
-        scope_predicate_json: Object.keys(predicate).length > 0 ? JSON.stringify(predicate) : '',
+        // An object, or null to clear it back to match-all.
+        scope_predicate: Object.keys(predicate).length > 0 ? predicate : null,
         breaker_threshold: breakerThreshold,
         min_autonomy_suitability: minAutonomy,
         applies_to_unowned: appliesToUnowned,
       }
       await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}`, {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
