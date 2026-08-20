@@ -558,7 +558,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		}
 	})
 
-	// CreatorUserID narrows to one human's spend — the /api/usage/me personal
+	// CreatorUserID narrows to one human's spend — the /api/me/usage personal
 	// view (TFAC-478): manual runs + curator turns they created. Autonomous runs
 	// (NULL creator) and system rows (NULL creator) are excluded.
 	t.Run("ListSpend_CreatorUserIDFilter", func(t *testing.T) {

@@ -322,7 +322,7 @@ export interface Artifact {
 
 // ActivityArtifact is the activity feed's Objects-lens row shape (TFAC-483): an
 // Artifact plus the owning team's id + name. The team fields are populated ONLY
-// by the org-wide feed (GET /api/usage/org/activity?view=objects) so a cross-team
+// by the org-wide feed (POST /api/orgs/{id}/usage/artifacts/list) so a cross-team
 // row shows which team's bot acted; the team-scoped feed omits them (it's already
 // one team). Mirrors internal/server activityArtifactJSON.
 export interface ActivityArtifact extends Artifact {
@@ -1104,11 +1104,12 @@ export interface FactoryEntity {
   /** Active tasks for this entity, grouped by event_type. Drives the
    *  station drawer's drag-to-delegate flow: dropping on the runs tray
    *  reads the matching event_type's first dedup_key and forwards it
-   *  (along with entity_id + event_type) to POST /api/factory/delegate,
-   *  which then find-or-creates via the unique index on
-   *  (entity_id, event_type, dedup_key). task_id is informational —
-   *  not currently sent on the request — and is kept available for
-   *  future UI hints (e.g., "this queued chip already has a task"). */
+   *  (along with entity_id + event_type) to POST /api/tasks, which
+   *  find-or-creates via the unique index on
+   *  (entity_id, event_type, dedup_key) and answers the task the second
+   *  call delegates. task_id is informational — not sent on the request —
+   *  and is kept available for future UI hints (e.g., "this queued chip
+   *  already has a task"). */
   pending_tasks?: Record<string, Array<{ task_id: string; dedup_key: string }>>
   /** True if any run on this entity is `open` (a turn ended without a
    *  conclusion). Drives the idle badge on the runs-tray chip so a user
@@ -1287,10 +1288,10 @@ export type WSEvent =
 
 // ──────────────────────────────────────────────────────────────────────
 // Usage dashboard — spend layer (TFAC-479, consuming the TFAC-478 backend).
-// Three role-gated, session-org-scoped reads over the llm_spend view. The FE
-// calls the literal /api/usage/* paths WITHOUT an org prefix — the backend
-// resolves the org from the session, same as /api/dashboard/*. snake_case
-// fields mirror the Go response structs in internal/server/usage_handler.go.
+// Three role-gated reads over the llm_spend view, each addressed by the scope
+// it reports on: /api/me/usage, /api/teams/{id}/usage, /api/orgs/{id}/usage.
+// snake_case fields mirror the Go response structs in
+// internal/server/usage_handler.go.
 // `cost` is real USD (SDK token counts × list price; see the TFAC-449 epic),
 // not an estimate.
 // ──────────────────────────────────────────────────────────────────────
@@ -1351,7 +1352,7 @@ export interface UsageRuleBucket {
 
 /** One team's summed cost across team-attributed rows (org rollup only). Per-team
  *  caps are NOT here — the governance cap editor reads the full team list from
- *  /api/usage/org/team-caps (UsageTeamCap), so an idle team absent from this spend
+ *  /api/orgs/{id}/usage/team-caps/list (UsageTeamCap), so an idle team absent from this spend
  *  rollup can still be capped (TFAC-482). */
 export interface UsageTeamBucket {
   team_id: string
@@ -1366,7 +1367,7 @@ export interface UsageOrgLevelBucket {
   cost: number
 }
 
-/** GET /api/usage/me — the caller's own spend (any org member). */
+/** GET /api/me/usage — the caller's own spend (any org member). */
 export interface UsageMeResponse {
   total_cost_usd: number
   by_category: UsageCategoryBucket[]
@@ -1375,7 +1376,7 @@ export interface UsageMeResponse {
   by_day_model?: UsageDayModelBucket[]
 }
 
-/** GET /api/usage/teams/{id} — one team's breakdown (team admin only; an org
+/** GET /api/teams/{id}/usage — one team's breakdown (team admin only; an org
  *  admin who isn't a team admin gets a 403 and sees cross-team numbers in the
  *  org rollup instead). */
 export interface UsageTeamResponse {
@@ -1390,7 +1391,7 @@ export interface UsageTeamResponse {
   by_day_model?: UsageDayModelBucket[]
 }
 
-/** GET /api/usage/org — the org rollup (org admin only). Partition invariant
+/** GET /api/orgs/{id}/usage — the org rollup (org admin only). Partition invariant
  *  (from the backend): total_cost_usd === sum(by_team) + sum(org_level); by_user
  *  and by_category slice the same total on different axes. */
 export interface UsageOrgResponse {
@@ -1408,7 +1409,7 @@ export interface UsageOrgResponse {
   by_rule?: UsageRuleBucket[]
 }
 
-/** One row of POST /api/usage/org/team-caps/list — a team's id, name, and
+/** One row of POST /api/orgs/{id}/usage/team-caps/list — a team's id, name, and
  *  per-team daily spend cap (null = no cap). The governance cap editor lists
  *  EVERY active team (not just those with spend), so an idle team can be
  *  pre-capped; window spend is looked up separately from the org rollup's
@@ -1420,7 +1421,7 @@ export interface UsageTeamCap {
 }
 
 /** One row of the EE access & credential change-log (GET
- *  /api/usage/org/access-log, TFAC-484). `action_label` is the server-rendered
+ *  /api/orgs/{id}/usage/access-log/list, TFAC-484). `action_label` is the server-rendered
  *  human predicate ("changed Alice from member to admin") shown after the actor +
  *  timestamp; the actor/target/team names are pre-resolved ("" when a
  *  since-removed user/team no longer resolves). `action` is the raw discriminator
@@ -1440,7 +1441,7 @@ export interface AccessChangeRow {
   created_at: string
 }
 
-/** POST /api/usage/org/access-log/list — the org-admin EE audit viewer (org
+/** POST /api/orgs/{id}/usage/access-log/list — the org-admin EE audit viewer (org
  *  admin + governance entitlement; 404 unlicensed), newest-first, answering the
  *  standard list envelope. The body's `category` narrows to membership vs
  *  credential vs policy (SSO connection, enforcement, domains, break-glass)
@@ -1620,7 +1621,7 @@ export interface FleetSandboxSeries {
 }
 
 // UsageOrgOps — the org-scoped operations subset (TFAC-589): an org admin's own
-// queue waits + run durations, mirroring GET /api/usage/org/ops. SaaS-safe (no
+// queue waits + run durations, mirroring GET /api/orgs/{id}/usage/ops. SaaS-safe (no
 // cross-tenant machine truth).
 export interface UsageOrgOpsFailureKind {
   kind: string

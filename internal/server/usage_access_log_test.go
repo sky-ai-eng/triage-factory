@@ -264,7 +264,7 @@ func TestAccessLogList_StrictBody(t *testing.T) {
 			continue
 		}
 		t.Run(tc.name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", tc.body)
+			rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", tc.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
 			}
@@ -275,7 +275,7 @@ func TestAccessLogList_StrictBody(t *testing.T) {
 // postAccessLog calls the access-log list and decodes the shared envelope.
 func postAccessLog(t *testing.T, s *Server, body map[string]any) listEnvelope[accessChangeJSON] {
 	t.Helper()
-	return decodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", body))
+	return decodeList[accessChangeJSON](t, doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", body))
 }
 
 // newLicensedAccessLogServer is a local-mode server with the governance
@@ -387,7 +387,7 @@ func TestUsageAccessLog_Local(t *testing.T) {
 		// closed vocabulary now: reject rather than guess which reading the
 		// caller meant. The fault names the body field — category is a payload
 		// field on this route, not a query param, so the envelope carries it.
-		rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", map[string]any{"category": "bogus"})
+		rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", map[string]any{"category": "bogus"})
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("category=bogus = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
@@ -426,7 +426,7 @@ func TestUsageAccessLog_Unlicensed404(t *testing.T) {
 	s := newUsageTestServer(t)
 	seedAccessLogLocal(t, s)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/usage/org/access-log/list", map[string]any{})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage/access-log/list", map[string]any{})
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("unlicensed access-log = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}

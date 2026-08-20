@@ -118,12 +118,15 @@ func (r *usageRig) seedSpend(t *testing.T) {
 		uuid.New().String(), r.orgID, when)
 }
 
-// req builds a GET carrying the active org (session-scoped) + caller claims, and
-// the team_id path value when teamID is set — the state withSession/withOrg
-// would normally seed. The handler is invoked directly (not via the mux) so the
-// test exercises authz + RLS without the cookie-session dance.
+// req builds a GET carrying the caller claims plus both scope segments — the
+// org_id every org-scoped read authorizes against, and team_id when teamID is
+// set — alongside the session org the viewer-relative and team reads take. That
+// is the state withSession/withOrg + the mux would normally seed. The handler is
+// invoked directly (not via the mux) so the test exercises authz + RLS without
+// the cookie-session dance.
 func (r *usageRig) req(caller, teamID string) *http.Request {
 	req := httptest.NewRequest(http.MethodGet, "/api/usage?since=2000-01-01", nil)
+	req.SetPathValue("org_id", r.orgID)
 	if teamID != "" {
 		req.SetPathValue("team_id", teamID)
 	}

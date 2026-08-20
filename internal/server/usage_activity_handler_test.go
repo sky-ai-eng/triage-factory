@@ -141,8 +141,9 @@ func (r *usageRig) activityReq(caller, teamID, body string) *http.Request {
 	if body == "" {
 		body = "{}"
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/usage/activity/list", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/api/activity/list", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("org_id", r.orgID)
 	if teamID != "" {
 		req.SetPathValue("team_id", teamID)
 	}

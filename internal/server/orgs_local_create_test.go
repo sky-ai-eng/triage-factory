@@ -73,24 +73,27 @@ func TestIntegrationsStatus_TenantlessNotConfigured(t *testing.T) {
 	}
 }
 
-// TestSetupStart_ProvisionsAndSeeds pins the explicit provision action:
-// POST /api/setup/start on an empty DB creates the synthetic tenant +
+// TestLocalOrgCreate_ProvisionsAndSeeds pins the explicit provision action:
+// POST /api/orgs on an empty DB creates the synthetic tenant +
 // materializes the shipped defaults through the org template, and the
 // status endpoint flips to configured=true.
-func TestSetupStart_ProvisionsAndSeeds(t *testing.T) {
+func TestLocalOrgCreate_ProvisionsAndSeeds(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/setup/start", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup/start: got=%d want=200, body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs", nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/orgs: got=%d want=201, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["provisioned"] != true {
-		t.Errorf("provisioned=%v; want true", resp["provisioned"])
+	if resp["id"] != runmode.LocalDefaultOrgID {
+		t.Errorf("id=%v; want the local sentinel org", resp["id"])
+	}
+	if resp["team_id"] != runmode.LocalDefaultTeamID {
+		t.Errorf("team_id=%v; want the local sentinel team", resp["team_id"])
 	}
 	if resp["already_provisioned"] != false {
 		t.Errorf("already_provisioned=%v; want false on first provision", resp["already_provisioned"])
@@ -111,7 +114,7 @@ func TestSetupStart_ProvisionsAndSeeds(t *testing.T) {
 		t.Fatalf("count handlers: %v", err)
 	}
 	if handlers == 0 {
-		t.Error("no shipped event handlers after setup/start")
+		t.Error("no shipped event handlers after provision")
 	}
 
 	// Status now reports configured.
@@ -125,11 +128,12 @@ func TestSetupStart_ProvisionsAndSeeds(t *testing.T) {
 	}
 }
 
-// TestSetupStart_PartialProvisionRecovery pins that setup/start completes a
-// crash-mid-provision state (CreateLocalTenant committed, binary died before
-// BootstrapNewOrg ran) without requiring a clean-slate reinstall. The endpoint
-// must not treat "org row exists, no agent" as "already_provisioned".
-func TestSetupStart_PartialProvisionRecovery(t *testing.T) {
+// TestLocalOrgCreate_PartialProvisionRecovery pins that the provision action
+// completes a crash-mid-provision state (CreateLocalTenant committed, binary
+// died before BootstrapNewOrg ran) without requiring a clean-slate reinstall.
+// The endpoint must not treat "org row exists, no agent" as
+// "already_provisioned".
+func TestLocalOrgCreate_PartialProvisionRecovery(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
 
@@ -143,16 +147,13 @@ func TestSetupStart_PartialProvisionRecovery(t *testing.T) {
 	}
 
 	// Endpoint must complete the provision, not return already_provisioned.
-	rec := doJSON(t, s, http.MethodPost, "/api/setup/start", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("setup/start after partial: got=%d body=%s", rec.Code, rec.Body.String())
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs", nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/orgs after partial: got=%d want=201, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
-	}
-	if resp["provisioned"] != true {
-		t.Errorf("provisioned=%v; want true", resp["provisioned"])
 	}
 	if resp["already_provisioned"] != false {
 		t.Errorf("already_provisioned=%v; want false (completed a partial, not a no-op)", resp["already_provisioned"])
@@ -166,17 +167,17 @@ func TestSetupStart_PartialProvisionRecovery(t *testing.T) {
 	}
 }
 
-// TestSetupStart_NonResurrection is the durability guarantee the whole
-// ticket exists for: provision, delete a shipped (system) handler, then
-// re-call setup/start. Because the endpoint no-ops once a tenant exists,
-// the deleted handler stays deleted — it does not resurrect (the analog
-// of "survives a restart" now that boot seeds nothing).
-func TestSetupStart_NonResurrection(t *testing.T) {
+// TestLocalOrgCreate_NonResurrection is the durability guarantee the whole
+// provision action exists for: provision, delete a shipped (system) handler,
+// then re-call it. Because the endpoint no-ops once a tenant exists, the
+// deleted handler stays deleted — it does not resurrect (the analog of
+// "survives a restart" now that boot seeds nothing).
+func TestLocalOrgCreate_NonResurrection(t *testing.T) {
 	keyring.MockInit()
 	s, database := newTenantlessServer(t)
 
-	if rec := doJSON(t, s, http.MethodPost, "/api/setup/start", nil); rec.Code != http.StatusOK {
-		t.Fatalf("first setup/start: got=%d body=%s", rec.Code, rec.Body.String())
+	if rec := doJSON(t, s, http.MethodPost, "/api/orgs", nil); rec.Code != http.StatusCreated {
+		t.Fatalf("first POST /api/orgs: got=%d want=201, body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Pick a shipped handler and hard-delete it (the user's "fully delete
@@ -195,10 +196,11 @@ func TestSetupStart_NonResurrection(t *testing.T) {
 		t.Fatalf("delete victim: %v", err)
 	}
 
-	// Re-call the provision endpoint — must be a no-op (tenant exists).
-	rec := doJSON(t, s, http.MethodPost, "/api/setup/start", nil)
+	// Re-call the provision endpoint — must be a no-op (tenant exists), and
+	// say so with 200 rather than the 201 a fresh provision answers.
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs", nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("second setup/start: got=%d body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("second POST /api/orgs: got=%d want=200, body=%s", rec.Code, rec.Body.String())
 	}
 	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

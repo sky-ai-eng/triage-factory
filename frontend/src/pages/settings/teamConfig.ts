@@ -109,13 +109,13 @@ export interface TeamSettingsData {
   permission_absent_grace_max_seconds?: number
 }
 
-// TeamReposData mirrors GET /api/settings/team/{id}/repos.
+// TeamReposData mirrors GET /api/teams/{id}/github-repos.
 export interface TeamReposData {
   repos: string[]
   role: string
 }
 
-// TeamGitHubGroupsData mirrors GET /api/settings/team/{id}/github-groups —
+// TeamGitHubGroupsData mirrors GET /api/teams/{id}/github-groups —
 // the saved mappings plus the live org-wide candidate list the checklist
 // renders.
 export interface TeamGitHubGroupsData {
@@ -200,11 +200,10 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   }
 }
 
-// The team resource. Its settings row and its Jira project rules hang off it;
-// the tracked repos and the GitHub-team mappings still live under the older
-// /api/settings/team/{id} prefix, which this ticket didn't move.
+// The team resource. Its settings row and its three child collections — the
+// Jira project rules, the tracked GitHub repos, the GitHub-team mappings — all
+// hang off it.
 const teamPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}`
-const legacyTeamPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}`
 
 export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsData | null> {
   return apiJSON<TeamSettingsData>(`${teamPath(teamId)}/settings`).catch(() => null)
@@ -215,7 +214,7 @@ export async function fetchTeamSettings(teamId: string): Promise<TeamSettingsDat
 // from this must not treat a failed load as "tracks nothing" and then write
 // [] back, wiping the team's repos (the Repos page guards the same way).
 export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
-  return apiJSON<TeamReposData>(`${legacyTeamPath(teamId)}/repos`)
+  return apiJSON<TeamReposData>(`${teamPath(teamId)}/github-repos`)
     .then((data) => data.repos ?? [])
     .catch(() => null)
 }
@@ -227,7 +226,7 @@ export async function fetchTeamRepos(teamId: string): Promise<string[] | null> {
 // as fetchTeamRepos: a failed load must not read as "maps nothing." (The GET
 // also re-triggers the server's deletion reconcile, same as the group's fetch.)
 export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup[] | null> {
-  return apiJSON<TeamGitHubGroupsData>(`${legacyTeamPath(teamId)}/github-groups`)
+  return apiJSON<TeamGitHubGroupsData>(`${teamPath(teamId)}/github-groups`)
     .then((data) => data.groups ?? [])
     .catch(() => null)
 }
@@ -295,12 +294,13 @@ export async function saveTeamJiraProjects(
   }
 }
 
-// saveTeamRepos persists the tracked-repo set via PUT /api/settings/team/
-// {id}/repos. Re-PUTting the same set re-triggers profiling, so callers that
-// save unconditionally (vs. only-on-change) should be aware.
+// saveTeamRepos persists the tracked-repo set via
+// PUT /api/teams/{id}/github-repos. Re-PUTting the same set re-triggers
+// profiling, so callers that save unconditionally (vs. only-on-change) should
+// be aware.
 export async function saveTeamRepos(teamId: string, repos: string[]): Promise<SaveResult> {
   try {
-    await apiFetch(`${legacyTeamPath(teamId)}/repos`, {
+    await apiFetch(`${teamPath(teamId)}/github-repos`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ repos }),
@@ -312,13 +312,13 @@ export async function saveTeamRepos(teamId: string, repos: string[]): Promise<Sa
 }
 
 // saveTeamGitHubGroups persists the GitHub-team → TF-team mappings via PUT
-// /api/settings/team/{id}/github-groups (a full replace-set).
+// /api/teams/{id}/github-groups (a full replace-set).
 export async function saveTeamGitHubGroups(
   teamId: string,
   groups: GitHubGroup[],
 ): Promise<SaveResult> {
   try {
-    await apiFetch(`${legacyTeamPath(teamId)}/github-groups`, {
+    await apiFetch(`${teamPath(teamId)}/github-groups`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups }),

@@ -45,7 +45,7 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
   // "default" is the alias ResolveTeamID maps to the sole team in local
   // mode (the only mode whose callers leave teamId empty); a real team id
   // is used verbatim once the picker supplies one.
-  const teamReposPath = `/api/settings/team/${teamId || 'default'}/repos`
+  const teamReposPath = `/api/teams/${teamId || 'default'}/github-repos`
   const [available, setAvailable] = useState<RepoOption[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)

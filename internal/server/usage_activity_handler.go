@@ -41,10 +41,10 @@ import (
 // Each resource has the same two scopes + gates (mirroring the spend
 // endpoints):
 //
-//   - POST /api/usage/teams/{team_id}/{artifacts,actions}/list — one team's
+//   - POST /api/teams/{team_id}/usage/{artifacts,actions}/list — one team's
 //     history (team admin OR org admin), RLS/team-scoped under the caller's
 //     claims.
-//   - POST /api/usage/org/{artifacts,actions}/list — every team's history (org
+//   - POST /api/orgs/{org_id}/usage/{artifacts,actions}/list — every team's history (org
 //     admin), the System cross-team read; rows carry team_id + team_name (+
 //     actor_name for actions).
 //
@@ -138,7 +138,7 @@ func resolveActivityWindow(v *httpx.Validation, since, until string) (time.Time,
 // (defense in depth alongside the role gate). The team feed omits
 // team_id/team_name (already one team).
 //
-// POST /api/usage/teams/{team_id}/artifacts/list
+// POST /api/teams/{team_id}/usage/artifacts/list
 func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
 	if !ok {
@@ -184,9 +184,9 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 // then resolves each row's team name (via Teams.GetSystem) so the feed shows
 // which team's bot acted.
 //
-// POST /api/usage/org/artifacts/list
+// POST /api/orgs/{org_id}/usage/artifacts/list
 func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveOrgActivityCaller(w, r)
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
 	}
@@ -259,23 +259,6 @@ func (h *usageHandler) resolveTeamActivityCaller(w http.ResponseWriter, r *http.
 		return "", "", "", false
 	}
 	return orgID, userID, teamID, true
-}
-
-// resolveOrgActivityCaller is resolveTeamActivityCaller's org-wide sibling:
-// governance entitlement plus the org-admin role that authorizes a cross-team
-// read.
-func (h *usageHandler) resolveOrgActivityCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
-	orgID, userID, ok = h.resolveCaller(w, r)
-	if !ok {
-		return "", "", false
-	}
-	if !requireGovernance(w, r, orgID) {
-		return "", "", false
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
-		return "", "", false
-	}
-	return orgID, userID, true
 }
 
 // requireGovernance gates a handler on the FeatureGovernance entitlement for
@@ -448,7 +431,7 @@ func resolveActionActivityFilters(v *httpx.Validation, req actionActivityListReq
 // actor UUIDs would be poor UX, and resolving over one page's small
 // distinct-actor set is cheap.
 //
-// POST /api/usage/teams/{team_id}/actions/list
+// POST /api/teams/{team_id}/usage/actions/list
 func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, teamID, ok := h.resolveTeamActivityCaller(w, r)
 	if !ok {
@@ -500,9 +483,9 @@ func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Req
 // (Users.GetProfile, org-scoped under the caller's claims) so the feed reads
 // "team X's bot did Y, authorized by Z".
 //
-// POST /api/usage/org/actions/list
+// POST /api/orgs/{org_id}/usage/actions/list
 func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveOrgActivityCaller(w, r)
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
 		return
 	}

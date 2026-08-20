@@ -15,6 +15,7 @@ import TeamSwitch from '../components/TeamSwitch'
 import ActivityFeed from '../components/ActivityFeed'
 import { useOptionalAuth } from '../contexts/AuthContext'
 import { useEntitlements, FeatureGovernance } from '../hooks/useEntitlements'
+import { useApiOrgId } from '../hooks/useApiOrgId'
 import { useOrgRole } from '../hooks/useOrgRole'
 import { useTeams } from '../hooks/useTeams'
 import { usePagedList } from '../hooks/usePagedList'
@@ -44,17 +45,25 @@ import type {
 // etched monospace section labels, thin glowing telemetry gauges, and a dark HMI
 // "screen" for each time-series. Three role-gated sections, each self-gating:
 //
-//   - Personal (everyone): GET /api/usage/me — your own runs + curator turns.
-//   - Team (admins of their OWN teams): GET /api/usage/teams/{id}, chosen via a
+//   - Personal (everyone): GET /api/me/usage — your own runs + curator turns.
+//   - Team (admins of their OWN teams): GET /api/teams/{id}/usage, chosen via a
 //     TeamSwitch over the teams you admin. Team detail is team-admin-only, so the
 //     dropdown is sourced from useTeams() filtered to role==='admin' — NOT from
 //     the org rollup's by_team (drilling into a team you don't admin would 403).
-//   - Org rollup (org admins + local N=1): GET /api/usage/org — every team +
-//     curator + system overhead. The org rollup is the ONLY place system-overhead
-//     spend surfaces, so local mode shows it too (see Usage() below).
+//   - Org rollup (org admins + local N=1): GET /api/orgs/{id}/usage — every team
+//     + curator + system overhead. The org rollup is the ONLY place
+//     system-overhead spend surfaces, so local mode shows it too (see Usage()).
 //
-// All three reads are session-org-scoped (org from the session, like
-// /api/dashboard/*), so we hit the literal /api/usage/* paths with no org prefix.
+// Each read is addressed by the scope it reports on. Personal is the only
+// viewer-relative one, so it alone takes no id; the team and org reads name
+// their scope, and the org id comes from useApiOrgId — which answers null while
+// multi mode is still resolving one, so an org read holds rather than guessing.
+
+// orgUsagePath addresses an org's usage subtree. Callers pass an id resolved by
+// useApiOrgId (the sentinel in local mode, the active org in multi) and hold
+// their fetch while it is null.
+const orgUsagePath = (orgId: string, suffix = '') =>
+  `/api/orgs/${encodeURIComponent(orgId)}/usage${suffix}`
 
 // --- query window ---
 
@@ -1028,7 +1037,7 @@ function Band({
 // --- sections ---
 
 function PersonalSection({ since, days }: { since: string; days: number }) {
-  const { data, error } = useUsageFetch<UsageMeResponse>(withWindow('/api/usage/me', since))
+  const { data, error } = useUsageFetch<UsageMeResponse>(withWindow('/api/me/usage', since))
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
   return (
@@ -1074,7 +1083,7 @@ function TeamSection({
     picked && adminTeams.some((t) => t.id === picked) ? picked : (adminTeams[0]?.id ?? '')
 
   const { data, error } = useUsageFetch<UsageTeamResponse>(
-    teamId ? withWindow(`/api/usage/teams/${teamId}`, since) : null,
+    teamId ? withWindow(`/api/teams/${teamId}/usage`, since) : null,
   )
   const total = data?.total_cost_usd ?? 0
   const active = activeDays(data?.by_day ?? [], days)
@@ -1129,7 +1138,7 @@ function TeamSection({
         </div>
       </Band>
       {/* EE activity feed (Actions / Objects lenses) — team-scoped, behind FeatureGovernance. */}
-      {gov && teamId && <ActivityFeed basePath={`/api/usage/teams/${teamId}`} />}
+      {gov && teamId && <ActivityFeed basePath={`/api/teams/${teamId}/usage`} />}
     </>
   )
 }
@@ -1165,7 +1174,7 @@ function CapStatus({
 
 // CapRow is one team's inline daily-cap editor (TFAC-482): the team name + its
 // window spend on the left, a $-prefixed numeric input on the right that PUTs to
-// /api/usage/teams/{id}/cap. Blank clears the cap (no cap). It holds its own
+// /api/teams/{id}/usage/cap. Blank clears the cap (no cap). It holds its own
 // draft so the section's 15s background poll never clobbers a value mid-edit, and
 // re-normalizes the draft from the server echo on a successful save. Mirrors
 // OrgSettings' $-prefixed "No cap" input, in the console's monospace language.
@@ -1226,7 +1235,7 @@ function CapRow({ team, spend }: { team: UsageTeamCap; spend: number }) {
     setError(null)
     try {
       const body = await apiJSON<{ max_daily_cost_usd: number | null }>(
-        `/api/usage/teams/${team.team_id}/cap`,
+        `/api/teams/${team.team_id}/usage/cap`,
         {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -1352,7 +1361,10 @@ function fmtOpsDur(seconds: number): string {
 // fleet console. Core (not governance-gated); mirrors the burn-console
 // aesthetic with etched instruments. Absent silently on a fetch error.
 function OrgOpsBand({ since }: { since: string }) {
-  const { data } = useUsageFetch<UsageOrgOps>(withWindow('/api/usage/org/ops', since))
+  const orgId = useApiOrgId()
+  const { data } = useUsageFetch<UsageOrgOps>(
+    orgId ? withWindow(orgUsagePath(orgId, '/ops'), since) : null,
+  )
   if (!data) return null
   const failRate = data.runs_total > 0 ? (data.runs_failed / data.runs_total) * 100 : 0
   return (
@@ -1432,7 +1444,10 @@ function OrgOpsBand({ since }: { since: string }) {
 }
 
 function OrgSection({ since, days, gov }: { since: string; days: number; gov: boolean }) {
-  const { data, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
+  const orgId = useApiOrgId()
+  const { data, error } = useUsageFetch<UsageOrgResponse>(
+    orgId ? withWindow(orgUsagePath(orgId), since) : null,
+  )
   // Per-team caps are an EE/governance surface; render the editor only when the
   // active org is licensed (the OrgSection itself is already org-admin-gated). The
   // backend enforces both gates, so this is purely affordance-level. The editor
@@ -1446,17 +1461,17 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
   // One page is the whole editor: an org with more teams than a page holds
   // pages through the same "load more" every other list surface uses.
   const capsList = usePagedList<UsageTeamCap>(
-    '/api/usage/org/team-caps/list',
+    orgId ? orgUsagePath(orgId, '/team-caps/list') : '',
     'Could not load the per-team caps.',
   )
   const loadCaps = capsList.load
   const [capsLoaded, setCapsLoaded] = useState(false)
   useEffect(() => {
-    if (!gov) return
+    if (!gov || !orgId) return
     loadCaps({}).then((page) => {
       if (page) setCapsLoaded(true)
     })
-  }, [gov, loadCaps])
+  }, [gov, orgId, loadCaps])
   const spendByTeam = new Map<string, number>(
     (data?.by_team ?? []).map((t) => [t.team_id, t.cost] as [string, number]),
   )
@@ -1513,7 +1528,7 @@ function OrgSection({ since, days, gov }: { since: string; days: number; gov: bo
           governance-gated); the org-facing complement to the fleet console. */}
       <OrgOpsBand since={since} />
       {/* EE activity feed (Actions / Objects lenses) — org-wide (cross-team), behind FeatureGovernance. */}
-      {gov && <ActivityFeed basePath="/api/usage/org" showTeam />}
+      {gov && orgId && <ActivityFeed basePath={orgUsagePath(orgId)} showTeam />}
     </>
   )
 }
@@ -1678,17 +1693,19 @@ function AccessLogMore({
 // console's skeleton / error / zero-note treatment, but carries no $ total/rate,
 // so it's a sibling of Band rather than a use of it.
 function AccessLogSection() {
+  const orgId = useApiOrgId()
   const [category, setCategory] = useState<AccessCategory>('')
   const log = usePagedList<AccessChangeRow>(
-    '/api/usage/org/access-log/list',
+    orgId ? orgUsagePath(orgId, '/access-log/list') : '',
     'Could not load the access log.',
   )
   const { items: rows, total, hasMore, loading, error, load, loadMore } = log
   const [loadedOnce, setLoadedOnce] = useState(false)
 
   useEffect(() => {
+    if (!orgId) return
     load({ category, page_size: ACCESS_LOG_PAGE }).then(() => setLoadedOnce(true))
-  }, [category, load])
+  }, [category, orgId, load])
 
   return (
     <section className="mb-12 last:mb-0">
@@ -1789,10 +1806,13 @@ function ConsoleFrame({ children }: { children: React.ReactNode }) {
 // total, the over-time throughput, the by-team + category dials, and by-rule.
 // One fetch does it all: the org rollup omits by_rule for multi-tenant orgs (per-
 // rule detail stays with the owning team), but in local mode the boundary is moot
-// — there's one team — so /api/usage/org folds by_rule in for exactly this view,
+// — there's one team — so the org rollup folds by_rule in for exactly this view,
 // sparing the console a second round-trip to the sole team.
 function LocalConsole({ since, days }: { since: string; days: number }) {
-  const { data: org, error } = useUsageFetch<UsageOrgResponse>(withWindow('/api/usage/org', since))
+  const orgId = useApiOrgId()
+  const { data: org, error } = useUsageFetch<UsageOrgResponse>(
+    orgId ? withWindow(orgUsagePath(orgId), since) : null,
+  )
 
   if (org === null) return error ? <EtchedNote msg={error} tone="error" /> : <SkeletonBand />
   const total = org.total_cost_usd

@@ -1041,7 +1041,7 @@ function SkillsImport() {
         imported: number
         skipped: number
         scanned: number
-      }>('/api/skills/import', { method: 'POST' })
+      }>('/api/prompts/from-disk', { method: 'POST' })
       if (result.errors?.length) {
         toast.error(
           `${result.errors.length} skill${result.errors.length !== 1 ? 's' : ''} failed to import: ${result.errors[0]}`,
@@ -1108,7 +1108,7 @@ function SkillPasteImport() {
     if (submitting || !content.trim() || !ready) return
     setSubmitting(true)
     try {
-      const created = await apiJSON<{ name: string }>('/api/skills/upload', {
+      const created = await apiJSON<{ name: string }>('/api/prompts/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content, team_id: team }),

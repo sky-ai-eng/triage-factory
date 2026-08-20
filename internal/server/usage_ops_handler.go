@@ -36,14 +36,12 @@ type opsFailureKind struct {
 	Count int    `json:"count"`
 }
 
-// handleUsageOrgOps serves GET /api/usage/org/ops — org-admin gated. Reuses the
-// usage window parsing and the ConversationQueue's org-scoped timing reads.
+// handleUsageOrgOps serves GET /api/orgs/{org_id}/usage/ops — org-admin gated
+// against the org in the path. Reuses the usage window parsing and the
+// ConversationQueue's org-scoped timing reads.
 func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	orgID, _, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 	if h.conversationQueue == nil {

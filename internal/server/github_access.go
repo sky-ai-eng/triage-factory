@@ -52,11 +52,11 @@ import (
 const (
 	msgAppAlreadyLive  = "the GitHub App is already the live credential"
 	msgAppNotInstalled = "install the App before switching"
-	msgAppIsLiveCred   = "this GitHub App is the live credential; use switch-to-pat to remove it"
+	msgAppIsLiveCred   = "this GitHub App is the live credential; switch the org to a PAT to remove it"
 )
 
-// switchPATRequest carries a user-supplied org PAT for the switch-to-PAT and
-// pat-preflight paths. The preflight validates and discards it; the commit
+// switchPATRequest carries a user-supplied org PAT for both PAT routes — the
+// preflight and the switch-to. The preflight validates and discards it; the commit
 // validates and stores it (and re-validating on commit is why sending it twice
 // from the same client is fine).
 type switchPATRequest struct {
@@ -315,7 +315,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 // that so the UI can point the admin at GitHub to delete it there. Org-admin
 // only. Also valid from a staged state (re-committing to PAT mid-switch).
 //
-// POST /api/orgs/{org_id}/github/access/switch-to-pat
+// POST /api/orgs/{org_id}/github/pat/switch-to
 func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -708,7 +708,7 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 	return out, nil
 }
 
-// patPreflightResponse is the pat-preflight body: the same reachability diff
+// patPreflightResponse is the PAT preflight body: the same reachability diff
 // plus the login the PAT authenticates as. The diff fields are promoted via
 // the embedded struct.
 type patPreflightResponse struct {
@@ -721,7 +721,7 @@ type patPreflightResponse struct {
 // plus the PAT's login. Does NOT store the PAT — the commit endpoint
 // re-validates. Org-admin only.
 //
-// POST /api/orgs/{org_id}/github/access/pat-preflight
+// POST /api/orgs/{org_id}/github/pat/preflight
 func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.Request) {
 	orgID, _, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -755,7 +755,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 	if err != nil {
 		// The detail (ListUserRepos folds GitHub's response body into the
 		// error) goes to the log, not the response body.
-		githubAccessLog.Error("pat-preflight: enumerate repos failed", "org", orgID, "error", err)
+		githubAccessLog.Error("pat preflight: enumerate repos failed", "org", orgID, "error", err)
 		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to enumerate repositories for that token"})
 		return
 	}

@@ -80,7 +80,8 @@ function prefersReducedMotion(): boolean {
 
 // In-flight delegate request: dropping a queued entity onto the runs
 // tray populates this; the prompt picker reads it; on prompt selection
-// it's POSTed to /api/factory/delegate. Cleared on close/cancel.
+// it's POSTed to /api/tasks and then /api/tasks/{id}/delegate.
+// Cleared on close/cancel.
 interface PendingDelegate {
   entity: FactoryEntity
   eventType: string
@@ -345,30 +346,39 @@ export default function Factory() {
       const pd = pendingDelegate
       setPendingDelegate(null)
       if (!pd) return
-      // Three failure modes to surface:
+      // The drop is two writes: resolve the task at this station, then
+      // delegate it. Three failure modes to surface, and which call raised one
+      // doesn't change how it reads to the user:
       //   - Network error (fetch throws) — caught below.
-      //   - Pre-claim rejection — input/state validation failures (entity
-      //     not found, no matching event, spawner missing) as
-      //     400/404/409/422/503. Nothing landed; toast and stop.
-      //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad
-      //     blueprint reference, 500 spawn/DB fault) AFTER the claim
-      //     stamped. The task is bot-claimed with no run, so refetch (the
-      //     bot-claimed card must surface immediately) and tell the user to
-      //     retry. The reason is the discriminator — pre-claim faults also
-      //     answer 500, so status alone can't tell the two apart.
+      //   - Pre-claim rejection — input/state validation failures (entity not
+      //     found, no matching event, viewer) as 400/403/404/409/422. Nothing
+      //     landed on the claim axis; toast and stop.
+      //   - Post-claim spawn failure — reason SPAWN_FAILED (422 bad blueprint
+      //     reference, 500 spawn/DB fault) AFTER the claim stamped. The task is
+      //     bot-claimed with no run, so refetch (the bot-claimed card must
+      //     surface immediately) and tell the user to retry. The reason is the
+      //     discriminator — pre-claim faults also answer 500, so status alone
+      //     can't tell the two apart.
       const label = entityLabel(pd.entity)
       try {
-        await apiJSON<{ conversation_id: string }>('/api/factory/delegate', {
+        const task = await apiJSON<{ id: string }>('/api/tasks', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             entity_id: pd.entity.id,
             event_type: pd.eventType,
             dedup_key: pd.dedupKey,
-            blueprint_id: promptId,
             team_id: delegateTeam,
           }),
         })
+        await apiJSON<{ conversation_id: string }>(
+          `/api/tasks/${encodeURIComponent(task.id)}/delegate`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ blueprint_id: promptId }),
+          },
+        )
       } catch (err) {
         const spawnFailed = apiErrors(err).some((it) => it.reason === 'SPAWN_FAILED')
         if (spawnFailed) {

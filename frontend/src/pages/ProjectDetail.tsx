@@ -630,7 +630,7 @@ function PinnedReposInline({
       // visibility project has no team) — the caller (ProjectHeader) only
       // mounts this component when project.team_id is set, so this guard
       // is unreachable in practice. It stays as defense in depth: fetching
-      // `/api/settings/team//repos` would 404 and bury the real cause
+      // `/api/teams//github-repos` would 404 and bury the real cause
       // behind a generic load error if that invariant is ever violated.
       if (!teamId) {
         setLoadError('This project has no team — pinned repos are unavailable.')
@@ -639,7 +639,7 @@ function PinnedReposInline({
       }
       try {
         const [team, registry] = await Promise.all([
-          apiJSON<{ repos?: string[] }>(`/api/settings/team/${teamId}/repos`, { signal }),
+          apiJSON<{ repos?: string[] }>(`/api/teams/${teamId}/github-repos`, { signal }),
           apiListAll<RepoOption>('/api/repos/list', {}, { signal }),
         ])
         if (signal.aborted) return

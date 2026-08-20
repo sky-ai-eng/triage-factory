@@ -36,7 +36,7 @@ import (
 // unbind clears both. Only these routes may write the secret; that's the
 // property that matters.
 
-// githubPATRequest is the PUT /github/access/pat body: the host the token
+// githubPATRequest is the PUT /github/pat body: the host the token
 // authenticates against and the token itself, both required. There is no
 // "leave blank to keep current" — a blank token means the caller had nothing to
 // bind and shouldn't have called at all, which is exactly the ambiguity that
@@ -56,7 +56,7 @@ type githubPATRequest struct {
 // (PAT_2) is captured by its own surface, so access and identity stay
 // independent even when the same token is used for both.
 //
-// PUT /api/orgs/{org_id}/github/access/pat
+// PUT /api/orgs/{org_id}/github/pat
 func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {
@@ -221,7 +221,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 // own surface, and disconnecting the org's access doesn't unmake the fact that
 // a user is @login on that host.
 //
-// DELETE /api/orgs/{org_id}/github/access/pat
+// DELETE /api/orgs/{org_id}/github/pat
 func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
 	if !ok {

@@ -382,11 +382,11 @@ export async function cutoverPreflight(orgId: string): Promise<AccessDiff> {
 // validates the PAT, stores it, and deletes the App registration + secrets in
 // one transaction; the App still exists on GitHub (the result flags that).
 //
-// POST /api/orgs/{org_id}/github/access/switch-to-pat
+// POST /api/orgs/{org_id}/github/pat/switch-to
 export async function switchToPat(orgId: string, pat: string): Promise<SwitchToPatResult> {
   try {
     return await apiJSON<SwitchToPatResult>(
-      `/api/orgs/${encodeURIComponent(orgId)}/github/access/switch-to-pat`,
+      `/api/orgs/${encodeURIComponent(orgId)}/github/pat/switch-to`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -402,11 +402,11 @@ export async function switchToPat(orgId: string, pat: string): Promise<SwitchToP
 // reachability diff for an App→PAT switch plus the login it authenticates as.
 // Stores nothing — switchToPat re-validates on commit.
 //
-// POST /api/orgs/{org_id}/github/access/pat-preflight
+// POST /api/orgs/{org_id}/github/pat/preflight
 export async function patPreflight(orgId: string, pat: string): Promise<PatPreflight> {
   try {
     return await apiJSON<PatPreflight>(
-      `/api/orgs/${encodeURIComponent(orgId)}/github/access/pat-preflight`,
+      `/api/orgs/${encodeURIComponent(orgId)}/github/pat/preflight`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

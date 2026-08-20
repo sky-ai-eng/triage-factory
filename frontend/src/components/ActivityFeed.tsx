@@ -29,8 +29,8 @@ import { ACTION_OPTIONS, ACTION_PROVIDERS } from './actionMeta'
 //
 // Two scopes, set by the caller's basePath:
 //
-//   - team: /api/usage/teams/{id} (team admin or org admin).
-//   - org : /api/usage/org, showTeam (org admin) — rows carry the owning team
+//   - team: /api/teams/{id}/usage (team admin or org admin).
+//   - org : /api/orgs/{id}/usage, showTeam (org admin) — rows carry the owning team
 //     (+ the authorizing actor on the Actions lens), with a client-side
 //     team-scope (and, on Actions, actor-scope) filter narrowing the loaded page.
 //
@@ -116,8 +116,8 @@ export default function ActivityFeed({
   basePath,
   showTeam = false,
 }: {
-  /** The scope prefix — `/api/usage/org` or `/api/usage/teams/{id}`. The lens
-   *  appends its own resource segment. */
+  /** The scope prefix — `/api/orgs/{id}/usage` or `/api/teams/{id}/usage`. The
+   *  lens appends its own resource segment. */
   basePath: string
   /** Org feed: show the owning team (+ authorizing actor) per row + client-side scope filters. */
   showTeam?: boolean

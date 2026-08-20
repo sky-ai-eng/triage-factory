@@ -53,7 +53,7 @@ var jiraFormatting string
 
 // Prompts returns the system prompts every team gets seeded with — the single
 // source of truth shared by the local provision action (db.BootstrapLocalOrg,
-// fired by POST /api/setup/start), the multi-mode org-create bootstrap
+// fired by POST /api/orgs), the multi-mode org-create bootstrap
 // (db.BootstrapNewOrg), and the boot-time drift sync. They all run the same
 // seed chain, so the paths can't diverge.
 //

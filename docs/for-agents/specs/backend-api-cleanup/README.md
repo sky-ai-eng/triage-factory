@@ -123,7 +123,7 @@ inconsistency the audit found was never that three forms exist, it was
 that nothing said which was which, so new routes picked one at random.
 
 **Session-implied scope — viewer-relative reads.** `/api/me`,
-`/api/usage/me`, `/api/dashboard/*`. The subject is *the caller*, and it
+`/api/me/usage`, `/api/dashboard/*`. The subject is *the caller*, and it
 comes from the session, never from the path. These are the only routes
 where the absence of a scope segment is meaningful: there is no id to
 put there, because the answer is different for every caller and no
@@ -131,7 +131,7 @@ caller may address another's. A `?user=` on one of these would be an
 impersonation surface.
 
 **Path-scoped — admin-scoped resources.** `/api/orgs/{org_id}/…`,
-`/api/teams/{team_id}/…`, `/api/usage/teams/{team_id}/…`. The subject is
+`/api/teams/{team_id}/…`, `/api/teams/{team_id}/usage/…`. The subject is
 a *named* org or team, so the caller is asserting a scope and the
 handler authorizes them against it. Anything an admin reads about
 somebody else's scope belongs here, because the id in the path is what
@@ -154,11 +154,33 @@ it, so a segment that resolves to nothing is a 404 rather than a 500
 from a uuid cast three layers down.
 
 **Moving a route between these forms is a route change, not a cleanup.**
-The settings family is the one migration in flight (8/8 moves
-`/api/settings/team/{team_id}` and `/api/settings/org` under their
-resources); nothing else moves on the strength of this section. The
-section exists so the next route is placed correctly, not so existing
-ones get churned.
+It stays one, which is why the sweep this section deferred got its own
+ticket rather than riding along with the shape work: TFAC-872 placed the
+ten families that were addressed by something other than their subject,
+and the rule it wrote into CLAUDE.md ("The path is the address") is the
+version to read — this section is its audit.
+
+What moved, for the record: `/api/setup/start` → `POST /api/orgs` (the
+local arm of the create-workspace route); the two team-settings siblings
+the settings decomposition left behind → `/api/teams/{team_id}/`
+`github-repos` and `github-groups`; `/api/settings/user` →
+`GET|PATCH /api/me/settings`; `github/access/pat*` → `github/pat*`;
+`/api/skills/*` → `POST /api/prompts/upload` and
+`POST /api/prompts/from-disk`; `/api/factory/delegate` →
+`POST /api/tasks` plus the delegate route that already existed; and
+**`/api/usage/*` moved under its scopes** — `/api/me/usage`,
+`/api/orgs/{org_id}/usage/…`, `/api/teams/{team_id}/usage/…`. The org
+half of that one is a real authorization change, not a rename: those
+reads took the org from the session and now take it from the path, so
+`az.RequireOrgAdmin` gates the named org rather than
+`RequireOrgAdminRole` gating whichever one the session pointed at.
+
+Three things deliberately stayed. `/api/fleet/*` keeps its `?org=`: the
+subject is the deployment. `/api/dashboard/*` keeps session-implied
+scope: viewer-relative by definition. And the per-user GitHub and Jira
+identity reads keep their `{org_id}` — the org decides which host the
+identity is keyed under, and for Jira it owns the stored credential, so
+the segment is what the answer depends on rather than a lookup key.
 
 ---
 

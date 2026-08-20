@@ -43,7 +43,7 @@ type accessChangeJSON struct {
 	CreatedAt   time.Time       `json:"created_at"`
 }
 
-// accessLogListRequest is the body of POST /api/usage/org/access-log/list.
+// accessLogListRequest is the body of POST /api/orgs/{org_id}/usage/access-log/list.
 // Category narrows to one bucket of actions; empty is every action.
 type accessLogListRequest struct {
 	Category string `json:"category"`
@@ -75,13 +75,10 @@ type accessLogFilterKey struct {
 // past-the-page trick that stood in for a total: the viewer now knows how many
 // rows the filter matches, not merely that another page exists.
 //
-// POST /api/usage/org/access-log/list
+// POST /api/orgs/{org_id}/usage/access-log/list
 func (h *usageHandler) handleUsageAccessLog(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {

@@ -19,7 +19,7 @@ import (
 // GitHub teams in the github-groups mapping step.
 //
 // This is NOT a standalone endpoint. It rides on
-// GET /api/settings/team/{id}/github-groups?include_membership=true (see
+// GET /api/teams/{team_id}/github-groups?include_membership=true (see
 // handleTeamGitHubGroupsGet), so the wizard and the Settings editor read
 // the *same* org-wide candidate list and differ only in pre-checking —
 // the candidate set is no longer sourced from one user's perspective.
@@ -33,7 +33,7 @@ import (
 //     ask GraphQL's organization.teams(userLogins:) connection per
 //     configured-repo owner — O(orgs) queries, not a per-team probe.
 //
-// The write target is the existing PUT /api/settings/team/{id}/github-groups
+// The write target is the existing PUT /api/teams/{team_id}/github-groups
 // (replace-set, idempotent, team-admin gated).
 // --------------------------------------------------------------------
 

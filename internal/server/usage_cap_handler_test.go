@@ -12,14 +12,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// putCapReq builds a PUT /api/usage/teams/{team_id}/cap carrying the session org,
+// putCapReq builds a PUT /api/teams/{team_id}/usage/cap carrying the session org,
 // caller claims, the team_id path value, and a JSON body — the state
 // withCSRF/withSession would normally seed. The handler is invoked directly (not
 // via the mux) so the test exercises the governance + role gates and the
 // admin-pool write without the cookie-session dance. Reuses the usageRig from
 // usage_handler_gates_test.go (same package, same four actors + seeded spend).
 func (r *usageRig) putCapReq(caller, teamID, body string) *http.Request {
-	req := httptest.NewRequest(http.MethodPut, "/api/usage/teams/"+teamID+"/cap", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPut, "/api/teams/"+teamID+"/usage/cap", strings.NewReader(body))
 	req.SetPathValue("team_id", teamID)
 	ctx := httpx.WithOrgID(req.Context(), r.orgID)
 	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: caller})

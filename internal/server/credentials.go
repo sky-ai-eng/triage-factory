@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // persistOrgGitHubIdentity records the org credential's OWN GitHub login and
@@ -213,56 +212,11 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, result)
 }
 
-// handleSetupStart is the local-mode "Start your factory"
-// provision action (POST /api/setup/start). On a tenant-less install it
-// runs the shared BootstrapLocalOrg chain: create the synthetic tenant
-// rows, then seed the org template + materialize the founder team's
-// agent + prompts + blueprints + handlers — the same create→bootstrap
-// path multi-mode fires on org-create, with auth skipped and identity
-// auto-filled to the runmode.LocalDefault* sentinels.
-//
-// Non-resurrection guarantee: no-ops once the tenant is *fully*
-// provisioned. "Fully provisioned" means the org row exists AND the
-// agents row exists (the first step of BootstrapNewOrg). If the org
-// row exists but the agents row doesn't, the binary crashed mid-provision
-// after CreateLocalTenant committed but before BootstrapNewOrg ran.
-// In that partial state the user hasn't performed any actions yet (the
-// onboarding screen never completed), so re-running BootstrapLocalOrg is
-// safe — there are no user-deleted shipped defaults to resurrect. Once
-// the agent row exists, it signals "the user may have made changes" and
-// the endpoint stops re-seeding to preserve those changes.
-//
-// Local-mode only — multi-mode provisions per signup through
-// auth_provision.go and has no synthetic tenant to create.
-func (s *Server) handleSetupStart(w http.ResponseWriter, r *http.Request) {
-	if runmode.Current() != runmode.ModeLocal {
-		httpx.WriteErrors(w, http.StatusNotFound, httpx.ErrorItem{Reason: httpx.ReasonNotFound, Message: "setup/start is local-mode only; multi-mode provisions tenants on org creation"})
-		return
-	}
-
-	alreadyProvisioned, err := s.ensureLocalOrgProvisioned(r.Context())
-	if err != nil {
-		internalError(w, "setup", fmt.Errorf("provision local workspace: %w", err))
-		return
-	}
-
-	// Echo the (stable sentinel) IDs to keep the response shape parallel to
-	// multi-mode's org-create response and give the onboarding UI something to
-	// confirm against. already_provisioned=false signals "we just provisioned
-	// it (fresh install or partial-provision recovery)".
-	writeJSON(w, http.StatusOK, map[string]any{
-		"provisioned":         true,
-		"already_provisioned": alreadyProvisioned,
-		"org_id":              runmode.LocalDefaultOrgID,
-		"team_id":             runmode.LocalDefaultTeamID,
-	})
-}
-
 // ensureLocalOrgProvisioned idempotently provisions the local-mode tenant —
 // the runmode.LocalDefault* sentinel rows plus the shipped
 // agent/prompts/blueprints/handlers — by running the shared
 // db.BootstrapLocalOrg chain when needed. It is the common core of the
-// "Start your factory" action (handleSetupStart) and the headless bootstrap
+// "Start your factory" action (createLocalOrg) and the headless bootstrap
 // (RunHeadlessBootstrap), so the two share one provisioning path.
 //
 // Returns alreadyProvisioned=true when the org AND its agents row already

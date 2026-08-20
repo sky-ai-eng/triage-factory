@@ -42,8 +42,8 @@ function LocalAuthGate({ children }: { children: React.ReactNode }) {
   const { configured, loading } = useAuthStatus()
   if (loading) return <Loading />
   // No provisioned tenant yet → the first-run "Start your factory"
-  // screen, which fires POST /api/setup/start and then routes into the
-  // /setup wizard. (configured = a tenant exists, not "GitHub creds set".)
+  // screen, which fires POST /api/orgs and then routes into the /setup
+  // wizard. (configured = a tenant exists, not "GitHub creds set".)
   if (!configured) return <Navigate to="/start" replace />
   return <>{children}</>
 }
