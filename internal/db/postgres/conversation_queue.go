@@ -63,9 +63,14 @@ const conversationTerminalStatusesSQL = `'completed','failed'`
 // That is the whole enforcement — there is no claim-side exclusion, because
 // there is no row for one to exclude. Leaving either arm to the column
 // DEFAULT (still 'sdk', for the curator's sake) would quietly undo it.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error {
+// Returns the minted row via writeConversationReturning, sharing
+// ConversationStore.Get's projection — a fresh mint has no claims/messages/
+// memory rows yet, so the claim/ledger laterals and the memory/agent LEFT
+// JOINs read exactly as a Get immediately afterward would (NULL/zero
+// defaults throughout).
+func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	if err := db.AssertBlueprintStepIndexed(conv); err != nil {
-		return err
+		return nil, err
 	}
 	triggerType := conv.TriggerType
 	if triggerType == "" {
@@ -80,7 +85,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	// event rows insert here; the schema CHECK pairing trigger_type with
 	// creator_user_id nullability is satisfied by the branch below.
 	if triggerType == "event" {
-		_, err := s.conn.ExecContext(ctx, `
+		r, err := writeConversationReturning(ctx, s.conn, `
 			INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
 			                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 			                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
@@ -88,14 +93,15 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 			VALUES ($1, $2, 'delegation', 'native', $3, $4, $5, $6, 'event', $7,
 			        (SELECT team_id FROM tasks WHERE id = $3 AND org_id = $2),
 			        'team', NULL, $8, $9, $10, NULLIF($11, ''), now())
+			RETURNING *
 		`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 			nullIfEmpty(conv.TriggerID), nullIfEmpty(conv.ActorAgentID),
 			nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		s.notifyWake(ctx, orgID)
-		return nil
+		return r, nil
 	}
 	// Manual: the local sentinel user has no FK target in multi-mode; filter it
 	// so the COALESCE walks to the org owner. There is no tf.current_user_id()
@@ -105,7 +111,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	if creatorBind == runmode.LocalDefaultUserID {
 		creatorBind = ""
 	}
-	_, err := s.conn.ExecContext(ctx, `
+	r, err := writeConversationReturning(ctx, s.conn, `
 		INSERT INTO conversations (id, org_id, type, runtime, task_id, prompt_id, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility, creator_user_id,
 		                  actor_agent_id, blueprint_run_id, blueprint_step_index, preferred_executor_id,
@@ -115,14 +121,15 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 		        'team',
 		        COALESCE(NULLIF($8, '')::uuid, (SELECT owner_user_id FROM orgs WHERE id = $2)),
 		        $9, $10, $11, NULLIF($12, ''), now())
+		RETURNING *
 	`, conv.ID, orgID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 		nullIfEmpty(conv.TriggerID), creatorBind, nullIfEmpty(conv.ActorAgentID),
 		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	s.notifyWake(ctx, orgID)
-	return nil
+	return r, nil
 }
 
 // notifyWake fires the tf_wake doorbell after a row lands
@@ -506,30 +513,60 @@ func isActiveClaimConflict(err error) bool {
 	return pgErr.Code == "23505" && pgErr.ConstraintName == "idx_claims_one_active"
 }
 
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) error {
-	// Releasing the claim IS the requeue: the conversation stays mid-flight
-	// (status NULL), so the moment its last claim releases it matches the
-	// needs-driving predicate again. Guarded on NULL status so a stale
-	// requeue can't resurrect a terminal or parked row. The claim releases as
-	// 'requeued' (it already counted this try — Attempts is the claim count),
-	// so any owner-keyed reader sees an unowned, claimable row.
-	// preferred_executor_id is cleared for the same reason: a requeue's stamp
-	// likely points at the executor that just failed the conversation; NULL means
-	// "unowned, claimable by anyone now" — a live executor re-warms it with
-	// no aging delay, the correct placement-is-advisory answer on a recovery
-	// path (affinity is re-earned on the next enqueue, never carried stale).
-	_, err := s.conn.ExecContext(ctx, `
-		WITH req AS (
-			UPDATE conversations AS r SET result_summary = $3, preferred_executor_id = NULL
-			WHERE r.org_id = $1 AND r.id = $2 AND r.status IS NULL
-			  AND `+activeClaimExistsSQL+`
-			RETURNING id
-		)
-		UPDATE claims SET released_at = now(), outcome = 'requeued'
-		FROM req
-		WHERE claims.conversation_id = req.id AND claims.released_at IS NULL
-	`, orgID, conversationID, lastErr)
-	return err
+// RequeueConversation releases the claim FIRST and flips the conversation
+// row SECOND, as two separate statements in one transaction — NOT the single
+// combined CTE the pre-conversion version used. Postgres runs every
+// data-modifying CTE in a WITH clause against one shared snapshot (they
+// "cannot see one another's effects on the target tables" per the Postgres
+// docs), so a single statement's claims release would be invisible to that
+// same statement's conversationClaimLateral read — the returned row would
+// show the just-released claim as still active. Two statements in the same
+// transaction don't have that restriction: the second sees the first's write
+// directly, which is what makes the final RETURNING's derived display status
+// ('queued', no active claim) agree with a follow-up Get. See
+// writeConversationReturning's doc for the single-CTE version of this
+// caveat.
+//
+// The guard — a mid-flight conversation with a live claim — moves onto the
+// claims release itself (matched only when the owning conversation's status
+// IS NULL), so RowsAffected there tells the whole guard's outcome; the
+// conversations flip that follows needs no guard of its own; nothing else in
+// this transaction could have changed the row in between.
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) (*domain.Conversation, error) {
+	var result *domain.Conversation
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = 'requeued'
+			WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
+			  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.status IS NULL)
+		`, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil || n == 0 {
+			return err
+		}
+		// preferred_executor_id is cleared: a requeue's stamp likely points at
+		// the executor that just failed the conversation; NULL means "unowned,
+		// claimable by anyone now" — a live executor re-warms it with no aging
+		// delay, the correct placement-is-advisory answer on a recovery path
+		// (affinity is re-earned on the next enqueue, never carried stale).
+		r, err := writeConversationReturning(ctx, q, `
+			UPDATE conversations SET result_summary = $1, preferred_executor_id = NULL
+			WHERE org_id = $2 AND id = $3
+			RETURNING *
+		`, lastErr, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, conversationID, credPubKey string) (bool, error) {

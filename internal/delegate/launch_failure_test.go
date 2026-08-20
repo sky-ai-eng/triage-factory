@@ -86,7 +86,7 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	}
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "lfrun-" + suffix, TaskID: task.ID, PromptID: promptID, Model: "claude-sonnet-4-6",
 		TriggerType: "manual", CreatorUserID: runmode.LocalDefaultUserID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0, WorktreePath: wt,

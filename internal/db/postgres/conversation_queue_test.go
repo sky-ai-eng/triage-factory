@@ -42,7 +42,7 @@ func TestConversationQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 
 	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -73,7 +73,7 @@ func TestConversationQueueStore_Postgres_EnqueueClaim(t *testing.T) {
 	}
 
 	// Requeue → re-claimable, attempts retained.
-	if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{})
@@ -105,7 +105,7 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_ScopedToOw
 	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	conversationID := uuid.New().String()
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -165,7 +165,7 @@ func TestConversationQueueStore_Postgres_ResetProcessingConversations_NeverReset
 	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 	step0 := 0
 	conversationID := uuid.New().String()
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -199,7 +199,7 @@ func TestConversationQueueStore_Postgres_CancelRequestedNotClaimed(t *testing.T)
 	brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -233,7 +233,7 @@ func TestConversationQueueStore_Postgres_ConcurrentClaim(t *testing.T) {
 	for i := 0; i < n; i++ {
 		conversationID := uuid.New().String()
 		step0 := 0
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: "manual", CreatorUserID: userID,
 			BlueprintRunID:     seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID),
@@ -300,7 +300,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	brA, taskA, promptA := seedPgConversationQueueFixture(t, h, orgID, userID)
 	orphanID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: orphanID, TaskID: taskA, PromptID: promptA, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -313,7 +313,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	// ever picked up must also be parked — a claimable step under a non-running
 	// parent is never actually claimed, so it would sit in the queue forever.
 	queuedOrphanID := uuid.New().String()
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: queuedOrphanID, TaskID: taskA, PromptID: promptA, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brA, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -326,7 +326,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversations(t *testi
 	// Healthy: running parent, child running — must be left alone.
 	brB, taskB, promptB := seedPgConversationQueueFixture(t, h, orgID, userID)
 	healthyID := uuid.New().String()
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: healthyID, TaskID: taskB, PromptID: promptB, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brB, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -385,7 +385,7 @@ func TestConversationQueueStore_Postgres_ReconcileHealsClaimDesyncs(t *testing.T
 	seedChild := func(status string) string {
 		t.Helper()
 		id := uuid.New().String()
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID: id, TaskID: taskID, PromptID: promptID, Model: "m",
 			TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		}); err != nil {
@@ -497,7 +497,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// Manual branch stamps the actor.
 	manualID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: manualID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,
@@ -518,7 +518,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// Event branch (creator_user_id NULL per the schema CHECK) also stamps it.
 	eventID := uuid.New().String()
 	step1 := 1
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: eventID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "event", ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step1,
@@ -536,7 +536,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 	// No actor → both fields empty (nullable column + LEFT JOIN).
 	bareID := uuid.New().String()
 	step2 := 2
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: bareID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step2,
@@ -596,7 +596,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsTheNativeEngine(t *testing
 			// The schema CHECK pairs a manual trigger with a creator.
 			conv.CreatorUserID = userID
 		}
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, conv); err != nil {
+		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, conv); err != nil {
 			t.Fatalf("EnqueueConversation (%s): %v", trigger, err)
 		}
 		if got := storedRuntime(t, convID); got != domain.ConversationRuntimeNative {
@@ -627,7 +627,7 @@ func TestConversationQueueStore_Postgres_Credentials(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				conversationID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -681,7 +681,7 @@ func TestConversationQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 				brID, taskID, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
 				conversationID := uuid.New().String()
 				step := 0
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step,
 				}); err != nil {
@@ -792,7 +792,7 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 
 	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -825,7 +825,7 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -864,7 +864,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 
 			conversationID := uuid.New().String()
 			step0 := 0
-			if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+			if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 				ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 				TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &step0,
 			}); err != nil {
@@ -880,7 +880,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -920,7 +920,7 @@ func TestConversationQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				conversationID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID,
 					BlueprintRunID: brID, BlueprintStepIndex: &idx,
@@ -1005,7 +1005,7 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 				// plain equality.
 				pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET current_step_index = $2 WHERE id = $1`, brID, idx)
 				convID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -1018,10 +1018,11 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 			},
 			EnqueueUnindexed: func(t *testing.T) error {
 				t.Helper()
-				return stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				_, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: uuid.New().String(), TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID,
 				})
+				return err
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()
@@ -1118,7 +1119,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 				idx := nextStep
 				nextStep++
 				convID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 					ID: convID, TaskID: taskID, PromptID: promptID, Model: "m",
 					TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -1154,5 +1155,31 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 			},
 		}
 		return stores.ConversationQueue, seed
+	})
+}
+
+// TestConversationQueueStore_Postgres_ReturnedRow runs the returned-row
+// conformance suite (TFAC-868) against the admin pool — see
+// ConversationQueueReturnedRowFactory's doc for why there is no separate
+// app-pool arm.
+func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunConversationQueueReturnedRowConformance(t, func(t *testing.T) (db.ConversationQueueStore, db.ConversationStore, string, dbtest.ConversationQueueReturnedRowScaffold) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgForBlueprints(t, h)
+
+		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID string) {
+			t.Helper()
+			bpID := "cqrr-bp-" + uuid.New().String()[:8]
+			seedPgBlueprint(t, h, orgID, userID, bpID)
+			promptID = "cqrr-p-" + uuid.New().String()[:8]
+			seedPgPrompt(t, h, orgID, userID, promptID)
+			taskID = seedPgTask(t, h, orgID, userID)
+			return taskID, promptID, seedPgBlueprintRunOn(t, h, orgID, userID, bpID, taskID)
+		}
+		return stores.ConversationQueue, stores.Conversations, orgID, scaffold
 	})
 }

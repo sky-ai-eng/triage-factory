@@ -94,7 +94,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 
 	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -114,7 +114,7 @@ func seedReaperFixture(t *testing.T, h *pgtest.Harness, priorOutcomes ...string)
 		}
 		switch outcome := priorOutcomes[i]; outcome {
 		case "requeued":
-			if err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "test churn"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "test churn"); err != nil {
 				t.Fatalf("RequeueConversation (claim %d): %v", i+1, err)
 			}
 		case "cancelled":
@@ -804,7 +804,7 @@ func (fx *orphanFixture) enqueueChild(t *testing.T, h *pgtest.Harness, brID stri
 	idx := fx.nextStep
 	fx.nextStep++
 	convID := uuid.New().String()
-	if err := stores.ConversationQueue.EnqueueConversation(context.Background(), fx.orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(context.Background(), fx.orgID, domain.Conversation{
 		ID: convID, TaskID: fx.taskID, PromptID: fx.promptID, Model: "m",
 		TriggerType: "event", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 	}); err != nil {

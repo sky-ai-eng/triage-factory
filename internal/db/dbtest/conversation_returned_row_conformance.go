@@ -264,7 +264,7 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 // this suite exists to check. Production Complete never hits that: its
 // settlement genuinely runs on the real admin pool. RunConversationReturnedRowConformance
 // covers Complete/CompleteSystem/CompleteForClaimSystem on the admin pool,
-// and its conversations flip shares updateConversationReturning byte-for-byte
+// and its conversations flip shares writeConversationReturning byte-for-byte
 // with SetSession/SetWorktreePath below — proving RLS-visibility for those
 // two is evidence the shared helper works under RLS, which is what this
 // suite is actually checking.
