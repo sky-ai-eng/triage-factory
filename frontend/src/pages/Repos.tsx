@@ -5,19 +5,24 @@ import { Link } from 'react-router'
 import RepoPickerModal from '../components/RepoPickerModal'
 import { useOrgHref } from '../hooks/useOrgHref'
 import { useApiOrgId } from '../hooks/useApiOrgId'
+import { useTeams } from '../hooks/useTeams'
+import { useOptionalAuth } from '../contexts/AuthContext'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
 // Repo tracking is per-team; writes go to the team's repos
 // endpoint. This page is pre-team-context, so it targets the org's
-// default team — a future change will thread the selected team here.
-// The default team's repo *tracking* set — read to seed the selection and
+// first team — a future change will thread the selected team here.
+// That team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
 // (the org-wide repositories union): in a multi-team org that union
 // includes sibling teams' repos, and writing it back here would pull them
-// into the default team's tracked set and past the router gate.
-const TEAM_REPOS_PATH = '/api/settings/team/default/repos'
+// into the first team's tracked set and past the router gate.
+// The {team_id} segment takes the "default" alias only in local mode;
+// multi addresses the caller's first team by uuid, resolved from the
+// teams list before the tracked-set read runs.
+const teamReposPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}/repos`
 
 interface Repository {
   /** The registry row id. Identity: the React key, the websocket merge
@@ -675,6 +680,16 @@ function formatAge(iso: string): string {
 
 export default function Repos() {
   const apiOrgId = useApiOrgId()
+  // useOptionalAuth is null in local mode (no AuthProvider) — the arm that
+  // addresses the sole team through the "default" alias. Multi resolves the
+  // first (oldest) team's uuid from the teams list; teamId is '' until it
+  // lands, and teamsSettled releases the first fetch once the list has
+  // resolved either way — so an unresolved team renders as the paused
+  // selection (writes disabled) rather than a wrong-team read.
+  const isLocal = useOptionalAuth() === null
+  const { teams, loaded: teamsLoaded, error: teamsError, refresh: refreshTeams } = useTeams()
+  const teamId = isLocal ? 'default' : (teams[0]?.id ?? '')
+  const teamsSettled = isLocal || teamsLoaded || !!teamsError
   const [profiles, setProfiles] = useState<Repository[]>([])
   const [loading, setLoading] = useState(true)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -695,16 +710,19 @@ export default function Repos() {
     try {
       // Two distinct lists: the cards show the org-wide repositories union
       // (the registry list), but the *selection* — what Save/Re-profile writes
-      // back to the default team — must come from the default team's own
-      // tracked set, never the union (see TEAM_REPOS_PATH).
+      // back to the first team — must come from that team's own
+      // tracked set, never the union (see teamReposPath).
       // Each settles on its own: the cards are worth painting even when the
-      // team read fails, and a failed team read must not be mistaken for an
-      // empty tracked set (see setTeamLoadFailed below).
+      // team read fails — or the team never resolved — and a failed team read
+      // must not be mistaken for an empty tracked set (see setTeamLoadFailed
+      // below).
       const [profiles, team] = await Promise.all([
         apiList<Repository>('/api/repos/list', { page_size: 200 })
           .then((page) => page.items)
           .catch(() => null),
-        apiJSON<{ repos?: string[] }>(TEAM_REPOS_PATH).catch(() => null),
+        teamId
+          ? apiJSON<{ repos?: string[] }>(teamReposPath(teamId)).catch(() => null)
+          : Promise.resolve(null),
       ])
       if (profiles) setProfiles(profiles)
       if (team) {
@@ -724,7 +742,15 @@ export default function Repos() {
   }
 
   useEffect(() => {
+    // Hold the first fetch until the team resolution settles: fetching
+    // sooner would paint the failed-selection warning for a team that is
+    // merely still resolving.
+    if (!teamsSettled) return
     fetchData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiOrgId, teamId, teamsSettled])
+
+  useEffect(() => {
     if (!apiOrgId) return
     apiJSON<{ github_base_url?: string }>(`/api/orgs/${encodeURIComponent(apiOrgId)}/settings`)
       .then((data) => {
@@ -765,9 +791,13 @@ export default function Repos() {
   })
 
   const handleSaveRepos = async (repos: string[]) => {
+    // The picker can't open while the selection is failed/unresolved (the
+    // Edit button gates on teamLoadFailed); this is the defense-in-depth
+    // guard against writing with no team to address.
+    if (!teamId) return
     setSaving(true)
     try {
-      await apiFetch(TEAM_REPOS_PATH, {
+      await apiFetch(teamReposPath(teamId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos }),
@@ -788,12 +818,12 @@ export default function Repos() {
     // selection is empty or its load failed — that would clear the team's
     // tracked repos. The button is also disabled in these states; this is
     // the defense-in-depth guard.
-    if (teamLoadFailed || selectedRepos.length === 0) {
+    if (!teamId || teamLoadFailed || selectedRepos.length === 0) {
       return
     }
     setSaving(true)
     try {
-      await apiFetch(TEAM_REPOS_PATH, {
+      await apiFetch(teamReposPath(teamId), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ repos: selectedRepos }),
@@ -865,7 +895,16 @@ export default function Repos() {
               overwriting it.{' '}
               <button
                 type="button"
-                onClick={() => fetchData()}
+                onClick={() => {
+                  // The failed read may be the teams list itself (multi,
+                  // team unresolved): re-resolve it first — the fetch effect
+                  // refires once the team lands.
+                  if (!teamId) {
+                    void refreshTeams()
+                    return
+                  }
+                  void fetchData()
+                }}
                 className="underline hover:text-amber-700"
               >
                 Retry

@@ -11,11 +11,12 @@ interface Props {
   value: string[]
   onChange: (next: string[]) => void
   // The team whose tracked repos the picker offers. Empty falls back to
-  // the org's default team (the "default" alias the repos endpoint
-  // resolves) — the solo case where no write-time picker renders. When
-  // the create modal's TeamPicker is shown (≥2 teams), it threads the
-  // chosen team here so the offered repos match the team the project is
-  // created under, and server-side validatePinnedRepos agrees.
+  // the "default" alias, which the repos endpoint resolves in local mode
+  // only — the sole-team case where no write-time picker renders. Multi
+  // callers must supply a uuid: the create modal holds the fetch via
+  // `disabled` until the acting team resolves, then threads it here so
+  // the offered repos match the team the project is created under, and
+  // server-side validatePinnedRepos agrees.
   teamId?: string
   // When true the picker waits — no fetch, no interaction — until the
   // acting team resolves. The create modal sets this so a multi-team user
@@ -41,8 +42,9 @@ interface Props {
 // tracked options + a search filter. Empty tracked list shows a hint
 // pointing at /repos rather than an awkward empty popover.
 export default function RepoMultiSelect({ value, onChange, teamId, disabled = false }: Props) {
-  // "default" is the alias resolveTeamID maps to the org's default team;
-  // a real team id is used verbatim once the picker supplies one.
+  // "default" is the alias ResolveTeamID maps to the sole team in local
+  // mode (the only mode whose callers leave teamId empty); a real team id
+  // is used verbatim once the picker supplies one.
   const teamReposPath = `/api/settings/team/${teamId || 'default'}/repos`
   const [available, setAvailable] = useState<RepoOption[]>([])
   const [loading, setLoading] = useState(true)
