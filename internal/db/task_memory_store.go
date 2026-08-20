@@ -25,23 +25,19 @@ import (
 //     and must be inside WithTx in multi-mode so JWT claims (org_id,
 //     sub) are set for RLS evaluation.
 //   - `...System` methods (UpsertAgentMemorySystem,
-//     GetMemoriesForEntitySystem, RecordEntityTouchSystem,
-//     CountMemoriesForEntitySystem) run on the admin pool (BYPASSRLS).
-//     The consumers are background goroutines without a JWT-claims
-//     context — the delegate spawner's post-completion gate teardown
-//     and the engagement-start materializer both fire from inside the
-//     spawner's `runAgent` goroutine which has no request scope.
-//     org_id stays bound in the INSERT/SELECT as defense in depth.
+//     UpdateConversationMemoryHumanContentSystem, GetMemoriesForEntitySystem,
+//     RecordEntityTouchSystem, CountMemoriesForEntitySystem) run on the
+//     admin pool (BYPASSRLS). The consumers are background goroutines
+//     without a JWT-claims context — the delegate spawner's
+//     post-completion gate teardown, the artifact reconciler's post-run
+//     outcome capture, and the engagement-start materializer all fire
+//     from a goroutine with no request scope. org_id stays bound in the
+//     INSERT/SELECT/UPDATE as defense in depth.
 //
-// No System variant exists for UpdateConversationMemoryHumanContent (only
-// called from HTTP handlers under request claims). Adding a
-// speculative System variant would just be dead code the admin-pool
-// conformance suite would have to cover for no consumer; the
-// precedent (e.g. EventStore's missing app-side GetMetadata) is to
-// omit unused variants until a real caller arrives.
-//
-// RecordEntityTouchSystem and CountMemoriesForEntitySystem are the
-// deliberate exception to that precedent: they're the conversation_memory_entities
+// The precedent (e.g. EventStore's missing app-side GetMetadata) is to omit
+// a System (or plain) variant until a real caller arrives rather than add
+// one speculatively — RecordEntityTouchSystem and CountMemoriesForEntitySystem
+// are the deliberate exception: they're the conversation_memory_entities
 // foundation TFAC-622 lands ahead of their production callers, which
 // arrive with the sibling touch-capture (TFAC-623) and memory-load
 // (TFAC-624) tickets. Until then they're exercised only by tests and the

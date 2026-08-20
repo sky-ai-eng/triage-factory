@@ -98,7 +98,7 @@ func (s *taskMemoryStore) UpdateConversationMemoryHumanContent(ctx context.Conte
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("update conversation_memory human_content: %w", err)
 	}
 	return &mem, nil
 }
