@@ -66,10 +66,6 @@ despite the record — leaves the tree alone, because it is then the only copy o
 the agent's uncommitted work. An evicted workspace is not lost: the next resume
 rehydrates it from the snapshot, exactly as it does after an executor restart.
 
-Local mode leaves this **off** unless you set the variable: parked trees there
-live on your own machine, where warm resume is the point. Setting it opts in with
-identical semantics.
-
 ## Hosted Supabase Storage, S3, or R2 (SaaS / BYO)
 
 The same `aws-sdk-go-v2` client (path-style addressing, configurable
