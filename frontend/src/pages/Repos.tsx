@@ -12,16 +12,19 @@ import { toast } from '../components/Toast/toastStore'
 import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 
 // Repo tracking is per-team; writes go to the team's repos
-// endpoint. This page is pre-team-context, so it targets the org's
-// first team — a future change will thread the selected team here.
+// endpoint. This page is pre-team-context, so it pins one team — a
+// future change will thread the selected team here.
 // That team's repo *tracking* set — read to seed the selection and
 // written on Save/Re-profile. This must NOT be sourced from GET /api/repos
 // (the org-wide repositories union): in a multi-team org that union
 // includes sibling teams' repos, and writing it back here would pull them
-// into the first team's tracked set and past the router gate.
+// into the pinned team's tracked set and past the router gate.
 // The {team_id} segment takes the "default" alias only in local mode;
-// multi addresses the caller's first team by uuid, resolved from the
-// teams list before the tracked-set read runs.
+// multi addresses the caller's OLDEST TEAM MEMBERSHIP by uuid, resolved
+// from the (membership-scoped, created_at-ordered) teams list before the
+// tracked-set read runs. That is not always the org-wide oldest team the
+// local alias resolves — deliberately: a member-visible team is the only
+// kind this page's reads and writes are authorized against.
 const teamReposPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}/repos`
 
 interface Repository {
@@ -682,10 +685,10 @@ export default function Repos() {
   const apiOrgId = useApiOrgId()
   // useOptionalAuth is null in local mode (no AuthProvider) — the arm that
   // addresses the sole team through the "default" alias. Multi resolves the
-  // first (oldest) team's uuid from the teams list; teamId is '' until it
-  // lands, and teamsSettled releases the first fetch once the list has
-  // resolved either way — so an unresolved team renders as the paused
-  // selection (writes disabled) rather than a wrong-team read.
+  // caller's oldest team membership from the teams list (see teamReposPath);
+  // teamId is '' until it lands, and teamsSettled releases the first fetch
+  // once the list has resolved either way — so an unresolved team renders as
+  // the paused selection (writes disabled) rather than a wrong-team read.
   const isLocal = useOptionalAuth() === null
   const { teams, loaded: teamsLoaded, error: teamsError, refresh: refreshTeams } = useTeams()
   const teamId = isLocal ? 'default' : (teams[0]?.id ?? '')

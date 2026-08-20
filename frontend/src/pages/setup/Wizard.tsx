@@ -102,10 +102,14 @@ export default function Wizard({ isLocal = false }: { isLocal?: boolean }) {
 
 // MultiTeamResolve holds the multi-mode wizard until the caller's first team
 // resolves. The {team_id} routes the team steps address accept the "default"
-// alias only in local mode — multi requires a uuid — and the teams list is
-// oldest-first, so [0] is the team provisioning created: the "first team" the
-// wizard's team section configures. Resolving before the stack mounts keeps
-// every step's load addressed correctly on the first fan-out.
+// alias only in local mode — multi requires a uuid — so the wizard takes [0]
+// of the membership-scoped, oldest-first teams list: the caller's own oldest
+// team. For the founder running first-time setup that is the team
+// provisioning created — the "first team" the wizard's team section
+// configures; for a caller who isn't on the org's oldest team it is their
+// own oldest instead, which is the only kind of team the steps' reads and
+// writes are authorized against anyway. Resolving before the stack mounts
+// keeps every step's load addressed correctly on the first fan-out.
 function MultiTeamResolve() {
   const { teams, loaded, error, refresh } = useTeams()
   const retry = () => void refresh()
