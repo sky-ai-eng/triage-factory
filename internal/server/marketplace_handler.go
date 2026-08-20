@@ -378,17 +378,22 @@ func (mh *marketplaceHandler) handleMarketplaceListingVersionCreate(w http.Respo
 	snap.Description = req.Description
 	snap.EventTypes = req.EventTypes
 
-	var newVersion int
+	var updated domain.MarketplaceListing
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		newVersion, e = tx.Marketplace.PublishVersion(r.Context(), orgID, id, snap, req.Name, req.Description, req.EventTypes)
+		updated, e = tx.Marketplace.PublishVersion(r.Context(), orgID, id, snap, req.Name, req.Description, req.EventTypes)
 		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrNoSuchListing) {
+			// Raced past the Get above (deleted between gate and write) — 404.
+			notFound(w, "listing")
+			return
+		}
 		internalError(w, "marketplace", err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]int{"version": newVersion})
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // gateMarketplaceListingWrite resolves a listing's publisher team and applies
@@ -447,8 +452,14 @@ func (mh *marketplaceHandler) handleMarketplaceListingDelist(w http.ResponseWrit
 		return
 	}
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Marketplace.Delist(r.Context(), orgID, id)
+		_, e := tx.Marketplace.Delist(r.Context(), orgID, id)
+		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrNoSuchListing) {
+			// Raced past gateMarketplaceListingWrite above — 404.
+			notFound(w, "listing")
+			return
+		}
 		internalError(w, "marketplace", err)
 		return
 	}
@@ -474,8 +485,14 @@ func (mh *marketplaceHandler) handleMarketplaceListingRelist(w http.ResponseWrit
 		return
 	}
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Marketplace.Relist(r.Context(), orgID, id)
+		_, e := tx.Marketplace.Relist(r.Context(), orgID, id)
+		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrNoSuchListing) {
+			// Raced past gateMarketplaceListingWrite above — 404.
+			notFound(w, "listing")
+			return
+		}
 		internalError(w, "marketplace", err)
 		return
 	}
@@ -692,7 +709,8 @@ func (mh *marketplaceHandler) handleMarketplaceVote(w http.ResponseWriter, r *ht
 	}
 
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Marketplace.Vote(r.Context(), orgID, id, userID)
+		_, e := tx.Marketplace.Vote(r.Context(), orgID, id, userID)
+		return e
 	}); err != nil {
 		internalError(w, "marketplace", err)
 		return

@@ -24,16 +24,16 @@ func (s *marketplaceStore) Publish(context.Context, string, domain.MarketplaceLi
 	return "", db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) PublishVersion(context.Context, string, string, domain.ListingSnapshot, string, string, []string) (int, error) {
-	return 0, db.ErrNotApplicableInLocal
+func (s *marketplaceStore) PublishVersion(context.Context, string, string, domain.ListingSnapshot, string, string, []string) (domain.MarketplaceListing, error) {
+	return domain.MarketplaceListing{}, db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) Delist(context.Context, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *marketplaceStore) Delist(context.Context, string, string) (domain.MarketplaceListing, error) {
+	return domain.MarketplaceListing{}, db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) Relist(context.Context, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *marketplaceStore) Relist(context.Context, string, string) (domain.MarketplaceListing, error) {
+	return domain.MarketplaceListing{}, db.ErrNotApplicableInLocal
 }
 
 func (s *marketplaceStore) List(context.Context, string, string, domain.ListingFilter, db.ListOpts) ([]domain.ListingSummary, int, error) {
@@ -52,16 +52,16 @@ func (s *marketplaceStore) GetBySource(context.Context, string, string) (*domain
 	return nil, db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) Vote(context.Context, string, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *marketplaceStore) Vote(context.Context, string, string, string) (domain.ListingSummary, error) {
+	return domain.ListingSummary{}, db.ErrNotApplicableInLocal
 }
 
 func (s *marketplaceStore) Unvote(context.Context, string, string, string) error {
 	return db.ErrNotApplicableInLocal
 }
 
-func (s *marketplaceStore) RecordInstall(context.Context, string, string, int, string, string, string) error {
-	return db.ErrNotApplicableInLocal
+func (s *marketplaceStore) RecordInstall(context.Context, string, string, int, string, string, string) (domain.ListingSummary, error) {
+	return domain.ListingSummary{}, db.ErrNotApplicableInLocal
 }
 
 func (s *marketplaceStore) MaterializeListing(context.Context, string, string, domain.ListingSnapshot, string, int, string) (string, []string, error) {

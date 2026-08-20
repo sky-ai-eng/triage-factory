@@ -2,9 +2,17 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrNoSuchListing means an id-keyed marketplace write named no live
+// marketplace_listings row in the given org — the id never existed, or RLS
+// narrowed an existing row out of the caller's view. Delist/Relist/
+// PublishVersion answer this the same way a rows-affected probe used to
+// synthesize it silently: a write that changes nothing now says so.
+var ErrNoSuchListing = errors.New("db: no live marketplace listing with that id")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=MarketplaceStore --output=./mocks --case=underscore --with-expecter
 
@@ -32,10 +40,6 @@ import (
 // aggregate that can't be computed under any single user's RLS view, so it
 // routes through the admin pool like the other `...System`-suffixed methods
 // elsewhere in this package (cf. PromptStore.IncrementUsageSystem).
-// TODO(TFAC-864): these single-row writes still return a bare error rather
-// than the row they persisted: Delist, Relist, Vote, RecordInstall. Vote and
-// RecordInstall each move a listing stat as well, so the ticket settles which
-// row is the outcome.
 type MarketplaceStore interface {
 	// Publish creates a new listing plus its v1 version row. l.ID is
 	// ignored — the store mints the id and returns it. l.CurrentVersion is
@@ -51,20 +55,34 @@ type MarketplaceStore interface {
 	// update the *listing* row (current, mutable, what List/browse reads),
 	// while snap is frozen into the new version row verbatim — a republish
 	// can retune the facets or blurb without them needing to match what's
-	// preserved in the new snapshot. Returns the newly minted version
-	// number. One transaction: listing update + version insert + facet
-	// replace land atomically or not at all.
-	PublishVersion(ctx context.Context, orgID, listingID string, snap domain.ListingSnapshot, name, desc string, eventTypes []string) (int, error)
+	// preserved in the new snapshot. One transaction: listing update +
+	// version insert + facet replace land atomically or not at all.
+	//
+	// Returns the updated listing row (current_version already bumped),
+	// sourced from the same UPDATE ... RETURNING that bumps it — the
+	// resource a republish caller wants, not a bare version number left for
+	// them to re-derive. ErrNoSuchListing when (orgID, listingID) matches no
+	// row.
+	PublishVersion(ctx context.Context, orgID, listingID string, snap domain.ListingSnapshot, name, desc string, eventTypes []string) (domain.MarketplaceListing, error)
 
 	// Delist flips status to 'delisted' and stamps delisted_at. The listing
 	// row, its versions, votes, and install history all survive — delisting
 	// only removes it from other members' browse (RLS: the publisher team
-	// still sees it to relist/manage).
-	Delist(ctx context.Context, orgID, listingID string) error
+	// still sees it to relist/manage). Not state-guarded: re-delisting an
+	// already-delisted listing just re-stamps delisted_at/updated_at rather
+	// than refusing — Relist is the mirror.
+	//
+	// Returns the updated row, or ErrNoSuchListing when (orgID, listingID)
+	// matches no row — including one an RLS-narrowed caller can no longer
+	// see. A handler that already gated on Get immediately before calling
+	// this reaches that case only via a race past its own gate.
+	Delist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error)
 
 	// Relist flips a delisted listing back to 'published' and clears
-	// delisted_at.
-	Relist(ctx context.Context, orgID, listingID string) error
+	// delisted_at. Not state-guarded — mirrors Delist.
+	//
+	// Returns the updated row, or ErrNoSuchListing. See Delist.
+	Relist(ctx context.Context, orgID, listingID string) (domain.MarketplaceListing, error)
 
 	// List returns browse-page summaries matching f, most-relevant-first per
 	// f.Sort (ListingSortInstalls/Votes/Recent, defaulting to Recent).
@@ -106,7 +124,14 @@ type MarketplaceStore interface {
 	// Vote records userID's 'recommend' vote on listingID. Idempotent — a
 	// repeat vote from the same user is a no-op (PK on (listing_id,
 	// user_id)), not an error.
-	Vote(ctx context.Context, orgID, listingID, userID string) error
+	//
+	// Returns the listing summary the caller renders after voting — header
+	// plus the now-current vote_count/viewer_voted — rather than the bare
+	// marketplace_votes row: vote_count is a computed join, not a stored
+	// column, so the "row" a vote actually changes, from the caller's
+	// perspective, is the listing whose counter moved. Mirrors
+	// BlueprintStore.ReplaceSteps returning the parent a set write stamps.
+	Vote(ctx context.Context, orgID, listingID, userID string) (domain.ListingSummary, error)
 
 	// Unvote removes userID's vote on listingID, if any. Removing a vote
 	// that doesn't exist is a no-op, not an error.
@@ -124,7 +149,11 @@ type MarketplaceStore interface {
 	// actually installed (may lag listing.current_version if the installer
 	// pinned an older snapshot). userID may be "" (system-initiated install
 	// has no human actor); teamID is the installing team and is required.
-	RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) error
+	//
+	// Returns the listing summary — install_count included — the same way
+	// Vote returns it: install_count is a computed join, and the listing is
+	// what moved from the caller's perspective, not the audit row.
+	RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) (domain.ListingSummary, error)
 
 	// MaterializeListing is the "copy to my team" install (TFAC-538): it
 	// deep-copies snap into teamID as brand-new, team-owned prompt(s) —

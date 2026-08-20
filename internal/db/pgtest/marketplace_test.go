@@ -143,7 +143,8 @@ func TestMarketplaceRLS_WriteRequiresPublisherTeam(t *testing.T) {
 
 	// alice (teamA, the publisher) can delist it.
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		return err
 	}); err != nil {
 		t.Fatalf("alice's delist: %v", err)
 	}
@@ -169,7 +170,8 @@ func TestMarketplaceRLS_DelistedVisibility(t *testing.T) {
 
 	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Soon Delisted", "")
 	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
+		return err
 	}); err != nil {
 		t.Fatalf("alice's delist: %v", err)
 	}
@@ -228,10 +230,11 @@ func TestMarketplaceRLS_VotePKAndOwnerOnlyDelete(t *testing.T) {
 	// dave votes; a second Vote from dave is idempotent (PK dedupe).
 	if err := h.WithUser(t, dave, orgA, func(tx *sql.Tx) error {
 		m := pgstore.NewForTx(tx, SecretKey).Marketplace
-		if err := m.Vote(t.Context(), orgA, listingID, dave); err != nil {
+		if _, err := m.Vote(t.Context(), orgA, listingID, dave); err != nil {
 			return err
 		}
-		return m.Vote(t.Context(), orgA, listingID, dave)
+		_, err := m.Vote(t.Context(), orgA, listingID, dave)
+		return err
 	}); err != nil {
 		t.Fatalf("dave's votes: %v", err)
 	}
@@ -329,7 +332,8 @@ func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
 
 	// erin is a viewer on teamB: RecordInstall is blocked by RLS.
 	installErr := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
+		return err
 	})
 	AssertRLSViolation(t, installErr)
 
@@ -344,7 +348,8 @@ func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
 	// Promote erin to a write role; the same install now succeeds.
 	MustExec(t, h.AdminDB, `UPDATE memberships SET role = 'member' WHERE user_id = $1 AND team_id = $2`, erin, teamB)
 	if err := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
-		return pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
+		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
+		return err
 	}); err != nil {
 		t.Fatalf("erin's install after promotion: %v", err)
 	}
