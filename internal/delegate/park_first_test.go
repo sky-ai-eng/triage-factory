@@ -213,7 +213,7 @@ func TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded(t *testing.T) {
 	// The state the crash leaves behind: pending forever, its writer gone
 	// (no claim row at all, so the liveness read answers "not coming"), and
 	// the blob nonetheless present.
-	stageSnapshotState(t, s, namespace, "claim-vanished", domain.WorkspaceSnapshotPending)
+	seedSnapshotState(t, s, namespace, "claim-vanished", domain.WorkspaceSnapshotPending)
 	putTestSnapshot(t, s, namespace)
 
 	appeared, _ := s.awaitSnapshotBlob(context.Background(), runmode.LocalDefaultOrgID, namespace)
@@ -275,7 +275,7 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 				s.SetStorage(blobs)
 				namespace := blueprintRunIDForConversation(t, database, conversationID)
 				if tc.state != "" {
-					stageSnapshotState(t, s, namespace, "claim-writer", tc.state)
+					seedSnapshotState(t, s, namespace, "claim-writer", tc.state)
 				}
 
 				conv, err := s.conversations.GetSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
@@ -307,7 +307,9 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 // flight, so the claim has to actually wait for it rather than declare the
 // workspace gone.
 func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
+	// Its own run namespace: the rebuild lands under the process temp dir,
+	// which outlives the test.
+	isolateRunNamespace(t)
 	setupGitTestEnv(t)
 	s, database, conversationID, _ := setupAdvanceFixture(t, "wait-inflight")
 	wireBlobStore(t, s)
@@ -315,14 +317,9 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	s.SetSnapshotWaitTimeout(10 * time.Second)
 	namespace := blueprintRunIDForConversation(t, database, conversationID)
 	markNative(t, database, conversationID)
-	// The rebuild lands under the process temp dir, which outlives the test —
-	// clear the key both ways so a leftover tree from an earlier run neither
-	// fails this one nor is left behind by it.
-	worktree.RemoveRunRoot(namespace)
-	t.Cleanup(func() { worktree.RemoveRunRoot(namespace) })
 
 	const writerClaim = "claim-slow-writer"
-	stageSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
+	seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
 	stageClaim(t, database, conversationID, writerClaim, "exec-writer")
 	stageInstance(t, database, "exec-writer", time.Now())
 
@@ -374,7 +371,7 @@ func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 			namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 			const writerClaim = "claim-dead-writer"
-			stageSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
+			seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
 			stageClaim(t, database, conversationID, writerClaim, "exec-dead")
 			// Last beat well outside the liveness window: the executor is gone,
 			// so nothing is producing this blob however long anyone waits.
@@ -443,7 +440,7 @@ func TestEnsureWorkspace_HonorsTheWaitCap(t *testing.T) {
 	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
 	const writerClaim = "claim-hung-writer"
-	stageSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
+	seedSnapshotState(t, s, namespace, writerClaim, domain.WorkspaceSnapshotPending)
 	stageClaim(t, database, conversationID, writerClaim, "exec-hung")
 	stageInstance(t, database, "exec-hung", time.Now())
 
@@ -547,24 +544,6 @@ func failingFreshBuilder(t *testing.T) freshWorkspaceBuilder {
 	return func(context.Context) (string, error) {
 		t.Error("built a fresh workspace; the snapshot this resume was waiting for did land")
 		return "", errors.New("fresh workspace builder must not be reached")
-	}
-}
-
-// stageSnapshotState writes a lifecycle record in the requested state through
-// the store's own begin/finish, so the staged row is one a production writer
-// could have produced.
-func stageSnapshotState(t *testing.T, s *Spawner, keyID, claimID, state string) {
-	t.Helper()
-	ctx := context.Background()
-	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, claimID); err != nil {
-		t.Fatalf("begin snapshot state: %v", err)
-	}
-	if state == domain.WorkspaceSnapshotPending {
-		return
-	}
-	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, claimID,
-		state == domain.WorkspaceSnapshotWritten); err != nil {
-		t.Fatalf("finish snapshot state: %v", err)
 	}
 }
 

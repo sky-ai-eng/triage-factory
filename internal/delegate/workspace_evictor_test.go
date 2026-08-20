@@ -72,7 +72,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, bpr, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-	seedSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten)
+	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, wtPath, "-2 hours")
 
 	s.EvictIdleWorkspaces(ctx, time.Hour)
@@ -87,7 +87,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	}
 
 	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, BlueprintRunID: bpr}
-	got, prov, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo})
+	got, prov, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace after eviction: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestEvictIdleWorkspaces_RefusesWithoutAVerifiedSnapshot(t *testing.T) {
 				putTestSnapshot(t, s, bpr)
 			}
 			if tc.state != "" {
-				seedSnapshotState(t, s, bpr, tc.state)
+				seedSnapshotState(t, s, bpr, evictWriterClaim, tc.state)
 			}
 			parkAged(t, database, conversationID, wtPath, "-2 hours")
 
@@ -231,7 +231,7 @@ func TestEvictIdleWorkspaces_RefusesAPathOutsideTheRunNamespace(t *testing.T) {
 		t.Fatalf("mkdir foreign tree: %v", err)
 	}
 	putTestSnapshot(t, s, bpr)
-	seedSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten)
+	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, foreign, "-2 hours")
 
 	var removed []string
@@ -268,7 +268,7 @@ func TestEvictIdleWorkspaces_RefusesAnotherKeysRunTree(t *testing.T) {
 	otherTree := makeRunTree(t, otherKey)
 
 	putTestSnapshot(t, s, bpr)
-	seedSnapshotState(t, s, bpr, domain.WorkspaceSnapshotWritten)
+	seedSnapshotState(t, s, bpr, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, otherTree, "-2 hours")
 
 	var removed []string
@@ -338,7 +338,7 @@ func seedEvictableTree(t *testing.T, s *Spawner, database *sql.DB, conversationI
 	blueprintRunID = blueprintRunIDForConversation(t, database, conversationID)
 	wtPath = makeRunTree(t, blueprintRunID)
 	putTestSnapshot(t, s, blueprintRunID)
-	seedSnapshotState(t, s, blueprintRunID, domain.WorkspaceSnapshotWritten)
+	seedSnapshotState(t, s, blueprintRunID, evictWriterClaim, domain.WorkspaceSnapshotWritten)
 	parkAged(t, database, conversationID, wtPath, "-2 hours")
 	return blueprintRunID, wtPath
 }
@@ -355,19 +355,21 @@ func makeRunTree(t *testing.T, keyID string) string {
 	return wtPath
 }
 
-// seedSnapshotState drives the real lifecycle store to leave the key in state:
-// begin, then finish written/failed. `pending` is just the begin with no
-// finish, which is what an in-flight persist actually looks like.
-func seedSnapshotState(t *testing.T, s *Spawner, keyID, state string) {
+// seedSnapshotState drives the real lifecycle store to leave the key in state
+// under claimID: begin, then finish written/failed. `pending` is just the begin
+// with no finish, which is what an in-flight persist actually looks like. The
+// writer is a parameter because the eviction gate ignores it while the resume
+// ladder's liveness read follows it to an executor.
+func seedSnapshotState(t *testing.T, s *Spawner, keyID, claimID, state string) {
 	t.Helper()
 	ctx := context.Background()
-	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, evictWriterClaim); err != nil {
+	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, claimID); err != nil {
 		t.Fatalf("BeginSnapshotSystem: %v", err)
 	}
 	if state == domain.WorkspaceSnapshotPending {
 		return
 	}
-	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, evictWriterClaim, state == domain.WorkspaceSnapshotWritten); err != nil {
+	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, runmode.LocalDefaultOrgID, keyID, claimID, state == domain.WorkspaceSnapshotWritten); err != nil {
 		t.Fatalf("FinishSnapshotSystem: %v", err)
 	}
 }
