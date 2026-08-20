@@ -456,6 +456,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// cutover); a fresh setup ⇒ active=true. integrations.Load reads the PAT
 	// inside the same tx so the decision and the write are consistent.
 	var staged bool
+	var created domain.OrgGitHubApp
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Same reasoning as the register callback: a failed credential read
 		// must not read as "no PAT" and activate the App beside a live one.
@@ -469,7 +470,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		if staged {
 			githubAppLog.Info("import: live pat present, staging app inactive until cutover", "org", orgID, "app_id", canonicalAppID)
 		}
-		if err := tx.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+		var cerr error
+		created, cerr = tx.GitHubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              canonicalAppID,
 			Slug:               app.Slug,
@@ -481,8 +483,9 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 			RegisteredByUserID: userID,
 			Active:             !staged,
 			BotUserID:          botUserID,
-		}); err != nil {
-			return err
+		})
+		if cerr != nil {
+			return cerr
 		}
 		// The org is now in the BYO-App credential system — including when the
 		// App is STAGED behind a still-live PAT. Same reasoning as the manifest
@@ -551,15 +554,10 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		go s.onGitHubChanged(orgID)
 	}
 
-	// Build the response from the freshly-persisted row (system reads — the admin
-	// gate already authorized orgID). No installations yet (no backfill at import;
-	// the install step reconciles), so this carries an empty list the wizard's
-	// install step refreshes.
-	created, err := s.githubApps.GetForOrgSystem(ctx, orgID)
-	if err != nil {
-		internalError(w, "github-app", err)
-		return
-	}
+	// Build the response from the row CreateForOrg persisted, above — no
+	// follow-up read needed, the write already handed it back. No installations
+	// yet (no backfill at import; the install step reconciles), so this carries
+	// an empty list the wizard's install step refreshes.
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -570,8 +568,8 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		// The class the transaction above just committed for this org — passed
 		// as the literal rather than re-read, since the import IS what put the
 		// org in the BYO-App system.
-		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, created, insts,
-			s.registrantDisplayName(ctx, orgID, userID, created), s.connectCallbackURLSafe(orgID),
+		githubAppStatusResponse: newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, &created, insts,
+			s.registrantDisplayName(ctx, orgID, userID, &created), s.connectCallbackURLSafe(orgID),
 			// No webhook health: nothing has probed this App yet, and the block
 			// is deliberately absent rather than optimistic. The panel's next
 			// status read runs the first probe — the import form's own copy is

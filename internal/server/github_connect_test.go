@@ -194,7 +194,7 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 	t.Helper()
 	const ref = "github_app_999_client_secret"
 	if err := rig.srv.tx.WithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.GitHubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
+		if _, err := tx.GitHubApps.CreateForOrg(context.Background(), domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              "999",
 			Slug:               "tf-connect-test",

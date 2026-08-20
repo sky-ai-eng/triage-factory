@@ -104,7 +104,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 	seedActive := func(t *testing.T, store db.GitHubAppsStore, seed GitHubSuspensionSeeder) string {
 		t.Helper()
 		org := seed.Org(t, seed.User(t))
-		if err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
 		return org
@@ -114,7 +114,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
 
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
@@ -147,7 +147,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 
 		suspended := install(org, "456", "acme")
 		suspended.SuspendedAt, suspended.SuspendedBy = suspendedAt, "octocat"
-		if err := store.UpsertInstallation(ctx, suspended); err != nil {
+		if _, err := store.UpsertInstallation(ctx, suspended); err != nil {
 			t.Fatalf("UpsertInstallation (reconcile sees a suspension): %v", err)
 		}
 
@@ -161,11 +161,11 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 	t.Run("SuspendedToActive", func(t *testing.T) {
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
-		if err := store.SetInstallationSuspension(ctx, org, "456", time.Time{}, ""); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", time.Time{}, ""); err != nil {
 			t.Fatalf("SetInstallationSuspension (unsuspend): %v", err)
 		}
 
@@ -186,11 +186,11 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		// that there is none.
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
-		if err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (reconcile sees no suspension): %v", err)
 		}
 		if got := live(t, store, org); got.Suspended() {
@@ -201,11 +201,11 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 	t.Run("SuspendedToRemovedRetainsSuspension", func(t *testing.T) {
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
-		if err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -235,14 +235,14 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		// revived row reads as suspended.
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
-		if err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
-		if err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (re-install): %v", err)
 		}
 
@@ -268,12 +268,12 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 			{InstallationID: "456", OrgID: org, AccountType: "Organization", AccountID: "1234", AccountLogin: "acme"},
 			{InstallationID: "789", OrgID: org, AccountType: "Organization", AccountID: "5678", AccountLogin: "beta"},
 		} {
-			if err := store.UpsertInstallation(ctx, inst); err != nil {
+			if _, err := store.UpsertInstallation(ctx, inst); err != nil {
 				t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
 			}
 		}
 
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
@@ -300,7 +300,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 
-		if err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension on an unmirrored installation: %v", err)
 		}
 		if row := seed.Row(t, org, "456"); row.Exists {

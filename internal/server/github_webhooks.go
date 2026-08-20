@@ -296,7 +296,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 		// clears an inherited suspension when this `created` is a RE-install
 		// over a row that was suspended before it was removed. The account
 		// re-installed the App; they did not re-install its suspension.
-		if err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
+		if _, err := s.githubApps.UpsertInstallation(r.Context(), domain.OrgGitHubAppInstallation{
 			InstallationID: installationID,
 			OrgID:          orgID,
 			AccountType:    p.Installation.Account.Type,
@@ -314,7 +314,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	case "deleted":
-		if err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
+		if _, err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
@@ -330,7 +330,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 		if suspendedAt.IsZero() {
 			suspendedAt = time.Now().UTC()
 		}
-		if err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
@@ -341,7 +341,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 		// Restores the prior state exactly: both columns back to NULL, nothing
 		// else on the row touched. No cache work — the installation mints again,
 		// and the entry the suspend dropped is simply re-minted on next use.
-		if err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, time.Time{}, ""); err != nil {
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, time.Time{}, ""); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}

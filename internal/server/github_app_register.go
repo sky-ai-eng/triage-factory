@@ -599,7 +599,7 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		if staged {
 			githubAppLog.Info("live pat present, staging app inactive until cutover", "org", orgID, "app_id", appIDStr)
 		}
-		if err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
+		if _, err := tx.GitHubApps.CreateForOrg(r.Context(), domain.OrgGitHubApp{
 			OrgID:              orgID,
 			AppID:              appIDStr,
 			Slug:               convResp.Slug,

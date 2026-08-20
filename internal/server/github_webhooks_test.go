@@ -151,7 +151,7 @@ func TestGitHubWebhook_InstallationDeleted_FiresHook(t *testing.T) {
 
 	// Pre-seed an active installation to remove.
 	stores := sqlitestore.New(s.db)
-	if err := stores.GitHubApps.UpsertInstallation(context.Background(), domain.OrgGitHubAppInstallation{
+	if _, err := stores.GitHubApps.UpsertInstallation(context.Background(), domain.OrgGitHubAppInstallation{
 		InstallationID: "4242",
 		OrgID:          runmode.LocalDefaultOrgID,
 		AccountType:    "Organization",

@@ -150,7 +150,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	if err := s.secrets.Put(ctx, org, "pem", testRSAPEM(t), ""); err != nil {
 		t.Fatalf("store pem: %v", err)
 	}
-	if err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: org, AppID: "123", Slug: "test-bot", PEMRef: "pem", Active: true,
 	}); err != nil {
 		t.Fatalf("create app: %v", err)
@@ -158,7 +158,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	seedBYOAppCredentialClass(t, s, org)
 	for _, inst := range installs {
 		inst.OrgID = org
-		if err := s.githubApps.UpsertInstallation(ctx, inst); err != nil {
+		if _, err := s.githubApps.UpsertInstallation(ctx, inst); err != nil {
 			t.Fatalf("upsert installation %s: %v", inst.AccountLogin, err)
 		}
 	}

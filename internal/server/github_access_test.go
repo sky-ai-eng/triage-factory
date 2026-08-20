@@ -124,7 +124,7 @@ func seedLocalApp(t *testing.T, s *Server, active bool) {
 			t.Fatalf("put secret %s: %v", ref, err)
 		}
 	}
-	if err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
+	if _, err := s.githubApps.CreateForOrg(ctx, domain.OrgGitHubApp{
 		OrgID: org, AppID: "1", Slug: "tf-bot", ClientID: "Iv1.x",
 		ClientSecretRef:  "github_app_1_client_secret",
 		PEMRef:           "github_app_1_pem",
@@ -155,7 +155,7 @@ func seedBYOAppCredentialClass(t *testing.T, s *Server, orgID string) {
 
 func seedInstallation(t *testing.T, s *Server, id int64, login string) {
 	t.Helper()
-	if err := s.githubApps.UpsertInstallation(context.Background(), domain.OrgGitHubAppInstallation{
+	if _, err := s.githubApps.UpsertInstallation(context.Background(), domain.OrgGitHubAppInstallation{
 		InstallationID: strconv.FormatInt(id, 10),
 		OrgID:          runmode.LocalDefaultOrgID,
 		AccountType:    "Organization",
@@ -375,7 +375,7 @@ func TestGitHubAppDiscard_AppGoesLiveUnderTheGuard(t *testing.T) {
 	var apps db.GitHubAppsStore
 	hook := &ghAppsRaceHook{afterGet: func() {
 		ctx := context.Background()
-		if err := apps.SetActive(ctx, runmode.LocalDefaultOrgID, true); err != nil {
+		if _, err := apps.SetActive(ctx, runmode.LocalDefaultOrgID, true); err != nil {
 			t.Errorf("concurrent cutover: set active: %v", err)
 		}
 		if _, err := s.secrets.Delete(ctx, runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); err != nil {
