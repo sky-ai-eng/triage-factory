@@ -270,9 +270,9 @@ func TestMarketplaceRLS_VotePKAndOwnerOnlyDelete(t *testing.T) {
 }
 
 // TestMarketplaceRLS_VoteAfterDelistPersistsAsErrNoSuchListing pins the race
-// Vote/RecordInstall's doc comments call out: marketplace_votes_insert's RLS
-// WITH CHECK only requires org membership (not that the listing still
-// satisfy marketplace_listings_select's published-or-publisher-writer
+// Vote's doc comment calls out: marketplace_votes_insert's RLS WITH CHECK
+// only requires org membership (not that the listing still satisfy
+// marketplace_listings_select's published-or-publisher-writer
 // visibility), so a vote on an already-delisted listing lands in the table
 // even though the caller can no longer see the listing. The write must not
 // surface that as a bare, unmapped sql.ErrNoRows (which a handler would
@@ -357,117 +357,14 @@ func TestMarketplaceRLS_CrossOrgIsolation(t *testing.T) {
 	}
 }
 
-// TestMarketplaceRLS_InstallRequiresInstallingTeamWrite pins that
-// RecordInstall gates on write role on the *installing* team, not the
-// publishing team — a viewer on the installing team is blocked; a member
-// (write role) succeeds.
-func TestMarketplaceRLS_InstallRequiresInstallingTeamWrite(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-	teamB := SeedTeam(t, h, orgA, "teamB")
-	erin := SeedUser(t, h, "erin")
-	AddOrgMember(t, h, erin, orgA, teamB, "member", "viewer")
-	// teamB needs its own admin (tf.guard_team_admins, TFAC-444): erin's role
-	// gets mutated below, and a team with zero admins trips "each team must
-	// retain at least one admin role" on that write regardless of whether
-	// the write itself removed the last admin.
-	teamBAdmin := SeedUser(t, h, "teamBAdmin")
-	AddOrgMember(t, h, teamBAdmin, orgA, teamB, "member", "admin")
-
-	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Installable", "")
-
-	const fakeRootObjectID = "00000000-0000-0000-0000-0000000000aa"
-
-	// erin is a viewer on teamB: RecordInstall is blocked by RLS.
-	installErr := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
-		return err
-	})
-	AssertRLSViolation(t, installErr)
-
-	var installCount int
-	if err := h.AdminDB.QueryRow(`SELECT COUNT(*) FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount); err != nil {
-		t.Fatalf("count installs: %v", err)
-	}
-	if installCount != 0 {
-		t.Fatalf("install count = %d after erin's blocked install, want 0", installCount)
-	}
-
-	// Promote erin to a write role; the same install now succeeds.
-	MustExec(t, h.AdminDB, `UPDATE memberships SET role = 'member' WHERE user_id = $1 AND team_id = $2`, erin, teamB)
-	if err := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
-		return err
-	}); err != nil {
-		t.Fatalf("erin's install after promotion: %v", err)
-	}
-	var rootObjectID string
-	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount, &rootObjectID); err != nil {
-		t.Fatalf("recount installs: %v", err)
-	}
-	if installCount != 1 {
-		t.Fatalf("install count = %d after erin's promoted install, want 1", installCount)
-	}
-	if rootObjectID != fakeRootObjectID {
-		t.Errorf("root_object_id = %q, want %q (provenance survives the install write)", rootObjectID, fakeRootObjectID)
-	}
-}
-
-// TestMarketplaceRLS_RecordInstallAfterDelistPersistsAsErrNoSuchListing
-// mirrors TestMarketplaceRLS_VoteAfterDelistPersistsAsErrNoSuchListing for
-// RecordInstall: marketplace_installs_insert's RLS WITH CHECK only requires
-// team-write on the *installing* team, not that the listing still satisfy
-// marketplace_listings_select — so installing against an already-delisted
-// listing writes the audit row and then reports ErrNoSuchListing from the
-// follow-up summary read, rather than a bare sql.ErrNoRows.
-func TestMarketplaceRLS_RecordInstallAfterDelistPersistsAsErrNoSuchListing(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	orgA, alice, teamA := SeedOrgWithUser(t, h, "alice")
-	teamB := SeedTeam(t, h, orgA, "teamB")
-	erin := SeedUser(t, h, "erin")
-	AddOrgMember(t, h, erin, orgA, teamB, "member", "admin")
-
-	listingID := publishAsTeamWriter(t, h, orgA, alice, teamA, "Installable Then Delisted", "")
-	if err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.Delist(t.Context(), orgA, listingID)
-		return err
-	}); err != nil {
-		t.Fatalf("alice's delist: %v", err)
-	}
-
-	const fakeRootObjectID = "00000000-0000-0000-0000-0000000000bb"
-	if err := h.WithUser(t, erin, orgA, func(tx *sql.Tx) error {
-		_, err := pgstore.NewForTx(tx, SecretKey).Marketplace.RecordInstall(t.Context(), orgA, listingID, 1, teamB, erin, fakeRootObjectID)
-		if !errors.Is(err, db.ErrNoSuchListing) {
-			t.Errorf("erin's install on a delisted listing = %v, want db.ErrNoSuchListing", err)
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("erin's install: %v", err)
-	}
-
-	var installCount int
-	var rootObjectID string
-	if err := h.AdminDB.QueryRow(`SELECT COUNT(*), COALESCE(MAX(root_object_id::text), '') FROM marketplace_installs WHERE listing_id = $1`, listingID).Scan(&installCount, &rootObjectID); err != nil {
-		t.Fatalf("count installs: %v", err)
-	}
-	if installCount != 1 || rootObjectID != fakeRootObjectID {
-		t.Fatalf("install record = count=%d root=%q, want count=1 root=%q (the write landed despite ErrNoSuchListing on the follow-up read)", installCount, rootObjectID, fakeRootObjectID)
-	}
-}
-
 // TestMarketplaceRLS_MaterializeListingRequiresInstallingTeamWrite pins that
-// MaterializeListing (TFAC-538's real copy-to-team primitive, as opposed to
-// RecordInstall's bare audit row above) also gates on write role on the
-// *installing* team. Unlike RecordInstall, the block here fires on the
-// prompts INSERT (prompts_insert requires tf.user_can_write_team(team_id)
-// too) before MaterializeListing ever reaches the marketplace_installs
-// write — either way the whole transaction rolls back, so nothing is
-// created.
+// MaterializeListing (TFAC-538's real copy-to-team primitive) gates on write
+// role on the *installing* team, not the publishing team — a viewer on the
+// installing team is blocked; an admin (write role) succeeds. The block
+// fires on the prompts INSERT (prompts_insert requires
+// tf.user_can_write_team(team_id) too) before MaterializeListing ever
+// reaches the marketplace_installs write — either way the whole transaction
+// rolls back, so nothing is created.
 func TestMarketplaceRLS_MaterializeListingRequiresInstallingTeamWrite(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)

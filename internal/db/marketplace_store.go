@@ -23,8 +23,9 @@ var ErrNoSuchListing = errors.New("db: no live marketplace listing with that id"
 // listing/version snapshot or a plain audit row (vote, install); nothing a
 // consumer copies ever FKs back to a listing, and a listing never FKs into
 // the team-owned prompts/blueprints it was published from. Provenance for a
-// copy lives on the install record (RecordInstall's rootObjectID), not on
-// the copy itself — prompts/blueprints stay untouched in both dialects.
+// copy lives on the install record MaterializeListing writes
+// (root_object_id), not on the copy itself — prompts/blueprints stay
+// untouched in both dialects.
 //
 // Multi-mode only (house pattern — see InvitesStore): every marketplace
 // table lives in the Postgres baseline only. The SQLite impl
@@ -146,25 +147,6 @@ type MarketplaceStore interface {
 	// Exempt from the returned-row rule: it is a delete.
 	Unvote(ctx context.Context, orgID, listingID, userID string) error
 
-	// RecordInstall appends an audit row for a "copy to my team" install —
-	// the substrate for install counts, the TFAC-540 run-derived-stats
-	// fast-follow, and provenance (rootObjectID is the id of the copy this
-	// install materialized: a blueprint id for kind=blueprint, a prompt id
-	// for kind=prompt). No FK on rootObjectID — install history must survive
-	// the copy's later deletion, exactly like GetActiveBySource's source_id
-	// survives the source's. version is the listing version that was
-	// actually installed (may lag listing.current_version if the installer
-	// pinned an older snapshot). userID may be "" (system-initiated install
-	// has no human actor); teamID is the installing team and is required.
-	//
-	// Returns the listing summary — install_count included — the same way
-	// Vote returns it: install_count is a computed join, and the listing is
-	// what moved from the caller's perspective, not the audit row. Same race
-	// as Vote: the audit row can land under a looser RLS check than the
-	// listing's own visibility, so a miss on the follow-up read is
-	// ErrNoSuchListing rather than a raw sql.ErrNoRows.
-	RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) (domain.ListingSummary, error)
-
 	// MaterializeListing is the "copy to my team" install (TFAC-538): it
 	// deep-copies snap into teamID as brand-new, team-owned prompt(s) —
 	// kind=prompt mints one; kind=blueprint mints one fresh prompt per step
@@ -181,17 +163,17 @@ type MarketplaceStore interface {
 	// TFAC-535 cross-org insurance in action: the installer consumes a
 	// snapshot document, never source rows, so an install still succeeds
 	// after the publisher team or its source object is deleted. listingID +
-	// version are threaded through only to stamp the install record
-	// (RecordInstall's audit row) — its FK to marketplace_listings is the
-	// only thing here that depends on the listing still existing.
+	// version are threaded through only to stamp the install record this
+	// method writes — its FK to marketplace_listings is the only thing here
+	// that depends on the listing still existing.
 	//
 	// Returns the created root object id (a blueprint id for kind=blueprint,
 	// the prompt id for kind=prompt — the same value written to the
 	// install's root_object_id) plus every prompt id created (the step
 	// copies for kind=blueprint, the single prompt for kind=prompt) so the
 	// caller can render/link every row this install created. userID may be
-	// "" (system-initiated install has no human actor, mirrors
-	// RecordInstall); teamID is the installing team and is required.
+	// "" (system-initiated install has no human actor); teamID is the
+	// installing team and is required.
 	//
 	// Rejects snap.SchemaVersion != domain.ListingSnapshotSchemaVersion
 	// before writing anything — a snapshot format this method doesn't

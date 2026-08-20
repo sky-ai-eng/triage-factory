@@ -11,9 +11,9 @@ import (
 
 // MarketplaceStoreFactory hands the conformance suite a wired
 // MarketplaceStore plus the org/team/user ids every write in the suite
-// addresses. userID must carry write role on teamID — the suite installs
-// into teamID as well as publishing from it, and RLS write-role seeding is
-// the caller's responsibility (schema- and auth-blind harness).
+// addresses. userID must carry write role on teamID — the suite publishes
+// the seed listing from it — and RLS write-role seeding is the caller's
+// responsibility (schema- and auth-blind harness).
 type MarketplaceStoreFactory func(t *testing.T) (store db.MarketplaceStore, orgID, teamID, userID string)
 
 // marketplaceConformanceSnapshot is a minimal valid single-step prompt
@@ -31,12 +31,11 @@ func marketplaceConformanceSnapshot(name string) domain.ListingSnapshot {
 }
 
 // RunMarketplaceReturnedRowConformance pins the returned-row standard on
-// PublishVersion/Delist/Relist/Vote/RecordInstall: what each write hands
-// back is what a follow-up Get finds. All five run over ONE published
-// listing in subtest declaration order (Go runs t.Run subtests
-// sequentially — RunOrgsReturnedRowConformance's single-shared-row shape),
-// since Delist/Relist are state flips on the same row PublishVersion just
-// bumped.
+// PublishVersion/Delist/Relist/Vote: what each write hands back is what a
+// follow-up Get finds. All four run over ONE published listing in subtest
+// declaration order (Go runs t.Run subtests sequentially —
+// RunOrgsReturnedRowConformance's single-shared-row shape), since
+// Delist/Relist are state flips on the same row PublishVersion just bumped.
 func RunMarketplaceReturnedRowConformance(t *testing.T, mk MarketplaceStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -73,17 +72,6 @@ func RunMarketplaceReturnedRowConformance(t *testing.T, mk MarketplaceStoreFacto
 		AssertWriteReturnedStoredRow(t, "Vote", got, readSummary)
 		if got.VoteCount != 1 || !got.ViewerVoted {
 			t.Errorf("Vote returned %+v, want vote_count=1 viewer_voted=true", got)
-		}
-	})
-
-	t.Run("RecordInstall_returns_the_stored_listing_summary", func(t *testing.T) {
-		got, err := store.RecordInstall(ctx, orgID, listingID, 1, teamID, userID, "")
-		if err != nil {
-			t.Fatalf("RecordInstall: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "RecordInstall", got, readSummary)
-		if got.InstallCount != 1 {
-			t.Errorf("RecordInstall returned install_count=%d, want 1", got.InstallCount)
 		}
 	})
 

@@ -52,9 +52,6 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if err := m.Unvote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Unvote = %v, want ErrNotApplicableInLocal", err)
 	}
-	if _, err := m.RecordInstall(ctx, orgID, listingID, 1, runmode.LocalDefaultTeamID, userID, "some-root-object"); !errors.Is(err, db.ErrNotApplicableInLocal) {
-		t.Errorf("RecordInstall = %v, want ErrNotApplicableInLocal", err)
-	}
 	if _, _, err := m.MaterializeListing(ctx, orgID, runmode.LocalDefaultTeamID, domain.ListingSnapshot{}, listingID, 1, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("MaterializeListing = %v, want ErrNotApplicableInLocal", err)
 	}

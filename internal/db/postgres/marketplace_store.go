@@ -418,10 +418,10 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 
 // getListingSummaryPG resolves one listing's ListingSummary — header,
 // computed vote/install counts, the viewer's own vote state, and event
-// types — the shared projection Get, Vote, and RecordInstall all render
-// their return value from, so the browse counter and the vote/install
-// response can never drift from what a follow-up Get would show. Propagates
-// sql.ErrNoRows when the listing doesn't exist / isn't visible under RLS.
+// types — the shared projection Get and Vote both render their return value
+// from, so the browse counter and the vote response can never drift from
+// what a follow-up Get would show. Propagates sql.ErrNoRows when the listing
+// doesn't exist / isn't visible under RLS.
 func getListingSummaryPG(ctx context.Context, q queryer, orgID, listingID, viewerUserID string) (domain.ListingSummary, error) {
 	sel := listingSummaryQueryPG + ` WHERE l.org_id = $2 AND l.id = $3::uuid`
 	summary, err := scanListingSummaryRowPG(q.QueryRowContext(ctx, sel, nullIfEmpty(viewerUserID), orgID, listingID).Scan)
@@ -543,31 +543,21 @@ func (s *marketplaceStore) GetBySource(ctx context.Context, orgID, sourceID stri
 	return &summary, nil
 }
 
-// summaryAfterListingChildWritePG runs the shared getListingSummaryPG
-// follow-up read for Vote/RecordInstall and maps a miss to
-// db.ErrNoSuchListing. The miss is real and reachable even right after a
-// successful write: marketplace_votes_insert/marketplace_installs_insert's
-// RLS WITH CHECK only requires org membership (+ team-write for installs) —
-// neither requires the listing itself to still satisfy
-// marketplace_listings_select ('published' OR a publisher-team writer). So a
-// listing delisted between the caller's own pre-check and this write (or
-// between the write and this read) leaves the child row landed but this
-// SELECT seeing nothing — a bare sql.ErrNoRows here would misreport an
-// actually-persisted write as an unmapped internal error.
-func summaryAfterListingChildWritePG(ctx context.Context, q queryer, orgID, listingID, userID string) (domain.ListingSummary, error) {
-	summary, err := getListingSummaryPG(ctx, q, orgID, listingID, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return domain.ListingSummary{}, db.ErrNoSuchListing
-	}
-	return summary, err
-}
-
 // Vote's INSERT is ON CONFLICT DO NOTHING (idempotent — a repeat vote is a
 // no-op), so its own RETURNING would answer zero rows on the conflict path.
 // vote_count is a computed join besides, not a column the vote row itself
 // carries, so the return value is sourced from a follow-up
 // getListingSummaryPG in the SAME transaction rather than the INSERT's own
-// RETURNING — same shape as RecordInstall below.
+// RETURNING.
+//
+// The vote itself can land while that follow-up read comes up empty:
+// marketplace_votes_insert's RLS WITH CHECK only requires org
+// membership, not that the listing still satisfy marketplace_listings_select
+// ('published' OR a publisher-team writer). A listing delisted between the
+// caller's own pre-check and this call (or concurrently with it) leaves the
+// vote row landed but this SELECT seeing nothing — mapped to
+// db.ErrNoSuchListing rather than a bare, unmapped sql.ErrNoRows that would
+// misreport an actually-persisted write as an internal error.
 func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID string) (domain.ListingSummary, error) {
 	if _, err := s.q.ExecContext(ctx, `
 		INSERT INTO marketplace_votes (listing_id, org_id, user_id, created_at) VALUES ($1::uuid, $2, $3::uuid, now())
@@ -575,29 +565,16 @@ func (s *marketplaceStore) Vote(ctx context.Context, orgID, listingID, userID st
 	`, listingID, orgID, userID); err != nil {
 		return domain.ListingSummary{}, err
 	}
-	return summaryAfterListingChildWritePG(ctx, s.q, orgID, listingID, userID)
+	summary, err := getListingSummaryPG(ctx, s.q, orgID, listingID, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ListingSummary{}, db.ErrNoSuchListing
+	}
+	return summary, err
 }
 
 func (s *marketplaceStore) Unvote(ctx context.Context, orgID, listingID, userID string) error {
 	_, err := s.q.ExecContext(ctx, `DELETE FROM marketplace_votes WHERE org_id = $1 AND listing_id = $2::uuid AND user_id = $3::uuid`, orgID, listingID, userID)
 	return err
-}
-
-// install_count is a computed join, not a column the install row itself
-// carries, so — like Vote — the return value is a follow-up
-// getListingSummaryPG in the same transaction rather than the INSERT's own
-// RETURNING.
-func (s *marketplaceStore) RecordInstall(ctx context.Context, orgID, listingID string, version int, teamID, userID, rootObjectID string) (domain.ListingSummary, error) {
-	if teamID == "" {
-		return domain.ListingSummary{}, errors.New("postgres marketplace: RecordInstall requires team_id")
-	}
-	if _, err := s.q.ExecContext(ctx, `
-		INSERT INTO marketplace_installs (listing_id, org_id, version, team_id, user_id, root_object_id, created_at)
-		VALUES ($1::uuid, $2, $3, $4::uuid, $5::uuid, $6::uuid, now())
-	`, listingID, orgID, version, teamID, nullIfEmpty(userID), nullIfEmpty(rootObjectID)); err != nil {
-		return domain.ListingSummary{}, err
-	}
-	return summaryAfterListingChildWritePG(ctx, s.q, orgID, listingID, userID)
 }
 
 // MaterializeListing deep-copies snap into teamID and records the install,
