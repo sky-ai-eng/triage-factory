@@ -16,11 +16,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// usageHandler serves the core Usage page's spend layer (TFAC-478): three
-// role-gated read endpoints over the llm_spend view (TFAC-472). Spend is core
-// at every scope; the SCOPE is what's role-gated, and each route is addressed
-// by the scope it is about — a team's spend is a fact about the team, like its
-// roster:
+// usageHandler serves the core Usage page's spend layer: three role-gated read
+// endpoints over the llm_spend view. Spend is core at every scope; the SCOPE is
+// what's role-gated, and each route is addressed by the scope it is about — a
+// team's spend is a fact about the team, like its roster:
 //
 //   - GET /api/me/usage           — the caller's own spend (any org member).
 //   - GET /api/teams/{id}/usage   — one team's breakdown (team admin).

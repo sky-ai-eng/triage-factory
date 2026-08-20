@@ -870,12 +870,12 @@ func (s *Server) routes() {
 	// owner sentinel, demotes the former owner — all in one tx as the owner.
 	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 
-	// Usage (spend layer) — the core Usage page's read API (TFAC-478), each
-	// route under the scope it reports on: usage is a fact about a caller, a
-	// team, or an org, the same way a roster is. /api/me/usage is
-	// viewer-relative and takes its org from the session; the team and org
-	// routes name their scope in the path, and the org routes authorize
-	// against THAT org rather than whichever one the session points at.
+	// Usage (spend layer) — the core Usage page's read API, each route under
+	// the scope it reports on: usage is a fact about a caller, a team, or an
+	// org, the same way a roster is. /api/me/usage is viewer-relative and takes
+	// its org from the session; the team and org routes name their scope in the
+	// path, and the org routes authorize against THAT org rather than whichever
+	// one the session points at.
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
 	// org-admin, /orgs/{id} is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
@@ -889,7 +889,7 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions (external-action
 	// audit log) + Objects (artifact history) lenses — same scope gates as the
-	// spend reads above, plus the entitlement (unlicensed → 404). TFAC-483.
+	// spend reads above, plus the entitlement (unlicensed → 404).
 	// Two resources, two routes each. The single ?view=-multiplexed /activity
 	// route they replaced answered with two different row shapes and two
 	// different filter vocabularies from one address.
