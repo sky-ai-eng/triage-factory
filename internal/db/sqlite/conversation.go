@@ -248,6 +248,12 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // path that puts an outcome-bearing conversation back into the mid-flight
 // (status NULL) state the needs-driving predicate claims from. See the
 // interface doc comment / the Postgres twin.
+//
+// The affinity re-stamp is inert here — placement is disabled at N=1, so the
+// tier predicate that reads the column is never built and one executor claims
+// everything regardless. It is written anyway because the column means the
+// same thing in both dialects: the executor whose engagement last held this
+// conversation's workspace.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -257,7 +263,11 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, park_reason = NULL,
-			                preferred_executor_id = NULL
+			                preferred_executor_id = (
+			                    SELECT c.executor_id FROM claims c
+			                    WHERE c.conversation_id = conversations.id
+			                    `+newestEngagementFirstSQL("c")+`
+			                    LIMIT 1)
 			WHERE id = ?
 			  AND (status = 'open'
 			       OR (status = 'completed'
@@ -305,30 +315,39 @@ func (s *conversationStore) SetActiveClaimPhaseSystem(ctx context.Context, orgID
 	return err
 }
 
-// PriorClaimExecutorSystem reads the predecessor engagement's executor. The
-// caller's own claim is excluded by id — it is the newest row by construction
-// (one active claim per conversation), so the predecessor is the next one back.
+// newestEngagementFirstSQL orders one conversation's claims by how recently
+// each engagement held it, nearest first, for the alias the caller gave the
+// claims table — the resume flip's affinity stamp and the predecessor lookup
+// below both take it, and "which engagement came later" is one question.
 //
 // The sort is total, for the reason the Postgres arm spells out. Ties are
 // reachable here too: the mint writes a precise Go timestamp, but the column's
 // own default is CURRENT_TIMESTAMP at whole-second resolution, so any row that
 // takes it can tie with a neighbour. released_at breaks a tie meaningfully —
 // of two claims that started together the one that finished later is the
-// nearer predecessor, and an unreleased one is nearer still, which is what the
+// nearer engagement, and an unreleased one is nearer still, which is what the
 // IS NULL term buys (SQLite sorts NULLs last under DESC, where Postgres is
 // told NULLS FIRST). rowid is the backstop that leaves nothing undecided.
 //
 // The answer is the same either way at N=1, where there is one executor to
 // name, but the ordering is part of a contract both dialects are held to.
+func newestEngagementFirstSQL(alias string) string {
+	return `ORDER BY ` + alias + `.claimed_at DESC, (` + alias + `.released_at IS NULL) DESC, ` +
+		alias + `.released_at DESC, ` + alias + `.rowid DESC`
+}
+
+// PriorClaimExecutorSystem reads the predecessor engagement's executor. The
+// caller's own claim is excluded by id — it is the newest row by construction
+// (one active claim per conversation), so the predecessor is the next one back.
 func (s *conversationStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
 	var executorID string
 	err := s.q.QueryRowContext(ctx, `
-		SELECT executor_id FROM claims
-		WHERE conversation_id = ? AND id <> ?
-		ORDER BY claimed_at DESC, (released_at IS NULL) DESC, released_at DESC, rowid DESC
+		SELECT c.executor_id FROM claims c
+		WHERE c.conversation_id = ? AND c.id <> ?
+		`+newestEngagementFirstSQL("c")+`
 		LIMIT 1
 	`, conversationID, claimID).Scan(&executorID)
 	if errors.Is(err, sql.ErrNoRows) {

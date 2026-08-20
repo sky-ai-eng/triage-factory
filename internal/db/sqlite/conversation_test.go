@@ -178,6 +178,16 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			}
 			return out
 		},
+		PreferredExecutor: func(t *testing.T, conversationID string) string {
+			t.Helper()
+			var pref sql.NullString
+			if err := conn.QueryRow(
+				`SELECT preferred_executor_id FROM conversations WHERE id = ?`, conversationID,
+			).Scan(&pref); err != nil {
+				t.Fatalf("read preferred_executor_id: %v", err)
+			}
+			return pref.String
+		},
 		CollapseClaimTimes: func(t *testing.T, conversationID string) {
 			t.Helper()
 			if _, err := conn.Exec(`

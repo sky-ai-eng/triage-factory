@@ -368,12 +368,15 @@ type Conversation struct {
 	// string === SQL NULL.
 	ExecutorID string `json:"-"`
 
-	// PreferredExecutorID is the placement affinity stamp (TFAC-587): the
-	// capacity-weighted rendezvous winner for this conversation's (org, repo) key,
-	// computed at enqueue and re-stamped on each blueprint-step advance. The
-	// two-tier claim reads it (tier 1 = preferred equals the claiming
-	// executor). Advisory: empty (→ SQL NULL) means "unowned, claimable by
-	// anyone now" — placement disabled, local N=1, a non-repo key, or a
+	// PreferredExecutorID is the placement affinity stamp: which executor
+	// should get this conversation if it can. At enqueue (and on each
+	// blueprint-step advance) that is the capacity-weighted rendezvous winner
+	// for the conversation's (org, repo) key; on a resume it is instead the
+	// executor of the newest claim, which is the machine holding the workspace
+	// tree the follow-up wants to land in. The two-tier claim reads it (tier 1
+	// = preferred equals the claiming executor). Advisory: empty (→ SQL NULL)
+	// means "unowned, claimable by anyone now" — placement disabled, local
+	// N=1, a non-repo key, a conversation no engagement ever drove, or a
 	// requeue that cleared it. Set on enqueue and while the row is queued
 	// (unlike ExecutorID); read back only where placement needs it.
 	PreferredExecutorID string `json:"-"`

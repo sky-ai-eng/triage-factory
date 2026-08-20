@@ -273,3 +273,71 @@ func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 		t.Fatalf("requeue must clear preferred_executor_id, still = %q", got)
 	}
 }
+
+// TestPlacementClaim_ResumeFollowsTheWarmTree is the resume path's affinity:
+// a stopped conversation woken by a follow-up routes back to the executor
+// whose engagement drove it last — the machine still holding its workspace
+// tree — rather than re-queueing unowned for whichever executor scans first.
+//
+// Both halves of "advisory" are asserted on one row: while the last executor
+// is alive the conversation is exclusively its own (tier 1), and the moment
+// that executor stops heartbeating the stamp costs nothing (tier 2 admits
+// anyone at once, no aging wait).
+func TestPlacementClaim_ResumeFollowsTheWarmTree(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+
+	registerLiveExecutor(t, stores, "exec-a")
+	registerLiveExecutor(t, stores, "exec-b")
+
+	// Born unowned, so nothing but the engagement itself can put A on the row.
+	conversationID := enqueuePgConversationPreferred(t, h, stores, orgID, userID, "")
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	if err != nil || claimed == nil || claimed.ID != conversationID {
+		t.Fatalf("A's first claim = (%+v, %v), want conversation %s", claimed, err, conversationID)
+	}
+
+	// The stop → "wait, one more thing" → resume flow.
+	resume := func(t *testing.T) {
+		t.Helper()
+		if ok, pErr := stores.Conversations.ParkOpen(ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); pErr != nil || !ok {
+			t.Fatalf("park: ok=%v err=%v", ok, pErr)
+		}
+		if ok, mErr := stores.Conversations.MarkQueuedForResume(ctx, orgID, conversationID); mErr != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, mErr)
+		}
+		if got, ok := readPreferred(t, h, conversationID); !ok || got != "exec-a" {
+			t.Fatalf("preferred_executor_id after the resume = (%q, %v), want exec-a", got, ok)
+		}
+	}
+	resume(t)
+
+	// B is live and idle, and the conversation is claimable — but it is A's
+	// until it ages, because A is where the warm tree is.
+	got, err := stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	if err != nil {
+		t.Fatalf("B claim: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("exec-b claimed the resumed conversation %q inside the aging window; the resume stamp is not tier-1 exclusive", got.ID)
+	}
+
+	// A takes it straight back — no aging wait, and the tree it left behind is
+	// seconds old.
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-a", 1, placementClaimCfg)
+	if err != nil || got == nil || got.ID != conversationID {
+		t.Fatalf("A's resume claim = (%+v, %v), want conversation %s", got, err, conversationID)
+	}
+
+	// Same row, same stamp, but A has stopped heartbeating: the warm tree is
+	// on a machine nobody can reach, so the stamp yields immediately.
+	resume(t)
+	backdatePgHeartbeat(t, h, "exec-a", time.Hour)
+	got, err = stores.ConversationQueue.ClaimNextConversation(ctx, "exec-b", 1, placementClaimCfg)
+	if err != nil || got == nil || got.ID != conversationID {
+		t.Fatalf("B's claim of a dead executor's resumed conversation = (%+v, %v), want conversation %s", got, err, conversationID)
+	}
+}
