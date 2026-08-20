@@ -387,25 +387,38 @@ func buildBlueprintStepWrapperPrompt(task domain.Task, step domain.BlueprintStep
 	return b.String()
 }
 
-// requestBlueprintCancel raises the blueprint layer's durable cancel signal for
-// a run's owning blueprint. It is the one place cancellation is spelled: from
-// here the claim gate stops handing out this blueprint's steps, and whichever
-// path disposes of the running step finalizes the blueprint 'cancelled'
-// (reactToStepTerminal for a live step, ResumeBlueprintAfterResume for a
-// resumed one, finalizeParkedBlueprintOnCancel for one that had already
-// parked). Best-effort: a failure here leaves the blueprint running with a
-// parked step, which the boot reconcile and the retention sweep both tolerate,
-// so it logs rather than failing the caller.
+// raiseBlueprintCancel writes the blueprint layer's durable cancel signal for a
+// run's owning blueprint, and reports whether it landed. It is the one place
+// cancellation is spelled: from here the claim gate stops handing out this
+// blueprint's steps, and whichever path disposes of the running step finalizes
+// the blueprint 'cancelled' (reactToStepTerminal for a live step,
+// ResumeBlueprintAfterResume for a resumed one,
+// finalizeParkedBlueprintOnCancel for one that had already parked).
 //
-// Only the blueprint's own cancel verb and the lifecycle teardown one layer up
+// It returns the error rather than swallowing it because what follows a failed
+// signal differs by caller: a blueprint whose signal never committed is one
+// the claim gate will keep advancing, so a caller whose next move depends on
+// the sequence being stopped has to know. requestBlueprintCancel is the
+// best-effort spelling for the callers that don't.
+//
+// Only the blueprint's own cancel verbs and the lifecycle teardown one layer up
 // (a closed or swiped task, an archived team) reach this. Stopping a
 // conversation must not: the signal is what turns a parked step into a
 // permanently unresumable one.
-func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
+func (s *Spawner) raiseBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) error {
 	if s.blueprints == nil || blueprintRunID == "" {
-		return
+		return nil
 	}
-	if _, err := s.blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID); err != nil {
+	_, err := s.blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID)
+	return err
+}
+
+// requestBlueprintCancel raises the signal best-effort, for the callers that
+// finish their teardown either way: a failure leaves the blueprint running
+// with a parked step, which the boot reconcile and the retention sweep both
+// tolerate, so it logs rather than failing the caller.
+func (s *Spawner) requestBlueprintCancel(ctx context.Context, orgID, blueprintRunID string) {
+	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {
 		blueprintLog.Warn("raise cancel signal failed", "blueprint_run", blueprintRunID, "error", err)
 	}
 }

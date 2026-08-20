@@ -1,9 +1,11 @@
 package delegate
 
 import (
+	"context"
 	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -136,5 +138,54 @@ func TestStopConversationAndCancelBlueprint_RefusesABlueprintRunID(t *testing.T)
 	}
 	if convStatus != "running" {
 		t.Errorf("conversation status = %q, want running — the conversation verb reaches nothing when handed a blueprint_run id", convStatus)
+	}
+}
+
+// cancelSignalFailingBlueprints fails only the durable cancel-signal write.
+// Every other read the teardown makes is the real store, so the verb reaches
+// the signal exactly as it would in production and fails only there.
+type cancelSignalFailingBlueprints struct {
+	db.BlueprintStore
+}
+
+func (cancelSignalFailingBlueprints) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {
+	return false, errors.New("boom: the cancel signal did not commit")
+}
+
+// TestStopBlueprintRun_CancelSignalFailure_TearsNothingDown pins the ordering
+// the teardown depends on. The signal is what stops the claim gate advancing
+// the sequence, so without it killing a step does not stop the run — the
+// reactor reads that step's terminal, finds no cancel_requested and enqueues
+// the next one. Proceeding would trade a live step for its successor and
+// return nil, which is worse than the failure it is papering over.
+func TestStopBlueprintRun_CancelSignalFailure_TearsNothingDown(t *testing.T) {
+	database := newDelegateTestDB(t)
+	const conversationID = "r-no-signal"
+	seedConversation(t, database, conversationID, "sess-ns", "/tmp/wt-ns")
+	brID := "seedbpr-" + conversationID
+
+	stores := testSpawnerStores(database)
+	stores.Blueprints = cancelSignalFailingBlueprints{BlueprintStore: stores.Blueprints}
+	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
+
+	if err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseFiringReverted); err == nil {
+		t.Fatal("StopBlueprintRun returned nil after the cancel signal failed to commit")
+	}
+
+	var convStatus, bpStatus string
+	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if convStatus != "running" {
+		t.Errorf("step conversation status = %q, want running — a teardown that could not stop the sequence must not kill a step the sequence will replace", convStatus)
+	}
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run: %v", err)
+	}
+	if bpStatus != "running" {
+		t.Errorf("blueprint_run status = %q, want running", bpStatus)
+	}
+	if notes := stopNotes(t, database, conversationID); len(notes) != 0 {
+		t.Errorf("stop notes = %d, want 0 — nothing was stopped, so the transcript must not say so", len(notes))
 	}
 }

@@ -165,7 +165,9 @@ func (s *Spawner) StopConversationAndCancelBlueprint(orgID, conversationID, user
 // The cancel signal is raised before any step is enumerated: it is what stops
 // the claim gate handing this blueprint's steps out, so the run cannot grow a
 // step behind the teardown's back and a step minted but not yet claimed is
-// covered whether or not this call sees it.
+// covered whether or not this call sees it. A signal that fails to commit
+// aborts the teardown before anything is killed — every step below it is
+// pointless without it, and half of them are harmful.
 //
 // System-attributed throughout: the user-facing cancel of a blueprint run is
 // CancelBlueprintRun, which carries the acting user's identity into its writes.
@@ -183,14 +185,21 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 		return fmt.Errorf("%w %s", ErrNoActiveBlueprintRun, blueprintRunID)
 	}
 
-	s.requestBlueprintCancel(ctx, orgID, blueprintRunID)
+	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {
+		// Nothing below is worth attempting without it. Killing a step under a
+		// blueprint that never learned it was cancelled doesn't stop the run —
+		// the reactor reads that step's terminal, finds no cancel_requested,
+		// and enqueues the next step — so a teardown that proceeded from here
+		// would trade one live step for its successor and report success.
+		return fmt.Errorf("raise blueprint cancel signal: %w", err)
+	}
 
 	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
 	if err != nil {
-		// The signal above is the durable half and it landed, so the run is
-		// not forgotten — the claim gate refuses a cancel-requested blueprint
-		// and the reaper finalizes it. What this call can no longer do is
-		// kill the live step now, which is the whole reason its caller asked.
+		// The signal is committed, so the run is not forgotten: the claim gate
+		// refuses a cancel-requested blueprint and the reaper finalizes it.
+		// What this call can no longer do is kill the live step now, which is
+		// the whole reason its caller asked.
 		return fmt.Errorf("list active step conversations: %w", err)
 	}
 	var errs []error
