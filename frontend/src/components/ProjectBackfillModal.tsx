@@ -66,7 +66,12 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
   }, [onClose, saving])
 
   useEffect(() => {
-    let cancelled = false
+    // apiListAll walks the list route page by page — a bare `cancelled` flag
+    // would only stop this effect from acting on the result, not the walk
+    // itself, which would keep issuing requests for a closed modal or a
+    // project the user has navigated away from. The signal stops the walk at
+    // its next page.
+    const controller = new AbortController()
     ;(async () => {
       try {
         // The whole set, not a page: the body below partitions it into the
@@ -75,15 +80,18 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
         // user is choosing from.
         const list = await apiListAll<BackfillCandidate>(
           `/api/projects/${encodeURIComponent(projectId)}/backfill-candidates/list`,
+          {},
+          { signal: controller.signal },
         )
-        if (cancelled) return
         setCandidates(list)
       } catch (err) {
-        if (!cancelled) setLoadError(httpErrorMessage(err, 'Could not load the candidates.'))
+        if (!controller.signal.aborted) {
+          setLoadError(httpErrorMessage(err, 'Could not load the candidates.'))
+        }
       }
     })()
     return () => {
-      cancelled = true
+      controller.abort()
     }
   }, [projectId])
 
