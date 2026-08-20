@@ -98,7 +98,7 @@ bytes are still one download away.
 Anything that was under _tfac/ci-logs/ before the rebuild is therefore gone —
 the work that read it still happened. To get the identical content back:
 
-    triagefactory exec gh actions download-logs <workflow_run_id>
+    triagefactory exec gh actions download-logs <run_id>
 
 That writes ./_tfac/ci-logs/<run_id>/ exactly as it was.
 `
