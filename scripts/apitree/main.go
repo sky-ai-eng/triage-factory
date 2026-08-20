@@ -13,16 +13,29 @@
 // string is not. Test files are skipped: a route registered in a test is not
 // part of the surface.
 //
-// The four registration idioms, and what each one means for the caller:
+// Routes reach the mux two ways and the tool has to know both. The core server
+// registers its own; an ee package is handed an ExtensionAPI and registers
+// through that. The pairs are equivalent — serverExtensionAPI forwards each
+// method straight to its core counterpart (extension.go) — so what actually
+// varies is the auth class, of which there are three:
 //
-//	s.api / api.API                   session required, read-shaped
-//	s.apiMutating / api.APIMutating   session required + CSRF same-origin check
-//	s.mux.Handle / s.mux.HandleFunc   raw mount — no session wrapper of its own
+//	core             extension        what the caller must present
+//	───────────────  ───────────────  ──────────────────────────────────────
+//	s.api            api.API          a session
+//	s.apiMutating    api.APIMutating  a session, + CSRF same-origin check
+//	s.mux.Handle*    api.Raw          nothing — no session wrapper at all
 //
-// The third is the interesting one: every route on it either authenticates by
-// another means (a webhook HMAC, an OAuth state parameter) or is deliberately
-// open (health, config, the SPA fallback). It is marked in the output for that
-// reason rather than for completeness.
+// The last row is why the output marks routes at all: everything on it either
+// authenticates by another means (a webhook HMAC, an OAuth state parameter) or
+// is deliberately open (health, config, the SPA fallback), and that is a short
+// list worth reading in one pass.
+//
+// Its extension half is also the half this tool first got wrong. Omitting
+// api.Raw hid POST /api/sso/discover and POST /api/webhooks/slack/{org_id} —
+// pre-auth routes, absent with nothing to say so. Which is why registrars is
+// no longer trusted to be complete: TestRegistrarsCoverExtensionAPI reads
+// ExtensionAPI's declaration and fails if a method that mounts routes is not
+// listed here.
 package main
 
 import (
@@ -71,8 +84,10 @@ type route struct {
 	Pkg string
 }
 
-// registrars maps a call's selector text to what mounting through it means.
-// Anything not named here is not a route registration.
+// registrars maps a call's selector text to what mounting through it means —
+// the table the package doc describes. Anything not named here is not a route
+// registration, which is why the extension column is checked against
+// ExtensionAPI rather than maintained by hand.
 var registrars = map[string]authClass{
 	"s.api":            classSession,
 	"api.API":          classSession,
@@ -80,15 +95,10 @@ var registrars = map[string]authClass{
 	"api.APIMutating":  classMutating,
 	"s.mux.Handle":     classRaw,
 	"s.mux.HandleFunc": classRaw,
-	"mux.Handle":       classRaw,
-	"mux.HandleFunc":   classRaw,
-	// ExtensionAPI.Raw mounts straight onto the mux with no session wrapper —
-	// it is how an ee installer registers a pre-auth endpoint (SSO discovery)
-	// or a signature-authenticated webhook receiver (Slack). Exactly the
-	// routes the "!" mark exists to surface, so omitting it was worst where
-	// the tool claims to be most useful. TestRegistrarsCoverExtensionAPI is
-	// the guard against the next one going the same way.
-	"api.Raw": classRaw,
+	// A handler package that took the mux directly rather than the server.
+	"mux.Handle":     classRaw,
+	"mux.HandleFunc": classRaw,
+	"api.Raw":        classRaw,
 }
 
 func main() {
