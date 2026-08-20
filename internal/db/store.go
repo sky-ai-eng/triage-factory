@@ -24,7 +24,11 @@ import (
 // write in those stores that still returns a bare error carries its exemption
 // at the method.
 //
-// TODO(TFAC-838): the stores not in that list each carry a marker on their own
+// Outside that list a store either states its own exemption at the interface
+// (WorkspaceSnapshotStore, whose writes deliberately answer with the CAS
+// outcome rather than a row) or is unconverged.
+//
+// TODO(TFAC-838): the unconverged stores each carry a marker on their own
 // interface naming their unconverged writes and the sub-issue that tracks
 // them — TFAC-860 through TFAC-871. Don't add a new write in the old shape
 // anywhere.

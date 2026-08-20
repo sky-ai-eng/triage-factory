@@ -105,12 +105,14 @@ export default function TriggerConfigPanel({
     try {
       // The toggle answers with the handler resource, so the switch settles on
       // the stored value rather than on what we optimistically assumed.
-      const res = await apiFetch(`${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: checked }),
-      })
-      const saved = (await res.json()) as TriggerHandler
+      const saved = await apiJSON<TriggerHandler>(
+        `${handlerBase}/${encodeURIComponent(trigger.id)}/toggle`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: checked }),
+        },
+      )
       setEnabled(saved.enabled)
       onRefresh?.()
     } catch (err) {
