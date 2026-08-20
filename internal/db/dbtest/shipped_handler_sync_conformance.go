@@ -211,7 +211,7 @@ func RunShippedHandlerSyncConformance(t *testing.T, factory ShippedSyncFactory) 
 		r := handlerBySlug(t, stores, orgID, teamID, "hr-mod")
 		edited := *r
 		edited.Name = "User Renamed"
-		if err := stores.EventHandlers.Update(ctx, orgID, edited); err != nil {
+		if _, err := stores.EventHandlers.Update(ctx, orgID, edited); err != nil {
 			t.Fatalf("user update: %v", err)
 		}
 		handlersB := []db.ShippedEventHandler{

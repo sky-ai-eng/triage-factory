@@ -62,19 +62,19 @@ type ReviewArtifactProposed struct {
 //     comments were validated against (each comment's CommitSHA), not this — the
 //     PR head can advance between start-review and the comments.
 //   - FinalizedHeadSHA: the PR head at finalize-review — the commit every staged
-//     comment was reconciled to (TFAC-499) and the baseline the human-facing
-//     freshness check measures drift from: the review read compares it to the
-//     live PR head for the "N commits since this review was written" count.
-//     Empty on a never-finalized draft and on rows finalized before TFAC-500
-//     (those fall back to HeadSHA for the count).
+//     comment was reconciled to, and the baseline the human-facing freshness
+//     check measures drift from: the review read compares it to the live PR
+//     head for the "N commits since this review was written" count. Empty on a
+//     never-finalized draft, and on stored rows finalized before the frame was
+//     recorded (those fall back to HeadSHA for the count).
 //   - FinalizedBaseSHA: the PR base branch tip at finalize-review. Paired with
 //     FinalizedHeadSHA it reproduces the finalize-time PR diff deterministically
 //     (the review overlay renders FinalizedBaseSHA...FinalizedHeadSHA so every
-//     staged comment anchors in the frame it was written against, TFAC-500); the
+//     staged comment anchors in the frame it was written against); the
 //     three-dot compare recomputes the merge-base from the two fixed commits, so
 //     a later base advance can't shift it. Empty on a comment-less review (which
-//     makes no GitHub call at finalize) and on pre-TFAC-500 rows — the overlay
-//     falls back to the live PR diff in that case.
+//     makes no GitHub call at finalize) and on stored rows predating the frame —
+//     the overlay falls back to the live PR diff in that case.
 //   - StagedComments: the mutable inline-comment set — appended at
 //     add-review-comment (each anchored to the PR head it was validated against,
 //     ReviewArtifactComment.CommitSHA), edited/deleted live by the human (local

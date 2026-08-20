@@ -2,9 +2,18 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrNoSuchEventHandler means an id-keyed write was handed an id no live row
+// answers to — deleted, never existed, or (for the kind-pinned writes) the
+// wrong kind for the operation. The id-keyed writes report it instead of
+// succeeding over zero rows, because a handler id is a handle this store
+// minted: one that stops resolving is a broken invariant the caller has to
+// answer for, not an empty result it can render.
+var ErrNoSuchEventHandler = errors.New("no event handler with that id")
 
 //go:generate go run github.com/vektra/mockery/v2 --name=EventHandlerStore --output=./mocks --case=underscore --with-expecter
 
@@ -121,10 +130,11 @@ type EventHandlerStore interface {
 	// from the write rather than reading it back.
 	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error)
 
-	// Update changes a handler's mutable fields. ID, kind, source,
-	// event_type, and created_at are immutable. For triggers,
-	// blueprint_id is also immutable (see RetargetBlueprint). updated_at is
-	// refreshed.
+	// Update changes a handler's mutable fields and returns the stored row.
+	// ID, kind, source, event_type, and created_at are immutable. For
+	// triggers, blueprint_id is also immutable (see RetargetBlueprint).
+	// updated_at is refreshed. An id no live row of this kind answers to is
+	// ErrNoSuchEventHandler, never a silent zero-row success.
 	//
 	// Stamps user_modified=true when a content field actually changed —
 	// scope_predicate_json, name, default_priority (rules), or
@@ -134,7 +144,7 @@ type EventHandlerStore interface {
 	// dedicated SetEnabled / Reorder methods below. Determined by comparing
 	// against the row's current content, so a caller that resends unchanged
 	// content alongside a new enabled value does not spuriously stamp.
-	Update(ctx context.Context, orgID string, h domain.EventHandler) error
+	Update(ctx context.Context, orgID string, h domain.EventHandler) (domain.EventHandler, error)
 
 	// SetEnabled flips just the enabled bit — the user-facing enable/disable
 	// toggle, and (per the automations-as-toggles product direction) the
@@ -162,11 +172,12 @@ type EventHandlerStore interface {
 
 	// Promote converts a kind='rule' row to kind='trigger' atomically:
 	// validates the incoming trigger-only fields, clears rule-only
-	// fields, writes both in one UPDATE. ID is preserved. Errors if
-	// the row isn't found, isn't a rule, or the new trigger fields
-	// don't satisfy the CHECK constraints. Always stamps user_modified=true —
-	// a kind change is never something the sync should undo.
-	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) error
+	// fields, writes both in one UPDATE, and returns the promoted row. ID is
+	// preserved. ErrNoSuchEventHandler if the row isn't found or isn't a
+	// rule; a plain error if the new trigger fields don't satisfy the CHECK
+	// constraints. Always stamps user_modified=true — a kind change is never
+	// something the sync should undo.
+	Promote(ctx context.Context, orgID string, id string, t domain.EventHandler) (domain.EventHandler, error)
 
 	// RetargetBlueprint re-points a trigger at a different blueprint in a single
 	// UPDATE, preserving the handler row — and its id, which runs /
@@ -178,8 +189,9 @@ type EventHandlerStore interface {
 	// partial-unique index is the hard backstop. Always stamps
 	// user_modified=true — a user-initiated retarget must never be silently
 	// reverted by a later sync pass (which re-resolves an unmodified trigger's
-	// blueprint binding from the shipped slug on every boot).
-	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) error
+	// blueprint binding from the shipped slug on every boot). Returns the
+	// moved row; an id that names no live trigger is ErrNoSuchEventHandler.
+	RetargetBlueprint(ctx context.Context, orgID string, id string, newBlueprintID string) (domain.EventHandler, error)
 
 	// Sync brings teamID's unmodified copies of shippedHandlers up to current
 	// shipped content, one handler at a time. Production callers always pass

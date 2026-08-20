@@ -305,7 +305,7 @@ export default function ReviewOverlay({ artifactId, open, onClose }: Props) {
 
   // Group comments by file path for the diff renderer. The overlay renders the
   // finalize-time frame, so a comment anchors by the path + line it was written
-  // against (TFAC-500); freshness + mappedLine ride along for the badge only.
+  // against; freshness + mappedLine ride along for the badge only.
   const commentsByFile = (review?.details.comments ?? []).reduce<Record<string, FileComment[]>>(
     (acc, c) => {
       ;(acc[c.path] ??= []).push({

@@ -30,9 +30,9 @@ type reviewFreshnessOut struct {
 	} `json:"comments"`
 }
 
-// seedFinalizedReviewAt seeds a finalized review-draft artifact (TFAC-494) with a
-// stamped finalize-time head (TFAC-500) and one inline comment on a.go anchored to
-// that head at the given line. Returns the artifact id. The owner must be "acme"
+// seedFinalizedReviewAt seeds a finalized review-draft artifact with a stamped
+// finalize-time head and one inline comment on a.go anchored to that head at
+// the given line. Returns the artifact id. The owner must be "acme"
 // so the App resolver (acmeInstall) matches.
 func seedFinalizedReviewAt(t *testing.T, s *Server, suffix string, number int, finalizeHead string, line int) string {
 	t.Helper()

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 
@@ -178,9 +179,17 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		// Update flips it off; the round-trip must reflect the new value.
 		got.AppliesToUnowned = false
-		if err := store.Update(ctx, orgID, *got); err != nil {
+		updated, err := store.Update(ctx, orgID, *got)
+		if err != nil {
 			t.Fatalf("Update: %v", err)
 		}
+		// user_modified is OR'd against its stored value inside the UPDATE and
+		// updated_at is stamped there, so the input struct cannot describe the
+		// result — the write has to hand it back.
+		AssertWriteReturnedStoredRow(t, "EventHandlerStore.Update", updated, func() (*domain.EventHandler, error) {
+			return store.Get(ctx, orgID, h.ID)
+		})
+
 		got2, err := store.Get(ctx, orgID, h.ID)
 		if err != nil || got2 == nil {
 			t.Fatalf("Get after Update: got=%v err=%v", got2, err)
@@ -281,9 +290,14 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		if err := store.RetargetBlueprint(ctx, orgID, h.ID, to); err != nil {
+		moved, err := store.RetargetBlueprint(ctx, orgID, h.ID, to)
+		if err != nil {
 			t.Fatalf("RetargetBlueprint: %v", err)
 		}
+		AssertWriteReturnedStoredRow(t, "EventHandlerStore.RetargetBlueprint", moved, func() (*domain.EventHandler, error) {
+			return store.Get(ctx, orgID, h.ID)
+		})
+
 		got, err := store.Get(ctx, orgID, h.ID)
 		if err != nil || got == nil {
 			t.Fatalf("Get after retarget: got=%v err=%v", got, err)
@@ -524,7 +538,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		breaker := 3
 		minAutonomy := 0.0
 		promoteTarget := ids["p-promote-target"]
-		err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+		promoted, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
 			Kind:                   domain.EventHandlerKindTrigger,
 			BlueprintID:            promoteTarget,
 			BreakerThreshold:       &breaker,
@@ -533,6 +547,13 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if err != nil {
 			t.Fatalf("Promote: %v", err)
 		}
+		// Promote is the write whose returned row differs from its input most:
+		// the UPDATE flips kind, NULLs every rule-only column, and stamps
+		// user_modified, none of which the target struct describes.
+		AssertWriteReturnedStoredRow(t, "EventHandlerStore.Promote", promoted, func() (*domain.EventHandler, error) {
+			return store.Get(ctx, orgID, ruleID)
+		})
+
 		got, _ := store.Get(ctx, orgID, ruleID)
 		if got == nil || got.Kind != domain.EventHandlerKindTrigger {
 			t.Fatalf("Promote did not flip kind: got=%v", got)
@@ -567,7 +588,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
+		_, err := store.Promote(ctx, orgID, trigID, domain.EventHandler{
 			Kind:             domain.EventHandlerKindTrigger,
 			BlueprintID:      blueprintID,
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
@@ -595,6 +616,47 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		got, _ := store.Get(ctx, orgID, h.ID)
 		if got == nil || got.UserModified {
 			t.Errorf("UserModified=%v after SetEnabled; want false (activation state is not content)", got != nil && got.UserModified)
+		}
+	})
+
+	t.Run("IDKeyedWrites_MissIsAnError", func(t *testing.T) {
+		// A zero-row write used to answer success, so a caller could not tell
+		// "updated" from "there was nothing to update" — and the handlers above
+		// rendered the former for the latter. Each id-keyed write reports the
+		// miss instead, including the kind-pinned ones (Promote wants a rule,
+		// RetargetBlueprint a trigger), where "wrong kind" is the same miss.
+		store, orgID, teamID, seedBlueprints := factory(t)
+		ctx := context.Background()
+		ids := seedBlueprints(t, "p-miss-target")
+		absent := uuid.New().String()
+		priority, sortOrder := 0.5, 0
+		breaker, minAutonomy := 3, 0.0
+
+		ruleID := uuid.New().String()
+		if _, err := store.Create(ctx, orgID, teamID, domain.EventHandler{
+			ID: ruleID, Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "still-a-rule", DefaultPriority: &priority, SortOrder: &sortOrder, Enabled: true,
+		}); err != nil {
+			t.Fatalf("Create rule: %v", err)
+		}
+
+		if _, err := store.Update(ctx, orgID, domain.EventHandler{
+			ID: absent, Kind: domain.EventHandlerKindRule,
+			EventType: domain.EventGitHubPRCICheckFailed,
+			Name:      "ghost", DefaultPriority: &priority, SortOrder: &sortOrder,
+		}); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Update on an absent id = %v, want ErrNoSuchEventHandler", err)
+		}
+		if _, err := store.Promote(ctx, orgID, absent, domain.EventHandler{
+			Kind: domain.EventHandlerKindTrigger, BlueprintID: ids["p-miss-target"],
+			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
+		}); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("Promote on an absent id = %v, want ErrNoSuchEventHandler", err)
+		}
+		// A live row of the wrong kind: RetargetBlueprint pins kind='trigger'.
+		if _, err := store.RetargetBlueprint(ctx, orgID, ruleID, ids["p-miss-target"]); !errors.Is(err, db.ErrNoSuchEventHandler) {
+			t.Errorf("RetargetBlueprint on a rule = %v, want ErrNoSuchEventHandler", err)
 		}
 	})
 
@@ -682,7 +744,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		// Update carrying enabled alongside unchanged content: no stamp.
 		got, _ := store.Get(ctx, orgID, h.ID)
 		got.Enabled = false
-		if err := store.Update(ctx, orgID, *got); err != nil {
+		if _, err := store.Update(ctx, orgID, *got); err != nil {
 			t.Fatalf("Update (enabled-only): %v", err)
 		}
 		afterEnabledOnly, _ := store.Get(ctx, orgID, h.ID)
@@ -692,7 +754,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 
 		// Update changing a content field: stamps.
 		afterEnabledOnly.Name = "update-stamp-renamed"
-		if err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
+		if _, err := store.Update(ctx, orgID, *afterEnabledOnly); err != nil {
 			t.Fatalf("Update (content change): %v", err)
 		}
 		afterContent, _ := store.Get(ctx, orgID, h.ID)
@@ -716,7 +778,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		}
 		breaker := 3
 		minAutonomy := 0.0
-		if err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
+		if _, err := store.Promote(ctx, orgID, ruleID, domain.EventHandler{
 			Kind: domain.EventHandlerKindTrigger, BlueprintID: ids["p-promote-stamp"],
 			BreakerThreshold: &breaker, MinAutonomySuitability: &minAutonomy,
 		}); err != nil {
@@ -742,7 +804,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		if _, err := store.Create(ctx, orgID, teamID, h); err != nil {
 			t.Fatalf("Create trigger: %v", err)
 		}
-		if err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
+		if _, err := store.RetargetBlueprint(ctx, orgID, h.ID, ids["p-retarget-stamp-to"]); err != nil {
 			t.Fatalf("RetargetBlueprint: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, h.ID)

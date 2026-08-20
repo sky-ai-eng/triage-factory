@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -563,8 +564,8 @@ type patchEventHandlerCommon struct {
 	ScopePredicate json.RawMessage `json:"scope_predicate"`
 	Enabled        *bool           `json:"enabled"`
 
-	// AppliesToUnowned toggles the watch-scope flag (TFAC-517); absent leaves
-	// it unchanged.
+	// AppliesToUnowned toggles the watch-scope flag; absent leaves it
+	// unchanged.
 	AppliesToUnowned *bool `json:"applies_to_unowned"`
 }
 
@@ -694,23 +695,22 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		return
 	}
 
-	var fresh *domain.EventHandler
+	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.EventHandlers.Update(r.Context(), orgID, updated); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		stored, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
+		return e
 	}); err != nil {
+		// The row was loaded a moment ago, so a miss here means it was deleted
+		// in between. 404 rather than a 200 over a write that touched nothing.
+		if errors.Is(err, db.ErrNoSuchEventHandler) {
+			notFound(w, "event handler")
+			return
+		}
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if fresh != nil {
-		writeJSON(w, http.StatusOK, fresh)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, stored)
 }
 
 // DELETE /api/event-handlers/{id}
@@ -885,14 +885,11 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		MinAutonomySuitability: &minAutonomy,
 		ScopePredicateJSON:     predicate,
 	}
-	var fresh *domain.EventHandler
+	var promoted domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.EventHandlers.Promote(r.Context(), orgID, id, target); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		promoted, e = tx.EventHandlers.Promote(r.Context(), orgID, id, target)
+		return e
 	}); err != nil {
 		// The blueprintHasTrigger pre-check and this Promote run in separate
 		// transactions, so a concurrent promote onto the same blueprint can pass
@@ -903,10 +900,16 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
 			return
 		}
+		// The rule was read in the check above, so a miss here means it was
+		// deleted or promoted by someone else in the window between them.
+		if errors.Is(err, db.ErrNoSuchEventHandler) {
+			notFound(w, "event handler")
+			return
+		}
 		internalError(w, "event_handlers", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, fresh)
+	writeJSON(w, http.StatusOK, promoted)
 }
 
 // POST /api/event-handlers/{id}/retarget
@@ -987,15 +990,20 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 			hasTrigger = true
 			return nil
 		}
-		if e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID); e != nil {
+		moved, e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID)
+		if e != nil {
 			return e
 		}
-		fresh, e = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return e
+		fresh = &moved
+		return nil
 	}); err != nil {
 		if isUniqueViolation(err) {
 			eventHandlersLog.Warn("retarget conflict, blueprint already triggered", "error", err)
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this blueprint already has a trigger — a blueprint is fired by exactly one event"})
+			return
+		}
+		if errors.Is(err, db.ErrNoSuchEventHandler) {
+			notFound(w, "event handler")
 			return
 		}
 		internalError(w, "event_handlers", err)

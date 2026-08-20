@@ -31,7 +31,7 @@ type reviewArtifactDetailsJSON struct {
 	ReviewEvent string                      `json:"review_event"`
 	Comments    []reviewArtifactCommentJSON `json:"comments"`
 	// CommitsSinceFinalize is how many commits the live PR head is ahead of the
-	// finalize-time head (TFAC-500) — the "N commits since this review was written"
+	// finalize-time head — the "N commits since this review was written"
 	// indicator. nil when it can't be computed (no finalize head stored, or the
 	// live head couldn't be fetched); a non-nil 0 means the PR hasn't advanced.
 	CommitsSinceFinalize *int `json:"commits_since_finalize"`
@@ -511,7 +511,7 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 // artifact pending → dismissed, then runs the terminal-on-last task-closure check.
 // The per-item counterpart to reviewApprove; like approve it never touches the
 // conversation's lifecycle. No GitHub call and NO external-actions audit row — the review
-// is staged entirely TF-side (TFAC-494), so a dismiss is a purely local state
+// is staged entirely TF-side, so a dismiss is a purely local state
 // change, not an org-credential write (external_actions records only writes). The
 // flip is the whole resolution. A pending review is dismissable whether or not it
 // reached the ready sentinel (a started-but-unfinalized review is still
