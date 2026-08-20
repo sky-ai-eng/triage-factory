@@ -50,17 +50,22 @@ type SecretStore interface {
 	// stored in org_secrets keyed on (orgID, NULL user, key); rotations
 	// overwrite the same row.
 	//
-	// Exempt from the returned-row rule: this store's reads answer with a
-	// value, never a row — Get/GetSystem hand back the decrypted secret
-	// string, not a projected column set — so there is no point read whose
-	// column list and scanner a RETURNING could share. Giving Put a row
-	// type would be a read-shape change, not a write-shape convergence,
-	// and it would widen what a caller can obtain: the only row-shaped
-	// facts beyond what the caller already passed (orgID, key,
-	// description) are the ciphertext and the plaintext value itself, and
-	// handing either back to satisfy a shape rule is worse than the rule.
-	// Same answer as ClaimCredentialsStore.Put, for the same reason — a
-	// credential surface with nothing non-secret worth echoing back.
+	// Exempt from the returned-row rule. org_secrets does carry non-secret
+	// row metadata (id, description, created_at, updated_at) — but no
+	// existing read on this store ever answers with it: Get/GetSystem hand
+	// back the decrypted value alone, never a projected column set, so
+	// there is no point read whose column list and scanner a RETURNING
+	// could share. The standard's mechanism is "project the point read's
+	// shape onto the write" — this store has no row-shaped point read to
+	// project, so applying it to Put means inventing a new read shape
+	// nothing here has ever needed, which is a read-shape addition, not a
+	// mechanical write-shape convergence (the ticket's own "if it converts
+	// instead" case, needing its own domain type and matching point read
+	// argued for on its own). Whatever a future row carried, it must still
+	// exclude the ciphertext and the plaintext value themselves — widening
+	// what a caller can obtain is the opposite of what this credential
+	// surface exists to prevent. Same answer as ClaimCredentialsStore.Put,
+	// for the same reason.
 	Put(ctx context.Context, orgID, key, value, description string) error
 
 	// Get returns the stored secret value, or ("", nil) when no
@@ -108,10 +113,10 @@ type SecretStore interface {
 	// it composes the key (e.g. "jira_token/<host>") before calling.
 	// There is deliberately no separate host parameter here.
 	//
-	// Exempt from the returned-row rule, for the same reason as Put: no
-	// point read to project (GetUser answers with a value, not a row),
-	// and nothing non-secret worth handing back beyond what the caller
-	// already supplied.
+	// Exempt from the returned-row rule, for the same reason as Put: GetUser
+	// answers with a value, never a row, so there is no point read to
+	// project org_secrets' non-secret columns onto — and nothing beyond
+	// them may ever be handed back.
 	PutUser(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// GetUser returns the stored per-user secret value, or ("", nil)
@@ -155,7 +160,9 @@ type SecretStore interface {
 	// request handlers stay on the claims-checked PutUser.
 	//
 	// Exempt from the returned-row rule, same reason as Put/PutUser: no
-	// point read to project and nothing non-secret worth echoing back.
+	// point read on this store to project the row's non-secret columns
+	// onto, and no outcome may echo back the ciphertext or plaintext
+	// value.
 	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// DeleteUser removes a per-user secret. Returns ok=false when no
