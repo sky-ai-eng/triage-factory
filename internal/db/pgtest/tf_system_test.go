@@ -306,7 +306,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("staged_injections", func(t *testing.T) {
 		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
-		if err := stores.StagedInjections.AppendSystem(ctx, orgID, &domain.StagedInjection{
+		if _, err := stores.StagedInjections.AppendSystem(ctx, orgID, domain.StagedInjection{
 			ConversationID: conversationID, Producer: domain.StagedInjectionProducerPRNewCommits, Body: "new commits landed",
 		}); err != nil {
 			t.Fatalf("StagedInjections.AppendSystem: %v", err)

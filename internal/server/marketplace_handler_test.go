@@ -481,14 +481,12 @@ func TestMarketplaceRepublish_BumpsVersionPreservesV1(t *testing.T) {
 	if repubRec.Code != http.StatusOK {
 		t.Fatalf("republish: status = %d, want 200; body=%s", repubRec.Code, repubRec.Body.String())
 	}
-	var verResp struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(repubRec.Body.Bytes(), &verResp); err != nil {
+	var updated domain.MarketplaceListing
+	if err := json.Unmarshal(repubRec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if verResp.Version != 2 {
-		t.Fatalf("republish version = %d, want 2", verResp.Version)
+	if updated.CurrentVersion != 2 {
+		t.Fatalf("republish response current_version = %d, want 2 (the resource, not a bare version echo)", updated.CurrentVersion)
 	}
 
 	detail := r.getListingDetail(t, r.admin, pubResp.ID)

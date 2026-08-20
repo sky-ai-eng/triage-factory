@@ -22,22 +22,18 @@ import (
 // JWT claims. org_id stays in every WHERE/INSERT clause as defense in depth;
 // SQLite is N=1 and asserts LocalDefaultOrgID. There is no app-pool
 // variant — no request handler reads or writes the queue.
-// TODO(TFAC-869): AppendSystem still returns a bare error and delivers the row
-// it wrote by mutating the caller's struct through a pointer argument, which
-// is the pre-standard workaround wearing a signature. The ticket converts it
-// to value-in, row-out.
 type StagedInjectionStore interface {
-	// AppendSystem enqueues one injection for a conversation. The impl writes
-	// an undelivered message row and writes the row id back to n.ID (a
-	// decimal string — messages ids are integers); CreatedAt is stamped by
-	// the DB default. The injection's Body is the bare, already-rendered
-	// line — the flush wraps and bundles. A failure to append is the one
-	// drop the queue can suffer, and it is permanent for that injection:
-	// the transition that produced it was already committed alongside the
-	// snapshot it was diffed against, so re-polling re-derives nothing. A
-	// caller may still treat it as acceptable, but only where a LATER
-	// transition would carry the same news — never as a retry of this one.
-	AppendSystem(ctx context.Context, orgID string, n *domain.StagedInjection) error
+	// AppendSystem enqueues one injection for a conversation and returns the
+	// row it persisted — id (a decimal string; messages ids are integers)
+	// and CreatedAt come from the DB, not the caller's input. The injection's
+	// Body is the bare, already-rendered line — the flush wraps and
+	// bundles. A failure to append is the one drop the queue can suffer, and
+	// it is permanent for that injection: the transition that produced it was
+	// already committed alongside the snapshot it was diffed against, so
+	// re-polling re-derives nothing. A caller may still treat it as
+	// acceptable, but only where a LATER transition would carry the same
+	// news — never as a retry of this one.
+	AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error)
 
 	// FlushPendingSystem atomically claims and returns every pending
 	// injection for the conversation, oldest-first (id ASC — insertion order),

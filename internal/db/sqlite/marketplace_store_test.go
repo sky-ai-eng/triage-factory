@@ -31,10 +31,10 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if _, err := m.PublishVersion(ctx, orgID, listingID, domain.ListingSnapshot{}, "name", "desc", nil); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("PublishVersion = %v, want ErrNotApplicableInLocal", err)
 	}
-	if err := m.Delist(ctx, orgID, listingID); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, err := m.Delist(ctx, orgID, listingID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Delist = %v, want ErrNotApplicableInLocal", err)
 	}
-	if err := m.Relist(ctx, orgID, listingID); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, err := m.Relist(ctx, orgID, listingID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Relist = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, _, err := m.List(ctx, orgID, userID, domain.ListingFilter{}, db.ListOpts{Limit: 50}); !errors.Is(err, db.ErrNotApplicableInLocal) {
@@ -46,14 +46,11 @@ func TestMarketplaceStore_SQLite_EveryMethodReturnsErrNotApplicableInLocal(t *te
 	if _, err := m.GetActiveBySource(ctx, orgID, "some-source"); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("GetActiveBySource = %v, want ErrNotApplicableInLocal", err)
 	}
-	if err := m.Vote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
+	if _, err := m.Vote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Vote = %v, want ErrNotApplicableInLocal", err)
 	}
 	if err := m.Unvote(ctx, orgID, listingID, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("Unvote = %v, want ErrNotApplicableInLocal", err)
-	}
-	if err := m.RecordInstall(ctx, orgID, listingID, 1, runmode.LocalDefaultTeamID, userID, "some-root-object"); !errors.Is(err, db.ErrNotApplicableInLocal) {
-		t.Errorf("RecordInstall = %v, want ErrNotApplicableInLocal", err)
 	}
 	if _, _, err := m.MaterializeListing(ctx, orgID, runmode.LocalDefaultTeamID, domain.ListingSnapshot{}, listingID, 1, userID); !errors.Is(err, db.ErrNotApplicableInLocal) {
 		t.Errorf("MaterializeListing = %v, want ErrNotApplicableInLocal", err)

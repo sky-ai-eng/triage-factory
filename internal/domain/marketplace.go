@@ -167,7 +167,7 @@ type ListingSummary struct {
 // either way, so it counts toward neither "how much work got done" nor "how
 // well," and must not silently score as a failure just because it isn't
 // 'completed' yet. This holds across copy deletion too: root_object_id
-// survives deletion on the install row (see MarketplaceStore.RecordInstall),
+// survives deletion on the install row (see MarketplaceStore.MaterializeListing),
 // so a listing's lifetime usage never drops just because a consumer cleaned
 // up their copy — but it's still only *resolved* lifetime usage.
 type ListingStats struct {

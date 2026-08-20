@@ -429,8 +429,17 @@ func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.ConversationSignalAckOK)
 	}()
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	// The routed path has no local row to hand back — it lives on the remote
+	// owner, whose own resolvePermissionLocal wrote it — so ResolvePermission
+	// returns (nil, nil) here. The server's resolve endpoint is what turns
+	// that into a real answer, by reading the row back through the shared
+	// Postgres store rather than the broker.
+	resolved, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"})
+	if err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
+	}
+	if resolved != nil {
+		t.Fatalf("ResolvePermission (routed) = %+v, want nil — the settled row lives on the remote owner, not this process", resolved)
 	}
 }
 
@@ -445,7 +454,7 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-perm2", &agentproc.LiveRun{})
 
-	err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm2", "req-ghost", "", agentproc.PermissionDecision{Behavior: "allow"})
+	_, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm2", "req-ghost", "", agentproc.PermissionDecision{Behavior: "allow"})
 	if !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission", err)
 	}
