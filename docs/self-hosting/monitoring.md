@@ -303,10 +303,13 @@ run's own duration accounting deliberately discounts), `relay.call` /
 duration and turn count. Open any of them and the links menu walks to the
 setup trace, and vice versa.
 
-`workspace.snapshot` gets read more closely than the others, because the
-status flip a park or a stop reports is serialized behind it — a run that sat
-in WORKING long after you pressed stop spent that time here. It splits into
-three children naming where: `workspace.snapshot.capture` (the git delta plus
+`workspace.snapshot` gets read more closely than the others, because it is
+the unbounded piece of a park: a git bundle, a tar of the whole scratch tree,
+and a blob upload. Nothing a person is watching waits on it — the park records
+that a persist is owed, flips the conversation, and captures afterwards — so a
+slow one costs storage lag and a resume's wait rather than a run that reports
+WORKING after you pressed stop. It splits into three children naming where:
+`workspace.snapshot.capture` (the git delta plus
 the session-transcript read, with `snapshot.bundle_bytes` /
 `snapshot.patch_bytes` / `snapshot.transcript_bytes`),
 `workspace.snapshot.archive` (the tar walk plus gzip, with
@@ -318,6 +321,18 @@ snapshots. The family is identical in both modes save for what `capture`
 covers — local runs the capture in-process, multi routes it through the
 privileged capture child, which is span-free like every privileged process,
 so the executor-side `capture` span is its measurement.
+
+The read against it is `engagement.workspace.ensure`, on the setup trace of
+whatever engagement picks the conversation back up. Its `workspace.provenance`
+says how that engagement's tree came to be — `warm` (the parked tree was still
+on this host), `rehydrated` (rebuilt from the blob), or `fresh` (there was no
+blob to rebuild from, so the tree holds only what reached the remote, and the
+agent is told so). `snapshot.waited_ms` is how long it spent waiting on a
+persist that was still in flight: zero on nearly every ensure, and the thing
+to look at when a resume is slow for no visible reason. A wait that runs to
+the `TF_SNAPSHOT_WAIT_SEC` bound (default 60s) and then reads `fresh` means the
+executor that owed the snapshot never produced one — pair it with that
+executor's `workspace.snapshot` span, or its absence.
 
 Two spans on that path measure someone else's work.
 `engagement.credentials.await` is the executor sitting in

@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"testing"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
@@ -46,13 +47,20 @@ func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
 // its status — which is all the client can see — but its workspace is gone, so
 // the composer this read gates must come up disabled rather than accept a
 // message that answers 410.
+//
+// SDK, because that is the runtime the answer belongs to: its session
+// transcript lived inside the snapshot, so a lost workspace ends the
+// conversation. A native row in the same state is NOT expired — it resumes
+// into a workspace built from nothing — and the case below covers it.
 func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
 	conversationID := seedSteerConversation(t, s.db, "resgone", "open")
-	// Native: the resume state is the transcript, so the ladder reaches the
-	// workspace question rather than stopping at a missing session id.
-	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path='' WHERE id=?`, conversationID)
+	// Everything the SDK's own rungs demand is present, and the recorded
+	// worktree is simply not on disk — so the ladder reaches the workspace
+	// question rather than stopping above it.
+	execSQL(t, s.db, `UPDATE conversations SET sdk_session_id='sess-resgone', model='m', worktree_path=? WHERE id=?`,
+		filepath.Join(t.TempDir(), "swept-away"), conversationID)
 
 	got := readConversation(t, s, conversationID)
 	if got["resumable"] != false {
@@ -60,6 +68,27 @@ func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 	}
 	if got["resume_blocked_reason"] != delegate.ResumeBlockedWorkspaceExpired {
 		t.Errorf("resume_blocked_reason = %v, want %q", got["resume_blocked_reason"], delegate.ResumeBlockedWorkspaceExpired)
+	}
+}
+
+// TestHandleAgentStatus_ResumableNativeWithoutAWorkspace is the other half of
+// the split, on the same fixture: a native conversation whose workspace is
+// equally gone reads resumable, because the transcript this read is attached
+// to is the resume state and the claim builds a fresh tree around it. The
+// composer stays live, and the send it accepts is one that works.
+func TestHandleAgentStatus_ResumableNativeWithoutAWorkspace(t *testing.T) {
+	s := newTestServer(t)
+	withEmptyBlobStore(t, s)
+	conversationID := seedSteerConversation(t, s.db, "resgonenative", "open")
+	execSQL(t, s.db, `UPDATE conversations SET runtime='native', worktree_path=? WHERE id=?`,
+		filepath.Join(t.TempDir(), "swept-away"), conversationID)
+
+	got := readConversation(t, s, conversationID)
+	if got["resumable"] != true {
+		t.Errorf("resumable = %v, want true", got["resumable"])
+	}
+	if _, ok := got["resume_blocked_reason"]; ok {
+		t.Errorf("resume_blocked_reason = %v, want the key absent", got["resume_blocked_reason"])
 	}
 }
 

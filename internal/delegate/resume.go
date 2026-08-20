@@ -72,10 +72,17 @@ var ErrConversationConcluded = errors.New("resume: this conversation can no long
 var ErrStepHandedOff = errors.New("resume: this step just handed off to the next one — follow up on the blueprint's latest step")
 
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
-// gone for good: its warm worktree was swept AND its durable snapshot was
-// reaped by the retention TTL. The conversation's status is left unchanged (no
-// flip), so the user gets a clear "this workspace has expired" signal rather
-// than seeing the run silently fail mid-resume. Callers map it to 410 Gone.
+// gone for good: its warm worktree was swept, its durable snapshot is not
+// there and no persist is coming, and its runtime cannot continue without one.
+// That last clause is the whole of the difference between the two engines — an
+// SDK conversation's continuity lived in the session transcript the blob
+// carried, while a native one's lives in `messages` and survives a workspace
+// built from nothing — so this is an SDK answer, and a native conversation
+// falls back to a fresh workspace instead of reaching here.
+//
+// The conversation's status is left unchanged (no flip), so the user gets a
+// clear "this workspace has expired" signal rather than seeing the run
+// silently fail mid-resume. Callers map it to 410 Gone.
 var ErrWorkspaceExpired = errors.New("resume: this conversation's workspace has expired and can no longer be resumed")
 
 // lostWakeOutcome answers for a wake whose compare-and-swap found the
@@ -174,11 +181,27 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 	}
 }
 
-// workspaceRecoverable reports whether a parked run can still be resumed:
-// its warm worktree survives on disk, or its durable snapshot is present to
-// cold-rehydrate from. A check we can't complete (no storage wired, a blob
-// hiccup) counts as recoverable — a transient inability to verify must never
-// strand a resumable run as expired, and the claim path re-checks for real.
+// workspaceRecoverable reports whether a parked run can still be resumed. Four
+// rungs, most-certain-first, and only the last is a judgement call:
+//
+//   - the warm worktree survives on disk — nothing else needs asking;
+//   - the durable snapshot blob is present to cold-rehydrate from;
+//   - neither, but the key's lifecycle record says a persist is in flight. That
+//     is the gap a park deliberately opens: the status flips before the capture
+//     runs, so "no blob yet" is the expected reading for the seconds it takes,
+//     and the claim path's own wait is what resolves it (see ensureWorkspace);
+//   - neither, and no persist is coming — the record says failed, or names a
+//     write that never finished, or there is no record at all. Here the answer
+//     splits on the runtime, because the two engines keep their continuity in
+//     different places. A native conversation's context is its `messages`
+//     rows, so it can be picked up in a workspace built from nothing; an SDK
+//     conversation's lived in the session transcript the blob carried, and
+//     without it `claude --resume` has nothing to reconnect to. So native wakes
+//     and SDK is expired.
+//
+// A check we can't complete (no storage wired, a blob hiccup) counts as
+// recoverable — a transient inability to verify must never strand a resumable
+// run as expired, and the claim path re-checks for real.
 func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *domain.Conversation) bool {
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
@@ -195,12 +218,27 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 	if blobs == nil {
 		return true
 	}
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, memoryNamespace(conv.BlueprintRunID)))
+	keyID := memoryNamespace(conv.BlueprintRunID)
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, keyID))
 	if err != nil {
 		delegateLog.Warn("resume: snapshot existence check failed", "conversation", conv.ID, "error", err)
 		return true
 	}
-	return ok
+	if ok {
+		return true
+	}
+	state, sErr := s.snapshotStateFor(ctx, orgID, keyID)
+	if sErr != nil {
+		// Inconclusive, so recoverable: this rung exists to distinguish a
+		// persist in flight from a workspace that is gone, and a store that
+		// cannot answer is not evidence of either.
+		delegateLog.Warn("resume: workspace snapshot state read failed; treating as recoverable", "conversation", conv.ID, "error", sErr)
+		return true
+	}
+	if state != nil && state.State == domain.WorkspaceSnapshotPending {
+		return true
+	}
+	return conv.Runtime == domain.ConversationRuntimeNative
 }
 
 // ResumeOptions configures a ResumeWithMessage invocation. Callers

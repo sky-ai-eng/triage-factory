@@ -135,11 +135,12 @@ type SystemConversationStatusMetadata struct {
 	ConversationID string `json:"conversation_id"`
 	Status         string `json:"status"`                 // the broadcast status string
 	FailureKind    string `json:"failure_kind,omitempty"` // set on the failed arm only
-	// Resumable rides the parked status when the conversation's workspace
-	// snapshot lands after the park was already announced — the moment a
-	// follow-up becomes possible, which no status change of its own marks. A
-	// pointer because absence means "unchanged, ask the conversation read",
-	// which is not the same claim as false.
+	// Resumable rides the parked status when a conversation parked by one pod
+	// becomes resumable on another — the executor holding the workspace
+	// records that it owes a persist for it, moments after control announced
+	// the park. That is the moment a follow-up becomes possible, and no status
+	// change of its own marks it. A pointer because absence means "unchanged,
+	// ask the conversation read", which is not the same claim as false.
 	Resumable *bool `json:"resumable,omitempty"`
 }
 

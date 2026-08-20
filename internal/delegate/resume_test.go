@@ -123,22 +123,27 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 // look identically resumable from the conversation alone, so the whole
 // distinction lives in what is true around them:
 //
-//   - workspace reaped by the retention TTL → 410 Gone.
+//   - workspace reaped by the retention TTL → 410 Gone, for an SDK
+//     conversation. A native one is NOT refused: its continuity is the
+//     transcript in `messages`, so the claim builds it a fresh workspace and
+//     tells it what that cost.
 //   - workspace intact, blueprint cancelled → 409 concluded. A blueprint that
 //     merely FINISHED is not in this set — that is the follow-up case and it
 //     succeeds; called off is the one that still refuses.
-//   - both                                  → the workspace answer wins,
-//     because telling someone their sequence was cancelled implies there is
-//     something left to cancel back into, and there isn't.
+//   - both → whichever refusal is real for that runtime. Under the SDK the
+//     workspace answer wins, because telling someone their sequence was
+//     cancelled implies there is something left to cancel back into and there
+//     isn't; a native row has no workspace refusal to raise, so the blueprint's
+//     answer is the one left standing.
 //
 // The third case is not hypothetical: it is every run stopped by an older
 // build. The old cancel path discarded the snapshot AND cancelled the
-// blueprint, so a migrated row has both conditions and must answer 410.
+// blueprint, so a migrated row has both conditions.
 //
-// Every case runs under BOTH runtimes, because that is the property the
-// consolidation buys: one ladder, so a given row answers the same way whatever
-// drives it. Only the SDK's session/worktree/model checks are runtime-specific,
-// and they sit above this and are pinned separately.
+// Every case runs under BOTH runtimes. Most of the ladder is shared and answers
+// identically whatever drives the row; the workspace rung is where the two
+// engines genuinely differ, and running both is how that difference stays a
+// stated contract rather than a surprise.
 func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 	park := func(t *testing.T, database *sql.DB, id, runtime, blueprintStatus string, keepWorkspace bool) *Spawner {
 		t.Helper()
@@ -174,6 +179,17 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-reaped", runtime, "running", false)
 				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-reaped", runmode.LocalDefaultUserID, "msg")
+				if runtime == "native" {
+					// The transcript is the conversation, so a lost workspace
+					// costs uncommitted work rather than the whole run.
+					if err != nil {
+						t.Fatalf("err = %v, want the wake accepted — a native conversation resumes into a fresh workspace", err)
+					}
+					if got := pendingRows(t, s, "r-reaped"); len(got) != 1 {
+						t.Errorf("queued rows = %d, want the follow-up waiting for the next claim", len(got))
+					}
+					return
+				}
 				if !errors.Is(err, ErrWorkspaceExpired) {
 					t.Errorf("err = %v, want ErrWorkspaceExpired (410)", err)
 				}
@@ -221,8 +237,15 @@ func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 				database := newDelegateTestDB(t)
 				s := park(t, database, "r-legacy", runtime, "cancelled", false)
 				err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-legacy", runmode.LocalDefaultUserID, "msg")
-				if !errors.Is(err, ErrWorkspaceExpired) {
-					t.Errorf("err = %v, want ErrWorkspaceExpired — the permanent answer wins over the temporary one", err)
+				want := ErrWorkspaceExpired // the permanent answer wins over the temporary one
+				if runtime == "native" {
+					// Nothing about the workspace refuses a native row, so the
+					// cancelled blueprint is the only refusal there is — and it
+					// is the true one: nothing would ever drive this step again.
+					want = ErrConversationConcluded
+				}
+				if !errors.Is(err, want) {
+					t.Errorf("err = %v, want %v", err, want)
 				}
 			})
 		})
