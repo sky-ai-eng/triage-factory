@@ -703,13 +703,27 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// and the only id this path holds: its steps' conversations are
 				// minted below it, so the teardown resolves them itself.
 				if r.spawner != nil {
-					if cerr := r.spawner.StopBlueprintRun(orgID, blueprintRunID, delegate.StopCauseFiringReverted); cerr != nil {
+					cerr := r.spawner.StopBlueprintRun(orgID, blueprintRunID, delegate.StopCauseFiringReverted)
+					switch {
+					case cerr == nil:
+					case errors.Is(cerr, delegate.ErrBlueprintRunConcluded):
+						// The run beat the rollback to a terminal of its own,
+						// so the thing this teardown exists to prevent — a run
+						// still executing under a task that no longer claims it
+						// — cannot happen. Recorded rather than silent because
+						// an auto run concluding inside the mark-fired window
+						// is rare enough to be worth seeing next to the failure
+						// above.
+						routerLog.Warn("tear down blueprint run after mark-fired failure: run had already concluded, nothing left to stop",
+							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
+					default:
 						// The rest of the rollback lands regardless, which is
 						// what makes this the bad outcome rather than a partial
 						// one: the task goes back to 'queued' and the firing
-						// back to 'pending' under a blueprint run that is still
-						// executing for nobody.
-						routerLog.Error("tear down blueprint run after mark-fired failure: rollback left a live run with no task claiming it",
+						// back to 'pending' under a blueprint run that, as far
+						// as anything here knows, is still executing for
+						// nobody.
+						routerLog.Error("tear down blueprint run after mark-fired failure: rollback may have left a live run with no task claiming it",
 							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
 					}
 				}

@@ -61,11 +61,22 @@ import (
 // to a client.
 var ErrNoActiveConversation = errors.New("no active conversation")
 
-// ErrNoActiveBlueprintRun is StopBlueprintRun's answer when there is nothing to
-// tear down: no such blueprint run in this org, or one that already reached a
-// terminal. A caller unwinding its own side effects treats it as a failure: it
-// means the run it is rolling back is not where it left it.
-var ErrNoActiveBlueprintRun = errors.New("no active blueprint run")
+// The two ways StopBlueprintRun can find nothing to tear down. They are
+// separate errors because they mean opposite things to a caller unwinding its
+// own side effects, and that caller has to be able to say which happened:
+//
+//   - ErrBlueprintRunConcluded — the run reached a terminal on its own first.
+//     Benign: there is no live run left to orphan, which is the outcome the
+//     unwinding caller wanted anyway.
+//   - ErrNoSuchBlueprintRun — no such run in this org at all. Anomalous for
+//     any caller holding an id it just watched commit, and never benign.
+//
+// A single "nothing to stop" sentinel would force one message to cover both,
+// which can only be done by overstating the first or understating the second.
+var (
+	ErrBlueprintRunConcluded = errors.New("blueprint run already concluded")
+	ErrNoSuchBlueprintRun    = errors.New("no such blueprint run")
+)
 
 // StopCause names the lifecycle event a teardown caller is acting on — the
 // thing that caller knows and the conversation itself does not. It exists so
@@ -181,8 +192,11 @@ func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause
 	if err != nil {
 		return fmt.Errorf("load blueprint run: %w", err)
 	}
-	if br == nil || br.Status != domain.BlueprintRunStatusRunning {
-		return fmt.Errorf("%w %s", ErrNoActiveBlueprintRun, blueprintRunID)
+	if br == nil {
+		return fmt.Errorf("%w %s", ErrNoSuchBlueprintRun, blueprintRunID)
+	}
+	if br.Status != domain.BlueprintRunStatusRunning {
+		return fmt.Errorf("%w %s: status %s", ErrBlueprintRunConcluded, blueprintRunID, br.Status)
 	}
 
 	if err := s.raiseBlueprintCancel(ctx, orgID, blueprintRunID); err != nil {

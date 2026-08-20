@@ -108,8 +108,8 @@ func TestStopBlueprintRun_RefusesAConversationID(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
 	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, conversationID, StopCauseFiringReverted)
-	if !errors.Is(err, ErrNoActiveBlueprintRun) {
-		t.Fatalf("StopBlueprintRun with a conversation id = %v, want ErrNoActiveBlueprintRun", err)
+	if !errors.Is(err, ErrNoSuchBlueprintRun) {
+		t.Fatalf("StopBlueprintRun with a conversation id = %v, want ErrNoSuchBlueprintRun", err)
 	}
 	var bpStatus string
 	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, "seedbpr-"+conversationID).Scan(&bpStatus); err != nil {
@@ -187,5 +187,37 @@ func TestStopBlueprintRun_CancelSignalFailure_TearsNothingDown(t *testing.T) {
 	}
 	if notes := stopNotes(t, database, conversationID); len(notes) != 0 {
 		t.Errorf("stop notes = %d, want 0 — nothing was stopped, so the transcript must not say so", len(notes))
+	}
+}
+
+// TestStopBlueprintRun_ConcludedRunIsItsOwnAnswer keeps the two "nothing to
+// tear down" outcomes apart. A run that concluded on its own leaves nothing
+// live to orphan, and a run that isn't there at all is an anomaly for a caller
+// holding an id it just watched commit — so a caller unwinding its own side
+// effects can report what actually happened instead of picking one and being
+// wrong half the time.
+func TestStopBlueprintRun_ConcludedRunIsItsOwnAnswer(t *testing.T) {
+	database := newDelegateTestDB(t)
+	const conversationID = "r-concluded"
+	seedConversation(t, database, conversationID, "sess-con", "/tmp/wt-con")
+	brID := "seedbpr-" + conversationID
+	settleConversationBlueprint(t, database, conversationID, "completed")
+
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
+
+	err := s.StopBlueprintRun(runmode.LocalDefaultOrgID, brID, StopCauseFiringReverted)
+	if !errors.Is(err, ErrBlueprintRunConcluded) {
+		t.Fatalf("StopBlueprintRun on a concluded run = %v, want ErrBlueprintRunConcluded", err)
+	}
+	if errors.Is(err, ErrNoSuchBlueprintRun) {
+		t.Error("a concluded run answered ErrNoSuchBlueprintRun; the run is right there, it is just finished")
+	}
+
+	var bpStatus string
+	if err := database.QueryRow(`SELECT status FROM blueprint_runs WHERE id = ?`, brID).Scan(&bpStatus); err != nil {
+		t.Fatalf("read blueprint_run: %v", err)
+	}
+	if bpStatus != "completed" {
+		t.Errorf("blueprint_run status = %q, want completed — a teardown must not rewrite a terminal it arrived too late for", bpStatus)
 	}
 }
