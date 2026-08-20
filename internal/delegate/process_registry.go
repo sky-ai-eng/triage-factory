@@ -302,9 +302,9 @@ func (s *Spawner) stampExecutor(orgID, conversationID, claimID string) {
 	executorID, bootEpoch := s.executorIdentity()
 	var err error
 	if claimID != "" {
-		err = s.conversations.SetExecutorForClaimSystem(context.Background(), orgID, conversationID, claimID, executorID, bootEpoch)
+		_, err = s.conversations.SetExecutorForClaimSystem(context.Background(), orgID, conversationID, claimID, executorID, bootEpoch)
 	} else {
-		err = s.conversations.SetExecutorSystem(context.Background(), orgID, conversationID, executorID, bootEpoch)
+		_, err = s.conversations.SetExecutorSystem(context.Background(), orgID, conversationID, executorID, bootEpoch)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the go-live executor stamp — a successor owns this conversation",
@@ -329,7 +329,8 @@ func (s *Spawner) recordSandboxActuals(ctx context.Context, orgID, claimID strin
 	if s.conversations == nil {
 		return nil
 	}
-	return s.conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	_, err := s.conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	return err
 }
 
 // SetExecutorID overrides this spawner's executor identity with the

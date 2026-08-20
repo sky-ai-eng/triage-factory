@@ -366,7 +366,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	// processCompletion does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
 	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	if err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
+	if _, err := stores.Conversations.CompleteSystem(ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
 		t.Fatalf("complete step conversation: %v", err)
 	}
 	stepConversations, err := blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)

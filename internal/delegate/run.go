@@ -922,15 +922,18 @@ func (s *Spawner) processCompletion(
 	}
 
 	var completeErr error
+	var completedRow *domain.Conversation
 	switch {
 	case claimID != "":
-		completeErr = s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
+		completedRow, completeErr = s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	case triggerType == "manual":
 		completeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.Complete(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
+			r, err := ts.Conversations.Complete(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
+			completedRow = r
+			return err
 		})
 	default:
-		completeErr = s.conversations.CompleteSystem(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
+		completedRow, completeErr = s.conversations.CompleteSystem(bgCtx, orgID, conversationID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	}
 	if errors.Is(completeErr, db.ErrClaimReleased) {
 		// A successor owns the conversation, so this result is not the run's
@@ -951,6 +954,15 @@ func (s *Spawner) processCompletion(
 
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
+	// broadcastStatus prefers the row the write actually persisted over the
+	// caller's own status variable — the same value here (Complete writes
+	// status verbatim, no COALESCE), but sourced from what landed rather than
+	// what was asked for, per the returned-row standard.
+	broadcastStatus := status
+	if completedRow != nil {
+		broadcastStatus = completedRow.Status
+	}
+
 	// Task disposition (close on finish, leave-open on abort) is the
 	// orchestrator's job now, not the step's: reactToStepTerminal reads this run's
 	// terminal conversations.outcome and routes through terminateBlueprint,
@@ -959,7 +971,7 @@ func (s *Spawner) processCompletion(
 	if status == "failed" {
 		s.broadcastConversationFailed(orgID, conversationID, failureKind)
 	} else {
-		s.broadcastConversationUpdate(orgID, conversationID, status)
+		s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	}
 	// Recompute the aggregate board column. A completed step that left an
 	// unresolved artifact (draft PR / ready review) lands the task in_review (the

@@ -183,7 +183,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 			t.Fatalf("ClaimNextConversation = %+v, want the just-enqueued conversation", claimed)
 		}
 
-		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
+		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
 		}
 		if _, err := stores.Conversations.ParkOpenSystem(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
@@ -197,13 +197,13 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Conversations.GetSystem(ctx, orgID, conversationID); err != nil {
 			t.Errorf("Conversations.GetSystem: %v", err)
 		}
-		if err := stores.Conversations.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/conformance-wt"); err != nil {
+		if _, err := stores.Conversations.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/conformance-wt"); err != nil {
 			t.Errorf("Conversations.SetWorktreePathSystem: %v", err)
 		}
 		// The nonzero cost exercises the terminal settle's messages UPDATE
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
-		if err := stores.Conversations.CompleteSystem(ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
+		if _, err := stores.Conversations.CompleteSystem(ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
 			"did the thing", "completed", "", ""); err != nil {
 			t.Errorf("Conversations.CompleteSystem: %v", err)
 		}

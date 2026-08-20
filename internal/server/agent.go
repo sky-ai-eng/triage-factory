@@ -55,6 +55,16 @@ func (ag *agentHandler) handleAgentStatus(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	ag.writeConversationResource(w, r, orgID, userID, conversationID)
+}
+
+// writeConversationResource reads the conversation resource exactly as
+// handleAgentStatus does — the point read plus its display enrichment
+// (artifact counts, blueprint step count, resumability) — and writes it as
+// the response. Shared with handleAgentStop/handleMessage so a mutating verb
+// route answers with the resource it just changed rather than a status stub
+// naming only the field that verb happens to touch.
+func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http.Request, orgID, userID, conversationID string) {
 	var conv *domain.Conversation
 	var resp map[string]any
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -675,8 +685,7 @@ func (ag *agentHandler) handleAgentStop(w http.ResponseWriter, r *http.Request) 
 		internalError(w, "agent", err)
 		return
 	}
-	// This field names the conversation's status, and a stop parks it.
-	writeJSON(w, http.StatusOK, map[string]string{"status": "open"})
+	ag.writeConversationResource(w, r, orgID, userID, conversationID)
 }
 
 // conversationVisible reports whether conversationID exists and is visible to the caller's org
@@ -773,7 +782,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteErrors(w, status, httpx.ErrorItem{Reason: reason, Message: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
+	ag.writeConversationResource(w, r, orgID, userID, conversationID)
 }
 
 // steerErrorStatus maps a SendMessage error to an HTTP status. A

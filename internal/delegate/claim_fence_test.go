@@ -35,12 +35,12 @@ type fencedConversationStore struct {
 	unfencedSessions int
 }
 
-func (f *fencedConversationStore) SetSessionForClaimSystem(context.Context, string, string, string, string) error {
+func (f *fencedConversationStore) SetSessionForClaimSystem(context.Context, string, string, string, string) (*domain.Conversation, error) {
 	f.sessions++
-	return db.ErrClaimReleased
+	return nil, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) error {
+func (f *fencedConversationStore) SetSessionSystem(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
 	f.unfencedSessions++
 	return f.ConversationStore.SetSessionSystem(ctx, orgID, conversationID, sessionID)
 }
@@ -50,9 +50,9 @@ func (f *fencedConversationStore) InsertMessageForClaimSystem(context.Context, s
 	return 0, db.ErrClaimReleased
 }
 
-func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string, string, string, string, float64, int, int, string, string, string, string) error {
+func (f *fencedConversationStore) CompleteForClaimSystem(context.Context, string, string, string, string, float64, int, int, string, string, string, string) (*domain.Conversation, error) {
 	f.completes++
-	return db.ErrClaimReleased
+	return nil, db.ErrClaimReleased
 }
 
 func (f *fencedConversationStore) MarkFailedIfActiveForClaimSystem(context.Context, string, string, string, string) (bool, error) {
@@ -246,14 +246,14 @@ type worktreeFencedStore struct {
 	unfenced int
 }
 
-func (w *worktreeFencedStore) SetWorktreePathForClaimSystem(context.Context, string, string, string, string) error {
+func (w *worktreeFencedStore) SetWorktreePathForClaimSystem(context.Context, string, string, string, string) (*domain.Conversation, error) {
 	w.byClaim++
-	return db.ErrClaimReleased
+	return nil, db.ErrClaimReleased
 }
 
-func (w *worktreeFencedStore) SetWorktreePathSystem(context.Context, string, string, string) error {
+func (w *worktreeFencedStore) SetWorktreePathSystem(context.Context, string, string, string) (*domain.Conversation, error) {
 	w.unfenced++
-	return nil
+	return nil, nil
 }
 
 // TestStampExecutor_RoutesByClaim: the go-live ownership stamp is an assertion
@@ -283,14 +283,14 @@ type executorFencedStore struct {
 	unfenced int
 }
 
-func (e *executorFencedStore) SetExecutorForClaimSystem(context.Context, string, string, string, string, int64) error {
+func (e *executorFencedStore) SetExecutorForClaimSystem(context.Context, string, string, string, string, int64) (*domain.ExecutorClaim, error) {
 	e.byClaim++
-	return db.ErrClaimReleased
+	return nil, db.ErrClaimReleased
 }
 
-func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string, string, int64) error {
+func (e *executorFencedStore) SetExecutorSystem(context.Context, string, string, string, int64) (*domain.ExecutorClaim, error) {
 	e.unfenced++
-	return nil
+	return nil, nil
 }
 
 // TestProcessCompletion_IdleParkFenceTripReportsFenced: a no-conclusion turn
@@ -420,14 +420,14 @@ type phaseFencedStore struct {
 	byConversation int
 }
 
-func (p *phaseFencedStore) SetClaimPhaseSystem(context.Context, string, string, string, string) error {
+func (p *phaseFencedStore) SetClaimPhaseSystem(context.Context, string, string, string, string) (*domain.ExecutorClaim, error) {
 	p.byClaim++
-	return db.ErrClaimReleased
+	return nil, db.ErrClaimReleased
 }
 
-func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, string, string) error {
+func (p *phaseFencedStore) SetActiveClaimPhaseSystem(context.Context, string, string, string) (*domain.ExecutorClaim, error) {
 	p.byConversation++
-	return nil
+	return nil, nil
 }
 
 // TestParkConversationOpen_CancelFenceTripRecordsNothing: the path a partition

@@ -122,7 +122,7 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 		t.Errorf("LocalClient views differ: host %q, agent %q — no sandbox boundary on this transport", host, agent)
 	}
 
-	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-roots", "/data/runs/rehydrated-root"); err != nil {
+	if _, err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-roots", "/data/runs/rehydrated-root"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 	host, agent, err = client.WorkspaceRoots(context.Background())
@@ -143,7 +143,7 @@ func TestLocalClient_WorkspaceRoots(t *testing.T) {
 func TestServer_WorkspaceRoots_AgentViewIsWorkMount(t *testing.T) {
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-ipc-roots", runmode.LocalDefaultUserID, "manual")
-	if err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-ipc-roots", "/tmp/triagefactory-runs/conv-ipc-roots"); err != nil {
+	if _, err := stores.Conversations.SetWorktreePathSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-ipc-roots", "/tmp/triagefactory-runs/conv-ipc-roots"); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 

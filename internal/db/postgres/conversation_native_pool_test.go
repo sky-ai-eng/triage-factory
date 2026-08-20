@@ -57,7 +57,7 @@ func TestConversationStore_NativeLoopReadsNeedNoRequestIdentity(t *testing.T) {
 
 	// The fenced flush needs an engagement to fence against; SetExecutorSystem
 	// mints the claim exactly as the dispatcher does.
-	if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-pool", 1); err != nil {
+	if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-pool", 1); err != nil {
 		t.Fatalf("SetExecutorSystem: %v", err)
 	}
 	var claimID string

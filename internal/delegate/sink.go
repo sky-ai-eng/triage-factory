@@ -84,27 +84,43 @@ func (k *conversationSink) OnSession(sessionID string) error {
 	}
 	k.sessionDelivered = true
 	bgCtx := context.Background()
+	// broadcastStatus prefers the just-written row's derived display status
+	// over a hardcoded "running" guess — SetSession only touches
+	// sdk_session_id, so the row is the one place that actually knows whether
+	// this engagement is live, still setting up (a claim phase), or has
+	// already raced past this point.
+	broadcastStatus := "running"
 	switch {
 	case k.claimID != "":
-		if err := k.spawner.conversations.SetSessionForClaimSystem(bgCtx, k.orgID, k.conversationID, k.claimID, sessionID); err != nil {
+		row, err := k.spawner.conversations.SetSessionForClaimSystem(bgCtx, k.orgID, k.conversationID, k.claimID, sessionID)
+		if err != nil {
 			if errors.Is(err, db.ErrClaimReleased) {
 				k.tripFence(err)
 				return err
 			}
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		broadcastStatus = row.Status
 	case k.triggerType == "manual":
+		var row *domain.Conversation
 		if err := k.spawner.tx.SyntheticClaimsWithTx(bgCtx, k.orgID, k.creatorUserID, func(ts db.TxStores) error {
-			return ts.Conversations.SetSession(bgCtx, k.orgID, k.conversationID, sessionID)
+			r, err := ts.Conversations.SetSession(bgCtx, k.orgID, k.conversationID, sessionID)
+			row = r
+			return err
 		}); err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		if row != nil {
+			broadcastStatus = row.Status
+		}
 	default:
-		if err := k.spawner.conversations.SetSessionSystem(bgCtx, k.orgID, k.conversationID, sessionID); err != nil {
+		row, err := k.spawner.conversations.SetSessionSystem(bgCtx, k.orgID, k.conversationID, sessionID)
+		if err != nil {
 			return fmt.Errorf("persist session_id: %w", err)
 		}
+		broadcastStatus = row.Status
 	}
-	k.spawner.broadcastConversationUpdate(k.orgID, k.conversationID, "running")
+	k.spawner.broadcastConversationUpdate(k.orgID, k.conversationID, broadcastStatus)
 	return nil
 }
 

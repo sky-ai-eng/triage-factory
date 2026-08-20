@@ -673,7 +673,8 @@ func (s *Spawner) recordNativeResult(
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
 	bgCtx := context.WithoutCancel(ctx)
-	if err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, ""); err != nil {
+	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
+	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
 				"conversation", conversationID, "claim", cfg.claimID)
@@ -682,8 +683,12 @@ func (s *Spawner) recordNativeResult(
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", err)
 	}
 
+	broadcastStatus := "completed"
+	if updated != nil {
+		broadcastStatus = updated.Status
+	}
 	s.updateBreakerCounter(task.ID, triggerType, "completed")
-	s.broadcastConversationUpdate(orgID, conversationID, "completed")
+	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	s.recomputeTaskBoardColumn(orgID, task.ID)
 	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return false

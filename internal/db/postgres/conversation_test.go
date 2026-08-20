@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -36,6 +37,24 @@ func TestConversationStore_Postgres(t *testing.T) {
 		promptID := seedPgConversationPrompt(t, h, orgID, userID)
 		seeder := newPgConversationSeeder(h.AdminDB, orgID, userID, agentID, promptID)
 		return stores.Conversations, orgID, userID, seeder
+	})
+}
+
+// TestConversationStore_Postgres_ReturnedRow runs the returned-row
+// conformance suite (TFAC-861) against the admin pool — see
+// TestConversationStore_Postgres_ReturnedRow_AppPool for the RLS-under-claims
+// wiring that exercises the RETURNING visibility property directly.
+func TestConversationStore_Postgres_ReturnedRow(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunConversationReturnedRowConformance(t, func(t *testing.T) (db.ConversationStore, db.ConversationQueueStore, string, string, dbtest.ConversationSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgConversationOrg(t, h)
+		promptID := seedPgConversationPrompt(t, h, orgID, userID)
+		seeder := newPgConversationSeeder(h.AdminDB, orgID, userID, agentID, promptID)
+		return stores.Conversations, stores.ConversationQueue, orgID, userID, seeder
 	})
 }
 
@@ -469,12 +488,20 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// The insert path moved to the admin-pool conversation queue (nothing
 		// mints conversations under tf_app), so the write arm to pin is
 		// an UPDATE: bob's lifecycle write against orgA's conversation must be
-		// silently filtered by the USING clause — no rows touched.
+		// filtered by the USING clause — no rows touched. Under the
+		// returned-row standard that is now db.ErrNoSuchConversation (the
+		// RETURNING clause finds nothing to hand back) rather than a silent
+		// no-op — the miss is reported, not swallowed.
+		var werr error
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, convA, "/tmp/bob-was-here")
+			_, werr = pgstore.NewForTx(tx, pgtest.SecretKey).Conversations.SetWorktreePath(ctx, orgA, convA, "/tmp/bob-was-here")
+			return nil
 		})
 		if err != nil {
 			t.Fatalf("cross-org SetWorktreePath: %v", err)
+		}
+		if !errors.Is(werr, db.ErrNoSuchConversation) {
+			t.Fatalf("cross-org SetWorktreePath = %v, want db.ErrNoSuchConversation (RLS USING filter hides the row)", werr)
 		}
 		var wt sql.NullString
 		if err := h.AdminDB.QueryRow(`SELECT worktree_path FROM conversations WHERE id = $1`, convA).Scan(&wt); err != nil {
@@ -584,7 +611,7 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	// cycles.
 	settle := func(cost float64, durationMs, numTurns int, resultSummary, outcome string) {
 		t.Helper()
-		if err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, "exec-lc", 1); err != nil {
+		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, "exec-lc", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -596,7 +623,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 			t.Fatalf("InsertMessage under synth claims: %v", err)
 		}
 		if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-			return tx.Conversations.Complete(ctx, orgID, conversationID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", "")
+			_, err := tx.Conversations.Complete(ctx, orgID, conversationID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", "")
+			return err
 		}); err != nil {
 			t.Fatalf("Complete under synth claims: %v", err)
 		}
@@ -925,7 +953,7 @@ func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t 
 		TriggerType: "manual", CreatorUserID: creator,
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
-	if err := stores.Conversations.SetExecutorSystem(ctx, orgID, convID, "exec-warm", 1); err != nil {
+	if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, convID, "exec-warm", 1); err != nil {
 		t.Fatalf("mint the engagement: %v", err)
 	}
 	if ok, err := stores.Conversations.ParkOpenSystem(ctx, orgID, convID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {

@@ -473,7 +473,8 @@ func (c *Curator) getSecrets() agentproc.SecretsReader {
 // on a detached context and swallows the error, so a lost stamp costs this
 // turn's accounting and nothing else.
 func (c *Curator) recordSandboxActuals(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error {
-	return c.stores.Conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	_, err := c.stores.Conversations.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, actuals.PeakMemMB, actuals.CPUUsec)
+	return err
 }
 
 // queueItem carries everything the per-project goroutine needs to

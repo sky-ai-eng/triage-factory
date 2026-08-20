@@ -1159,9 +1159,9 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 	ctx = context.WithoutCancel(ctx)
 	var err error
 	if claimID != "" {
-		err = s.conversations.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, phase)
+		_, err = s.conversations.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, phase)
 	} else {
-		err = s.conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase)
+		_, err = s.conversations.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused a phase write — this executor no longer owns the conversation",
@@ -1206,9 +1206,9 @@ func (s *Spawner) updatePhase(ctx context.Context, orgID, conversationID, claimI
 func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, claimID, path string) error {
 	var err error
 	if claimID != "" {
-		err = s.conversations.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, path)
+		_, err = s.conversations.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, path)
 	} else {
-		err = s.conversations.SetWorktreePathSystem(ctx, orgID, conversationID, path)
+		_, err = s.conversations.SetWorktreePathSystem(ctx, orgID, conversationID, path)
 	}
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused a worktree_path write — a successor owns this conversation; its own workspace stands",

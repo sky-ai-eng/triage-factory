@@ -213,14 +213,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-cost", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-cost", 1); err != nil {
 			t.Fatalf("SetExecutorSystem 1: %v", err)
 		}
 		msg1, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "turn 1"})
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 4000, 3, "", "", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 4000, 3, "", "", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -239,14 +239,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// The resume invocation mints its own claim, records its own row,
 		// then settles.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-cost", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-cost", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
 		msg2, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "turn 2"})
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 2000, 5, "all done", "abort", "needs human", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 2000, 5, "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, conversationID)
@@ -316,7 +316,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-zero", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-zero", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		// Exactly representable in float4: the postgres column is `real`, and
@@ -330,7 +330,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 4000, 3, "done", "continue", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 4000, 3, "done", "continue", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 
@@ -367,7 +367,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
 		// Engagement 1 records a row and settles.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 1); err != nil {
 			t.Fatalf("SetExecutorSystem 1: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -379,13 +379,13 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "abort", "wait", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "abort", "wait", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 
 		// Engagement 2 goes live and records its row; then a NEWER row
 		// attributed (explicitly) to the released first claim lands.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-b", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-b", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
 		msgB, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "b"})
@@ -396,7 +396,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage c: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("second Complete: %v", err)
 		}
 
@@ -444,15 +444,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
 		// No active claim at all: the fallback owns the settle.
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		// A live claim whose engagement recorded nothing (both rows predate
 		// it) falls back the same way, added.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-rowless", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-rowless", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("rowless-engagement Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -487,7 +487,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-synth", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-synth", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		real1, err := store.InsertMessage(ctx, orgID, &domain.Message{
@@ -512,7 +512,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "failed", 1.5, 1000, 2, "", "", "", "infra"); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "failed", 1.5, 1000, 2, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		msgs, err := store.Messages(ctx, orgID, conversationID)
@@ -537,7 +537,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// records its dollars — totals stay exact even though the row names
 		// no model (the usage breakdowns exclude it, by_day still counts it).
 		onlySynthID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, onlySynthID, "exec-synth-only", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, onlySynthID, "exec-synth-only", 1); err != nil {
 			t.Fatalf("SetExecutorSystem only-synth: %v", err)
 		}
 		onlySynth, err := store.InsertMessage(ctx, orgID, &domain.Message{
@@ -547,7 +547,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage only-synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, onlySynthID, "failed", 0.25, 0, 0, "", "", "", "infra"); err != nil {
+		if _, err := store.Complete(ctx, orgID, onlySynthID, "failed", 0.25, 0, 0, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete only-synth: %v", err)
 		}
 		gotOnly, err := store.Get(ctx, orgID, onlySynthID)
@@ -592,7 +592,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage tool: %v", err)
 		}
 		// No claim at all: the fallback arm owns this settle.
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		msgs, err := store.Messages(ctx, orgID, conversationID)
@@ -626,7 +626,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage synthetic: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "", "", "", "infra"); err != nil {
+		if _, err := store.Complete(ctx, orgID, noRealID, "failed", 0.5, 0, 0, "", "", "", "infra"); err != nil {
 			t.Fatalf("Complete no-real: %v", err)
 		}
 		noRealMsgs, err := store.Messages(ctx, orgID, noRealID)
@@ -653,10 +653,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-norows", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-norows", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 9.99, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 9.99, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -708,7 +708,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, conversationID)
@@ -813,7 +813,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, conversationID, "failed", 0, 0, 0, "", "", "", string(domain.ConversationFailureAgentError)); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "failed", 0, 0, 0, "", "", "", string(domain.ConversationFailureAgentError)); err != nil {
 			t.Fatalf("Complete with kind: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -829,7 +829,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Empty kind on a failed Complete → NULL → unclassified zero value.
 		plainID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, plainID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("Complete without kind: %v", err)
 		}
 		if got, _ := store.Get(ctx, orgID, plainID); got == nil || got.FailureKind != domain.ConversationFailureUnclassified {
@@ -841,7 +841,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetSession(ctx, orgID, conversationID, "sess-abc"); err != nil {
+		if _, err := store.SetSession(ctx, orgID, conversationID, "sess-abc"); err != nil {
 			t.Fatalf("SetSession: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, conversationID)
@@ -863,14 +863,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/warm"); err != nil {
+		if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/warm"); err != nil {
 			t.Fatalf("SetWorktreePathSystem: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, conversationID)
 		if got == nil || got.WorktreePath != "/tmp/triagefactory-runs/warm" {
 			t.Fatalf("worktree_path = %v, want /tmp/triagefactory-runs/warm", got)
 		}
-		if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/rebuilt"); err != nil {
+		if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/rebuilt"); err != nil {
 			t.Fatalf("re-stamp: %v", err)
 		}
 		got, _ = store.Get(ctx, orgID, conversationID)
@@ -951,7 +951,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// order the reactor writes in; the window between the two writes is the
 		// subtest below.
 		abortConversation, abortBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, abortConversation, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, abortConversation, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
@@ -959,7 +959,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
 		finishConversation, finishBR := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, finishConversation, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, finishConversation, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, finishBR, "completed")
@@ -970,7 +970,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// workspace to land a follow-up in; this is the one rest state the CAS
 		// still excludes.
 		failedConversation := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, failedConversation, "failed", 0, 0, 0, "", "", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, failedConversation, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("fail: %v", err)
 		}
 		if ok, _ := store.MarkQueuedForResume(ctx, orgID, failedConversation); ok {
@@ -986,7 +986,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		conversationID, brID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step: %v", err)
 		}
 		// The blueprint has not reacted yet — exactly the live failure.
@@ -1046,7 +1046,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// One engagement: its executor is the stamp.
 		single := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, single, "exec-1", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, single, "exec-1", 1); err != nil {
 			t.Fatalf("SetExecutorSystem exec-1: %v", err)
 		}
 		resume(t, single)
@@ -1057,15 +1057,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Two engagements: the NEWER one holds the tree, so an older
 		// engagement's executor must not win.
 		twice := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, twice, "exec-1", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "exec-1", 1); err != nil {
 			t.Fatalf("SetExecutorSystem exec-1: %v", err)
 		}
 		// The empty stamp releases the claim; without it the next call would
 		// update that engagement in place instead of starting a second one.
-		if err := store.SetExecutorSystem(ctx, orgID, twice, "", 0); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "", 0); err != nil {
 			t.Fatalf("release the first engagement: %v", err)
 		}
-		if err := store.SetExecutorSystem(ctx, orgID, twice, "exec-2", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, twice, "exec-2", 2); err != nil {
 			t.Fatalf("SetExecutorSystem exec-2: %v", err)
 		}
 		resume(t, twice)
@@ -1217,7 +1217,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-idle-park", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-idle-park", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 
@@ -1259,10 +1259,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			})
 		}
 		step1, step2 := mkStep(), mkStep()
-		if err := store.Complete(ctx, orgID, step1, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, step1, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step 1: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, step2, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, step2, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
 			t.Fatalf("complete step 2: %v", err)
 		}
 
@@ -1293,7 +1293,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID, bpr := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
 		const wtPath = "/tmp/triagefactory-runs/evictable"
-		if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, wtPath); err != nil {
+		if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, wtPath); err != nil {
 			t.Fatalf("SetWorktreePathSystem: %v", err)
 		}
 		if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
@@ -1353,7 +1353,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			})
 		}
 		parked, live := mkStep(), mkStep()
-		if err := store.SetWorktreePathSystem(ctx, orgID, parked, "/tmp/triagefactory-runs/"+bpr); err != nil {
+		if _, err := store.SetWorktreePathSystem(ctx, orgID, parked, "/tmp/triagefactory-runs/"+bpr); err != nil {
 			t.Fatalf("SetWorktreePathSystem: %v", err)
 		}
 		if _, err := store.ParkOpen(ctx, orgID, parked, db.ParkIdle()); err != nil {
@@ -1362,7 +1362,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		seed.SetSnapshotState(t, bpr, domain.WorkspaceSnapshotWritten)
 
 		// The sibling step is mid-engagement.
-		if err := store.SetExecutorSystem(ctx, orgID, live, "exec-live", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, live, "exec-live", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got != nil {
@@ -1375,10 +1375,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Release it and the key becomes evictable — the claim, not the
 		// sibling's existence, is what held it back.
-		if err := store.SetExecutorSystem(ctx, orgID, live, "", 0); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, live, "", 0); err != nil {
 			t.Fatalf("release claim: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, live, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, live, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
 			t.Fatalf("complete sibling: %v", err)
 		}
 		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got == nil {
@@ -1412,7 +1412,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
 		// No claim yet → the go-live confirmation mints one.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 3); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 3); err != nil {
 			t.Fatalf("SetExecutorSystem mint: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -1421,7 +1421,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// A live claim → idempotent identity update, no second row.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 4); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-a", 4); err != nil {
 			t.Fatalf("SetExecutorSystem update: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -1434,7 +1434,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Empty executorID → the legacy clear: the active claim releases
 		// as requeued and the read-side owner goes empty.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 			t.Fatalf("SetExecutorSystem clear: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -1459,7 +1459,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// A re-mint after release is a NEW claim — attempts becomes the
 		// lifetime claim count, and one-active-claim holds (the released row
 		// stays).
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-b", 5); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-b", 5); err != nil {
 			t.Fatalf("SetExecutorSystem re-mint: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -1500,7 +1500,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		stage := func(t *testing.T) string {
 			t.Helper()
 			conversationID := seedConversationForTest(t, orgID, seed, "running")
-			if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-term", 1); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-term", 1); err != nil {
 				t.Fatalf("SetExecutorSystem: %v", err)
 			}
 			return conversationID
@@ -1508,14 +1508,14 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		t.Run("Complete_completed", func(t *testing.T) {
 			conversationID := stage(t)
-			if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+			if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, conversationID, "completed")
 		})
 		t.Run("Complete_failed", func(t *testing.T) {
 			conversationID := stage(t)
-			if err := store.Complete(ctx, orgID, conversationID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
+			if _, err := store.Complete(ctx, orgID, conversationID, "failed", 0, 0, 0, "", "", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, conversationID, "failed")
@@ -1548,7 +1548,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			}
 			// ParkOpen already released as 'parked'; re-mint so the requeue
 			// has an active claim to release.
-			if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-park", 2); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-park", 2); err != nil {
 				t.Fatalf("SetExecutorSystem re-mint: %v", err)
 			}
 			if ok, err := store.MarkQueuedForResume(ctx, orgID, conversationID); err != nil || !ok {
@@ -1568,10 +1568,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			// re-mint a claim (simulating a racing engagement), then fail — the
 			// guard refuses and the claim stays live.
 			conversationID := stage(t)
-			if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+			if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
-			if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-race", 9); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-race", 9); err != nil {
 				t.Fatalf("SetExecutorSystem: %v", err)
 			}
 			if ok, _ := store.MarkFailedIfActive(ctx, orgID, conversationID, ""); ok {
@@ -1590,7 +1590,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-phase", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-phase", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		// Set: the phase lands on the active claim and the display read
@@ -1598,7 +1598,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// the canonical vocabulary rather than a copy of it, so a phase added
 		// in Go and never taught to a store fails here on both dialects.
 		for _, phase := range domain.AllClaimPhases() {
-			if err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase); err != nil {
+			if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, phase); err != nil {
 				t.Fatalf("SetActiveClaimPhaseSystem set %s: %v", phase, err)
 			}
 			claims := seed.ClaimRows(t, conversationID)
@@ -1616,7 +1616,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Clear: empty phase writes NULL and the display falls back to the
 		// stored status.
-		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, ""); err != nil {
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, ""); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem clear: %v", err)
 		}
 		if claims := seed.ClaimRows(t, conversationID); len(claims) != 1 || claims[0].Phase != "" {
@@ -1632,18 +1632,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-phase-rel", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-phase-rel", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "agent_starting"); err != nil {
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "agent_starting"); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem: %v", err)
 		}
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		// A write against the released claim is a silent no-op: the released
 		// claim's phase stays whatever it held at release.
-		if err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "cloning"); err != nil {
+		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "cloning"); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem on released: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -1668,7 +1668,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -1677,7 +1677,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		claimID := claims[0].ID
 
-		if err := store.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, "cloning"); err != nil {
+		if _, err := store.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, "cloning"); err != nil {
 			t.Fatalf("SetClaimPhaseSystem: %v", err)
 		}
 		if got := seed.ClaimRows(t, conversationID); len(got) != 1 || got[0].Phase != "cloning" {
@@ -1711,7 +1711,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
 		}
 
-		if err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0.5, 1500, 2, "done", "finish", "", ""); err != nil {
+		if _, err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0.5, 1500, 2, "done", "finish", "", ""); err != nil {
 			t.Fatalf("CompleteForClaimSystem: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -1745,7 +1745,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-seq", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-seq", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -1791,7 +1791,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-compact", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-compact", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -1896,7 +1896,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-settle", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-settle", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -1912,7 +1912,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Postgres, and a value like 0.42 would come back off by float32
 		// rounding — a dialect fact, not a store bug.
 		cost := 0.25
-		if err := store.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID,
+		if _, err := store.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID,
 			int(reqID), 150000, 900, 140000, 2000, &cost, "tool-calls-in-reply"); err != nil {
 			t.Fatalf("SettleCompactionRequestForClaimSystem: %v", err)
 		}
@@ -1942,7 +1942,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced-cancel", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced-cancel", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -1977,18 +1977,18 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-coords", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-coords", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
 
-		if err := store.SetSessionForClaimSystem(ctx, orgID, conversationID, claimID, "sess-fenced"); err != nil {
+		if _, err := store.SetSessionForClaimSystem(ctx, orgID, conversationID, claimID, "sess-fenced"); err != nil {
 			t.Fatalf("SetSessionForClaimSystem: %v", err)
 		}
-		if err := store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/triagefactory-runs/fenced"); err != nil {
+		if _, err := store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/triagefactory-runs/fenced"); err != nil {
 			t.Fatalf("SetWorktreePathForClaimSystem: %v", err)
 		}
-		if err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-coords-live", 7); err != nil {
+		if _, err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-coords-live", 7); err != nil {
 			t.Fatalf("SetExecutorForClaimSystem: %v", err)
 		}
 
@@ -2015,7 +2015,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Re-stamping is the ordinary case (a warm re-claim, a cold rehydrate
 		// onto a fresh path), so each of these is an unconditional overwrite.
-		if err := store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/triagefactory-runs/rebuilt"); err != nil {
+		if _, err := store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/triagefactory-runs/rebuilt"); err != nil {
 			t.Fatalf("re-stamp worktree path: %v", err)
 		}
 		if got, _ = store.Get(ctx, orgID, conversationID); got == nil || got.WorktreePath != "/tmp/triagefactory-runs/rebuilt" {
@@ -2039,7 +2039,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
 		// A conversation with no claim at all: the twin would mint one here.
-		if err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, "6f1b7d3e-0000-4000-8000-000000000000", "exec-ghost", 1); err == nil {
+		if _, err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, "6f1b7d3e-0000-4000-8000-000000000000", "exec-ghost", 1); err == nil {
 			t.Log("no error naming a claim that does not exist (local no-ops; Postgres refuses) — the row state below is what matters")
 		}
 		if claims := seed.ClaimRows(t, conversationID); len(claims) != 0 {
@@ -2049,19 +2049,19 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Now with a real engagement, plus a second one on another
 		// conversation to catch a write that resolves "active" instead of
 		// "named".
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-named", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-named", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
 
 		otherConversation := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, otherConversation, "exec-other", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, otherConversation, "exec-other", 2); err != nil {
 			t.Fatalf("SetExecutorSystem (other): %v", err)
 		}
 		otherClaim := seed.ClaimRows(t, otherConversation)[0].ID
 
 		// A (conversation, claim) pair that does not agree writes neither row.
-		if err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, otherClaim, "exec-crossed", 9); err == nil {
+		if _, err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, otherClaim, "exec-crossed", 9); err == nil {
 			t.Log("no error on a mis-threaded pair (local no-ops; Postgres refuses)")
 		}
 		if got := seed.ClaimRows(t, conversationID); len(got) != 1 || got[0].ExecutorID != "exec-named" {
@@ -2072,7 +2072,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// The matching pair writes, and writes only its own row.
-		if err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-named-live", 5); err != nil {
+		if _, err := store.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, "exec-named-live", 5); err != nil {
 			t.Fatalf("SetExecutorForClaimSystem: %v", err)
 		}
 		if got := seed.ClaimRows(t, conversationID); len(got) != 1 || got[0].ExecutorID != "exec-named-live" || got[0].BootEpoch != 5 {
@@ -2088,7 +2088,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced-fail", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-fenced-fail", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -2118,7 +2118,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-actuals", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-actuals", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -2135,7 +2135,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The live-claim stamp (the shape a hibernating conversation hits — its
 		// claim is parked, not yet released).
 		peak, cpu := 731, int64(12_500_000)
-		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak, &cpu); err != nil {
+		if _, err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak, &cpu); err != nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem live: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -2148,11 +2148,11 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// bookkeeping releases the claim, so the stamp must land on a
 		// released row. An active-claim predicate here would silently drop
 		// every engagement's actuals.
-		if err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		peak2, cpu2 := 998, int64(20_000_000)
-		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak2, &cpu2); err != nil {
+		if _, err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, &peak2, &cpu2); err != nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem released: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -2167,7 +2167,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Partial measurement (a kernel with no memory.peak): the CPU time
 		// records and the peak goes back to NULL rather than to a zero that
 		// would read as a measured 0 MB engagement.
-		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, nil, &cpu2); err != nil {
+		if _, err := store.RecordClaimSandboxStatsSystem(ctx, orgID, claimID, nil, &cpu2); err != nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem partial: %v", err)
 		}
 		claims = seed.ClaimRows(t, conversationID)
@@ -2181,7 +2181,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// An unknown claim id is a no-op, not an error — the caller is on a
 		// best-effort teardown path and must never fail a finished conversation
 		// over accounting.
-		if err := store.RecordClaimSandboxStatsSystem(ctx, orgID, uuid.New().String(), &peak, &cpu); err != nil {
+		if _, err := store.RecordClaimSandboxStatsSystem(ctx, orgID, uuid.New().String(), &peak, &cpu); err != nil {
 			t.Errorf("RecordClaimSandboxStatsSystem unknown claim: %v, want a silent no-op", err)
 		}
 	})
@@ -2192,7 +2192,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 
 		// First engagement.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-1", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-1", 1); err != nil {
 			t.Fatalf("SetExecutorSystem 1: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -2210,7 +2210,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("ParkOpen: ok=%v err=%v", ok, err)
 		}
 		time.Sleep(1100 * time.Millisecond) // SQLite's second-granularity timestamps
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-2", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-2", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, conversationID)
@@ -2239,10 +2239,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Helper()
 			// The empty stamp releases the active claim; without it the next
 			// mint would update in place instead of starting an engagement.
-			if err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 				t.Fatalf("release before minting %s: %v", executorID, err)
 			}
-			if err := store.SetExecutorSystem(ctx, orgID, conversationID, executorID, epoch); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, executorID, epoch); err != nil {
 				t.Fatalf("SetExecutorSystem %s: %v", executorID, err)
 			}
 		}
@@ -2255,7 +2255,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			return got
 		}
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-1", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-1", 1); err != nil {
 			t.Fatalf("SetExecutorSystem exec-1: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -2511,7 +2511,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// Terminate the event conversation; only terminal event-trigger rows
 		// remain plus the still-running manual — gate flips back to
 		// false.
-		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasActiveAutoConversationForTask(ctx, orgID, taskID); has {
@@ -2564,7 +2564,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// as a live auto conversation again — for its own task, and only its
 		// own. A human-paced follow-up on one card must never hold up automated
 		// triage of a different card on the same entity.
-		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
 		// The blueprint settles first: a resume fixture that skipped this would
@@ -2582,7 +2582,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Terminate it — terminal-only, plus the still-active manual
 		// conversation, resolves back to "".
-		if err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.Complete(ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, err := store.ActiveAutoConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
@@ -2596,21 +2596,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// open WITH a worktree path → included.
 		openConversation := seedConversationForTest(t, orgID, seed, "open")
-		if err := store.SetWorktreePath(ctx, orgID, openConversation, "/tmp/triagefactory-runs/open"); err != nil {
+		if _, err := store.SetWorktreePath(ctx, orgID, openConversation, "/tmp/triagefactory-runs/open"); err != nil {
 			t.Fatalf("set worktree (open): %v", err)
 		}
 		// completed WITH a worktree → excluded by the status filter. A completed
 		// conversation that left an unresolved artifact no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
 		completed := seedConversationForTest(t, orgID, seed, "completed")
-		if err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
+		if _, err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
 			t.Fatalf("set worktree (completed): %v", err)
 		}
 		// open WITHOUT a worktree → excluded by the COALESCE filter.
 		_ = seedConversationForTest(t, orgID, seed, "open")
 		// running WITH a worktree → excluded by the status filter.
 		running := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
+		if _, err := store.SetWorktreePath(ctx, orgID, running, "/tmp/triagefactory-runs/running"); err != nil {
 			t.Fatalf("set worktree (running): %v", err)
 		}
 		// open WITH a worktree but under an already-terminal blueprint_run →
@@ -2624,7 +2624,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			TaskID: orphanTaskID, PromptID: conversationTestPrompt(t), Status: "open", Model: "m",
 			BlueprintRunID: orphanBR,
 		})
-		if err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
+		if _, err := store.SetWorktreePath(ctx, orgID, orphan, "/tmp/triagefactory-runs/orphan"); err != nil {
 			t.Fatalf("set worktree (orphan): %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, orphanBR, "cancelled")
@@ -2780,7 +2780,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Mint a claim so ClaimID has a real FK target, then attribute a
 		// user message to (user, claim).
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-msg", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-msg", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -2798,7 +2798,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// A system row written outside the engagement (claim released)
 		// leaves both empty (NULL on the row).
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 			t.Fatalf("SetExecutorSystem release: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{
@@ -2836,7 +2836,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage pre-claim: %v", err)
 		}
 
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claims := seed.ClaimRows(t, conversationID)
@@ -2850,7 +2850,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 
 		// Released engagement: later rows must NOT inherit the dead claim.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "", 0); err != nil {
 			t.Fatalf("SetExecutorSystem release: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "post"}); err != nil {
@@ -2860,7 +2860,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// A second engagement goes live; an explicit ClaimID naming the
 		// released first claim (the bundle-import shape) beats the active
 		// one.
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 2); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 2); err != nil {
 			t.Fatalf("SetExecutorSystem 2: %v", err)
 		}
 		if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: conversationID, Role: "assistant", Content: "explicit", ClaimID: claim1}); err != nil {
@@ -3378,7 +3378,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
 		otherConversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-scope", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-scope", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -3432,7 +3432,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID := seedConversationForTest(t, orgID, seed, "running")
-		if err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 1); err != nil {
+		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-stamp", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
 		claimID := seed.ClaimRows(t, conversationID)[0].ID
@@ -3690,7 +3690,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			if _, err := store.InsertMessage(ctx, orgID, &domain.Message{ConversationID: stepID, Role: "assistant", Content: "work"}); err != nil {
 				t.Fatalf("InsertMessage %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "", "finish", "", ""); err != nil {
+			if _, err := store.Complete(ctx, orgID, stepID, "completed", cost, 1000, 1, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}
@@ -3762,10 +3762,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		})
 		settle := func(stepID string, durationMs int) {
 			t.Helper()
-			if err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
+			if _, err := store.SetExecutorSystem(ctx, orgID, stepID, "exec-dur", 1); err != nil {
 				t.Fatalf("SetExecutorSystem %s: %v", stepID, err)
 			}
-			if err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "", "finish", "", ""); err != nil {
+			if _, err := store.Complete(ctx, orgID, stepID, "completed", 0, durationMs, 1, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete %s: %v", stepID, err)
 			}
 		}
@@ -3876,7 +3876,7 @@ func evictableFor(t *testing.T, store db.ConversationStore, ctx context.Context,
 func parkedEvictionCandidate(t *testing.T, store db.ConversationStore, ctx context.Context, orgID string, seed ConversationSeeder, suffix string) string {
 	t.Helper()
 	conversationID, bpr := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-	if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/"+suffix); err != nil {
+	if _, err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/"+suffix); err != nil {
 		t.Fatalf("SetWorktreePathSystem: %v", err)
 	}
 	if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {

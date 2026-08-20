@@ -202,7 +202,7 @@ func (s *Spawner) curatorSidecarProvisionFor(orgID, conversationID string) agent
 				// costs is bounded by what the phase is for — one re-seal by
 				// the backstop sweep, on a turn a successor is provisioning
 				// anyway.
-				if err := s.conversations.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
+				if _, err := s.conversations.SetActiveClaimPhaseSystem(provCtx, orgID, conversationID, ""); err != nil {
 					dispatchLog.Warn("clear curator turn awaiting-credentials phase failed",
 						"conversation", conversationID, "error", err)
 				}
