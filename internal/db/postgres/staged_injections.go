@@ -31,23 +31,26 @@ var _ db.StagedInjectionStore = (*stagedInjectionStore)(nil)
 // 'text').
 const stagedInjectionSubtype = "injection:system-note"
 
-func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n *domain.StagedInjection) error {
+func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error) {
 	meta, err := json.Marshal(map[string]string{"producer": n.Producer})
 	if err != nil {
-		return err
+		return domain.StagedInjection{}, err
 	}
-	// created_at is left to the column DEFAULT now(). RETURNING id writes
-	// the minted row id back to the caller as a decimal string.
-	var id int64
+	// created_at is left to the column DEFAULT now(). RETURNING projects the
+	// same columns flushPendingInput's SELECT does, so the freshly-inserted
+	// row and a later flush of it map through the same stagedInjectionFromPending.
+	var r pendingRow
 	if err := s.admin.QueryRowContext(ctx, `
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES ($1::uuid, $2::uuid, 'user', $3, $4, $5::jsonb, false)
-		RETURNING id
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(&id); err != nil {
-		return err
+		RETURNING id, org_id::text, conversation_id::text, content,
+		          COALESCE(user_id::text, ''), COALESCE(metadata::text, ''), created_at
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(
+		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &r.UserID, &r.Metadata, &r.CreatedAt,
+	); err != nil {
+		return domain.StagedInjection{}, err
 	}
-	n.ID = strconv.FormatInt(id, 10)
-	return nil
+	return stagedInjectionFromPending(r), nil
 }
 
 func (s *stagedInjectionStore) FlushPendingSystem(ctx context.Context, orgID, conversationID string) ([]domain.StagedInjection, error) {
@@ -83,27 +86,36 @@ func (s *stagedInjectionStore) DeleteSystem(ctx context.Context, orgID, id strin
 	return err
 }
 
+// stagedInjectionFromPending maps one messages row (whether just inserted by
+// AppendSystem or claimed by a flush) onto the StagedInjection shape: the row
+// id becomes the decimal ID, content the Body, and the producer tag is
+// unpacked from metadata. The two writers share this mapper so a fresh
+// AppendSystem row and that same row read back by a later flush can never
+// disagree about what a staged injection is.
+func stagedInjectionFromPending(r pendingRow) domain.StagedInjection {
+	n := domain.StagedInjection{
+		ID:             strconv.FormatInt(r.ID, 10),
+		ConversationID: r.ConvID,
+		OrgID:          r.OrgID,
+		Body:           r.Content,
+		CreatedAt:      r.CreatedAt,
+	}
+	if r.Metadata != "" {
+		var meta struct {
+			Producer string `json:"producer"`
+		}
+		_ = json.Unmarshal([]byte(r.Metadata), &meta)
+		n.Producer = meta.Producer
+	}
+	return n
+}
+
 // stagedInjectionsFromPending maps flushed pending rows onto the
-// StagedInjection shape: the row id becomes the decimal ID, content the
-// Body, and the producer tag is unpacked from metadata.
+// StagedInjection shape via stagedInjectionFromPending.
 func stagedInjectionsFromPending(flushed []pendingRow) []domain.StagedInjection {
 	var out []domain.StagedInjection
 	for _, r := range flushed {
-		n := domain.StagedInjection{
-			ID:             strconv.FormatInt(r.ID, 10),
-			ConversationID: r.ConvID,
-			OrgID:          r.OrgID,
-			Body:           r.Content,
-			CreatedAt:      r.CreatedAt,
-		}
-		if r.Metadata != "" {
-			var meta struct {
-				Producer string `json:"producer"`
-			}
-			_ = json.Unmarshal([]byte(r.Metadata), &meta)
-			n.Producer = meta.Producer
-		}
-		out = append(out, n)
+		out = append(out, stagedInjectionFromPending(r))
 	}
 	return out
 }

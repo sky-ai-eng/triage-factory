@@ -86,16 +86,16 @@ func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body 
 		delegateLog.Warn("stage injection dropped: no staged-injection store wired", "conversation", conversationID, "producer", producer)
 		return false, false, ""
 	}
-	n := &domain.StagedInjection{
+	stored, err := s.stagedInjections.AppendSystem(context.Background(), orgID, domain.StagedInjection{
 		ConversationID: conversationID,
 		Producer:       producer,
 		Body:           body,
-	}
-	if err := s.stagedInjections.AppendSystem(context.Background(), orgID, n); err != nil {
+	})
+	if err != nil {
 		delegateLog.Warn("stage injection: append failed (the producer's next signal re-stages)", "conversation", conversationID, "producer", producer, "error", err)
 		return false, false, ""
 	}
-	return false, true, n.ID
+	return false, true, stored.ID
 }
 
 // stagedInjectionsForResume flushes a resuming run's durable staged-injection queue and

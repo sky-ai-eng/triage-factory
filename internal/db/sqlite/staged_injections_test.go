@@ -46,12 +46,25 @@ func TestStagedInjectionStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.StagedInjections.AppendSystem(ctx, badOrg, &domain.StagedInjection{ConversationID: "r", Producer: "p", Body: "b"}); err == nil {
+	if _, err := stores.StagedInjections.AppendSystem(ctx, badOrg, domain.StagedInjection{ConversationID: "r", Producer: "p", Body: "b"}); err == nil {
 		t.Error("AppendSystem(non-local org) should error")
 	}
 	if _, err := stores.StagedInjections.FlushPendingSystem(ctx, badOrg, "r"); err == nil {
 		t.Error("FlushPendingSystem(non-local org) should error")
 	}
+}
+
+// TestStagedInjectionStore_SQLite_ReturnedRow runs the returned-row arm of
+// the staged-injection conformance suite (TFAC-869) against the SQLite impl.
+func TestStagedInjectionStore_SQLite_ReturnedRow(t *testing.T) {
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	conversationID := seedSQLiteConversationForStagedInjection(t, conn, "ret")
+
+	dbtest.RunStagedInjectionReturnedRowConformance(t, func(t *testing.T) (db.StagedInjectionStore, string, string) {
+		t.Helper()
+		return stores.StagedInjections, runmode.LocalDefaultOrgID, conversationID
+	})
 }
 
 // seedSQLiteConversationForStagedInjection inserts a bare conversation row
