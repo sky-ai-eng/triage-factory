@@ -656,7 +656,7 @@ func (s *Spawner) recordNativeResult(
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
-	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claudeCwd, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative); err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)
 	}
 

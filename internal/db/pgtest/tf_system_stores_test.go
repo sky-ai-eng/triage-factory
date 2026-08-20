@@ -56,6 +56,37 @@ func TestTfSystem_InstanceStatStoreConformance(t *testing.T) {
 	})
 }
 
+// TestTfSystem_WorkspaceSnapshotStoreConformance covers the workspace-snapshot
+// lifecycle row as the role that actually writes it: the executor's teardown
+// begins and closes out every snapshot, its resume path reads the state back,
+// and its retention reaper deletes it — so the whole surface is on this role's
+// path and none of it has another pod whose success could stand in for it.
+// Seeding stays on AdminDB: staging a blueprint run is fixture setup, not the
+// flow under test, and tf_system holds no INSERT on those tables by design.
+func TestTfSystem_WorkspaceSnapshotStoreConformance(t *testing.T) {
+	h := Shared(t)
+	dbtest.RunWorkspaceSnapshotStoreConformance(t, func(t *testing.T) (db.WorkspaceSnapshotStore, string, dbtest.WorkspaceSnapshotSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := SeedOrgWithUser(t, h, "snapshot-executor-org")
+		seed := dbtest.WorkspaceSnapshotSeeder{
+			BlueprintRun: func(t *testing.T, suffix string) string {
+				t.Helper()
+				entityID := seedEntity(t, h, orgID, "github", "octo/repo#"+suffix)
+				taskID := seedTask(t, h, orgID, userID, entityID, "github:pr:opened")
+				return seedBlueprintRun(t, h, orgID, userID, taskID)
+			},
+			DeleteBlueprintRun: func(t *testing.T, blueprintRunID string) {
+				t.Helper()
+				MustExec(t, h.AdminDB, `DELETE FROM blueprint_runs WHERE id = $1`, blueprintRunID)
+			},
+		}
+		// The store bundle whose admin half is tf_system — the shape a
+		// TF_ROLE=executor process wires in internal/app/stores.go.
+		return pgstore.New(h.SystemDB, h.AppDB, SecretKey).WorkspaceSnapshots, orgID, seed
+	})
+}
+
 // TestTfSystem_MissingGrantFailsTheWayProductionDid proves the guard above
 // actually sees a missing grant, by taking one away: revoke the sampler's
 // INSERT on sandbox_stats and the very first write the conformance suite makes
