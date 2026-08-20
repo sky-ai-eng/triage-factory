@@ -125,7 +125,8 @@ func main() {
 
 // collect walks the repo for route registrations. Directories that cannot
 // contain Go source we care about are skipped wholesale — node_modules is large
-// enough that walking it is the difference between instant and not.
+// enough that walking it is the difference between instant and not — and so is
+// any nested checkout, for correctness rather than speed.
 func collect(root string) ([]route, error) {
 	var out []route
 	skip := map[string]bool{
@@ -138,6 +139,19 @@ func collect(root string) ([]route, error) {
 		}
 		if d.IsDir() {
 			if skip[d.Name()] {
+				return filepath.SkipDir
+			}
+			// A subdirectory carrying its own .git is a separate checkout: a
+			// linked worktree, or a clone someone put inside the tree. Its
+			// files are whatever commit IT has out, so walking it reports
+			// another branch's surface as part of this one — every shared
+			// route counted twice, and paths this commit deleted still
+			// listed. That reads as a half-finished migration rather than as
+			// a stale worktree, so say what was skipped instead of dropping
+			// it silently.
+			if path != root && isCheckout(path) {
+				rel, _ := filepath.Rel(root, path)
+				fmt.Fprintf(os.Stderr, "apitree: skipping nested checkout %s\n", filepath.ToSlash(rel))
 				return filepath.SkipDir
 			}
 			return nil
@@ -158,6 +172,15 @@ func collect(root string) ([]route, error) {
 		return nil
 	})
 	return out, err
+}
+
+// isCheckout reports whether dir is the root of its own git checkout. A linked
+// worktree carries .git as a file pointing into the parent's gitdir; a clone
+// carries it as a directory. Either way what is under dir belongs to that
+// checkout's commit, not to the one being walked.
+func isCheckout(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil
 }
 
 func parseFile(path, pkgDir string) ([]route, error) {

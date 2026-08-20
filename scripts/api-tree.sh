@@ -20,7 +20,10 @@
 #      which is how an EE surface is told from core
 #
 # Routes are read from the Go AST, so a registration wrapped across lines is
-# still found and a path mentioned in a comment is not. Test files are skipped.
+# still found and a path mentioned in a comment is not. Test files are skipped,
+# and so is any nested checkout — a linked worktree or a clone inside the tree
+# has a different commit out, so its routes are not this commit's surface. Each
+# one skipped is named on stderr.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 exec go run ./scripts/apitree "$@"
