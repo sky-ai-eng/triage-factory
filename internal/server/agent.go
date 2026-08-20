@@ -837,7 +837,9 @@ func steerErrorStatus(err error) (int, string) {
 // tool_use id the prompt was raised for. The conversation is authorized under the
 // caller's org (RLS) first — like the message/interrupt endpoints — so a conversation not
 // visible to this org is 404; a prompt that isn't pending (already answered,
-// timed out, or never existed) is also 404.
+// timed out, or never existed) is also 404. A 200 always answers with
+// agentPermissionResolvedResponse — see its doc for why `permission` is
+// sometimes absent.
 func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
@@ -891,25 +893,54 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 	switch {
 	case errors.Is(err, delegate.ErrNoPendingPermission):
 		notFound(w, "permission request")
+		return
 	case errors.Is(err, delegate.ErrSignalAckTimeout):
 		httpx.WriteErrors(w, http.StatusGatewayTimeout, httpx.ErrorItem{
 			Reason: httpx.ReasonUpstreamUnavailable, Message: err.Error(),
 		})
+		return
 	case err != nil:
 		internalError(w, "agent", err)
-	case resolved != nil:
-		// The row this call's decision actually settled — not a canned
-		// "resolved" string asserting an outcome the guard may not have
-		// granted. The client (lib/permissions.ts) only branches on the
-		// status code today, so this is additive, not a breaking shape
-		// change.
-		writeJSON(w, http.StatusOK, resolved)
-	default:
-		// The broker delivered the decision (nil err), but the settled row
-		// lives on a different process — the cross-pod routed path acks the
-		// remote owner's own resolve without shipping its row back here.
-		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
+		return
 	}
+
+	// The broker delivered the decision either way (err == nil). resolved is
+	// the row when this process settled it locally; it's nil on two other
+	// paths that are NOT errors: the cross-pod routed case (the write
+	// happened on the remote owner, not here) and the best-effort-record
+	// failure case (Create/Resolve never produced a row at all — see their
+	// docs; a missing claim is one way there). The first is recoverable by
+	// reading the row back — a genuine read of state a DIFFERENT process
+	// just wrote, not the re-read-your-own-write pattern the returned-row
+	// standard exists to remove, and done under the caller's own claims
+	// (RLS), matching handleAgentPermissions below. The second genuinely has
+	// no row anywhere; failing to record a prompt must never become a
+	// reason to fail to answer it, so that stays a 200 with nothing to show.
+	if resolved == nil {
+		if txErr := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+			var getErr error
+			resolved, getErr = tx.Permissions.Get(r.Context(), orgID, conversationID, toolCallID)
+			return getErr
+		}); txErr != nil {
+			internalError(w, "agent", txErr)
+			return
+		}
+	}
+	// One fixed response shape regardless of path: `permission` is present
+	// when a row was found (locally, or via the cross-pod fallback read) and
+	// omitted — never a differently-typed stub — when there's genuinely
+	// nothing to show. A client can always read `status` unconditionally.
+	writeJSON(w, http.StatusOK, agentPermissionResolvedResponse{Status: "resolved", Permission: resolved})
+}
+
+// agentPermissionResolvedResponse is handleAgentPermission's one 200 body
+// shape. Permission is nil exactly when there's no audit row to answer with
+// (see handleAgentPermission's doc) — never represented by swapping in a
+// differently-shaped body, so a client can always safely read Status without
+// a type switch.
+type agentPermissionResolvedResponse struct {
+	Status     string                         `json:"status"`
+	Permission *domain.ConversationPermission `json:"permission,omitempty"`
 }
 
 // handleAgentPermissions lists the tool-approval prompts a conversation is

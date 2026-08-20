@@ -429,8 +429,17 @@ func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.ConversationSignalAckOK)
 	}()
 
-	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	// The routed path has no local row to hand back — it lives on the remote
+	// owner, whose own resolvePermissionLocal wrote it — so ResolvePermission
+	// returns (nil, nil) here. The server's resolve endpoint is what turns
+	// that into a real answer, by reading the row back through the shared
+	// Postgres store rather than the broker.
+	resolved, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"})
+	if err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
+	}
+	if resolved != nil {
+		t.Fatalf("ResolvePermission (routed) = %+v, want nil — the settled row lives on the remote owner, not this process", resolved)
 	}
 }
 

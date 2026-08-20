@@ -176,6 +176,14 @@ func (s *permissionStore) ListPending(ctx context.Context, orgID, conversationID
 	return scanPermissions(rows)
 }
 
+func (s *permissionStore) Get(ctx context.Context, orgID, conversationID, toolCallID string) (*domain.ConversationPermission, error) {
+	return scanPermissionRow(s.q.QueryRowContext(ctx, `
+		SELECT `+permissionColumns+`
+		FROM conversation_permissions
+		WHERE org_id = ? AND conversation_id = ? AND tool_call_id = ?
+	`, orgID, conversationID, toolCallID))
+}
+
 func (s *permissionStore) ExpireForClaim(ctx context.Context, orgID, claimID string) error {
 	if claimID == "" {
 		return nil

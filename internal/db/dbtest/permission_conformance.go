@@ -32,22 +32,13 @@ type PermissionSeeder struct {
 	// prompt it asked stop being pending.
 	ReleaseClaim func(t *testing.T, claimID string)
 
-	// Load reads one row's audit columns straight out of the table. The store
-	// exposes no history read on purpose (the audit UI that would call it
-	// doesn't exist yet, and a method with no caller is a liability), but the
-	// audit columns are the entire reason the table exists — so the suite
-	// checks them through the backend's own SQL rather than not at all.
-	// found=false when no row matches.
+	// Load reads one row's audit columns straight out of the table. The store's
+	// own Get answers a full-row point read (added for the resolve endpoint's
+	// cross-pod fallback — see the interface doc), so this exists only for the
+	// narrower audit-column assertions (reason, decided_by, waited_ms) that
+	// would otherwise mean unpacking a whole domain.ConversationPermission
+	// just to check five fields. found=false when no row matches.
 	Load func(t *testing.T, conversationID, toolCallID string) (row PermissionRow, found bool)
-
-	// LoadFull reads a row's full projection straight out of the table — every
-	// column Create/Resolve write, not the audit-only subset Load exposes. The
-	// returned-row conformance arms compare Create/Resolve's return value
-	// against this: PermissionStore has no general-purpose point read by
-	// design (see Load's doc), so this is the backend's own SQL standing in
-	// for one, over the same column list the store's write-side RETURNING
-	// projects. found=false when no row matches.
-	LoadFull func(t *testing.T, conversationID, toolCallID string) (row domain.ConversationPermission, found bool)
 }
 
 // PermissionRow is the raw audit view a PermissionSeeder.Load returns.
@@ -61,10 +52,13 @@ type PermissionRow struct {
 
 // RunPermissionStoreConformance covers the contract every backend must hold,
 // including the returned-row standard on Create and Resolve
-// (create_returns_the_stored_row, resolve_returns_the_stored_row) and
-// Resolve's declined-guard outcome (pinned inside first_resolution_wins and
+// (create_returns_the_stored_row, resolve_returns_the_stored_row — both
+// asserted against Get, the point read added for exactly this: no other
+// PermissionStore method finds a row regardless of state) and Resolve's
+// declined-guard outcome (pinned inside first_resolution_wins and
 // resolving_an_unknown_call_is_not_an_error: a racing or missing resolution
-// is (nil, nil), never an error).
+// is (nil, nil), never an error). get_returns_a_row_regardless_of_state
+// covers Get itself, pending and resolved alike.
 //
 // Unlike JiraAppsStore.UpsertForOrg, there is no separate Postgres-app-pool
 // arm for these writes: Create and Resolve are unconditionally admin-pool in
@@ -166,11 +160,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 			t.Fatalf("Create: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Create", created, func() (*domain.ConversationPermission, error) {
-			row, found := seed.LoadFull(t, conversationID, "toolu_returned_row")
-			if !found {
-				return nil, nil
-			}
-			return &row, nil
+			return store.Get(ctx, orgID, conversationID, "toolu_returned_row")
 		})
 	})
 
@@ -206,12 +196,40 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 			t.Fatal("Resolve returned nil for a genuinely pending prompt")
 		}
 		AssertWriteReturnedStoredRow(t, "Resolve", *resolved, func() (*domain.ConversationPermission, error) {
-			row, found := seed.LoadFull(t, conversationID, "toolu_resolved_row")
-			if !found {
-				return nil, nil
-			}
-			return &row, nil
+			return store.Get(ctx, orgID, conversationID, "toolu_resolved_row")
 		})
+	})
+
+	t.Run("get_returns_a_row_regardless_of_state", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		conversationID, _ := newPending(t, store, orgID, seed, "toolu_get", time.Now().UTC())
+
+		got, err := store.Get(ctx, orgID, conversationID, "toolu_get")
+		if err != nil {
+			t.Fatalf("Get (pending): %v", err)
+		}
+		if got == nil || got.State != domain.PermissionStatePending {
+			t.Fatalf("Get (pending) = %+v, want the pending row", got)
+		}
+
+		if _, err := store.Resolve(ctx, orgID, conversationID, "toolu_get",
+			domain.PermissionStateAllowed, domain.PermissionReasonUser, userID); err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		// Unlike ListPending, Get still finds a resolved prompt — the resolve
+		// endpoint's cross-pod fallback needs exactly this, since by the time
+		// it reads, the prompt is no longer pending.
+		got, err = store.Get(ctx, orgID, conversationID, "toolu_get")
+		if err != nil {
+			t.Fatalf("Get (resolved): %v", err)
+		}
+		if got == nil || got.State != domain.PermissionStateAllowed {
+			t.Fatalf("Get (resolved) = %+v, want the allowed row", got)
+		}
+
+		if got, err := store.Get(ctx, orgID, conversationID, "toolu_get_never_existed"); err != nil || got != nil {
+			t.Fatalf("Get on an unknown tool call = %+v (err %v), want (nil, nil)", got, err)
+		}
 	})
 
 	t.Run("approve_records_who_allowed_it_and_how_long_they_took", func(t *testing.T) {

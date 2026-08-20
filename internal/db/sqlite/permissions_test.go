@@ -2,7 +2,6 @@ package sqlite_test
 
 import (
 	"database/sql"
-	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,7 +9,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -49,10 +47,6 @@ func TestPermissionStore_SQLite_Conformance(t *testing.T) {
 			Load: func(t *testing.T, conversationID, toolCallID string) (dbtest.PermissionRow, bool) {
 				t.Helper()
 				return loadSQLitePermissionRow(t, conn, conversationID, toolCallID)
-			},
-			LoadFull: func(t *testing.T, conversationID, toolCallID string) (domain.ConversationPermission, bool) {
-				t.Helper()
-				return loadSQLitePermissionRowFull(t, conn, conversationID, toolCallID)
 			},
 		}
 		return stores.Permissions, runmode.LocalDefaultOrgID, userID, seed
@@ -97,55 +91,4 @@ func loadSQLitePermissionRow(t *testing.T, conn *sql.DB, conversationID, toolCal
 		row.WaitedMs = &v
 	}
 	return row, true
-}
-
-// loadSQLitePermissionRowFull reads every column Create/Resolve write,
-// straight off the table, over the same column list/order the store's own
-// RETURNING projects (permissionColumns is unexported, so this mirrors it by
-// hand) — the returned-row conformance arms compare Create/Resolve's return
-// value against this.
-func loadSQLitePermissionRowFull(t *testing.T, conn *sql.DB, conversationID, toolCallID string) (domain.ConversationPermission, bool) {
-	t.Helper()
-	var p domain.ConversationPermission
-	var messageID, waited sql.NullInt64
-	var inputJSON sql.NullString
-	var expiresAt, decidedAt sql.NullTime
-	err := conn.QueryRow(`
-		SELECT id, org_id, conversation_id, COALESCE(claim_id, ''), message_id,
-		       tool_call_id, tool_name, input_json, COALESCE(title, ''), state,
-		       COALESCE(reason, ''), requested_at, expires_at, COALESCE(decided_by, ''),
-		       decided_at, waited_ms
-		FROM conversation_permissions
-		WHERE conversation_id = ? AND tool_call_id = ?
-	`, conversationID, toolCallID).Scan(&p.ID, &p.OrgID, &p.ConversationID, &p.ClaimID, &messageID,
-		&p.ToolCallID, &p.ToolName, &inputJSON, &p.Title, &p.State, &p.Reason,
-		&p.RequestedAt, &expiresAt, &p.DecidedBy, &decidedAt, &waited)
-	if err == sql.ErrNoRows {
-		return domain.ConversationPermission{}, false
-	}
-	if err != nil {
-		t.Fatalf("load full permission row: %v", err)
-	}
-	if messageID.Valid {
-		v := messageID.Int64
-		p.MessageID = &v
-	}
-	if inputJSON.Valid && inputJSON.String != "" {
-		if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
-			t.Fatalf("unmarshal input_json: %v", err)
-		}
-	}
-	if expiresAt.Valid {
-		v := expiresAt.Time
-		p.ExpiresAt = &v
-	}
-	if decidedAt.Valid {
-		v := decidedAt.Time
-		p.DecidedAt = &v
-	}
-	if waited.Valid {
-		v := int(waited.Int64)
-		p.WaitedMs = &v
-	}
-	return p, true
 }

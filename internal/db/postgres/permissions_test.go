@@ -2,7 +2,6 @@ package postgres_test
 
 import (
 	"database/sql"
-	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -11,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestPermissionStore_Postgres_Conformance runs the shared suite against the
@@ -59,10 +57,6 @@ func TestPermissionStore_Postgres_Conformance(t *testing.T) {
 				t.Helper()
 				return loadPgPermissionRow(t, h, conversationID, toolCallID)
 			},
-			LoadFull: func(t *testing.T, conversationID, toolCallID string) (domain.ConversationPermission, bool) {
-				t.Helper()
-				return loadPgPermissionRowFull(t, h, conversationID, toolCallID)
-			},
 		}
 		return stores.Permissions, orgID, userID, seed
 	})
@@ -96,55 +90,4 @@ func loadPgPermissionRow(t *testing.T, h *pgtest.Harness, conversationID, toolCa
 		row.WaitedMs = &v
 	}
 	return row, true
-}
-
-// loadPgPermissionRowFull reads every column Create/Resolve write, straight
-// off the table, over the same column list/order the store's own RETURNING
-// projects (pgPermissionColumns is unexported, so this mirrors it by hand) —
-// the returned-row conformance arms compare Create/Resolve's return value
-// against this.
-func loadPgPermissionRowFull(t *testing.T, h *pgtest.Harness, conversationID, toolCallID string) (domain.ConversationPermission, bool) {
-	t.Helper()
-	var p domain.ConversationPermission
-	var messageID, waited sql.NullInt64
-	var inputJSON sql.NullString
-	var expiresAt, decidedAt sql.NullTime
-	err := h.AdminDB.QueryRow(`
-		SELECT id::text, org_id::text, conversation_id::text, COALESCE(claim_id::text, ''),
-		       message_id, tool_call_id, tool_name, input_json, COALESCE(title, ''), state,
-		       COALESCE(reason, ''), requested_at, expires_at, COALESCE(decided_by::text, ''),
-		       decided_at, waited_ms
-		FROM conversation_permissions
-		WHERE conversation_id = $1 AND tool_call_id = $2
-	`, conversationID, toolCallID).Scan(&p.ID, &p.OrgID, &p.ConversationID, &p.ClaimID, &messageID,
-		&p.ToolCallID, &p.ToolName, &inputJSON, &p.Title, &p.State, &p.Reason,
-		&p.RequestedAt, &expiresAt, &p.DecidedBy, &decidedAt, &waited)
-	if err == sql.ErrNoRows {
-		return domain.ConversationPermission{}, false
-	}
-	if err != nil {
-		t.Fatalf("load full permission row: %v", err)
-	}
-	if messageID.Valid {
-		v := messageID.Int64
-		p.MessageID = &v
-	}
-	if inputJSON.Valid && inputJSON.String != "" {
-		if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
-			t.Fatalf("unmarshal input_json: %v", err)
-		}
-	}
-	if expiresAt.Valid {
-		v := expiresAt.Time
-		p.ExpiresAt = &v
-	}
-	if decidedAt.Valid {
-		v := decidedAt.Time
-		p.DecidedAt = &v
-	}
-	if waited.Valid {
-		v := int(waited.Int64)
-		p.WaitedMs = &v
-	}
-	return p, true
 }

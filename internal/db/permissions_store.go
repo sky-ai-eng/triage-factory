@@ -76,6 +76,24 @@ type PermissionStore interface {
 	// active claim has nothing pending, by construction.
 	ListPending(ctx context.Context, orgID, conversationID string) ([]domain.ConversationPermission, error)
 
+	// Get returns the single prompt named by (conversationID, toolCallID) in
+	// whatever state it currently holds — pending or already resolved — unlike
+	// ListPending, which surfaces pending rows only. nil when no such row
+	// exists (never resolved, resolved on a process this one can't reach, or
+	// never recorded at all — Get doesn't distinguish among these, all three
+	// answer the same "nothing to show").
+	//
+	// The route this exists for: POST .../permissions/{toolCallID} answers
+	// with the resolved permission, but Resolve's own return value has no row
+	// to hand back on the cross-pod path (delegate.Spawner.ResolvePermission
+	// routes the decision to a remote owner and settles nothing locally). This
+	// is what that fallback reads — a genuine read of state a DIFFERENT
+	// process just wrote, not the re-read-your-own-write pattern the
+	// returned-row standard exists to remove — so the endpoint answers with
+	// one fixed response shape regardless of which pod actually settled the
+	// prompt, or whether anything was ever recorded at all.
+	Get(ctx context.Context, orgID, conversationID, toolCallID string) (*domain.ConversationPermission, error)
+
 	// ExpireForClaim marks every still-pending prompt owned by claimID as
 	// expired (reason domain.PermissionReasonClaimLost), stamping the same
 	// decided_at / waited_ms a real resolution would.
