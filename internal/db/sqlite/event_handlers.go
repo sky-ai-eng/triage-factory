@@ -168,6 +168,9 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.EventHandler{}, total, nil
+	}
 
 	q := `SELECT ` + sqliteEventHandlerColumns + ` FROM event_handlers` + where + `
 	      ORDER BY kind ASC,

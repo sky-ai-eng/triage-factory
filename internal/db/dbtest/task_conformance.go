@@ -113,6 +113,12 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				t.Errorf("task %s shouldn't appear in the queue projection (has claim)", task.ID)
 			}
 		}
+
+		coRows, coTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("List count-only: %v", err)
+		}
+		AssertCountOnlyList(t, "tasks.List", len(coRows), coTotal, total)
 	})
 
 	t.Run("List_done_excludes_active", func(t *testing.T) {

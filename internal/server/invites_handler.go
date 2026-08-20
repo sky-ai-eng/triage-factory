@@ -336,7 +336,7 @@ func (ih *invitesHandler) handleInviteList(w http.ResponseWriter, r *http.Reques
 	)
 	if err := ih.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		invites, total, e = tx.Invites.ListActive(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		invites, total, e = tx.Invites.ListActive(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "invites", err)

@@ -73,6 +73,9 @@ func (s *blueprintStore) List(ctx context.Context, orgID string, f db.BlueprintL
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM blueprints`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Blueprint{}, total, nil
+	}
 
 	q := `SELECT id, name, source, usage_count, user_modified, team_id, system_slug, created_at, updated_at
 		FROM blueprints` + where + ` ORDER BY updated_at DESC, id`
@@ -323,6 +326,9 @@ func (s *blueprintStore) ListAllSteps(ctx context.Context, orgID string, f db.Bl
 	var total int
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*)`+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count blueprint steps: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.BlueprintStep{}, total, nil
 	}
 
 	q := `
@@ -1015,6 +1021,9 @@ func (s *blueprintStore) ListRuns(ctx context.Context, orgID string, f db.Bluepr
 	var total int
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM blueprint_runs`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.BlueprintRun{}, total, nil
 	}
 
 	q := `

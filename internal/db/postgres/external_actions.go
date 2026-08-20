@@ -93,6 +93,9 @@ func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string,
 	if err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
+	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1`
 	query, args := appendPgExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.admin.QueryContext(ctx, query, args...)
@@ -107,6 +110,9 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND team_id = $2`, []any{orgID, teamID}, opts)
 	if err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
 	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND team_id = $2`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, teamID}, opts)
@@ -127,6 +133,9 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	total, err := countPgExternalActions(ctx, s.q, `org_id = $1 AND conversation_id = $2::uuid`, []any{orgID, conversationID}, opts)
 	if err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
 	}
 	query := `SELECT ` + pgExternalActionColumns + ` FROM external_actions WHERE org_id = $1 AND conversation_id = $2::uuid`
 	query, args := appendPgExternalActionFilters(query, []any{orgID, conversationID}, opts)

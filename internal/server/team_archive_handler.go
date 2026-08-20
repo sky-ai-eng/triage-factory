@@ -319,7 +319,7 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 	}
 
 	teams, total, err := th.allStores.Teams.ListArchivedForOrgSystem(r.Context(), orgID,
-		db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		internalError(w, "teams", err)
 		return

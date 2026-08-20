@@ -364,6 +364,9 @@ func (s *marketplaceStore) List(ctx context.Context, orgID string, viewerUserID 
 		args[1:]...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.ListingSummary{}, total, nil
+	}
 
 	// Every sort ends in l.id so the order is total: installs, votes and
 	// total_runs all tie freely, and offset paging over a partial order drops

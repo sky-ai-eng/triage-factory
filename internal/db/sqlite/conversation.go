@@ -730,6 +730,9 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 		}
 		total += n
 	}
+	if opts.CountOnly {
+		return []domain.Conversation{}, total, nil
+	}
 
 	// ?-placeholder IN list (SQLite has no array bind), mirroring
 	// artifactStore.ListByConversations, chunked to stay inside SQLite's variable

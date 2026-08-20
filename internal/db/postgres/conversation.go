@@ -1099,6 +1099,9 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	`, orgID, pgUUIDArray(taskIDs)).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Conversation{}, total, nil
+	}
 	// App pool (RLS-active): rows are team-scoped exactly like ListForTask.
 	// task_id is a uuid column, so the slice binds as a uuid[] literal
 	// through one $N (pgUUIDArray), like artifactStore.ListByConversations — not a

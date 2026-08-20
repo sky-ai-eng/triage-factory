@@ -382,6 +382,12 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("total = %d, want 3", total)
 		}
 
+		coRows, coTotal, err := s.List(ctx, orgID, db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("List count-only: %v", err)
+		}
+		AssertCountOnlyList(t, "repositories.List", len(coRows), coTotal, total)
+
 		// The pages partition that order: a two-row window then a one-row
 		// window covers the set exactly once, and each page reports the
 		// filtered total rather than its own length.

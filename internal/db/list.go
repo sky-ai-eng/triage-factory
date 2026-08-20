@@ -15,9 +15,19 @@ import "strings"
 // Offset is the number of matching rows to skip. Offset paging is what the
 // list contract's opaque page token encodes today; see internal/server/httpx's
 // pageToken for why that choice is reversible.
+//
+// CountOnly asks the read for its filtered total and nothing else: the impl
+// runs the count query it would have run anyway and returns an empty page
+// without touching the row query. Limit and Offset are ignored when it is
+// set. It exists for the explicit page_size: 0 request (httpx.Page.CountOnly
+// hands it through) — the zero ListOpts stays "no window", so the two
+// zero-adjacent meanings can't collide. Every List impl must honor it; one
+// that doesn't would silently answer a count request with an unwindowed
+// fetch of every matching row.
 type ListOpts struct {
-	Limit  int
-	Offset int
+	Limit     int
+	Offset    int
+	CountOnly bool
 }
 
 // Unwindowed is the zero ListOpts, spelled so a call site that wants every

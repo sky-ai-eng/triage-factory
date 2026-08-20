@@ -469,7 +469,7 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			OnlyUnclaimed:  req.OnlyUnclaimed,
 			IncludeSnoozed: req.IncludeSnoozed,
 			ClosedSince:    closedSince,
-		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)

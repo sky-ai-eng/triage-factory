@@ -74,6 +74,9 @@ func (s *promptStore) List(ctx context.Context, orgID string, teamID string, opt
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompts`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Prompt{}, total, nil
+	}
 
 	q := `SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
 		FROM prompts` + where + ` ORDER BY updated_at DESC, id`

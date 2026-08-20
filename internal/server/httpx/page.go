@@ -36,12 +36,15 @@ const (
 //	    httpx.PageRequest
 //	}
 //
-// PageSize 0 means "absent" — the zero value and an omitted field are the same
-// request, and the default applies. An explicit 0 is therefore indistinguishable
-// from absent and also yields the default; every other out-of-range value is
-// rejected.
+// PageSize is a pointer because absent and zero are different requests —
+// the same absent-vs-explicit distinction the PATCH contract draws with
+// json.RawMessage. Absent (nil) takes the default window. An explicit 0 is
+// the count-only read: no items, total_count under the same filters —
+// stat() on the directory instead of read() — so a caller rendering a
+// figure doesn't pay for a page of rows it discards. Every other value
+// outside 1..max is rejected.
 type PageRequest struct {
-	PageSize  int    `json:"page_size"`
+	PageSize  *int   `json:"page_size"`
 	PageToken string `json:"page_token"`
 }
 
@@ -52,6 +55,12 @@ type PageRequest struct {
 type Page struct {
 	Limit  int
 	Offset int
+
+	// CountOnly marks the explicit page_size: 0 request. Limit is 0 then,
+	// and 0 means "no window" to a store (db.Unwindowed), so a handler must
+	// hand this flag to db.ListOpts rather than let a zero Limit through —
+	// the impls run only their count query and return an empty page.
+	CountOnly bool
 
 	// Cursor is the upstream position a proxy list resumes from — see
 	// WriteProxyList. Empty on the first page and on every store-backed list,
@@ -120,14 +129,18 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 	if maxPageSize <= 0 {
 		maxPageSize = MaxPageSize
 	}
-	limit := DefaultPageSize
+	limit, countOnly := DefaultPageSize, false
 	switch {
-	case req.PageSize == 0:
-		// Absent (or an explicit zero, which is the same JSON): default.
-	case req.PageSize < 0 || req.PageSize > maxPageSize:
-		v.OutOfRange("page_size", fmt.Sprintf("page_size must be between 1 and %d", maxPageSize))
+	case req.PageSize == nil:
+		// Absent: the default window.
+	case *req.PageSize == 0:
+		// Explicit zero: the count-only read. The store still computes the
+		// filtered total; it just never runs the page query.
+		limit, countOnly = 0, true
+	case *req.PageSize < 0 || *req.PageSize > maxPageSize:
+		v.OutOfRange("page_size", fmt.Sprintf("page_size must be between 0 and %d; 0 returns only total_count", maxPageSize))
 	default:
-		limit = req.PageSize
+		limit = *req.PageSize
 	}
 
 	offset, cursor := 0, ""
@@ -150,7 +163,7 @@ func ResolvePage(v *Validation, req PageRequest, fingerprint string, maxPageSize
 			offset, cursor = tok.O, tok.C
 		}
 	}
-	return Page{Limit: limit, Offset: offset, Cursor: cursor, fingerprint: fingerprint}
+	return Page{Limit: limit, Offset: offset, CountOnly: countOnly, Cursor: cursor, fingerprint: fingerprint}
 }
 
 func encodePageToken(tok pageToken) string {

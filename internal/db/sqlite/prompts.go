@@ -52,6 +52,9 @@ func (s *promptStore) List(ctx context.Context, orgID string, _ string, opts db.
 	`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Prompt{}, total, nil
+	}
 	query := `
 		SELECT ` + sqlitePromptColumns + `
 		FROM prompts WHERE hidden = 0 AND deleted_at IS NULL ORDER BY updated_at DESC, id`
