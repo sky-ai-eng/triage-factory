@@ -1159,7 +1159,7 @@ func TestConversationQueueStore_Postgres_ReconcileOrphanedConversationsConforman
 }
 
 // TestConversationQueueStore_Postgres_ReturnedRow runs the returned-row
-// conformance suite (TFAC-868) against the admin pool — see
+// conformance suite against the admin pool — see
 // ConversationQueueReturnedRowFactory's doc for why there is no separate
 // app-pool arm.
 func TestConversationQueueStore_Postgres_ReturnedRow(t *testing.T) {

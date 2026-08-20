@@ -1052,7 +1052,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 }
 
 // TestConversationQueueStore_SQLite_ReturnedRow runs the returned-row
-// conformance suite (TFAC-868) against the SQLite impl.
+// conformance suite against the SQLite impl.
 func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
 	dbtest.RunConversationQueueReturnedRowConformance(t, func(t *testing.T) (db.ConversationQueueStore, db.ConversationStore, string, dbtest.ConversationQueueReturnedRowScaffold) {
 		t.Helper()

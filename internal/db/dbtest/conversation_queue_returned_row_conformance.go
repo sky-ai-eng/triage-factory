@@ -21,7 +21,8 @@ type ConversationQueueReturnedRowScaffold func(t *testing.T) (taskID, promptID, 
 // ConversationQueueReturnedRowFactory is what a per-backend test file hands to
 // RunConversationQueueReturnedRowConformance: the ConversationQueueStore
 // under test, its ConversationStore sibling (the point-read projection
-// EnqueueConversation/RequeueConversation share — TFAC-861's Get/GetSystem),
+// EnqueueConversation/RequeueConversation share — ConversationStore's
+// Get/GetSystem),
 // the org to pass, and the scaffold above.
 type ConversationQueueReturnedRowFactory func(t *testing.T) (
 	queue db.ConversationQueueStore,
@@ -31,7 +32,7 @@ type ConversationQueueReturnedRowFactory func(t *testing.T) (
 )
 
 // RunConversationQueueReturnedRowConformance covers the returned-row standard
-// (TFAC-868) for ConversationQueueStore's two conversations-row writes:
+// for ConversationQueueStore's two conversations-row writes:
 //
 //   - EnqueueConversation returns the minted row, GetSystem's projection.
 //   - RequeueConversation returns the requeued row on a mid-flight
