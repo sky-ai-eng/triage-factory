@@ -21,16 +21,17 @@ import (
 // through the conversation, mirroring claims), writes are admin-pool — every
 // writer is a delegate goroutine with no JWT-claims context, and tf_app holds
 // no INSERT/UPDATE grant on the table. SQLite is N=1 and collapses to the one
-// connection.
-// TODO(TFAC-865): these single-row writes still return a bare error rather
-// than the row they persisted: Create (which mints the id and stamps
-// requested_at) and Resolve (a guarded transition whose declined arm a bare
-// error cannot express).
+// connection. Because every write is admin-pool with no app-pool-doored
+// twin, there is no RLS-gated write path to converge separately the way
+// JiraAppsStore.UpsertForOrg's app-pool conformance arm does — see
+// dbtest.RunPermissionStoreConformance's doc.
 type PermissionStore interface {
-	// Create inserts a freshly surfaced prompt. p.State must be
-	// domain.PermissionStatePending; p.ID is minted when empty and p.RequestedAt
-	// defaults to now, so the caller's clock is the one both timestamps and the
-	// derived wait are measured against.
+	// Create inserts a freshly surfaced prompt and returns the persisted row.
+	// p.State must be domain.PermissionStatePending; the store mints the id
+	// when p.ID is empty and defaults RequestedAt to now when zero, so the
+	// caller's clock is the one both timestamps and the derived wait are
+	// measured against — and the returned row is a caller's only handle to
+	// either when it supplied neither.
 	//
 	// p.ClaimID is REQUIRED, enforced here rather than by the schema (the
 	// column stays nullable so an old row survives its claim being deleted).
@@ -43,23 +44,25 @@ type PermissionStore interface {
 	// A second insert for the same (conversation_id, tool_call_id) is refused by
 	// the unique index rather than silently duplicating the prompt — one row per
 	// gated call is what lets a decision tie back to the call it authorized.
-	Create(ctx context.Context, orgID string, p *domain.ConversationPermission) error
+	Create(ctx context.Context, orgID string, p domain.ConversationPermission) (domain.ConversationPermission, error)
 
 	// Resolve stamps a terminal on the prompt named by (conversationID,
-	// toolCallID): state, reason, the deciding user when there was one, the
-	// decision time, and the derived waited_ms.
+	// toolCallID) — state, reason, the deciding user when there was one, the
+	// decision time, and the derived waited_ms — and returns the row it
+	// settled.
 	//
 	// Only a row still 'pending' is written, so the first resolution wins and a
 	// racing second one is a silent no-op — which is exactly the shape the
 	// broker's own deregister-then-drain produces (a decision that arrived in
 	// the same instant a deadline fired is honored by one path and dropped by
-	// the other). A prompt that isn't pending — already resolved, or never
-	// existed — is not an error: this is a best-effort record alongside a
-	// mechanism that has already made its own decision.
+	// the other). (nil, nil) is that no-op: the guard declined because the
+	// prompt wasn't pending — already resolved, or never existed — and neither
+	// is an error. This is a best-effort record alongside a mechanism that has
+	// already made its own decision, never the thing driving it.
 	//
 	// decidedBy is the answering user's id, empty for every reason but
 	// domain.PermissionReasonUser.
-	Resolve(ctx context.Context, orgID, conversationID, toolCallID, state, reason, decidedBy string) error
+	Resolve(ctx context.Context, orgID, conversationID, toolCallID, state, reason, decidedBy string) (*domain.ConversationPermission, error)
 
 	// ListPending returns the conversation's genuinely-open prompts,
 	// oldest-first.

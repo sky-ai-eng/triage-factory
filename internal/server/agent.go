@@ -883,7 +883,7 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	err = spawner.ResolvePermission(orgID, conversationID, toolCallID, userID, agentproc.PermissionDecision{
+	resolved, err := spawner.ResolvePermission(orgID, conversationID, toolCallID, userID, agentproc.PermissionDecision{
 		Behavior:     body.Behavior,
 		Message:      body.Message,
 		UpdatedInput: body.UpdatedInput,
@@ -897,7 +897,17 @@ func (ag *agentHandler) handleAgentPermission(w http.ResponseWriter, r *http.Req
 		})
 	case err != nil:
 		internalError(w, "agent", err)
+	case resolved != nil:
+		// The row this call's decision actually settled — not a canned
+		// "resolved" string asserting an outcome the guard may not have
+		// granted. The client (lib/permissions.ts) only branches on the
+		// status code today, so this is additive, not a breaking shape
+		// change.
+		writeJSON(w, http.StatusOK, resolved)
 	default:
+		// The broker delivered the decision (nil err), but the settled row
+		// lives on a different process — the cross-pod routed path acks the
+		// remote owner's own resolve without shipping its row back here.
 		writeJSON(w, http.StatusOK, map[string]string{"status": "resolved"})
 	}
 }

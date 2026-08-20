@@ -429,7 +429,7 @@ func TestResolvePermission_RoutesRemoteWhenNoLocalProcess(t *testing.T) {
 		_ = fakeSignals.Ack(context.Background(), sig.ID, domain.ConversationSignalAckOK)
 	}()
 
-	if err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
 		t.Fatalf("ResolvePermission: %v", err)
 	}
 }
@@ -445,7 +445,7 @@ func TestResolvePermission_LocalProcOwnedButRequestStaleNeverGoesRemote(t *testi
 	s.SetConversationSignals(fakeSignals, nil)
 	s.registerProc(runmode.LocalDefaultOrgID, "r-perm2", &agentproc.LiveRun{})
 
-	err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm2", "req-ghost", "", agentproc.PermissionDecision{Behavior: "allow"})
+	_, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "r-perm2", "req-ghost", "", agentproc.PermissionDecision{Behavior: "allow"})
 	if !errors.Is(err, ErrNoPendingPermission) {
 		t.Errorf("err = %v, want ErrNoPendingPermission", err)
 	}

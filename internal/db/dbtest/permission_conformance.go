@@ -39,6 +39,15 @@ type PermissionSeeder struct {
 	// checks them through the backend's own SQL rather than not at all.
 	// found=false when no row matches.
 	Load func(t *testing.T, conversationID, toolCallID string) (row PermissionRow, found bool)
+
+	// LoadFull reads a row's full projection straight out of the table — every
+	// column Create/Resolve write, not the audit-only subset Load exposes. The
+	// returned-row conformance arms compare Create/Resolve's return value
+	// against this: PermissionStore has no general-purpose point read by
+	// design (see Load's doc), so this is the backend's own SQL standing in
+	// for one, over the same column list the store's write-side RETURNING
+	// projects. found=false when no row matches.
+	LoadFull func(t *testing.T, conversationID, toolCallID string) (row domain.ConversationPermission, found bool)
 }
 
 // PermissionRow is the raw audit view a PermissionSeeder.Load returns.
@@ -50,7 +59,20 @@ type PermissionRow struct {
 	WaitedMs     *int
 }
 
-// RunPermissionStoreConformance covers the contract every backend must hold.
+// RunPermissionStoreConformance covers the contract every backend must hold,
+// including the returned-row standard on Create and Resolve
+// (create_returns_the_stored_row, resolve_returns_the_stored_row) and
+// Resolve's declined-guard outcome (pinned inside first_resolution_wins and
+// resolving_an_unknown_call_is_not_an_error: a racing or missing resolution
+// is (nil, nil), never an error).
+//
+// Unlike JiraAppsStore.UpsertForOrg, there is no separate Postgres-app-pool
+// arm for these writes: Create and Resolve are unconditionally admin-pool in
+// both dialects (see the interface doc) with no app-pool-doored twin RLS
+// could gate, so running "the write" under real claims would test nothing
+// the admin-pool run here doesn't already cover. This suite's own Postgres
+// wiring runs everything — writes and the pending read alike — on AdminDB
+// (RLS-bypassed) for that reason.
 //
 // The through-line of every case here is that a prompt has to be READABLE by
 // someone who never saw the websocket frame, and a decision has to be
@@ -69,7 +91,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		conversationID = seed.Conversation(t)
 		claimID = seed.Claim(t, conversationID)
 		expires := requestedAt.Add(2 * time.Minute)
-		p := &domain.ConversationPermission{
+		created, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: conversationID,
 			ClaimID:        claimID,
 			ToolCallID:     toolCallID,
@@ -79,12 +101,12 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 			State:          domain.PermissionStatePending,
 			RequestedAt:    requestedAt,
 			ExpiresAt:      &expires,
-		}
-		if err := store.Create(ctx, orgID, p); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("create pending permission: %v", err)
 		}
-		if p.ID == "" {
-			t.Fatal("Create must leave the row's id on the struct — the caller and the row have to agree on identity")
+		if created.ID == "" {
+			t.Fatal("Create must return a row with an id — the caller and the row have to agree on identity")
 		}
 		return conversationID, claimID
 	}
@@ -122,12 +144,42 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 	})
 
+	t.Run("create_returns_the_stored_row", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		conversationID := seed.Conversation(t)
+		claimID := seed.Claim(t, conversationID)
+		requestedAt := time.Now().UTC().Add(-time.Second)
+		expires := requestedAt.Add(2 * time.Minute)
+
+		created, err := store.Create(ctx, orgID, domain.ConversationPermission{
+			ConversationID: conversationID,
+			ClaimID:        claimID,
+			ToolCallID:     "toolu_returned_row",
+			ToolName:       "Bash",
+			Input:          map[string]any{"command": "echo hi"},
+			Title:          "Claude wants to run echo hi",
+			State:          domain.PermissionStatePending,
+			RequestedAt:    requestedAt,
+			ExpiresAt:      &expires,
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create", created, func() (*domain.ConversationPermission, error) {
+			row, found := seed.LoadFull(t, conversationID, "toolu_returned_row")
+			if !found {
+				return nil, nil
+			}
+			return &row, nil
+		})
+	})
+
 	t.Run("second_row_for_same_call_is_rejected", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		now := time.Now().UTC()
 		conversationID, claimID := newPending(t, store, orgID, seed, "toolu_dup", now)
 
-		err := store.Create(ctx, orgID, &domain.ConversationPermission{
+		_, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: conversationID,
 			ClaimID:        claimID,
 			ToolCallID:     "toolu_dup",
@@ -140,6 +192,28 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 	})
 
+	t.Run("resolve_returns_the_stored_row", func(t *testing.T) {
+		store, orgID, userID, seed := mk(t)
+		requestedAt := time.Now().UTC().Add(-4 * time.Second)
+		conversationID, _ := newPending(t, store, orgID, seed, "toolu_resolved_row", requestedAt)
+
+		resolved, err := store.Resolve(ctx, orgID, conversationID, "toolu_resolved_row",
+			domain.PermissionStateAllowed, domain.PermissionReasonUser, userID)
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if resolved == nil {
+			t.Fatal("Resolve returned nil for a genuinely pending prompt")
+		}
+		AssertWriteReturnedStoredRow(t, "Resolve", *resolved, func() (*domain.ConversationPermission, error) {
+			row, found := seed.LoadFull(t, conversationID, "toolu_resolved_row")
+			if !found {
+				return nil, nil
+			}
+			return &row, nil
+		})
+	})
+
 	t.Run("approve_records_who_allowed_it_and_how_long_they_took", func(t *testing.T) {
 		store, orgID, userID, seed := mk(t)
 		// Backdated so the stamped wait is a real, assertable number rather
@@ -147,7 +221,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		requestedAt := time.Now().UTC().Add(-4 * time.Second)
 		conversationID, _ := newPending(t, store, orgID, seed, "toolu_allow", requestedAt)
 
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_allow",
+		if _, err := store.Resolve(ctx, orgID, conversationID, "toolu_allow",
 			domain.PermissionStateAllowed, domain.PermissionReasonUser, userID); err != nil {
 			t.Fatalf("resolve allow: %v", err)
 		}
@@ -196,7 +270,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 		for _, tc := range cases {
 			conversationID, _ := newPending(t, store, orgID, seed, tc.toolCall, time.Now().UTC().Add(-time.Second))
-			if err := store.Resolve(ctx, orgID, conversationID, tc.toolCall, tc.state, tc.reason, tc.decidedBy); err != nil {
+			if _, err := store.Resolve(ctx, orgID, conversationID, tc.toolCall, tc.state, tc.reason, tc.decidedBy); err != nil {
 				t.Fatalf("%s: resolve: %v", tc.name, err)
 			}
 			row, found := seed.Load(t, conversationID, tc.toolCall)
@@ -219,16 +293,25 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		store, orgID, userID, seed := mk(t)
 		conversationID, _ := newPending(t, store, orgID, seed, "toolu_race", time.Now().UTC().Add(-time.Second))
 
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_race",
-			domain.PermissionStateAllowed, domain.PermissionReasonUser, userID); err != nil {
+		first, err := store.Resolve(ctx, orgID, conversationID, "toolu_race",
+			domain.PermissionStateAllowed, domain.PermissionReasonUser, userID)
+		if err != nil {
 			t.Fatalf("first resolve: %v", err)
+		}
+		if first == nil || first.State != domain.PermissionStateAllowed {
+			t.Fatalf("first resolve = %+v, want the allowed row", first)
 		}
 		// The broker's deregister-then-drain can produce a second attempt for a
 		// prompt a deadline and a click both reached. It must not rewrite the
-		// verdict that already went to the agent.
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_race",
-			domain.PermissionStateDenied, domain.PermissionReasonTimeout, ""); err != nil {
+		// verdict that already went to the agent — the guard declines, which is
+		// (nil, nil), not an error.
+		again, err := store.Resolve(ctx, orgID, conversationID, "toolu_race",
+			domain.PermissionStateDenied, domain.PermissionReasonTimeout, "")
+		if err != nil {
 			t.Fatalf("second resolve must be a silent no-op, got %v", err)
+		}
+		if again != nil {
+			t.Fatalf("second resolve = %+v, want nil — the guard declining", again)
 		}
 		row, _ := seed.Load(t, conversationID, "toolu_race")
 		if row.State != domain.PermissionStateAllowed || row.Reason != domain.PermissionReasonUser || row.DecidedBy != userID {
@@ -240,10 +323,15 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		store, orgID, _, seed := mk(t)
 		conversationID := seed.Conversation(t)
 		// Recording is best-effort alongside a broker that has already decided;
-		// a missing row must not turn into a failure on that path.
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_never_existed",
-			domain.PermissionStateDenied, domain.PermissionReasonTimeout, ""); err != nil {
+		// a missing row must not turn into a failure on that path, and the
+		// return is the same (nil, nil) shape as a racing second resolution.
+		got, err := store.Resolve(ctx, orgID, conversationID, "toolu_never_existed",
+			domain.PermissionStateDenied, domain.PermissionReasonTimeout, "")
+		if err != nil {
 			t.Fatalf("resolving a prompt that was never recorded must be a no-op, got %v", err)
+		}
+		if got != nil {
+			t.Fatalf("resolving a prompt that was never recorded = %+v, want nil", got)
 		}
 	})
 
@@ -270,7 +358,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		// A successor engagement's own prompt IS pending: the filter is
 		// "the conversation's current claim", not "any claim".
 		successor := seed.Claim(t, conversationID)
-		if err := store.Create(ctx, orgID, &domain.ConversationPermission{
+		if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: conversationID,
 			ClaimID:        successor,
 			ToolCallID:     "toolu_successor",
@@ -345,7 +433,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		claimID := seed.Claim(t, conversationID)
 		// Written newest-first so ordering can't pass by insertion accident.
 		for i, off := range []time.Duration{2 * time.Second, 0, time.Second} {
-			if err := store.Create(ctx, orgID, &domain.ConversationPermission{
+			if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
 				ConversationID: conversationID,
 				ClaimID:        claimID,
 				ToolCallID:     []string{"toolu_third", "toolu_first", "toolu_second"}[i],
@@ -358,7 +446,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		}
 		other := seed.Conversation(t)
 		otherClaim := seed.Claim(t, other)
-		if err := store.Create(ctx, orgID, &domain.ConversationPermission{
+		if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: other, ClaimID: otherClaim, ToolCallID: "toolu_elsewhere",
 			ToolName: "Read", State: domain.PermissionStatePending, RequestedAt: base,
 		}); err != nil {
@@ -399,7 +487,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		claimID := seed.Claim(t, conversationID)
 		// A prompt is born pending. Minting one already-decided would mean a
 		// decision nobody made.
-		if err := store.Create(ctx, orgID, &domain.ConversationPermission{
+		if _, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: conversationID, ClaimID: claimID, ToolCallID: "toolu_prebaked",
 			ToolName: "Read", State: domain.PermissionStateAllowed,
 		}); err == nil {
@@ -418,7 +506,7 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		// it would sit at 'pending' forever with nothing able to surface it or
 		// settle it. Refusing the write is strictly better than accepting one —
 		// the caller records nothing, logs, and still asks the question.
-		err := store.Create(ctx, orgID, &domain.ConversationPermission{
+		_, err := store.Create(ctx, orgID, domain.ConversationPermission{
 			ConversationID: conversationID,
 			ToolCallID:     "toolu_unclaimed",
 			ToolName:       "Bash",
@@ -439,14 +527,14 @@ func RunPermissionStoreConformance(t *testing.T, mk PermissionStoreFactory) {
 		// The enum is the whole point of the column: a typo'd reason silently
 		// stored is a distinction lost, which is the state this table exists to
 		// get out of.
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab",
+		if _, err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab",
 			domain.PermissionStateDenied, "gave_up", ""); err == nil {
 			t.Fatal("Resolve must refuse an unknown reason")
 		}
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab", "maybe", domain.PermissionReasonUser, ""); err == nil {
+		if _, err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab", "maybe", domain.PermissionReasonUser, ""); err == nil {
 			t.Fatal("Resolve must refuse an unknown state")
 		}
-		if err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab",
+		if _, err := store.Resolve(ctx, orgID, conversationID, "toolu_vocab",
 			domain.PermissionStatePending, "", ""); err == nil {
 			t.Fatal("Resolve must refuse 'pending' — it stamps terminals, not the state the row was born in")
 		}

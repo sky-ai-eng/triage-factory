@@ -26,28 +26,25 @@ func newPermissionStore(q queryer) db.PermissionStore {
 
 var _ db.PermissionStore = (*permissionStore)(nil)
 
-// permissionColumns is the SELECT list scanned by scanPermissions.
+// permissionColumns is the SELECT list scanned by scanPermissionRow.
 const permissionColumns = `
 	id, org_id, conversation_id, COALESCE(claim_id, ''), message_id,
 	tool_call_id, tool_name, input_json, COALESCE(title, ''), state,
 	COALESCE(reason, ''), requested_at, expires_at, COALESCE(decided_by, ''),
 	decided_at, waited_ms`
 
-func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.ConversationPermission) error {
-	if p == nil {
-		return errors.New("sqlite permissions Create: nil permission")
-	}
+func (s *permissionStore) Create(ctx context.Context, orgID string, p domain.ConversationPermission) (domain.ConversationPermission, error) {
 	if p.State == "" {
 		p.State = domain.PermissionStatePending
 	}
 	if p.State != domain.PermissionStatePending {
-		return fmt.Errorf("sqlite permissions Create: state must be %q, got %q", domain.PermissionStatePending, p.State)
+		return domain.ConversationPermission{}, fmt.Errorf("sqlite permissions Create: state must be %q, got %q", domain.PermissionStatePending, p.State)
 	}
 	if p.ConversationID == "" || p.ToolCallID == "" || p.ToolName == "" {
-		return errors.New("sqlite permissions Create: conversation_id, tool_call_id and tool_name are required")
+		return domain.ConversationPermission{}, errors.New("sqlite permissions Create: conversation_id, tool_call_id and tool_name are required")
 	}
 	if p.ClaimID == "" {
-		return errors.New("sqlite permissions Create: claim_id is required on a pending prompt — ListPending derives pending against the conversation's active claim, so a NULL claim would be permanently unreachable (and ExpireForClaim keys on it too, so nothing would ever settle it)")
+		return domain.ConversationPermission{}, errors.New("sqlite permissions Create: claim_id is required on a pending prompt — ListPending derives pending against the conversation's active claim, so a NULL claim would be permanently unreachable (and ExpireForClaim keys on it too, so nothing would ever settle it)")
 	}
 	if p.ID == "" {
 		p.ID = uuid.New().String()
@@ -73,7 +70,7 @@ func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.Co
 	if len(p.Input) > 0 {
 		raw, err := json.Marshal(p.Input)
 		if err != nil {
-			return fmt.Errorf("sqlite permissions Create: marshal input: %w", err)
+			return domain.ConversationPermission{}, fmt.Errorf("sqlite permissions Create: marshal input: %w", err)
 		}
 		inputJSON = string(raw)
 	}
@@ -81,23 +78,26 @@ func (s *permissionStore) Create(ctx context.Context, orgID string, p *domain.Co
 	if p.ExpiresAt != nil {
 		expires = p.ExpiresAt.UTC()
 	}
-	_, err := s.q.ExecContext(ctx, `
+	// RETURNING answers "did this land" and "what does the row say now" in one
+	// statement — the id and requested_at this method mints/defaults are
+	// otherwise unreachable to a caller that supplied neither.
+	return scanWrittenPermission(s.q.QueryRowContext(ctx, `
 		INSERT INTO conversation_permissions (
 			id, org_id, conversation_id, claim_id, message_id, tool_call_id,
 			tool_name, input_json, title, state, requested_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, p.ID, orgID, p.ConversationID, nullIfEmpty(p.ClaimID), sqliteNullInt64(p.MessageID),
+		RETURNING `+permissionColumns,
+		p.ID, orgID, p.ConversationID, nullIfEmpty(p.ClaimID), sqliteNullInt64(p.MessageID),
 		p.ToolCallID, p.ToolName, inputJSON, nullIfEmpty(p.Title), p.State,
-		p.RequestedAt.UTC(), expires)
-	return err
+		p.RequestedAt.UTC(), expires))
 }
 
-func (s *permissionStore) Resolve(ctx context.Context, orgID, conversationID, toolCallID, state, reason, decidedBy string) error {
+func (s *permissionStore) Resolve(ctx context.Context, orgID, conversationID, toolCallID, state, reason, decidedBy string) (*domain.ConversationPermission, error) {
 	if !domain.ValidPermissionState(state) || state == domain.PermissionStatePending {
-		return fmt.Errorf("sqlite permissions Resolve: %q is not a terminal state", state)
+		return nil, fmt.Errorf("sqlite permissions Resolve: %q is not a terminal state", state)
 	}
 	if !domain.ValidPermissionReason(reason) {
-		return fmt.Errorf("sqlite permissions Resolve: unknown reason %q", reason)
+		return nil, fmt.Errorf("sqlite permissions Resolve: unknown reason %q", reason)
 	}
 	now := time.Now().UTC()
 	// The wait is computed in Go rather than in the UPDATE: reading the stored
@@ -107,22 +107,24 @@ func (s *permissionStore) Resolve(ctx context.Context, orgID, conversationID, to
 	if err != nil || !ok {
 		// Not pending — already resolved, or never recorded. Not an error:
 		// this is a best-effort record alongside a broker that has already
-		// decided.
-		return err
+		// decided. nil is the guard declining, the same shape the UPDATE
+		// below produces when a racing resolve slips in between this read
+		// and that statement.
+		return nil, err
 	}
 	// Only a pending row is written: the first resolution wins and a racing
 	// second one is a no-op, matching the broker's own deregister-then-drain
 	// (a decision that lands in the same instant a deadline fires is honored by
 	// one path and dropped by the other) — which is also why losing the read
 	// above to a racing resolve is harmless, since this UPDATE then matches
-	// nothing.
-	_, err = s.q.ExecContext(ctx, `
+	// nothing and RETURNING hands back no row.
+	return scanPermissionRow(s.q.QueryRowContext(ctx, `
 		UPDATE conversation_permissions
 		SET state = ?, reason = ?, decided_by = ?, decided_at = ?, waited_ms = ?
 		WHERE org_id = ? AND conversation_id = ? AND tool_call_id = ? AND state = 'pending'
-	`, state, nullIfEmpty(reason), nullIfEmpty(decidedBy), now, waitedMs(requestedAt, now),
-		orgID, conversationID, toolCallID)
-	return err
+		RETURNING `+permissionColumns,
+		state, nullIfEmpty(reason), nullIfEmpty(decidedBy), now, waitedMs(requestedAt, now),
+		orgID, conversationID, toolCallID))
 }
 
 // pendingRequestedAt reads one still-pending prompt's requested_at.
@@ -221,44 +223,77 @@ func (s *permissionStore) ExpireForClaim(ctx context.Context, orgID, claimID str
 	return nil
 }
 
+// scanPermissionRow decodes one conversation_permissions row from the shared
+// permissionColumns projection, off either a *sql.Row (a RETURNING or point
+// read) or a *sql.Rows mid-iteration. (nil, nil) on sql.ErrNoRows — the shape
+// Resolve's guarded UPDATE needs (nil is the guard declining, not an error)
+// and ListPending's loop below shares since Create's plain INSERT is the only
+// caller that needs a guaranteed row (see scanWrittenPermission).
+func scanPermissionRow(row interface{ Scan(dest ...any) error }) (*domain.ConversationPermission, error) {
+	var p domain.ConversationPermission
+	var messageID, waited sql.NullInt64
+	var inputJSON sql.NullString
+	var expiresAt, decidedAt sql.NullTime
+	err := row.Scan(&p.ID, &p.OrgID, &p.ConversationID, &p.ClaimID, &messageID,
+		&p.ToolCallID, &p.ToolName, &inputJSON, &p.Title, &p.State, &p.Reason,
+		&p.RequestedAt, &expiresAt, &p.DecidedBy, &decidedAt, &waited)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if messageID.Valid {
+		v := messageID.Int64
+		p.MessageID = &v
+	}
+	if inputJSON.Valid && inputJSON.String != "" {
+		// Unlike the write side, an unreadable blob HERE keeps the row: the
+		// prompt already exists and is parking an agent, so hiding it is the
+		// failure this table exists to prevent. It can only happen if the
+		// column was corrupted or written by something other than Create, so
+		// it's logged rather than swallowed.
+		if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
+			dbLog.Warn("permission input_json unreadable; surfacing the prompt without its input",
+				"conversation", p.ConversationID, "tool_call_id", p.ToolCallID, "error", err)
+			p.Input = nil
+		}
+	}
+	if expiresAt.Valid {
+		t := expiresAt.Time
+		p.ExpiresAt = &t
+	}
+	if decidedAt.Valid {
+		t := decidedAt.Time
+		p.DecidedAt = &t
+	}
+	p.WaitedMs = intPtrFromNull(waited)
+	return &p, nil
+}
+
+// scanWrittenPermission unwraps scanPermissionRow for a write expected to
+// always match a row — Create's plain INSERT, which has no ON CONFLICT arm.
+// nil here signals a genuine anomaly rather than a declined guard, unlike
+// Resolve's guarded UPDATE.
+func scanWrittenPermission(row interface{ Scan(dest ...any) error }) (domain.ConversationPermission, error) {
+	p, err := scanPermissionRow(row)
+	if err != nil {
+		return domain.ConversationPermission{}, err
+	}
+	if p == nil {
+		return domain.ConversationPermission{}, sql.ErrNoRows
+	}
+	return *p, nil
+}
+
 func scanPermissions(rows *sql.Rows) ([]domain.ConversationPermission, error) {
 	var out []domain.ConversationPermission
 	for rows.Next() {
-		var p domain.ConversationPermission
-		var messageID, waited sql.NullInt64
-		var inputJSON sql.NullString
-		var expiresAt, decidedAt sql.NullTime
-		if err := rows.Scan(&p.ID, &p.OrgID, &p.ConversationID, &p.ClaimID, &messageID,
-			&p.ToolCallID, &p.ToolName, &inputJSON, &p.Title, &p.State, &p.Reason,
-			&p.RequestedAt, &expiresAt, &p.DecidedBy, &decidedAt, &waited); err != nil {
+		p, err := scanPermissionRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		if messageID.Valid {
-			v := messageID.Int64
-			p.MessageID = &v
-		}
-		if inputJSON.Valid && inputJSON.String != "" {
-			// Unlike the write side, an unreadable blob HERE keeps the row: the
-			// prompt already exists and is parking an agent, so hiding it is the
-			// failure this table exists to prevent. It can only happen if the
-			// column was corrupted or written by something other than Create, so
-			// it's logged rather than swallowed.
-			if err := json.Unmarshal([]byte(inputJSON.String), &p.Input); err != nil {
-				dbLog.Warn("permission input_json unreadable; surfacing the prompt without its input",
-					"conversation", p.ConversationID, "tool_call_id", p.ToolCallID, "error", err)
-				p.Input = nil
-			}
-		}
-		if expiresAt.Valid {
-			t := expiresAt.Time
-			p.ExpiresAt = &t
-		}
-		if decidedAt.Valid {
-			t := decidedAt.Time
-			p.DecidedAt = &t
-		}
-		p.WaitedMs = intPtrFromNull(waited)
-		out = append(out, p)
+		out = append(out, *p)
 	}
 	return out, rows.Err()
 }
