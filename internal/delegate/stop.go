@@ -1,5 +1,6 @@
-// The conversation-level stop verb, plus the failure-finalization helpers a
-// stopped or errored run uses to reach its final DB state + surface a toast.
+// The stop verbs — one addressed by conversation, one by blueprint run — plus
+// the failure-finalization helpers a stopped or errored run uses to reach its
+// final DB state + surface a toast.
 //
 // Stopping means one thing, and it means it for every conversation — an
 // intermediate blueprint step, a final step, the only step, or a conversation
@@ -15,7 +16,7 @@
 // parked-and-dead under a terminal one, because the claim gate only ever
 // drives steps of a running blueprint. So the stop verb leaves the blueprint
 // alone and the callers that own a lifecycle one layer up spell their own
-// cancellation (StopAndCancelBlueprint, below).
+// cancellation (StopAndCancelBlueprint and StopBlueprintRun, below).
 //
 // The park keeps the workspace, and the retention TTL is what eventually
 // collects it, because the moment a user kills a wedged run is exactly the
@@ -59,6 +60,12 @@ import (
 // read, a failed park) and must not be reported as a missing run, nor echoed
 // to a client.
 var ErrNoActiveConversation = errors.New("no active conversation")
+
+// ErrNoActiveBlueprintRun is StopBlueprintRun's answer when there is nothing to
+// tear down: no such blueprint run in this org, or one that already reached a
+// terminal. A caller unwinding its own side effects treats it as a failure: it
+// means the run it is rolling back is not where it left it.
+var ErrNoActiveBlueprintRun = errors.New("no active blueprint run")
 
 // StopCause names the lifecycle event a teardown caller is acting on — the
 // thing that caller knows and the conversation itself does not. It exists so
@@ -143,7 +150,67 @@ func (s *Spawner) StopAndCancelBlueprint(orgID, conversationID, userID string, c
 	return s.stop(orgID, conversationID, userID, true, cause.note())
 }
 
-// stop is the shared body of both verbs. cancelBlueprint gates the two places
+// StopBlueprintRun tears down a whole blueprint run — every live step, the
+// blueprint_run row, and the shared worktree behind them — for a system caller
+// that owns a lifecycle one layer up and has decided the run should never have
+// existed. It is the blueprint-run twin of StopAndCancelBlueprint: that verb
+// takes a conversation and cancels the blueprint under it, this one takes the
+// blueprint_runs id its caller holds and stops the conversations under it. The
+// two ids are both opaque strings and neither resolves against the other's
+// table, so a caller holding a blueprint_run reaches its steps through here.
+//
+// The cancel signal is raised before any step is enumerated: it is what stops
+// the claim gate handing this blueprint's steps out, so the run cannot grow a
+// step behind the teardown's back and a step minted but not yet claimed is
+// covered whether or not this call sees it.
+//
+// System-attributed throughout: the user-facing cancel of a blueprint is
+// CancelBlueprint, which carries the acting user's identity into its writes.
+// cause names the lifecycle event and reaches every stopped step's transcript.
+func (s *Spawner) StopBlueprintRun(orgID, blueprintRunID string, cause StopCause) error {
+	if s.blueprints == nil {
+		return fmt.Errorf("stop blueprint run: no blueprint store")
+	}
+	ctx := context.Background()
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, blueprintRunID)
+	if err != nil {
+		return fmt.Errorf("load blueprint run: %w", err)
+	}
+	if br == nil || br.Status != domain.BlueprintRunStatusRunning {
+		return fmt.Errorf("%w %s", ErrNoActiveBlueprintRun, blueprintRunID)
+	}
+
+	s.requestBlueprintCancel(ctx, orgID, blueprintRunID)
+
+	stepIDs, err := s.blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID)
+	if err != nil {
+		// The signal above is the durable half and it landed, so the run is
+		// not forgotten — the claim gate refuses a cancel-requested blueprint
+		// and the reaper finalizes it. What this call can no longer do is
+		// kill the live step now, which is the whole reason its caller asked.
+		return fmt.Errorf("list active step conversations: %w", err)
+	}
+	var errs []error
+	for _, id := range stepIDs {
+		// ErrNoActiveConversation is a step that raced this teardown to its
+		// own terminal. Not a failure: the cancel signal is already raised, so
+		// the reactor reading that terminal finalizes the blueprint instead of
+		// enqueuing what comes next.
+		if err := s.stop(orgID, id, "", true, cause.note()); err != nil && !errors.Is(err, ErrNoActiveConversation) {
+			errs = append(errs, fmt.Errorf("stop step conversation %s: %w", id, err))
+		}
+	}
+	if len(stepIDs) == 0 {
+		// No step was stopped, so nothing is going to carry this run to a
+		// terminal — every path that finalizes a blueprint runs off a step's.
+		// Finalize it here instead of leaving it 'running' with nothing coming,
+		// holding its worktree and its task's one-active-auto-run slot.
+		s.finalizeCancelledBlueprintRun(ctx, orgID, br, nil, "")
+	}
+	return errors.Join(errs...)
+}
+
+// stop is the shared body every stop verb routes through. cancelBlueprint gates the two places
 // the blueprint layer is touched, and nothing else differs — one path, so the
 // stop verb and the lifecycle teardown cannot drift apart in the parts they
 // share. note is the sentence each verb writes onto the transcript.

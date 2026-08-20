@@ -43,6 +43,10 @@ func (s *fenceStubDelegator) StopAndCancelBlueprint(orgID, conversationID, userI
 	return nil
 }
 
+func (s *fenceStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
+	return nil
+}
+
 func (s *fenceStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }

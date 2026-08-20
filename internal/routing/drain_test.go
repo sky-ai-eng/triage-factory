@@ -3,6 +3,7 @@ package routing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,11 +26,15 @@ type stubDelegator struct {
 	db    *sql.DB
 	calls int64
 
-	// mu guards lastTaskTeamID, the task's owner team_id observed at the
-	// most recent Delegate call. Tests use it to assert the owner was
-	// consolidated to the acting team before the run was created.
+	// mu guards the two things drains write concurrently: lastTaskTeamID, the
+	// task's owner team_id observed at the most recent Delegate call (tests
+	// assert the owner was consolidated to the acting team before the run was
+	// created), and the teardown ids below.
 	mu             sync.Mutex
 	lastTaskTeamID string
+	// stopped is every blueprint-run id handed to StopBlueprintRun, so a test
+	// can assert the rollback tore down the run it actually spawned.
+	stopped []string
 }
 
 func (s *stubDelegator) Delegate(task domain.Task, opts delegate.DelegateOpts) (string, error) {
@@ -104,6 +109,26 @@ func stubDelegateRun(database *sql.DB, task domain.Task, opts delegate.DelegateO
 
 func (s *stubDelegator) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	return nil
+}
+
+// StopBlueprintRun records the id the caller asked to tear down. Recording
+// only: what the real teardown does with a blueprint_run id is
+// delegate.Spawner's to prove, and what a router test can prove is which id
+// the rollback hands over.
+func (s *stubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
+	s.mu.Lock()
+	s.stopped = append(s.stopped, blueprintRunID)
+	s.mu.Unlock()
+	return nil
+}
+
+// stoppedCopy is the blueprint-run ids StopBlueprintRun was called with.
+func (s *stubDelegator) stoppedCopy() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.stopped))
+	copy(out, s.stopped)
+	return out
 }
 
 func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
@@ -534,5 +559,75 @@ func TestRunDrainSweeper_NoOpWhenIdle(t *testing.T) {
 
 	if calls := atomic.LoadInt64(&stub.calls); calls != 0 {
 		t.Errorf("expected 0 Delegate calls with empty queue, got %d", calls)
+	}
+}
+
+// markFiredFailingFirings fails only the write that records the
+// firing→blueprint-run association. Everything else — the claiming pop, the
+// release — is the real store, so the drain reaches its rollback exactly the
+// way the durability race it exists for does.
+type markFiredFailingFirings struct {
+	dbpkg.PendingFiringsStore
+}
+
+func (markFiredFailingFirings) MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error {
+	return errors.New("boom: the firing→blueprint-run association did not commit")
+}
+
+// TestDrainTask_MarkFiredFailure_TearsDownTheBlueprintRun pins the rollback's
+// first step against the id it is given. Delegate returns a blueprint_run id —
+// the steps' conversations are minted under it — so a teardown addressed by
+// conversation resolves nothing and the rollback finishes with the task back
+// in 'queued' and the firing back in 'pending' over a run still executing for
+// nobody. The assertion is deliberately on the id's table rather than on the
+// call alone: that is the difference the bug turned on.
+func TestDrainTask_MarkFiredFailure_TearsDownTheBlueprintRun(t *testing.T) {
+	database := newTestDB(t)
+	entityID, taskID, triggerID, eventID := setupDrainScenario(t, database)
+
+	if _, _, err := sqlitestore.New(database).PendingFirings.Enqueue(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, entityID, taskID, triggerID, eventID, dbpkg.AgentClaimStamp{}); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	stub := &stubDelegator{db: database}
+	firings := markFiredFailingFirings{PendingFiringsStore: sqlitestore.New(database).PendingFirings}
+	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, firings, sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+
+	router.DrainTask(runmode.LocalDefaultOrgID, taskID)
+
+	stopped := stub.stoppedCopy()
+	if len(stopped) != 1 {
+		t.Fatalf("teardown calls = %d, want 1 — the rollback's whole point is undoing the run it just spawned", len(stopped))
+	}
+	var isBlueprintRun, isConversation int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM blueprint_runs WHERE id = ?`, stopped[0]).Scan(&isBlueprintRun); err != nil {
+		t.Fatalf("count blueprint_runs: %v", err)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversations WHERE id = ?`, stopped[0]).Scan(&isConversation); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if isBlueprintRun != 1 || isConversation != 0 {
+		t.Errorf("torn down id %q resolves to %d blueprint_runs / %d conversations, want 1 / 0",
+			stopped[0], isBlueprintRun, isConversation)
+	}
+
+	// The other two thirds of the rollback still land: the firing goes back to
+	// 'pending' for a later drain, and the task's lifecycle reverts.
+	rows, err := sqlitestore.New(database).PendingFirings.ListForEntity(t.Context(), runmode.LocalDefaultOrgID, entityID)
+	if err != nil {
+		t.Fatalf("list firings: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("firing rows = %d, want 1", len(rows))
+	}
+	if rows[0].Status != domain.PendingFiringStatusPending {
+		t.Errorf("firing status = %q, want %q (released for retry)", rows[0].Status, domain.PendingFiringStatusPending)
+	}
+	task, err := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, taskID)
+	if err != nil || task == nil {
+		t.Fatalf("read task: task=%v err=%v", task, err)
+	}
+	if task.Status != "queued" {
+		t.Errorf("task status = %q, want queued", task.Status)
 	}
 }

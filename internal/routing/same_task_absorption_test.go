@@ -99,6 +99,10 @@ func (s *injectingStubDelegator) StopAndCancelBlueprint(orgID, conversationID, u
 	return nil
 }
 
+func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error {
+	return nil
+}
+
 func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome

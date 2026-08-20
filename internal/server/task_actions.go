@@ -707,11 +707,44 @@ func (s *Server) triggerDelegation(w http.ResponseWriter, r *http.Request, orgID
 		writeDelegateSpawnError(w, err)
 		return false
 	}
-	// TODO(TFAC-840): the field says conversation_id but Delegate returns the
-	// blueprint_run id, so following this into /api/agent/conversations/{id}
-	// 404s. Kept as-is here because the field name is a wire contract.
-	response["conversation_id"] = blueprintRunID
+	// The field names a conversation, so it carries one: Delegate returns the
+	// blueprint_run it minted, and the run a client follows from here is that
+	// blueprint's first step. Delegate enqueues step 0 before it returns, so
+	// the row exists by now; a read that comes back empty leaves the field off
+	// rather than substituting an id that resolves against nothing, and the
+	// client's own task refetch reconciles.
+	if conversationID := s.firstStepConversationID(r.Context(), orgID, userID, blueprintRunID); conversationID != "" {
+		response["conversation_id"] = conversationID
+	}
 	return true
+}
+
+// firstStepConversationID resolves the conversation a caller watches a fresh
+// blueprint run through — its lowest-indexed step. Read under the requesting
+// user's claims, like every other read this handler makes; a manual
+// delegation's own creator can always see the step it just minted.
+//
+// Best-effort by design: it answers "" for a read failure or an empty result,
+// because the delegation itself has already committed and its response must
+// not turn on a lookup that only names the run.
+func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blueprintRunID string) string {
+	var convs []domain.Conversation
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		convs, e = tx.Blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
+		return e
+	}); err != nil {
+		taskActionLog.Warn("resolve first step conversation for delegation failed; responding without conversation_id",
+			"blueprint_run", blueprintRunID, "error", err)
+		return ""
+	}
+	if len(convs) == 0 {
+		taskActionLog.Warn("delegation minted no readable step conversation; responding without conversation_id",
+			"blueprint_run", blueprintRunID)
+		return ""
+	}
+	// ConversationsForBlueprint orders by step index, so the first row is step 0.
+	return convs[0].ID
 }
 
 // writeDelegateSpawnError maps a spawner.Delegate failure to its status: a

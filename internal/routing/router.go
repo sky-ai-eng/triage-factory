@@ -34,6 +34,12 @@ type Delegator interface {
 	// freezing 'running' over work nothing will resume. The cause names which
 	// of those it was, and reaches the stopped conversation's transcript.
 	StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error
+	// StopBlueprintRun is the same teardown addressed by blueprint run rather
+	// than by conversation, for the caller that holds the id Delegate returned
+	// and has no conversation in hand. It stops whatever steps the run has and
+	// cancels the run itself; the two verbs take different ids and neither
+	// resolves against the other's table.
+	StopBlueprintRun(orgID, blueprintRunID string, cause delegate.StopCause) error
 	// StageOrDeliverAdditiveEvent routes one agent-facing additive-event
 	// injection for a run by its live state — local process, live remote
 	// executor (TFAC-585's `inject` conversation_signals kind), or the durable

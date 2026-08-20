@@ -549,26 +549,40 @@ func (s *Spawner) finalizeParkedBlueprintOnCancel(ctx context.Context, orgID str
 	}
 	if cr, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID); err == nil && cr != nil &&
 		cr.Status == domain.BlueprintRunStatusRunning {
-		reason := "user_cancelled"
-		if userID == "" {
-			reason = "system_cancelled"
-		}
-		if userID != "" {
-			_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, conv.BlueprintStepIndex)
-		} else {
-			_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, conv.BlueprintStepIndex)
-		}
-		// Reconstruct just enough cfg for the worktree cleanup (mirrors
-		// CancelBlueprint — owner/repo/prNumber
-		// aren't persisted on blueprint_runs, so CleanupPRConfig is skipped).
-		cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
-		if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
-			cfg.hasWT = true
-		}
-		s.runBlueprintWorktreeCleanup(cr.ID, cfg)
+		s.finalizeCancelledBlueprintRun(ctx, orgID, cr, conv.BlueprintStepIndex, userID)
 	}
 	// The snapshot deliberately survives: it is the parked workspace the cancel
 	// just retained, and the retention TTL is what collects it.
+}
+
+// finalizeCancelledBlueprintRun writes a running blueprint_run's cancelled
+// terminal and cleans the shared worktree behind it. Callers have already
+// established that nothing else is going to reach that terminal — the step
+// they cancelled had no live goroutine, or the run had no live step at all —
+// and have loaded the row to know it is still running.
+//
+// abortedAtStep is the step the cancellation landed on, when the caller has
+// one; nil when the run had no step to name. userID routes the status write:
+// a user cancel under that user's synthetic claims, a system cancel (router
+// cleanup, drain rollback) through the admin pool, with the abort reason
+// naming which it was. The cfg is reconstructed rather than carried, because
+// owner/repo/prNumber aren't persisted on blueprint_runs — so CleanupPRConfig
+// is skipped and only the worktree is reclaimed.
+func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID string, cr *domain.BlueprintRun, abortedAtStep *int, userID string) {
+	reason := "user_cancelled"
+	if userID == "" {
+		reason = "system_cancelled"
+	}
+	if userID != "" {
+		_, _ = s.markBlueprintRunStatusAsUser(ctx, orgID, userID, cr.ID, domain.BlueprintRunStatusCancelled, reason, abortedAtStep)
+	} else {
+		_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, reason, abortedAtStep)
+	}
+	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
+	if task, _ := s.tasks.GetSystem(ctx, orgID, cr.TaskID); task != nil && task.EntitySource == "github" {
+		cfg.hasWT = true
+	}
+	s.runBlueprintWorktreeCleanup(cr.ID, cfg)
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under

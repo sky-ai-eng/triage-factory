@@ -682,8 +682,8 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// that records the firing→blueprint-run association failed.
 				//
 				// Roll the side-effect chain back in reverse: tear down
-				// the blueprint run we just spawned — blueprint included, since the
-				// firing that minted it is being undone — then revert the
+				// the blueprint run we just spawned — every step of it, since
+				// the firing that minted it is being undone — then revert the
 				// task to 'queued' so the limbo state (task=delegated + no
 				// live blueprint run) is not externally visible. Mirrors what
 				// fireDelegate already does when spawner.Delegate itself
@@ -699,15 +699,18 @@ func (r *Router) DrainTask(orgID, taskID string) {
 				// either, so nothing would ever pick it up again.
 				routerLog.Error("mark firing fired failed, rolling back: tearing down blueprint run + reverting task to queued",
 					"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", err)
-				// TODO(TFAC-840): this teardown never fires. StopAndCancelBlueprint
-				// resolves its id against conversations, and what Delegate returned
-				// is the blueprint_run — so the call always comes back
-				// ErrNoActiveConversation and the spawned blueprint run keeps executing
-				// while its task reverts to queued.
+				// Addressed by blueprint run, which is what Delegate returned
+				// and the only id this path holds: its steps' conversations are
+				// minted below it, so the teardown resolves them itself.
 				if r.spawner != nil {
-					if cerr := r.spawner.StopAndCancelBlueprint(orgID, blueprintRunID, "", delegate.StopCauseFiringReverted); cerr != nil {
-						routerLog.Warn("stop blueprint run after mark-fired failure (may already be terminal, drain still triggers from its defer)",
-							"blueprint_run", blueprintRunID, "error", cerr)
+					if cerr := r.spawner.StopBlueprintRun(orgID, blueprintRunID, delegate.StopCauseFiringReverted); cerr != nil {
+						// The rest of the rollback lands regardless, which is
+						// what makes this the bad outcome rather than a partial
+						// one: the task goes back to 'queued' and the firing
+						// back to 'pending' under a blueprint run that is still
+						// executing for nobody.
+						routerLog.Error("tear down blueprint run after mark-fired failure: rollback left a live run with no task claiming it",
+							"firing_id", firing.ID, "blueprint_run", blueprintRunID, "error", cerr)
 					}
 				}
 				r.revertTaskStatus(ctx, orgID, firing.TaskID, "queued")
