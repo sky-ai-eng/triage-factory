@@ -42,8 +42,7 @@ type BlueprintSeeder func(t *testing.T, slugs ...string) map[string]string
 //     both.
 //   - GetEnabledForEvent returns enabled rows of both kinds ordered
 //     rule-before-trigger.
-//   - Delete hard-removes; Update changes mutable fields per kind, including
-//     the enabled bit the product's rule and trigger switches PATCH.
+//   - Delete hard-removes; Update changes mutable fields per kind via PATCH
 //   - Reorder updates sort_order on rules; silently skips trigger ids.
 //   - Promote atomically flips a rule to a trigger, clearing rule
 //     fields and populating trigger fields.
