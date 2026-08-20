@@ -708,7 +708,7 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 	predicate := `{"channel_in":[]}`
 	threshold := slackMessageTriggerBreakerThreshold
 	minAutonomy := slackMessageTriggerMinAutonomy
-	if err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
+	if _, err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
 		ID:                     uuid.New().String(),
 		Kind:                   domain.EventHandlerKindTrigger,
 		EventType:              domain.EventSlackMessage,

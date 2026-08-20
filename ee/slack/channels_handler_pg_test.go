@@ -535,12 +535,13 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 			return err
 		}
 		threshold, minAutonomy := 5, 0.2
-		return tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+		_, e := tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
 			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
 			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
 			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
 			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
 		})
+		return e
 	}); err != nil {
 		t.Fatalf("seed pre-existing trigger: %v", err)
 	}

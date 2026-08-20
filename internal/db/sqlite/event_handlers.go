@@ -255,9 +255,9 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 	return collectEventHandlersSQLite(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	_ = teamID // local mode is single-team; rows pin LocalDefaultTeamID below
 	var pred any
@@ -271,9 +271,13 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	// is always that team — the teamID the handler threads is ignored
 	// here. creator_user_id is required for source='user' rows by the
 	// event_handlers_system_has_no_creator CHECK.
+	//
+	// RETURNING projects sqliteEventHandlerColumns through the same scan the
+	// point read uses, so the row a caller gets back cannot drift from the row
+	// a later Get would serve.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.q.ExecContext(ctx, `
+		row := s.q.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -283,14 +287,14 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
+			RETURNING `+sqliteEventHandlerColumns, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder),
 			now, now)
-		return err
+		return scanEventHandlerRowSQLite(row)
 
 	case domain.EventHandlerKindTrigger:
-		_, err := s.q.ExecContext(ctx, `
+		row := s.q.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, team_id, creator_user_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -300,13 +304,13 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 			        ?, ?, 'user', ?,
 			        ?, ?, ?,
 			        ?, ?)
-		`, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
+			RETURNING `+sqliteEventHandlerColumns, h.ID, orgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, h.EventType,
 			pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability),
 			now, now)
-		return err
+		return scanEventHandlerRowSQLite(row)
 	}
-	return fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("sqlite event_handlers Create: unknown kind %q", h.Kind)
 }
 
 func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) error {

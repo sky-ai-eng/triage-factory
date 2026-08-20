@@ -17,7 +17,7 @@ import (
 )
 
 // reviewArtifactDetailsJSON is the `details` payload for a review artifact.
-// The whole review is staged TF-side (TFAC-494): body/event and the inline
+// The whole review is staged TF-side: body/event and the inline
 // comments all come from the artifact's details_json, applied to GitHub only by
 // the atomic submit at approval. Each comment's severity is parsed back out of
 // its body for the chip. The artifact's own identity — id, state, and the
@@ -57,7 +57,7 @@ type reviewArtifactCommentJSON struct {
 }
 
 // reviewArtifactDetails composes the review `details` payload from the
-// artifact's TF-side staged draft (TFAC-494) — no GitHub call for the content
+// artifact's TF-side staged draft — no GitHub call for the content
 // itself. Each comment body carries the severity badge baked in;
 // ParseSeverityBadge splits it back into a chip level + clean body for display.
 // Body + event are the staged values; the whole review is local until the
@@ -679,7 +679,7 @@ func (ah *artifactsHandler) reviewRefresh(w http.ResponseWriter, r *http.Request
 
 // handleArtifactCommentUpdate edits one staged inline comment on the review
 // draft. Review-only, no GitHub call — the whole review is staged TF-side until
-// approval (TFAC-494). The comment's severity is fixed at creation and is
+// approval. The comment's severity is fixed at creation and is
 // re-baked onto the human's edited body from the stored comment, so an edit
 // preserves the chip without being able to move it.
 //

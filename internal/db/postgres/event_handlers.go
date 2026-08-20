@@ -274,9 +274,9 @@ func (s *eventHandlerStore) ListForBlueprint(ctx context.Context, orgID, bluepri
 	return collectEventHandlers(rows)
 }
 
-func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error {
+func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error) {
 	if err := db.ValidateEventHandlerForCreate(&h); err != nil {
-		return err
+		return domain.EventHandler{}, err
 	}
 	var pred any
 	if h.ScopePredicateJSON != nil {
@@ -290,11 +290,16 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 	// real team here keeps the write valid. Empty is a handler bug, so
 	// reject it rather than write an invalid row.
 	if teamID == "" {
-		return fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
+		return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
+
+	// RETURNING projects pgEventHandlerColumns through the same scan the point
+	// read uses, so the row a caller gets back cannot drift from the row a
+	// later Get would serve — which matters here because the INSERT decides
+	// source, user_modified and both timestamps itself.
 	switch h.Kind {
 	case domain.EventHandlerKindRule:
-		_, err := s.app.ExecContext(ctx, `
+		row := s.app.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -309,12 +314,12 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
+			RETURNING `+pgEventHandlerColumns, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
 			h.Name, derefFloat(h.DefaultPriority), derefInt(h.SortOrder))
-		return err
+		return scanEventHandlerRowPG(row)
 
 	case domain.EventHandlerKindTrigger:
-		_, err := s.app.ExecContext(ctx, `
+		row := s.app.QueryRowContext(ctx, `
 			INSERT INTO event_handlers
 				(id, org_id, creator_user_id, team_id, kind, event_type,
 				 scope_predicate_json, enabled, source, applies_to_unowned,
@@ -329,11 +334,11 @@ func (s *eventHandlerStore) Create(ctx context.Context, orgID, teamID string, h 
 				$8, $9, $10,
 				now(), now()
 			)
-		`, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
+			RETURNING `+pgEventHandlerColumns, h.ID, orgID, teamID, h.EventType, pred, h.Enabled, h.AppliesToUnowned,
 			h.BlueprintID, derefInt(h.BreakerThreshold), derefFloat(h.MinAutonomySuitability))
-		return err
+		return scanEventHandlerRowPG(row)
 	}
-	return fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
+	return domain.EventHandler{}, fmt.Errorf("postgres event_handlers Create: unknown kind %q", h.Kind)
 }
 
 func (s *eventHandlerStore) Update(ctx context.Context, orgID string, h domain.EventHandler) error {

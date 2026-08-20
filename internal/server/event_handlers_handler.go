@@ -226,8 +226,8 @@ type eventHandlerCreateCommon struct {
 	Enabled        *bool           `json:"enabled"`
 
 	// AppliesToUnowned opts the handler into reaching entities the team
-	// doesn't own (TFAC-517) — the explicit "watch" flag, default off.
-	// Visibility only; never confers firing rights (the TFAC-514 invariant).
+	// doesn't own — the explicit "watch" flag, default off. Visibility only;
+	// it never confers firing rights.
 	AppliesToUnowned *bool `json:"applies_to_unowned"`
 
 	// TeamID is the acting team the write picker supplied — the team this
@@ -278,10 +278,10 @@ func eventTypeField(v *httpx.Validation, eventType string) bool {
 }
 
 // gateEventTypeEntitlement refuses a create bound to an event source this org
-// isn't licensed for (TFAC-524), writing the 403 and reporting false. Only
-// create needs it — event_type is immutable on update, and promote/retarget
-// can't change it either (the router freeze makes an enabled-but-gated handler
-// inert regardless).
+// isn't licensed for, writing the 403 and reporting false. Only create needs
+// it — event_type is immutable on update, and promote/retarget can't change it
+// either (the router freeze makes an enabled-but-gated handler inert
+// regardless).
 //
 // It answers on its own rather than accumulating onto the body's validation:
 // a licensing boundary is not a field the caller can fix by editing the body,
@@ -297,21 +297,22 @@ func gateEventTypeEntitlement(w http.ResponseWriter, orgID, eventType string) bo
 }
 
 // insertEventHandler resolves the acting team and writes the composed row,
-// answering 201 with the stored row. Shared by both create routes: everything
-// above it differs per kind, everything from here down does not.
+// answering 201 with the row the INSERT returned. Shared by both create
+// routes: everything above it differs per kind, everything from here down does
+// not.
+//
+// The answer is the stored row, not the composed one: the write decides
+// team_id, source, user_modified and both timestamps, so the struct handed in
+// here is not a picture of what landed.
 func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *http.Request, orgID, userID, pickedTeam string, h domain.EventHandler) {
-	var fresh *domain.EventHandler
+	var stored domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, pickedTeam)
 		if e != nil {
 			return e
 		}
-		if e := tx.EventHandlers.Create(r.Context(), orgID, teamID, h); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, h.ID)
-		return ge
+		stored, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
+		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -327,11 +328,7 @@ func (eh *eventHandlersHandler) insertEventHandler(w http.ResponseWriter, r *htt
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if fresh != nil {
-		writeJSON(w, http.StatusCreated, fresh)
-		return
-	}
-	writeJSON(w, http.StatusCreated, h)
+	writeJSON(w, http.StatusCreated, stored)
 }
 
 // handleEventHandlerCreateRule authors a kind='rule' handler.
@@ -381,8 +378,8 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 		return
 	}
 
-	// Reject viewers before authoring a rule (TFAC-447): resolve the acting
-	// team read-only and gate, so a viewer gets a clean 403 rather than the
+	// Reject viewers before authoring a rule: resolve the acting team read-only
+	// and gate, so a viewer gets a clean 403 rather than the
 	// event_handlers_insert RLS WITH CHECK surfacing as a 500.
 	if !gateActingTeamWrite(w, r, eh.tx, eh.az, orgID, userID, req.TeamID, "event_handlers") {
 		return
@@ -1139,7 +1136,7 @@ func (eh *eventHandlersHandler) handleEventHandlerReorder(w http.ResponseWriter,
 	}
 
 	// Reorder rewrites sort_order across the whole list, so a viewer on ANY
-	// team the list spans can't run it (TFAC-447).
+	// team the list spans can't run it.
 	for _, teamID := range teams {
 		if !eh.az.RequireTeamWrite(w, r, orgID, userID, teamID) {
 			return

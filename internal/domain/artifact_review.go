@@ -63,9 +63,8 @@ type ReviewArtifactProposed struct {
 //     PR head can advance between start-review and the comments.
 //   - FinalizedHeadSHA: the PR head at finalize-review — the commit every staged
 //     comment was reconciled to (TFAC-499) and the baseline the human-facing
-//     freshness check (TFAC-500) measures drift from: the review read compares
-//     it to the live PR head for the "N commits since this review was written"
-//     count.
+//     freshness check measures drift from: the review read compares it to the
+//     live PR head for the "N commits since this review was written" count.
 //     Empty on a never-finalized draft and on rows finalized before TFAC-500
 //     (those fall back to HeadSHA for the count).
 //   - FinalizedBaseSHA: the PR base branch tip at finalize-review. Paired with

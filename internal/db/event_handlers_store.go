@@ -107,13 +107,19 @@ type EventHandlerStore interface {
 	ListForBlueprint(ctx context.Context, orgID string, blueprintID string) ([]domain.EventHandler, error)
 
 	// Create inserts a new user-source handler owned by teamID — the
-	// acting team the handler resolved for the request. Caller supplies
-	// ID, kind, event_type, and the per-kind fields appropriate to the
-	// kind. Source is forced to "user"; timestamps are stamped
-	// server-side. The Postgres impl binds teamID directly (it satisfies
-	// the team-membership RLS); the SQLite impl ignores it (local mode is
-	// single-team and pins the sentinel).
-	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) error
+	// acting team the handler resolved for the request — and returns the
+	// stored row. Caller supplies ID, kind, event_type, and the per-kind
+	// fields appropriate to the kind. Source is forced to "user";
+	// timestamps are stamped server-side. The Postgres impl binds teamID
+	// directly (it satisfies the team-membership RLS); the SQLite impl
+	// ignores it (local mode is single-team and pins the sentinel).
+	//
+	// The returned row comes from RETURNING on the INSERT itself, over the
+	// same column list Get projects: the input struct is not a picture of
+	// the row (team_id, source, user_modified and both timestamps are all
+	// decided here), so a caller that needs the persisted shape takes it
+	// from the write rather than reading it back.
+	Create(ctx context.Context, orgID, teamID string, h domain.EventHandler) (domain.EventHandler, error)
 
 	// Update changes a handler's mutable fields. ID, kind, source,
 	// event_type, and created_at are immutable. For triggers,

@@ -67,7 +67,7 @@ func createTriggerForTestSkills(t *testing.T, database *sql.DB, trig domain.Even
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPromptForSkills(t, database, trig.BlueprintID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestSkills %s: %v", trig.ID, err)
 	}
 }

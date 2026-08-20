@@ -18,7 +18,7 @@ import (
 )
 
 // reviewFreshnessOut is the slice of the review artifact's `details` payload
-// the TFAC-500 freshness tests assert on.
+// the freshness tests assert on.
 type reviewFreshnessOut struct {
 	CommitsSinceFinalize *int `json:"commits_since_finalize"`
 	Comments             []struct {

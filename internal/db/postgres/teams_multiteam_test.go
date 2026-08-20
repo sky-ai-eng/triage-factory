@@ -351,7 +351,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
+				_, err := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
 					ID:              id,
 					Kind:            domain.EventHandlerKindRule,
 					EventType:       domain.EventGitHubPRCICheckFailed,
@@ -361,6 +361,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 					Enabled:         true,
 					Source:          domain.EventHandlerSourceUser,
 				})
+				return err
 			}); e != nil {
 				t.Fatalf("create rule %s: %v", name, e)
 			}

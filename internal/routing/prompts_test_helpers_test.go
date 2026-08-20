@@ -94,7 +94,7 @@ func createTriggerForTestRouting(t *testing.T, database *sql.DB, trig domain.Eve
 	if trig.BlueprintID != "" {
 		trig.BlueprintID = blueprintWrappingPrompt(t, database, trig.BlueprintID, runmode.LocalDefaultTeamID)
 	}
-	if err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
+	if _, err := testEventHandlerStore(database).Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, trig); err != nil {
 		t.Fatalf("createTriggerForTestRouting %s: %v", trig.ID, err)
 	}
 }

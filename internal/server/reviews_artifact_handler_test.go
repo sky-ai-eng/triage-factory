@@ -503,8 +503,8 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 // TestReviewArtifactDismiss pins the per-artifact dismiss for reviews, now a
 // field write on the review sub-resource: PATCH {state:"dismissed"} flips the
 // artifact pending → dismissed with NO GitHub call (the review is staged
-// TF-side, TFAC-494) and never touches the conversation lifecycle (the
-// decoupled sidecar, TFAC-379). It is a field write precisely because nothing
+// TF-side) and never touches the conversation lifecycle (the decoupled
+// sidecar). It is a field write precisely because nothing
 // external happens — which is why the /dismiss verb, which really does close a
 // PR on GitHub, no longer answers for reviews.
 func TestReviewArtifactDismiss(t *testing.T) {

@@ -11,10 +11,10 @@ import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 // ReviewArtifact mirrors GET /api/artifacts/{id} for a review artifact: the
 // shared artifact envelope, with the review-shaped payload under `details`.
 // review_body / review_event there are the STAGED values (applied to GitHub
-// only on approval); the comments are staged TF-side (TFAC-494), each with its
+// only on approval); the comments are staged TF-side, each with its
 // severity parsed back out of the body (chip) and the clean body shown.
 // commits_since_finalize + per-comment freshness are computed against the live
-// PR head at GET time (TFAC-500) so the human sees how far the PR has drifted
+// PR head at GET time, so the human sees how far the PR has drifted
 // since the agent wrote the review.
 interface ReviewArtifact {
   id: string
@@ -39,7 +39,7 @@ interface ReviewArtifact {
       start_line?: number
       body: string
       severity?: string
-      // 'current' | 'moved' | 'outdated' | 'unknown' (TFAC-500).
+      // 'current' | 'moved' | 'outdated' | 'unknown'.
       freshness?: string
       // New-side position on the live head when freshness is 'moved'.
       mapped_line?: number

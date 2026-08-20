@@ -302,7 +302,7 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 	// the event shape (creator NULL) so its trigger-type CHECK holds.
 	breaker, minSuit := 3, 0.5
 	trigID := "trig-inherit-handler"
-	if err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
+	if _, err := sqlitestore.New(database).EventHandlers.Create(ctx, org, runmode.LocalDefaultTeamID, domain.EventHandler{
 		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
 		BlueprintID: "rbp-trig-inherit", BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit,
 		Enabled: true,
