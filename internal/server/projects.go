@@ -246,7 +246,7 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 				specBlueprintID = def.ID
 			}
 		}
-		id, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
+		row, createErr := tx.Projects.Create(r.Context(), orgID, teamID, domain.Project{
 			Name:                      name,
 			Description:               req.Description,
 			PinnedRepos:               pinned,
@@ -258,13 +258,9 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		if createErr != nil {
 			return createErr
 		}
-		row, getErr := tx.Projects.Get(r.Context(), orgID, id)
-		if getErr != nil || row == nil {
-			return getErr
-		}
-		rendered, getErr := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
-		if getErr != nil {
-			return getErr
+		rendered, renderErr := projectToJSON(r.Context(), tx.Repos, orgID, row, nil)
+		if renderErr != nil {
+			return renderErr
 		}
 		created = &rendered
 		return nil
@@ -890,11 +886,18 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var stored domain.Project
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.Projects.Update(r.Context(), orgID, updated)
+		var e error
+		stored, e = tx.Projects.Update(r.Context(), orgID, updated)
+		return e
 	}); err != nil {
 		if errors.Is(err, db.ErrVisibilityForbidden) {
 			forbidden(w, "you don't have permission to change this project to that visibility")
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			notFound(w, "project")
 			return
 		}
 		internalError(w, "projects", err)
@@ -911,20 +914,20 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	// the worst case is the agent missing one delta on its next turn (which
 	// a follow-up PATCH or the user's next message itself can correct).
 	queuePendingContextChanges(r.Context(), s.curatorStore, orgID, *existing, updated)
+	// Rendered from the row the write returned, not from `updated` — the merged
+	// struct is missing everything the statement decided (the restamped
+	// updated_at, the reconciled pin set) — and not from a second read, which
+	// could answer for a row that moved after the write.
 	var fresh *projectJSON
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		row, e := tx.Projects.Get(r.Context(), orgID, id)
-		if e != nil || row == nil {
-			return e
-		}
-		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, *row, nil)
+		rendered, e := projectToJSON(r.Context(), tx.Repos, orgID, stored, nil)
 		if e != nil {
 			return e
 		}
 		fresh = &rendered
 		return nil
 	}); err != nil {
-		internalError(w, "projects", fmt.Errorf("read back project %s after update: %w", id, err))
+		internalError(w, "projects", fmt.Errorf("render project %s after update: %w", id, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, fresh)

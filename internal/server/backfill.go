@@ -281,7 +281,7 @@ func (bf *backfillHandler) handleBackfill(w http.ResponseWriter, r *http.Request
 			// supersedes the classifier's vote, and showing the stale
 			// model rationale next to a human-claimed assignment would
 			// be misleading.
-			if assignErr := tx.Entities.AssignProject(r.Context(), orgID, eid, &projectID, manualAssignmentMessage); assignErr != nil {
+			if _, assignErr := tx.Entities.AssignProject(r.Context(), orgID, eid, &projectID, manualAssignmentMessage); assignErr != nil {
 				if errors.Is(assignErr, sql.ErrNoRows) {
 					f := backfillFailed(eid, httpx.ReasonNotFound, "entity not found")
 					failure = &f

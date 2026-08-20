@@ -36,9 +36,17 @@ func newProjectStore(q, _ queryer) db.ProjectStore { return &projectStore{q: q} 
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
-func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error) {
+// sqliteProjectColumns is the canonical projection of a projects row, in the
+// order scanSqliteProjectRow reads them. Every point read SELECTs it and both
+// single-row writes RETURN it, so the write shape cannot drift from the read
+// shape as columns are added.
+const sqliteProjectColumns = `id, name, description,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
+		       team_id, visibility, creator_user_id, created_at, updated_at`
+
+func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (domain.Project, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", err
+		return domain.Project{}, err
 	}
 	_ = teamID // ignored in local mode
 
@@ -47,24 +55,42 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 		id = uuid.New().String()
 	}
 	now := time.Now().UTC()
+	var created *domain.Project
 	if err := inTx(ctx, s.q, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx, `
+		// RETURNING carries the id this method minted when p had none, the
+		// team_id it pinned, and the visibility the column defaulted to —
+		// three things p cannot describe.
+		row, err := scanSqliteProjectRow(tx.QueryRowContext(ctx, `
 			INSERT INTO projects (id, name, description, jira_project_key, linear_project_key, spec_authorship_blueprint_id, team_id, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`,
+			RETURNING `+sqliteProjectColumns,
 			id, p.Name, p.Description,
 			nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
 			nullIfEmpty(p.SpecAuthorshipBlueprintID),
 			runmode.LocalDefaultTeamID,
 			now, now,
-		); err != nil {
+		))
+		if err != nil {
 			return err
 		}
-		return replacePinnedRepos(ctx, tx, id, p.PinnedRepos)
+		created = row
+		return attachProjectPinsAfterWrite(ctx, tx, created, p.PinnedRepos)
 	}); err != nil {
-		return "", err
+		return domain.Project{}, err
 	}
-	return id, nil
+	return *created, nil
+}
+
+// attachProjectPinsAfterWrite reconciles the project's pinned-repo set and
+// hangs the reconciled set on the row the write returned. The pins live in
+// their own table and are written as a set, so RETURNING cannot project them
+// and the set write has no single row to hand back — reading them here is the
+// set's own read, not a re-read of the projects row this statement produced.
+func attachProjectPinsAfterWrite(ctx context.Context, tx queryer, p *domain.Project, pins []string) error {
+	if err := replacePinnedRepos(ctx, tx, p.ID, pins); err != nil {
+		return err
+	}
+	return attachPinnedRepos(ctx, tx, []*domain.Project{p})
 }
 
 func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Project, error) {
@@ -72,9 +98,7 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		SELECT id, name, description,
-		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, visibility, creator_user_id, created_at, updated_at
+		SELECT `+sqliteProjectColumns+`
 		FROM projects WHERE id = ?
 	`, id)
 	p, err := scanSqliteProjectRow(row)
@@ -102,9 +126,7 @@ func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts)
 		return nil, 0, err
 	}
 	query := `
-		SELECT id, name, description,
-		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, visibility, creator_user_id, created_at, updated_at
+		SELECT ` + sqliteProjectColumns + `
 		FROM projects ORDER BY LOWER(name) ASC, id`
 	args := []any{}
 	if opts.Limit > 0 {
@@ -139,37 +161,41 @@ func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts)
 	return out, total, nil
 }
 
-func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) error {
+func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) (domain.Project, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Project{}, err
 	}
 	now := time.Now().UTC()
-	return inTx(ctx, s.q, func(tx queryer) error {
-		res, err := tx.ExecContext(ctx, `
+	var updated *domain.Project
+	if err := inTx(ctx, s.q, func(tx queryer) error {
+		// No row scanned means the id matched nothing — the same sql.ErrNoRows
+		// the rows-affected probe here used to synthesize, now reported by the
+		// statement that knows it.
+		row, err := scanSqliteProjectRow(tx.QueryRowContext(ctx, `
 			UPDATE projects
 			SET name = ?, description = ?,
 			    jira_project_key = ?, linear_project_key = ?,
 			    spec_authorship_blueprint_id = ?,
 			    updated_at = ?
 			WHERE id = ?
-		`,
+			RETURNING `+sqliteProjectColumns,
 			p.Name, p.Description,
 			nullIfEmpty(p.JiraProjectKey), nullIfEmpty(p.LinearProjectKey),
 			nullIfEmpty(p.SpecAuthorshipBlueprintID),
 			now, p.ID,
-		)
+		))
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n == 0 {
+		if row == nil {
 			return sql.ErrNoRows
 		}
-		return replacePinnedRepos(ctx, tx, p.ID, p.PinnedRepos)
-	})
+		updated = row
+		return attachProjectPinsAfterWrite(ctx, tx, updated, p.PinnedRepos)
+	}); err != nil {
+		return domain.Project{}, err
+	}
+	return *updated, nil
 }
 
 // ListSystem mirrors List. The project classifier consumes
@@ -217,6 +243,7 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+// BumpUpdatedAt is exempt from the returned-row rule; see the interface doc.
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err

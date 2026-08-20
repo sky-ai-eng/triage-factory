@@ -49,14 +49,14 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 
 	// 2-step blueprint with distinct, recognizable prompt bodies.
 	bpID := "freeze-bp"
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	ensureTestPrompt(t, database, domain.Prompt{ID: "freeze-p0", Name: "Step Zero", Body: "orig-0 body", Source: "user"})
 	ensureTestPrompt(t, database, domain.Prompt{ID: "freeze-p1", Name: "Step One", Body: "orig-1 body", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{"freeze-p0", "freeze-p1"}, []string{"brief-0", "brief-1"}); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{"freeze-p0", "freeze-p1"}, []string{"brief-0", "brief-1"}); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 			Source: p.Source, AllowedTools: p.AllowedTools, Model: p.Model, Brief: st.Brief,
 		}
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "freeze-bpr", BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-freeze", StepPlan: plan,
@@ -85,6 +85,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
 	// Step 0 finished with continue → ready to advance to step 1.
 	step0 := 0
@@ -101,7 +102,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	if _, err := database.Exec(`UPDATE prompts SET body = 'edited-1 body' WHERE id = 'freeze-p1'`); err != nil {
 		t.Fatalf("edit prompt body: %v", err)
 	}
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{"freeze-p0"}, []string{"brief-0"}); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{"freeze-p0"}, []string{"brief-0"}); err != nil {
 		t.Fatalf("ReplaceSteps (drop step 1): %v", err)
 	}
 

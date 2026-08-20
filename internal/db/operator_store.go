@@ -18,10 +18,17 @@ import (
 type OperatorStore interface {
 	// Add records email as an operator, idempotently (re-adding an existing
 	// operator is a no-op that succeeds). addedBy is best-effort provenance.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape: the
+	// insert is ON CONFLICT DO NOTHING so a re-add keeps the original
+	// provenance, and that returns zero rows precisely on the re-add. The CLI
+	// reports the email it was given; nothing renders the row.
 	Add(ctx context.Context, email, addedBy string) error
 
 	// Remove drops email from the operator set. removed is false when the
 	// email was not an operator (so the CLI can report "not an operator").
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Remove(ctx context.Context, email string) (removed bool, err error)
 
 	// IsOperator reports whether email is a deployment operator.

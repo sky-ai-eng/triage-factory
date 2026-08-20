@@ -179,7 +179,7 @@ func runPlacementPin(args []string) {
 	_, overrides, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
 
-	if err := overrides.Upsert(context.Background(), domain.PlacementOverride{
+	if _, err := overrides.Upsert(context.Background(), domain.PlacementOverride{
 		OrgID: orgID, KeyKind: kind, KeyValue: value, PinnedInstanceID: *instanceID,
 	}); err != nil {
 		fail("pin: %v", err)
@@ -202,7 +202,7 @@ func runPlacementReplicas(args []string) {
 	_, overrides, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
 
-	if err := overrides.Upsert(context.Background(), domain.PlacementOverride{
+	if _, err := overrides.Upsert(context.Background(), domain.PlacementOverride{
 		OrgID: orgID, KeyKind: kind, KeyValue: value, Replicas: *k,
 	}); err != nil {
 		fail("replicas: %v", err)

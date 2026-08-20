@@ -32,6 +32,19 @@ func TestBlueprintStore_SQLite_Conformance(t *testing.T) {
 	})
 }
 
+// TestBlueprintStore_SQLite_RunWriteConformance runs the shared returned-row
+// suite for the blueprint_runs writes against the SQLite impl.
+func TestBlueprintStore_SQLite_RunWriteConformance(t *testing.T) {
+	dbtest.RunBlueprintRunWriteConformance(t, func(t *testing.T) (db.BlueprintStore, string, string, string) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		blueprintID := "bp-run-" + uuid.New().String()[:8]
+		insertBlueprintForTest(t, conn, blueprintID, "Run fixture")
+		task := seedEntityEventTask(t, conn, "run-write")
+		return sqlitestore.New(conn).Blueprints, runmode.LocalDefaultOrgID, blueprintID, task.ID
+	})
+}
+
 // TestBlueprintStore_SQLite_DuplicationConformance runs the shared
 // DuplicatePrompts deep-copy suite against the SQLite impl. User prompts seed
 // via the store; system prompts (source='system', creator NULL, a system_slug)
@@ -51,7 +64,7 @@ func TestBlueprintStore_SQLite_DuplicationConformance(t *testing.T) {
 			if p.ID == "" {
 				p.ID = uuid.New().String()
 			}
-			if err := stores.Prompts.Create(ctx, org, team, p); err != nil {
+			if _, err := stores.Prompts.Create(ctx, org, team, p); err != nil {
 				t.Fatalf("create prompt: %v", err)
 			}
 			return p.ID
@@ -106,7 +119,7 @@ func insertSystemPromptForTest(t *testing.T, conn *sql.DB, p domain.Prompt) stri
 // blueprint id is the supplied id (tests reference it directly).
 func insertBlueprintForTest(t *testing.T, conn *sql.DB, id, name string) {
 	t.Helper()
-	if err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := sqlitestore.New(conn).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: id, Name: name, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint %s: %v", id, err)
@@ -152,11 +165,11 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T)
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "step-prompt-2", Name: "Step 2", Body: "do step 2", Source: "user"})
 	insertBlueprintForTest(t, conn, "blueprint-1", "My Blueprint")
 
-	if err := blueprints.ReplaceSteps(ctx, org, "blueprint-1", []string{"step-prompt-1", "step-prompt-2"}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, org, "blueprint-1", []string{"step-prompt-1", "step-prompt-2"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
-	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID:           "blueprint-run-rt",
 		BlueprintID:  "blueprint-1",
 		TaskID:       task.ID,
@@ -167,6 +180,7 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_RoundTrip(t *testing.T)
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	blueprintRunID := blueprintRunIDRow.ID
 	if blueprintRunID != "blueprint-run-rt" {
 		t.Fatalf("unexpected blueprint run id: %s", blueprintRunID)
 	}
@@ -486,7 +500,7 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 	task := seedEntityEventTask(t, conn, "blueprint-outcome")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "op-step", Name: "OP Step", Body: "x", Source: "user"})
 	insertBlueprintForTest(t, conn, "op-blueprint", "OP Blueprint")
-	if err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
+	if _, err := blueprints.ReplaceSteps(ctx, org, "op-blueprint", []string{"op-step"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	if _, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
@@ -585,13 +599,14 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "blueprint-guard")
 	insertBlueprintForTest(t, conn, "guard-blueprint", "Guard Blueprint")
 
-	blueprintRunID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	blueprintRunIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "blueprint-run-guard", BlueprintID: "guard-blueprint", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	blueprintRunID := blueprintRunIDRow.ID
 
 	changed, err := blueprints.MarkRunStatus(ctx, org, blueprintRunID, domain.BlueprintRunStatusCompleted, "", nil)
 	if err != nil {
@@ -630,13 +645,14 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 
 	task := seedEntityEventTask(t, conn, "reopen")
 	insertBlueprintForTest(t, conn, "reopen-blueprint", "Reopen Blueprint")
-	brID, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	brIDRow, err := blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "reopen-run", BlueprintID: "reopen-blueprint", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := brIDRow.ID
 
 	// A running blueprint is not re-openable (the CAS guards on status='aborted').
 	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID); err != nil || reopened {

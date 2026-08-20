@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -15,6 +17,19 @@ import (
 // TestJiraAppsStore_Postgres_UpsertGetDelete exercises Upsert + Get + Delete
 // through the app pool with matching claims. RLS gates writes via
 // tf.user_is_org_admin(org_id); the upsert replaces in place on conflict.
+// TestJiraAppsStore_Postgres_ReturnedRowConformance runs the shared
+// returned-row suite against the Postgres impl, on the app pool so the
+// upsert's UPDATE arm has to see the row it replaces.
+func TestJiraAppsStore_Postgres_ReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunJiraAppsReturnedRowConformance(t, func(t *testing.T) (db.JiraAppsStore, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
+		return pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).JiraApps, orgID, userID
+	})
+}
+
 func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -33,7 +48,7 @@ func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 			t.Error("GetForOrg on empty table returned non-nil")
 		}
 
-		if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+		if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           "atl-client-1",
 			ClientSecretRef:    "jira_oauth_client_secret",
@@ -55,7 +70,7 @@ func TestJiraAppsStore_Postgres_UpsertGetDelete(t *testing.T) {
 		firstRegistered := got.RegisteredAt
 
 		// Replace in place; registered_at preserved.
-		if err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
+		if _, err := stores.JiraApps.UpsertForOrg(ctx, domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           "atl-client-2",
 			ClientSecretRef:    "jira_oauth_client_secret",

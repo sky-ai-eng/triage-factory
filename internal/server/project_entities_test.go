@@ -17,28 +17,30 @@ import (
 func TestProjectEntities_FiltersByProjectAndState(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
-	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	pid := created.ID
+	created2, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	other := created2.ID
 
 	mine := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "mine")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, mine.ID, &pid, "rationale-1"); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, mine.ID, &pid, "rationale-1"); err != nil {
 		t.Fatal(err)
 	}
 	closedMine := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "closed-mine")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID, &pid, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedMine.ID); err != nil {
 		t.Fatal(err)
 	}
 	otherProj := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "other-project")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, otherProj.ID, &other, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, otherProj.ID, &other, ""); err != nil {
 		t.Fatal(err)
 	}
 	unassigned := mustEntity(t, s.db, "github", "owner/repo#4", "pr", "unassigned")

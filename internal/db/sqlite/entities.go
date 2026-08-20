@@ -324,43 +324,59 @@ func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID,
 	}, true, nil
 }
 
-func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
+// scanWrittenEntity decodes an id-keyed UPDATE … RETURNING. scanEntityRow maps
+// a scanned-nothing to (nil, nil) — the read convention — so the write layer
+// turns that back into sql.ErrNoRows, this store's miss sentinel for an id a
+// caller resolved and then wrote against.
+func scanWrittenEntity(row *sql.Row) (domain.Entity, error) {
+	e, err := scanEntityRow(row)
+	if err != nil {
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	if e == nil {
+		return domain.Entity{}, sql.ErrNoRows
+	}
+	return *e, nil
+}
+
+func (s *entityStore) UpdateSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return domain.Entity{}, err
+	}
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET snapshot_json = ?, last_polled_at = ? WHERE id = ?
-	`, snapshotJSON, time.Now().UTC(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		snapshotJSON, time.Now().UTC(), id))
 }
 
-func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) error {
+func (s *entityStore) PatchSnapshot(ctx context.Context, orgID, id, snapshotJSON string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET snapshot_json = ? WHERE id = ?`, snapshotJSON, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET snapshot_json = ? WHERE id = ? RETURNING `+entitySelectCols,
+		snapshotJSON, id))
 }
 
-func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) error {
+func (s *entityStore) UpdateTitle(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET title = ? WHERE id = ?`, title, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET title = ? WHERE id = ? RETURNING `+entitySelectCols, title, id))
 }
 
-func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, description string) error {
+func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, description string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET description = ? WHERE id = ?`, description, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET description = ? WHERE id = ? RETURNING `+entitySelectCols, description, id))
 }
 
-func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
 	var projectArg any
 	if projectID != nil && *projectID != "" {
@@ -370,51 +386,40 @@ func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, proje
 	if rationale != "" {
 		rationaleArg = rationale
 	}
-	res, err := s.q.ExecContext(ctx, `
+	// RETURNING answers "did this land" and "what does the row say now" in one
+	// statement, which retires the rows-affected probe and the existence
+	// SELECT that used to follow it.
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities
 		SET project_id = ?,
 		    classification_rationale = ?,
 		    classified_at = CURRENT_TIMESTAMP
 		WHERE id = ?
-	`, projectArg, rationaleArg, id)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		var exists int
-		err := s.q.QueryRowContext(ctx, `SELECT 1 FROM entities WHERE id = ?`, id).Scan(&exists)
-		if err == sql.ErrNoRows {
-			return sql.ErrNoRows
-		}
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+		RETURNING `+entitySelectCols,
+		projectArg, rationaleArg, id))
 }
 
-func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) error {
+func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ?
-	`, time.Now().UTC(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		time.Now().UTC(), id))
 }
 
-func (s *entityStore) Close(ctx context.Context, orgID, id string) error {
+// Close returns nil when the state='active' guard declined — the entity was
+// already closed, or no row carries the id. Both are the idempotent no-op the
+// method exists for, and neither is an error.
+func (s *entityStore) Close(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	return scanEntityRow(s.q.QueryRowContext(ctx, `
 		UPDATE entities SET state = 'closed', closed_at = ? WHERE id = ? AND state = 'active'
-	`, time.Now().UTC(), id)
-	return err
+		RETURNING `+entitySelectCols,
+		time.Now().UTC(), id))
 }
 
 func (s *entityStore) Reactivate(ctx context.Context, orgID, id string) (bool, error) {
@@ -552,6 +557,7 @@ func updateSnapshotCAS(ctx context.Context, q queryer, id, snapshotJSON string, 
 // MarkPolledSystem stamps last_polled_at alone — no snapshot, no poll_seq
 // bump. See the interface doc: it records that the row was read from the
 // source without anything having been diffed off it.
+// MarkPolledSystem is exempt from the returned-row rule; see the interface doc.
 func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -625,11 +631,11 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 	return survivor, merged, err
 }
 
-func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) error {
+func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error) {
 	return s.UpdateTitle(ctx, orgID, id, title)
 }
 
-func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) error {
+func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error) {
 	return s.UpdateDescription(ctx, orgID, id, description)
 }
 
@@ -637,26 +643,26 @@ func (s *entityStore) UpdateDescriptionSystem(ctx context.Context, orgID, id, de
 // (see the interface doc) — SQLite has one connection and no auth concept,
 // so this is inlined here rather than delegating to a shared non-System
 // method the way the other `...System` variants in this file do.
-func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) error {
+func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return domain.Entity{}, err
 	}
-	_, err := s.q.ExecContext(ctx, `UPDATE entities SET url = ? WHERE id = ?`, url, id)
-	return err
+	return scanWrittenEntity(s.q.QueryRowContext(ctx,
+		`UPDATE entities SET url = ? WHERE id = ? RETURNING `+entitySelectCols, url, id))
 }
 
-func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) error {
+func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
 	return s.AssignProject(ctx, orgID, id, projectID, rationale)
 }
 
-func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) error {
+func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error) {
 	return s.MarkClosed(ctx, orgID, id)
 }
 
 // CloseSystem mirrors Close (active→closed transition). The router's
 // entity-lifecycle path consumes this through the admin pool in
 // Postgres; SQLite collapses to the non-System variant.
-func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) error {
+func (s *entityStore) CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error) {
 	return s.Close(ctx, orgID, id)
 }
 

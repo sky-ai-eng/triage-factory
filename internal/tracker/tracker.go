@@ -287,7 +287,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// so it doesn't sit in the active refresh set forever (Phase 3
 			// won't emit a merged/closed event because prev==curr).
 			if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					trackerLog.Error("mark entity closed on discovery failed", "source_id", sid, "error", err)
 				}
 			} else if snap.Author != username {
@@ -318,7 +318,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		} else {
 			// Update title if changed.
 			if entity.Title != snap.Title {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Title)
 			}
 			// Reactivate if a previously-closed entity reappears as open
 			// (e.g., reopened PR).
@@ -547,10 +547,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 				trackerLog.WarnContext(ctx, "seed stub snapshot CAS lost race, skipping", "source_id", item.entity.SourceID)
 			}
 			if item.entity.Title != newSnap.Title {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 			}
 			if newSnap.Merged || newSnap.State == "CLOSED" || newSnap.State == "MERGED" {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, item.entity.ID); err != nil {
 					trackerLog.ErrorContext(ctx, "mark stub closed failed", "source_id", item.entity.SourceID, "error", err)
 				}
 			}
@@ -587,7 +587,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// mirroring, so a failure here costs a stale string until the next
 		// cycle, never an event.
 		if item.entity.Title != newSnap.Title {
-			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
+			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, item.entity.ID, newSnap.Title)
 		}
 	}
 
@@ -1130,21 +1130,21 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
 			}
 			if state.Description != "" {
-				if err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
+				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
 					trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
 				}
 			}
 			if terminal(snap) {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, entity.ID); err != nil {
 					trackerLog.Error("mark entity closed on discovery failed", "source_id", snap.Key, "error", err)
 				}
 			}
 		} else {
 			if entity.Title != snap.Summary {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
 			}
 			if entity.Description != state.Description {
-				_ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
+				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
 			}
 			// Reactivate if a previously-closed issue reappears as open.
 			if !terminal(snap) && entity.State == "closed" {
@@ -1209,10 +1209,10 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 				trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
 			}
 			if e.Title != newSnap.Summary {
-				_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 			}
 			if terminal(newSnap) {
-				if err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
+				if _, err := t.entities.MarkClosedSystem(context.Background(), orgID, e.ID); err != nil {
 					trackerLog.Error("mark jira stub closed failed", "source_id", e.SourceID, "error", err)
 				}
 			}
@@ -1274,7 +1274,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		// Best-effort, outside the transaction: display-only mirroring, so
 		// a failure costs a stale title until the next cycle, never an event.
 		if e.Title != newSnap.Summary {
-			_ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
+			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
 		}
 		// Description intentionally not updated here — batchFetchJira
 		// excludes the description field to save bandwidth, so newState's

@@ -53,6 +53,96 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("team_archive_and_restore_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on the two guarded team transitions. Role
+		// is blanked on both sides of the comparison: it is the caller's own
+		// membership, which Get resolves separately and no teams column
+		// carries, so it is not part of what a write returns.
+		stores, ids := factory(t)
+		read := func() (*domain.Team, error) {
+			got, err := stores.Teams.GetSystem(ctx, ids.OrgID, ids.TeamID)
+			if err != nil || got == nil {
+				return got, err
+			}
+			bare := *got
+			bare.Role = ""
+			return &bare, nil
+		}
+
+		archived, err := stores.Teams.Archive(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("Archive: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.Archive", archived, read)
+		if archived.DeletedAt == nil {
+			t.Error("Archive returned a row with no deleted_at, the column it stamps")
+		}
+		if _, err := stores.Teams.Archive(ctx, ids.TeamID); !errors.Is(err, db.ErrTeamNotFound) {
+			t.Errorf("re-archive: got %v, want db.ErrTeamNotFound", err)
+		}
+
+		restored, err := stores.Teams.Restore(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("Restore: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.Restore", restored, read)
+		if restored.DeletedAt != nil {
+			t.Errorf("Restore returned deleted_at %v, want it cleared", restored.DeletedAt)
+		}
+		if _, err := stores.Teams.Restore(ctx, ids.TeamID); !errors.Is(err, db.ErrTeamNotFound) {
+			t.Errorf("re-restore: got %v, want db.ErrTeamNotFound", err)
+		}
+	})
+
+	t.Run("team_settings_writes_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on the two team_settings writes: what the
+		// write handed back is what a point read finds. SetDailyCostCapSystem
+		// is the case it is for — it touches one column of a row whose other
+		// twelve come from schema defaults, so nothing the caller holds
+		// describes what landed.
+		stores, ids := factory(t)
+		read := func() (*domain.TeamSettings, error) {
+			set, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+			if err != nil {
+				return nil, err
+			}
+			return &set, nil
+		}
+
+		saved, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, domain.TeamSettings{
+			JiraProjects: []string{"RET"}, AIReprioritizeThreshold: 4,
+			AIPreferenceUpdateInterval: 12, DefaultModel: "opus",
+			PermissionAbsentGraceMS: 1000,
+			BranchTemplate:          "ret/<ticket-id>",
+			ReviewPosture:           domain.ReviewPostureAutoUnlessBlocking,
+			BaseBranchPushPolicy:    domain.BaseBranchPushManualOnly,
+		})
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.UpdateSettings", saved, read)
+
+		capped, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 9.5)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetDailyCostCapSystem", capped, read)
+		// The cap moved and everything the earlier save wrote is still there —
+		// the whole reason a one-column write hands back the whole row.
+		if capped.MaxDailyCostUSD != 9.5 || capped.DefaultModel != "opus" {
+			t.Errorf("SetDailyCostCapSystem returned %+v, want the new cap over the saved settings", capped)
+		}
+
+		cleared, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0)
+		if err != nil {
+			t.Fatalf("SetDailyCostCapSystem (clear): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Teams.SetDailyCostCapSystem (clear)", cleared, read)
+		if cleared.MaxDailyCostUSD != 0 {
+			t.Errorf("clearing the cap returned %v, want 0 (no cap)", cleared.MaxDailyCostUSD)
+		}
+	})
+
 	t.Run("OrgSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.OrgSettings{
@@ -588,7 +678,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
 			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
 		}
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -609,7 +699,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 		// Fresh team, no settings row yet → the partial INSERT must materialize the
 		// row from defaults + the cap, touching only max_daily_cost_usd.
-		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 42.50); err != nil {
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 42.50); err != nil {
 			t.Fatalf("SetDailyCostCapSystem (insert): %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -629,7 +719,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// A read-modify-write team-settings save that changes another field but not
 		// the cap must preserve it — the team-admin path can never alter the cap.
 		got.DefaultModel = "haiku"
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
 			t.Fatalf("UpdateSettings (rmw): %v", err)
 		}
 		after, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -644,7 +734,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// ≤ 0 clears the cap (stored NULL → read back as 0 / no cap).
-		if err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0); err != nil {
+		if _, err := stores.Teams.SetDailyCostCapSystem(ctx, ids.TeamID, 0); err != nil {
 			t.Fatalf("SetDailyCostCapSystem (clear): %v", err)
 		}
 		cleared, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
@@ -681,7 +771,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AIPreferenceUpdateInterval: 20,
 			DefaultModel:               "sonnet",
 		}
-		if err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
 		}
 		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)

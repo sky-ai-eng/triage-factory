@@ -67,5 +67,9 @@ type JiraStatusRulesStore interface {
 	// slice deletes every row for the team. Postgres routes through
 	// the app pool (jira_rules_insert / _update / _delete RLS gate
 	// writes by team admin).
+	//
+	// Exempt from the returned-row rule: it reconciles a team's whole rule set
+	// in one transaction, so there is no single row a return value could name.
+	// What it wrote is read back through the store's list read.
 	ReplaceForTeam(ctx context.Context, teamID string, rules []domain.JiraProjectStatusRules) error
 }

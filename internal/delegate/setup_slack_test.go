@@ -181,20 +181,20 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 	stores := sqlitestore.New(database)
 
 	bpID := "sbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("create blueprint: %v", err)
 	}
 	promptID := suffix + "-p0"
 	ensureTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	plan := []domain.BlueprintPlanStep{{
 		StepIndex: 0, PromptID: promptID, PromptName: promptID, PromptBody: "b", Source: "user",
 	}}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "sbpr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		StepPlan: plan,
@@ -202,6 +202,7 @@ func slackBlueprintFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, stri
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 
 	conv := domain.Conversation{ID: "srun-" + suffix, TaskID: task.ID, BlueprintRunID: brID}
 	return s, database, brID, task, conv

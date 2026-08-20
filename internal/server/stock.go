@@ -910,7 +910,8 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 		}
 	}
 	if err := s.tx.WithTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
-		return tx.Entities.MarkClosed(r.Context(), b.orgID, entity.ID)
+		_, e := tx.Entities.MarkClosed(r.Context(), b.orgID, entity.ID)
+		return e
 	}); err != nil {
 		stockLog.Error("stock: close failed", "issue", issueKey, "entity", entity.ID, "error", err)
 		return stockFailed(issueKey, httpx.ReasonInternal, "could not close the ticket"+httpx.LocalDetail(err))

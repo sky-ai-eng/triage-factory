@@ -24,6 +24,11 @@ import (
 // The manifest flow works in both modes. The SQLite impl reads/writes
 // the org_github_apps table directly (the table exists in the SQLite
 // baseline schema).
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: CreateForOrg, SetActive,
+// UpsertInstallation, SetInstallationSuspension, MarkInstallationRemoved. Each
+// is a genuine single-row insert/update/upsert, not one of the exempt buckets
+// — the ticket tracks the conversion.
 type GitHubAppsStore interface {
 	// GetForOrg returns the org's registered GitHub App, or nil if
 	// the org has no App registration (uses the deployment default
@@ -73,6 +78,8 @@ type GitHubAppsStore interface {
 	// but a lingering installation row is a harmless orphan once the
 	// registration row is gone (the resolver short-circuits on the absent App
 	// before ever reading installations).
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	DeleteForOrg(ctx context.Context, orgID string) error
 
 	// ListInstallationsForOrg returns the org's active App
@@ -166,6 +173,10 @@ type GitHubAppsStore interface {
 	// verification can run before the bit is flipped (TFAC-328). The poller
 	// only invokes this for active Apps (its own gate), so widening here
 	// doesn't make a staged App poll.
+	//
+	// Exempt from the returned-row rule: it reconciles a whole installation
+	// set from a provider enumeration, so there is no single row a return
+	// value could name.
 	BackfillInstallationsFromAPI(ctx context.Context, orgID string) error
 }
 

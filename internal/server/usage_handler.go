@@ -420,18 +420,15 @@ func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Write, then read the value back (both admin-pool) so the echo reflects what
-	// actually landed in team_settings rather than this caller's request body. The
-	// read-back is what keeps two org admins racing on the same team's cap
-	// convergent — each echoes the current DB state, not its own write — instead of
-	// diverging until the next poll. capUSD <= 0 stored NULL, which reads back as 0
-	// (no cap) → a null echo.
+	// The write returns the settings row it persisted, so the echo reflects what
+	// actually landed in team_settings rather than this caller's request body.
+	// That is what keeps two org admins racing on the same team's cap
+	// convergent — each echoes the state its own statement produced, not its own
+	// request — instead of diverging until the next poll. capUSD <= 0 stored
+	// NULL, which comes back as 0 (no cap) → a null echo.
 	var stored *float64
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.Teams.SetDailyCostCapSystem(r.Context(), teamID, capUSD); e != nil {
-			return e
-		}
-		set, e := tx.Teams.GetSettingsSystem(r.Context(), teamID)
+		set, e := tx.Teams.SetDailyCostCapSystem(r.Context(), teamID, capUSD)
 		if e != nil {
 			return e
 		}

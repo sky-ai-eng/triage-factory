@@ -54,6 +54,10 @@ type SealedBundle struct {
 // Postgres-only in substance: local mode reads the live secret store
 // directly, so the SQLite schema has no claim_credentials table and the
 // SQLite impl refuses with ErrNotApplicableInLocal.
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: Put. Each is a genuine
+// single-row insert/update/upsert, not one of the exempt buckets — the ticket
+// tracks the conversion.
 type ClaimCredentialsStore interface {
 	// Put seals sealed (already-encrypted by the caller via credseal) into
 	// claim_credentials for conversationID's active claim, replacing any existing

@@ -139,7 +139,7 @@ func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredP
 		return false, err
 	}
 	if snap.Merged || snap.State == "CLOSED" || snap.State == "MERGED" {
-		if err := t.entities.MarkClosedSystem(ctx, t.orgID, entity.ID); err != nil {
+		if _, err := t.entities.MarkClosedSystem(ctx, t.orgID, entity.ID); err != nil {
 			return false, err
 		}
 	}

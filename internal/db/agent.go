@@ -118,6 +118,16 @@ type MessageWindow struct {
 	Limit    int
 }
 
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: Complete, CompleteSystem,
+// CompleteForClaimSystem, SetSession, SetSessionSystem,
+// SetSessionForClaimSystem, SetWorktreePath, SetWorktreePathSystem,
+// SetWorktreePathForClaimSystem, SetExecutorSystem, SetExecutorForClaimSystem,
+// SetClaimPhaseSystem, SetActiveClaimPhaseSystem,
+// RecordClaimSandboxStatsSystem, CompactForClaimSystem,
+// SettleCompactionRequestForClaimSystem. Each is a genuine single-row
+// insert/update/upsert, not one of the exempt buckets — the ticket tracks the
+// conversion.
 type ConversationStore interface {
 	// --- Lifecycle ---
 
@@ -708,6 +718,10 @@ type ConversationStore interface {
 	// statement rather than flush-then-stamp because a crash between the
 	// two would leave a delivered row whose provenance was lost, and
 	// assembly would then render it as an ordinary user turn.
+	//
+	// Exempt from the returned-row rule: it flips a batch of pending-input
+	// rows delivered in one statement, so there is no single row a return
+	// value could name.
 	MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error
 
 	// CompactForClaimSystem commits one compaction atomically: optionally

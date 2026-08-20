@@ -37,10 +37,10 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "orphan-atomic")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "oa-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "oa-bp", "Orphan Atomic BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "oa-bp", []string{"oa-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "oa-bp", []string{"oa-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "oa-br", BlueprintID: "oa-bp", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-oa",
@@ -48,6 +48,7 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "oa-child", TaskID: task.ID, PromptID: "oa-p0", Status: "running",
@@ -105,10 +106,10 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "orphan-finish")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "of-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "of-bp", "Orphan Finish BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "of-bp", []string{"of-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "of-bp", []string{"of-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "of-br", BlueprintID: "of-bp", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: "/tmp/wt-of",
@@ -116,6 +117,7 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "of-child", TaskID: task.ID, PromptID: "of-p0", Status: "completed",
@@ -154,16 +156,17 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	taskA := seedEntityEventTask(t, conn, "recon-a")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ra-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "ra-bp", "Recon A BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "ra-bp", []string{"ra-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "ra-bp", []string{"ra-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps A: %v", err)
 	}
-	brA, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "ra-br", BlueprintID: "ra-bp", TaskID: taskA.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-ra",
 	})
 	if err != nil {
 		t.Fatalf("CreateRun A: %v", err)
 	}
+	brA := created.ID
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "ra-child", TaskID: taskA.ID, PromptID: "ra-p0", Status: "running",
@@ -203,16 +206,17 @@ func TestReconcileOrphanedConversations(t *testing.T) {
 	taskB := seedEntityEventTask(t, conn, "recon-b")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "rb-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "rb-bp", "Recon B BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "rb-bp", []string{"rb-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "rb-bp", []string{"rb-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps B: %v", err)
 	}
-	brB, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created2, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "rb-br", BlueprintID: "rb-bp", TaskID: taskB.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-rb",
 	})
 	if err != nil {
 		t.Fatalf("CreateRun B: %v", err)
 	}
+	brB := created2.ID
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "rb-child", TaskID: taskB.ID, PromptID: "rb-p0", Status: "running",
 		Model: "claude-sonnet-4-6", BlueprintRunID: brB, BlueprintStepIndex: &step0,
@@ -282,16 +286,17 @@ func TestReconcileOrphanedConversations_HealsClaimDesyncs(t *testing.T) {
 	task := seedEntityEventTask(t, conn, "desync")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ds-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "ds-bp", "Desync BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "ds-bp", []string{"ds-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "ds-bp", []string{"ds-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "ds-br", BlueprintID: "ds-bp", TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning, WorktreePath: "/tmp/wt-ds",
 	})
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	step0 := 0
 	seedChild := func(id, status string) {
 		t.Helper()
@@ -413,12 +418,12 @@ func TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus(t *te
 	task := seedEntityEventTask(t, conn, "stamp-shape")
 	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "ss-p0", Name: "p0", Body: "b", Source: "user"})
 	insertBlueprintForTest(t, conn, "ss-bp", "Stamp Shape BP")
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, "ss-bp", []string{"ss-p0"}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, "ss-bp", []string{"ss-p0"}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	newRun := func(id string) string {
 		t.Helper()
-		brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+		created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 			ID: id, BlueprintID: "ss-bp", TaskID: task.ID,
 			TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 			WorktreePath: "/tmp/wt-" + id,
@@ -426,6 +431,7 @@ func TestReconcileOrphanedConversations_MintCrashStampMatchesMarkRunStatus(t *te
 		if err != nil {
 			t.Fatalf("CreateRun %s: %v", id, err)
 		}
+		brID := created.ID
 		return brID
 	}
 	completedAtText := func(brID string) string {

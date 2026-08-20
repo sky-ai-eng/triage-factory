@@ -30,6 +30,19 @@ func NewPlacementOverrideStore(admin *sql.DB) db.PlacementOverrideStore {
 
 var _ db.PlacementOverrideStore = (*placementOverrideStore)(nil)
 
+// pgPlacementOverrideColumns is the canonical projection of a
+// placement_overrides row, in the order scanPlacementOverride reads them. Both
+// reads SELECT it and Upsert RETURNs it, so the write shape cannot drift from
+// the read shape. COALESCE keeps a NULL pin scanning as the empty string the
+// domain type carries.
+const pgPlacementOverrideColumns = `org_id, key_kind, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at`
+
+func scanPlacementOverride(scan func(...any) error) (domain.PlacementOverride, error) {
+	var ov domain.PlacementOverride
+	err := scan(&ov.OrgID, &ov.KeyKind, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
+	return ov, err
+}
+
 func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, keyValue string) (*domain.PlacementOverride, error) {
 	var ov domain.PlacementOverride
 	err := s.admin.QueryRowContext(ctx, `
@@ -48,7 +61,7 @@ func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, keyVal
 
 func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]domain.PlacementOverride, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT org_id, key_kind, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at
+		SELECT `+pgPlacementOverrideColumns+`
 		FROM placement_overrides
 		WHERE org_id = $1
 		ORDER BY key_kind, key_value
@@ -59,8 +72,8 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 	defer rows.Close()
 	var out []domain.PlacementOverride
 	for rows.Next() {
-		var ov domain.PlacementOverride
-		if err := rows.Scan(&ov.OrgID, &ov.KeyKind, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt); err != nil {
+		ov, err := scanPlacementOverride(rows.Scan)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, ov)
@@ -68,16 +81,20 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 	return out, rows.Err()
 }
 
-func (s *placementOverrideStore) Upsert(ctx context.Context, ov domain.PlacementOverride) error {
-	_, err := s.admin.ExecContext(ctx, `
+func (s *placementOverrideStore) Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error) {
+	stored, err := scanPlacementOverride(s.admin.QueryRowContext(ctx, `
 		INSERT INTO placement_overrides (org_id, key_kind, key_value, pinned_instance_id, replicas, updated_at)
 		VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())
 		ON CONFLICT (org_id, key_kind, key_value) DO UPDATE SET
 			pinned_instance_id = EXCLUDED.pinned_instance_id,
 			replicas           = EXCLUDED.replicas,
 			updated_at         = now()
-	`, ov.OrgID, ov.KeyKind, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas)
-	return wrapAdminPoolPermErr(err, "placement_overrides.Upsert")
+		RETURNING `+pgPlacementOverrideColumns,
+		ov.OrgID, ov.KeyKind, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas).Scan)
+	if err != nil {
+		return domain.PlacementOverride{}, wrapAdminPoolPermErr(err, "placement_overrides.Upsert")
+	}
+	return stored, nil
 }
 
 func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, keyValue string) (bool, error) {

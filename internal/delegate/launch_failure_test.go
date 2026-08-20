@@ -51,14 +51,14 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	}
 
 	bpID := "lfbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	promptID := "lfp-" + suffix
 	ensureTestPrompt(t, database, domain.Prompt{ID: promptID, Name: promptID, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 
@@ -68,7 +68,7 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	if err := os.MkdirAll(wt, 0o755); err != nil {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
-	brID, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+	created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
 		ID: "lfbr-" + suffix, BlueprintID: bpID, TaskID: task.ID,
 		TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
 		WorktreePath: wt,
@@ -79,6 +79,7 @@ func newLaunchFixture(t *testing.T, suffix string) *launchFixture {
 	if err != nil {
 		t.Fatalf("CreateRun: %v", err)
 	}
+	brID := created.ID
 	br, err := stores.Blueprints.GetRunSystem(ctx, org, brID)
 	if err != nil || br == nil {
 		t.Fatalf("GetRunSystem: (%v, %v)", br, err)

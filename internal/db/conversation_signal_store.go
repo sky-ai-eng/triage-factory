@@ -41,6 +41,9 @@ type ConversationSignalStore interface {
 	// Ack marks a signal applied (or resolved gone/stale). Idempotent: a
 	// signal that's already acked is left untouched, never an error —
 	// duplicate signals are legal (see the ticket's idempotency decision).
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping.
+	// The ack retires a signal the caller has already consumed.
 	Ack(ctx context.Context, id int64, result string) error
 
 	// AckStatus polls one signal's ack state — the waiting control pod's

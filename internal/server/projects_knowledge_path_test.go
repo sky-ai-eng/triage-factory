@@ -34,8 +34,9 @@ func TestProjectKnowledge_PercentNamesRoundTrip(t *testing.T) {
 	t.Setenv("HOME", home)
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	created, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Project{Name: "percent-names"})
+	id := created.ID
 
 	uploads := map[string][]byte{
 		"100%.md":          []byte("# hundred percent\n"),
@@ -90,8 +91,9 @@ func TestProjectKnowledge_EncodedSlashResolvesNothing(t *testing.T) {
 	t.Setenv("HOME", home)
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	created, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Project{Name: "encoded-slash"})
+	id := created.ID
 
 	if rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
 		"b.md": []byte("secret-ish\n"),

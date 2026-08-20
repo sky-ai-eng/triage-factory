@@ -31,9 +31,16 @@ type PlacementOverrideStore interface {
 	// Upsert writes ov wholesale, keyed on (OrgID, KeyKind, KeyValue),
 	// stamping updated_at. The operator write path (CLI); never on the
 	// executor's enqueue path.
-	Upsert(ctx context.Context, ov domain.PlacementOverride) error
+	//
+	// Returns the persisted row, read off RETURNING on the write statement
+	// itself rather than from a follow-up SELECT and projecting Get's column
+	// list and scanner. ov is an input: it carries no updated_at, and an empty
+	// PinnedInstanceID stores NULL rather than the empty string it was handed.
+	Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error)
 
 	// Delete removes the override for (orgID, keyKind, keyValue). matched is
 	// false when no such row existed.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Delete(ctx context.Context, orgID, keyKind, keyValue string) (matched bool, err error)
 }

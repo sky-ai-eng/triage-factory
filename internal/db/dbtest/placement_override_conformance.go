@@ -22,6 +22,39 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("Upsert_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard: what the write handed back is what a point
+		// read finds. ov carries no updated_at, and the empty pin it is handed
+		// is stored as NULL — the row and the argument disagree by design.
+		store, orgID := mk(t)
+		read := func() (*domain.PlacementOverride, error) {
+			return store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/ret")
+		}
+
+		first, err := store.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/ret", Replicas: 2,
+		})
+		if err != nil {
+			t.Fatalf("Upsert (insert): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (insert)", first, read)
+		if first.UpdatedAt.IsZero() || first.PinnedInstanceID != "" {
+			t.Errorf("Upsert returned %+v, want a stamped updated_at and no pin", first)
+		}
+
+		replaced, err := store.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/ret",
+			PinnedInstanceID: "exec-9", Replicas: 5,
+		})
+		if err != nil {
+			t.Fatalf("Upsert (replace): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (replace)", replaced, read)
+		if replaced.PinnedInstanceID != "exec-9" || replaced.Replicas != 5 {
+			t.Errorf("Upsert (replace) returned %+v, want the replaced pin and replica count", replaced)
+		}
+	})
+
 	t.Run("absent_get_is_nil_not_error", func(t *testing.T) {
 		store, orgID := mk(t)
 		ov, err := store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/ghost")
@@ -36,7 +69,7 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Run("upsert_pin_roundtrips", func(t *testing.T) {
 		store, orgID := mk(t)
 		want := domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/web", PinnedInstanceID: "exec-7"}
-		if err := store.Upsert(ctx, want); err != nil {
+		if _, err := store.Upsert(ctx, want); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/web")
@@ -54,12 +87,12 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Run("upsert_replaces_wholesale", func(t *testing.T) {
 		store, orgID := mk(t)
 		key := "acme/mono"
-		if err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "exec-1"}); err != nil {
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "exec-1"}); err != nil {
 			t.Fatalf("upsert pin: %v", err)
 		}
 		// Re-upsert the same key with a replica count and no pin — must
 		// replace, not merge (pin cleared, replicas set).
-		if err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, Replicas: 3}); err != nil {
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, Replicas: 3}); err != nil {
 			t.Fatalf("upsert replicas: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, key)
@@ -76,9 +109,9 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 
 	t.Run("list_is_org_scoped_and_ordered", func(t *testing.T) {
 		store, orgID := mk(t)
-		_ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "b/two", Replicas: 2})
-		_ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "a/one", PinnedInstanceID: "x"})
-		_ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindProject, KeyValue: "PROJ", Replicas: 1})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "b/two", Replicas: 2})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "a/one", PinnedInstanceID: "x"})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindProject, KeyValue: "PROJ", Replicas: 1})
 
 		list, err := store.List(ctx, orgID)
 		if err != nil {
@@ -100,7 +133,7 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Run("delete_reports_matched_and_is_idempotent", func(t *testing.T) {
 		store, orgID := mk(t)
 		key := "acme/del"
-		_ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "z"})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "z"})
 
 		matched, err := store.Delete(ctx, orgID, domain.PlacementKindRepo, key)
 		if err != nil || !matched {

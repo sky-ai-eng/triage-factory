@@ -32,6 +32,10 @@ import (
 // aggregate that can't be computed under any single user's RLS view, so it
 // routes through the admin pool like the other `...System`-suffixed methods
 // elsewhere in this package (cf. PromptStore.IncrementUsageSystem).
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: Delist, Relist, Vote,
+// RecordInstall. Each is a genuine single-row insert/update/upsert, not one of
+// the exempt buckets — the ticket tracks the conversion.
 type MarketplaceStore interface {
 	// Publish creates a new listing plus its v1 version row. l.ID is
 	// ignored — the store mints the id and returns it. l.CurrentVersion is
@@ -106,6 +110,8 @@ type MarketplaceStore interface {
 
 	// Unvote removes userID's vote on listingID, if any. Removing a vote
 	// that doesn't exist is a no-op, not an error.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Unvote(ctx context.Context, orgID, listingID, userID string) error
 
 	// RecordInstall appends an audit row for a "copy to my team" install —
@@ -170,5 +176,8 @@ type MarketplaceStore interface {
 	// pool — see the interface doc comment. Called by the multi-mode-only
 	// marketplacestats.Manager off the system:poll: sentinel, never from a
 	// request handler.
+	//
+	// Exempt from the returned-row rule: it recomputes aggregates across the
+	// whole listing set, so there is no single row a return value could name.
 	RecomputeStatsSystem(ctx context.Context, orgID string) error
 }

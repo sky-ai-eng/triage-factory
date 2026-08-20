@@ -91,6 +91,10 @@ type PendingFiringsStore interface {
 	// retried by a future drain or the periodic sweeper. Guarded by
 	// status='draining' so it's a no-op on a row that's since reached a
 	// terminal state some other way.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping —
+	// it drops a lease so another pass can take the row, and the releasing
+	// caller is done with it.
 	Release(ctx context.Context, orgID string, firingID int64) error
 
 	// RequeueStaleDraining releases every 'draining' row whose claim was
@@ -114,6 +118,10 @@ type PendingFiringsStore interface {
 	// status='draining' — only a row PopForTask actually claimed can be
 	// resolved this way — so a stray call against a 'pending' or already-
 	// terminal row is a no-op rather than a silent double-transition.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping.
+	// The row is retired by the flip and read again only by the resolver's
+	// next pass.
 	MarkFired(ctx context.Context, orgID string, firingID int64, blueprintRunID string) error
 
 	// MarkSkipped transitions a 'draining' firing to 'skipped_stale'
@@ -122,6 +130,9 @@ type PendingFiringsStore interface {
 	// Transient fire-time failures release back to 'pending' via Release
 	// instead. Skipping doesn't halt the drain loop — the next pending
 	// firing for the task is still considered.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
+	// same as MarkFired.
 	MarkSkipped(ctx context.Context, orgID string, firingID int64, reason string) error
 
 	// HasPendingForTask returns true iff the task has any

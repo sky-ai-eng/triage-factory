@@ -180,7 +180,7 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 		return fmt.Errorf("close phase: %w", closeErr)
 	}
 	if terminate {
-		if err := r.entities.CloseSystem(ctx, orgID, entityID); err != nil {
+		if _, err := r.entities.CloseSystem(ctx, orgID, entityID); err != nil {
 			lifecycleLog.Error("entity close failed", "entity_id", entityID, "error", err)
 			disp.Disposition = events.DispositionError
 			return fmt.Errorf("close entity: %w", err)

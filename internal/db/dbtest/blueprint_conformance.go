@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -28,6 +29,71 @@ type BlueprintStoreFactory func(t *testing.T) (store db.BlueprintStore, orgID, t
 // knowing each backend's prompt-insert shape.
 type PromptSeederForBlueprints func(t *testing.T, idHint string) string
 
+// BlueprintRunWriteFactory is what a per-backend test file hands to
+// RunBlueprintRunWriteConformance. A blueprint_runs row FKs both a blueprint
+// and a task, and a task hangs off an entity and an event, so the backend
+// seeds that graph its own way and returns the two ids the run needs. Kept
+// separate from BlueprintStoreFactory because the rest of the blueprint suite
+// never mints a run and would pay for that fixture on every subtest.
+type BlueprintRunWriteFactory func(t *testing.T) (store db.BlueprintStore, orgID, blueprintID, taskID string)
+
+// RunBlueprintRunWriteConformance covers the returned-row standard on the
+// blueprint_runs writes: CreateRun, SetRunWorktreePathSystem and
+// SetRunCurrentStepSystem each hand back the row they persisted, and the two
+// id-keyed stamps refuse an id no run answers to.
+func RunBlueprintRunWriteConformance(t *testing.T, mk BlueprintRunWriteFactory) {
+	t.Helper()
+
+	t.Run("every_single_row_run_write_returns_the_stored_row", func(t *testing.T) {
+		store, orgID, blueprintID, taskID := mk(t)
+		ctx := context.Background()
+		readRun := func(id string) func() (*domain.BlueprintRun, error) {
+			return func() (*domain.BlueprintRun, error) { return store.GetRun(ctx, orgID, id) }
+		}
+
+		run, err := store.CreateRun(ctx, orgID, domain.BlueprintRun{
+			BlueprintID: blueprintID, TaskID: taskID,
+			TriggerType: domain.BlueprintTriggerManual,
+		})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "CreateRun", run, readRun(run.ID))
+		// The id and started_at are the statement's, not the caller's — which
+		// is the whole reason a caller that supplied neither can still act on
+		// the run it just created.
+		if run.ID == "" || run.StartedAt.IsZero() || run.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("CreateRun returned a row missing what only the row knows: %+v", run)
+		}
+
+		pathed, err := store.SetRunWorktreePathSystem(ctx, orgID, run.ID, "/tmp/ret-wt")
+		if err != nil {
+			t.Fatalf("SetRunWorktreePathSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetRunWorktreePathSystem", pathed, readRun(run.ID))
+		if pathed.WorktreePath != "/tmp/ret-wt" {
+			t.Errorf("SetRunWorktreePathSystem returned worktree_path %q, want the stamped one", pathed.WorktreePath)
+		}
+
+		stepped, err := store.SetRunCurrentStepSystem(ctx, orgID, run.ID, 2)
+		if err != nil {
+			t.Fatalf("SetRunCurrentStepSystem: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetRunCurrentStepSystem", stepped, readRun(run.ID))
+		if stepped.CurrentStepIndex != 2 || stepped.WorktreePath != "/tmp/ret-wt" {
+			t.Errorf("SetRunCurrentStepSystem returned %+v, want step 2 with the earlier stamp intact", stepped)
+		}
+
+		missing := uuid.New().String()
+		if _, err := store.SetRunWorktreePathSystem(ctx, orgID, missing, "/tmp/x"); !errors.Is(err, db.ErrNoSuchBlueprintRun) {
+			t.Errorf("SetRunWorktreePathSystem on a missing id: got %v, want db.ErrNoSuchBlueprintRun", err)
+		}
+		if _, err := store.SetRunCurrentStepSystem(ctx, orgID, missing, 1); !errors.Is(err, db.ErrNoSuchBlueprintRun) {
+			t.Errorf("SetRunCurrentStepSystem on a missing id: got %v, want db.ErrNoSuchBlueprintRun", err)
+		}
+	})
+}
+
 // RunBlueprintStoreConformance runs the shared CRUD + step round-trip +
 // composition suite against any db.BlueprintStore impl:
 //
@@ -41,6 +107,59 @@ type PromptSeederForBlueprints func(t *testing.T, idHint string) string
 // only need a blueprint to exist, not the shipped shape.
 func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 	t.Helper()
+
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift).
+		store, orgID, teamID, seedPrompt := factory(t)
+		ctx := context.Background()
+		readBlueprint := func(id string) func() (*domain.Blueprint, error) {
+			return func() (*domain.Blueprint, error) { return store.Get(ctx, orgID, id) }
+		}
+
+		id := uuid.New().String()
+		created, err := store.Create(ctx, orgID, teamID, domain.Blueprint{
+			ID: id, Name: "Returned", Source: "user",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create", created, readBlueprint(id))
+		if created.UsageCount != 0 || created.TeamID == "" || created.CreatedAt.IsZero() {
+			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
+		}
+
+		renamed, err := store.Rename(ctx, orgID, id, "Returned v2")
+		if err != nil {
+			t.Fatalf("Rename: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Rename", renamed, readBlueprint(id))
+		if renamed.Name != "Returned v2" || !renamed.UserModified {
+			t.Errorf("Rename returned %+v, want the new name and user_modified stamped", renamed)
+		}
+
+		// ReplaceSteps writes a set and stamps the parent; the parent stamp is
+		// the single row, and its user_modified is a fact only the statement
+		// knows.
+		stamped, err := store.ReplaceSteps(ctx, orgID, id, []string{seedPrompt(t, "ret-step")}, nil)
+		if err != nil {
+			t.Fatalf("ReplaceSteps: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "ReplaceSteps", stamped, readBlueprint(id))
+		if !stamped.UserModified {
+			t.Error("ReplaceSteps returned a row without user_modified stamped")
+		}
+
+		if _, err := store.Rename(ctx, orgID, uuid.New().String(), "ghost"); !errors.Is(err, db.ErrNoSuchBlueprint) {
+			t.Errorf("Rename on a missing id: got %v, want db.ErrNoSuchBlueprint", err)
+		}
+		if _, err := store.ReplaceSteps(ctx, orgID, uuid.New().String(), nil, nil); !errors.Is(err, db.ErrNoSuchBlueprint) {
+			t.Errorf("ReplaceSteps on a missing id: got %v, want db.ErrNoSuchBlueprint", err)
+		}
+	})
 
 	t.Run("List_ReturnsCreated", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
@@ -71,7 +190,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		bpID := seedBlueprint(t, store, orgID, teamID, "Steps")
 		p1 := seedPrompt(t, "step-1")
 		p2 := seedPrompt(t, "step-2")
-		if err := store.ReplaceSteps(ctx, orgID, bpID, []string{p1, p2}, []string{"first", "second"}); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpID, []string{p1, p2}, []string{"first", "second"}); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		steps, err := store.ListSteps(ctx, orgID, bpID)
@@ -89,7 +208,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		}
 
 		// Re-ReplaceSteps with a shorter list collapses, not appends.
-		if err := store.ReplaceSteps(ctx, orgID, bpID, []string{p2}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpID, []string{p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps shrink: %v", err)
 		}
 		steps2, err := store.ListSteps(ctx, orgID, bpID)
@@ -109,10 +228,10 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		bp1 := seedBlueprint(t, store, orgID, teamID, "BP1")
 		bp2 := seedBlueprint(t, store, orgID, teamID, "BP2")
 		p := seedPrompt(t, "shared")
-		if err := store.ReplaceSteps(ctx, orgID, bp1, []string{p}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp1, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps bp1: %v", err)
 		}
-		if err := store.ReplaceSteps(ctx, orgID, bp2, []string{p}, nil); err == nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp2, []string{p}, nil); err == nil {
 			t.Fatalf("ReplaceSteps bp2 with an already-owned prompt succeeded; want unique-constraint error")
 		}
 	})
@@ -122,7 +241,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Owner")
 		p := seedPrompt(t, "owned")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		owner, ok, err := store.StepPromptOwner(ctx, orgID, p)
@@ -178,7 +297,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "SoftDelOwner")
 		p := seedPrompt(t, "paired-prompt")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		// Confirm the prompt is owned before deletion.
@@ -202,7 +321,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := seedBlueprint(t, store, orgID, teamID, "Before")
-		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
+		if _, err := store.Rename(ctx, orgID, id, "After"); err != nil {
 			t.Fatalf("Rename: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, id)
@@ -223,13 +342,13 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		a1, a2 := seedPrompt(t, "all-a1"), seedPrompt(t, "all-a2")
 		b1 := seedPrompt(t, "all-b1")
 		d1 := seedPrompt(t, "all-d1")
-		if err := store.ReplaceSteps(ctx, orgID, bpA, []string{a1, a2}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpA, []string{a1, a2}, nil); err != nil {
 			t.Fatalf("steps A: %v", err)
 		}
-		if err := store.ReplaceSteps(ctx, orgID, bpB, []string{b1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpB, []string{b1}, nil); err != nil {
 			t.Fatalf("steps B: %v", err)
 		}
-		if err := store.ReplaceSteps(ctx, orgID, bpDel, []string{d1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpDel, []string{d1}, nil); err != nil {
 			t.Fatalf("steps Del: %v", err)
 		}
 		// Soft-deleted blueprints' steps must be excluded from the bulk read.
@@ -297,10 +416,10 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		source := seedBlueprint(t, store, orgID, teamID, "Source")
 		h1, h2 := seedPrompt(t, "host-1"), seedPrompt(t, "host-2")
 		s1, s2 := seedPrompt(t, "src-1"), seedPrompt(t, "src-2")
-		if err := store.ReplaceSteps(ctx, orgID, host, []string{h1, h2}, []string{"h1", "h2"}); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, host, []string{h1, h2}, []string{"h1", "h2"}); err != nil {
 			t.Fatalf("ReplaceSteps host: %v", err)
 		}
-		if err := store.ReplaceSteps(ctx, orgID, source, []string{s1, s2}, []string{"s1", "s2"}); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, source, []string{s1, s2}, []string{"s1", "s2"}); err != nil {
 			t.Fatalf("ReplaceSteps source: %v", err)
 		}
 		if err := store.MergeInto(ctx, orgID, host, source); err != nil {
@@ -349,7 +468,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Split")
 		p0, p1, p2, p3 := seedPrompt(t, "sp-0"), seedPrompt(t, "sp-1"), seedPrompt(t, "sp-2"), seedPrompt(t, "sp-3")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, []string{"b0", "b1", "b2", "b3"}); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, []string{"b0", "b1", "b2", "b3"}); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		newID := uuid.New().String()
@@ -415,7 +534,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Tail")
 		p0, p1, p2 := seedPrompt(t, "dt-0"), seedPrompt(t, "dt-1"), seedPrompt(t, "dt-2")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 2, "")
@@ -441,7 +560,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Head")
 		p0, p1, p2 := seedPrompt(t, "dh-0"), seedPrompt(t, "dh-1"), seedPrompt(t, "dh-2")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 0, "Downstream")
@@ -470,7 +589,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Mid")
 		p0, p1, p2, p3 := seedPrompt(t, "dm-0"), seedPrompt(t, "dm-1"), seedPrompt(t, "dm-2"), seedPrompt(t, "dm-3")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2, p3}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		// Delete the middle step (index 1): upstream keeps [p0], downstream gets
@@ -511,7 +630,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "MinHead")
 		p0, p1 := seedPrompt(t, "dmh-0"), seedPrompt(t, "dmh-1")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 0, "Downstream")
@@ -536,7 +655,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "MinTail")
 		p0, p1 := seedPrompt(t, "dmt-0"), seedPrompt(t, "dmt-1")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 1, "")
@@ -561,7 +680,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "Single")
 		p := seedPrompt(t, "ds-0")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		// The sole-owner 1-step case is the handler's pair-delete path, not
@@ -575,7 +694,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := store.Create(ctx, orgID, teamID, domain.Blueprint{
+		if _, err := store.Create(ctx, orgID, teamID, domain.Blueprint{
 			ID: uuid.New().String(), Name: "Ctx", Source: "user",
 		}); err == nil {
 			t.Fatalf("Create with cancelled ctx returned nil error")
@@ -594,7 +713,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := uuid.New().String()
-		if err := store.Create(ctx, orgID, teamID, domain.Blueprint{ID: id, Name: "Created", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Blueprint{ID: id, Name: "Created", Source: "user"}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, id)
@@ -610,7 +729,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := seedBlueprint(t, store, orgID, teamID, "Before")
-		if err := store.Rename(ctx, orgID, id, "After"); err != nil {
+		if _, err := store.Rename(ctx, orgID, id, "After"); err != nil {
 			t.Fatalf("Rename: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, id)
@@ -627,7 +746,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		id := seedBlueprint(t, store, orgID, teamID, "StepsUM")
 		p := seedPrompt(t, "um-steps-p")
-		if err := store.ReplaceSteps(ctx, orgID, id, []string{p}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, id, []string{p}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, id)
@@ -645,7 +764,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		host := seedBlueprint(t, store, orgID, teamID, "Host")
 		source := seedBlueprint(t, store, orgID, teamID, "Source")
 		s1 := seedPrompt(t, "um-merge-s1")
-		if err := store.ReplaceSteps(ctx, orgID, source, []string{s1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, source, []string{s1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps source: %v", err)
 		}
 		// Host is freshly seeded with no steps of its own — user_modified starts
@@ -672,7 +791,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "SplitUM")
 		p0, p1 := seedPrompt(t, "um-split-0"), seedPrompt(t, "um-split-1")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		newID := uuid.New().String()
@@ -700,7 +819,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "HeadUM")
 		p0, p1 := seedPrompt(t, "um-dh-0"), seedPrompt(t, "um-dh-1")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 0, "Downstream")
@@ -732,7 +851,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "TailUM")
 		p0, p1 := seedPrompt(t, "um-dt-0"), seedPrompt(t, "um-dt-1")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 1, "")
@@ -756,7 +875,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 		ctx := context.Background()
 		bp := seedBlueprint(t, store, orgID, teamID, "MidUM")
 		p0, p1, p2 := seedPrompt(t, "um-dm-0"), seedPrompt(t, "um-dm-1"), seedPrompt(t, "um-dm-2")
-		if err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bp, []string{p0, p1, p2}, nil); err != nil {
 			t.Fatalf("ReplaceSteps: %v", err)
 		}
 		down, err := store.DeleteStep(ctx, orgID, bp, 1, "Downstream")
@@ -810,7 +929,7 @@ func RunBlueprintStoreConformance(t *testing.T, factory BlueprintStoreFactory) {
 func seedBlueprint(t *testing.T, store db.BlueprintStore, orgID, teamID, name string) string {
 	t.Helper()
 	id := uuid.New().String()
-	if err := store.Create(context.Background(), orgID, teamID, domain.Blueprint{
+	if _, err := store.Create(context.Background(), orgID, teamID, domain.Blueprint{
 		ID: id, Name: name, Source: "user",
 	}); err != nil {
 		t.Fatalf("seed blueprint %q: %v", name, err)
@@ -878,7 +997,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		for i, p := range prompts {
 			ids[i] = seed(t, p)
 		}
-		if err := store.ReplaceSteps(ctx, orgID, bpID, ids, briefs); err != nil {
+		if _, err := store.ReplaceSteps(ctx, orgID, bpID, ids, briefs); err != nil {
 			t.Fatalf("ReplaceSteps %s: %v", slug, err)
 		}
 		return bpID, ids

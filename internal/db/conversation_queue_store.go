@@ -79,6 +79,10 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: EnqueueConversation,
+// RequeueConversation. Each is a genuine single-row insert/update/upsert, not
+// one of the exempt buckets — the ticket tracks the conversion.
 type ConversationQueueStore interface {
 	// EnqueueConversation mints a delegation conversation for a blueprint step with
 	// NO stored status — the absence of an outcome is what makes it

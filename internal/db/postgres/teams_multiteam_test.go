@@ -261,16 +261,25 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		// behavior). The resolver that *chooses* teamB is unit-tested in the
 		// server package; here we pin that the store honors it.
 		promptID := "p_pick_" + uuid.New().String()
+		var created domain.Prompt
 		err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
+			var e error
+			created, e = pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, teamB, domain.Prompt{
 				ID:     promptID,
 				Name:   "Scoped",
 				Body:   "do the thing",
 				Source: "user",
 			})
+			return e
 		})
 		if err != nil {
 			t.Fatalf("create prompt on team B: %v", err)
+		}
+		// The row the write handed back says which team it landed on, so the
+		// caller learns it without a second read. The raw check below is the
+		// independent witness that it is telling the truth.
+		if created.TeamID != teamB {
+			t.Errorf("Create returned team %q; want the picked team %q (B)", created.TeamID, teamB)
 		}
 		var landed string
 		if err := h.AdminDB.QueryRow(
@@ -293,9 +302,10 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkPrompt := func(team, name string) string {
 			id := "p_scope_" + uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, team, domain.Prompt{
+				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgID, team, domain.Prompt{
 					ID: id, Name: name, Body: "b", Source: "user",
 				})
+				return e
 			}); e != nil {
 				t.Fatalf("create prompt %s: %v", name, e)
 			}
@@ -351,7 +361,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 		mkRule := func(team, name string) string {
 			id := uuid.New().String()
 			if e := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
-				return pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
+				_, e := pgstore.NewForTx(tx, pgtest.SecretKey).EventHandlers.Create(ctx, orgID, team, domain.EventHandler{
 					ID:              id,
 					Kind:            domain.EventHandlerKindRule,
 					EventType:       domain.EventGitHubPRCICheckFailed,
@@ -361,6 +371,7 @@ func TestMultiTeam_Postgres(t *testing.T) {
 					Enabled:         true,
 					Source:          domain.EventHandlerSourceUser,
 				})
+				return e
 			}); e != nil {
 				t.Fatalf("create rule %s: %v", name, e)
 			}

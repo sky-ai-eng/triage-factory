@@ -33,7 +33,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
 	seedConfiguredRepo(t, s, "sky-ai-eng", "other-repo")
 
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "Auth",
 		PinnedRepos:    []string{"sky-ai-eng/triage-factory"},
 		JiraProjectKey: "SKY",
@@ -41,6 +41,7 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pid := created.ID
 
 	// Two GitHub entities, only one in pinned_repos.
 	mustEntity(t, s.db, "github", "sky-ai-eng/triage-factory#1", "pr", "in pin")
@@ -76,10 +77,11 @@ func TestBackfillCandidates_ScopesByPinnedReposAndJiraKey(t *testing.T) {
 // anything from the unconfigured project.
 func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 	s := newTestServer(t)
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Misc"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	pid := created.ID
 
 	mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T1")
 	mustEntity(t, s.db, "jira", "ANY-1", "issue", "T2")
@@ -97,21 +99,23 @@ func TestBackfillCandidates_EmptyConfigShowsAll(t *testing.T) {
 func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
+	pid := created.ID
+	created2, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Other", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	other := created2.ID
 
 	already := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "already in")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, already.ID, &pid, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, already.ID, &pid, ""); err != nil {
 		t.Fatal(err)
 	}
 	elsewhere := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "elsewhere")
-	if err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, elsewhere.ID, &other, ""); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, elsewhere.ID, &other, ""); err != nil {
 		t.Fatal(err)
 	}
 	free := mustEntity(t, s.db, "github", "owner/repo#3", "pr", "unassigned")
@@ -140,10 +144,11 @@ func TestBackfillCandidates_ExcludesAlreadyInProject(t *testing.T) {
 func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
 	b := mustEntity(t, s.db, "github", "owner/repo#2", "pr", "B")
 
@@ -192,10 +197,11 @@ func TestBackfill_BulkAssignPartialSuccess(t *testing.T) {
 func TestBackfill_BatchAccounting(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 	a := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "A")
 
 	// Request-level faults, each rejected whole.
@@ -254,7 +260,7 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "in-scope")
 	seedConfiguredRepo(t, s, "owner", "out-of-scope")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "P",
 		PinnedRepos:    []string{"owner/in-scope"},
 		JiraProjectKey: "SKY",
@@ -262,12 +268,13 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 
 	inScope := mustEntity(t, s.db, "github", "owner/in-scope#1", "pr", "ok")
 	outScope := mustEntity(t, s.db, "github", "owner/out-of-scope#2", "pr", "wrong repo")
 	wrongJira := mustEntity(t, s.db, "jira", "FOO-9", "issue", "wrong project")
 	closedEnt := mustEntity(t, s.db, "github", "owner/in-scope#3", "pr", "closed")
-	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedEnt.ID); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, closedEnt.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -325,10 +332,11 @@ func TestBackfill_RejectsOutOfScopeAndClosed(t *testing.T) {
 func TestBackfill_StampsClassifiedAt(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "owner", "repo")
-	pid, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"owner/repo"}})
 	if err != nil {
 		t.Fatalf("CreateProject: %v", err)
 	}
+	pid := created.ID
 	e := mustEntity(t, s.db, "github", "owner/repo#1", "pr", "T")
 
 	pre, err := sqlitestore.New(s.db).Entities.ListUnclassified(context.Background(), runmode.LocalDefaultOrgID)

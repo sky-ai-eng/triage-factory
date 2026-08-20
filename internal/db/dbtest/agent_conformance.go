@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -31,11 +32,79 @@ type AgentStoreFactory func(t *testing.T) (store db.AgentStore, orgID, patUserID
 //   - SetGitHubPATUser writes the PAT-borrow FK; malformed input is
 //     refused before any UPDATE runs.
 //   - SetGitHubOrgIdentity stores or clears login + email atomically.
-//   - Postgres invalid-UUID guards: Update / SetGitHubPAT return nil
-//     instead of bubbling 22P02 parse errors.
+//   - Invalid-UUID ids: Update / SetGitHubPATUser / SetGitHubOrgIdentity
+//     refuse with db.ErrNoSuchAgent rather than bubbling a 22P02 parse error
+//     (Postgres) or silently affecting zero rows (SQLite).
 //   - DisplayName defaulting: empty input fills "Triage Factory Bot".
+//   - Every single-row write returns the row it persisted, and refuses an id
+//     no row answers to.
 func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 	t.Helper()
+
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift).
+		store, orgID, patUserID := factory(t)
+		ctx := context.Background()
+		id, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Returned Bot"})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		read := func() (*domain.Agent, error) { return store.GetForOrg(ctx, orgID) }
+
+		autonomy := 0.6
+		updated, err := store.Update(ctx, orgID, domain.Agent{
+			ID: id, DisplayName: "Returned Bot v2", DefaultModel: "claude-opus-4-7",
+			DefaultAutonomySuitability: &autonomy,
+		})
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Update", updated, read)
+
+		patted, err := store.SetGitHubPATUser(ctx, orgID, id, patUserID)
+		if err != nil {
+			t.Fatalf("SetGitHubPATUser: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetGitHubPATUser", patted, read)
+		// The row carries what the earlier write left alone, which is why an
+		// input struct cannot stand in for it.
+		if patted.DisplayName != "Returned Bot v2" {
+			t.Errorf("SetGitHubPATUser returned display name %q, want the row's", patted.DisplayName)
+		}
+
+		// The all-or-nothing identity pair: one half empty clears both, and
+		// only the row says so.
+		half, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "")
+		if err != nil {
+			t.Fatalf("SetGitHubOrgIdentity (half): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetGitHubOrgIdentity (half)", half, read)
+		if half.GitHubOrgLogin != "" || half.GitHubOrgEmail != "" {
+			t.Errorf("SetGitHubOrgIdentity returned %+v, want both identity columns cleared", half)
+		}
+		whole, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "octocat", "octo@example.com")
+		if err != nil {
+			t.Fatalf("SetGitHubOrgIdentity: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetGitHubOrgIdentity", whole, read)
+
+		// A miss is an error rather than a silent no-op — including the
+		// not-a-uuid input Postgres used to swallow.
+		missing := uuid.New().String()
+		if _, err := store.Update(ctx, orgID, domain.Agent{ID: missing}); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchAgent", err)
+		}
+		if _, err := store.SetGitHubPATUser(ctx, orgID, missing, patUserID); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("SetGitHubPATUser on a missing id: got %v, want db.ErrNoSuchAgent", err)
+		}
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, missing, "o", "o@e.test"); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("SetGitHubOrgIdentity on a missing id: got %v, want db.ErrNoSuchAgent", err)
+		}
+	})
 
 	t.Run("Create_FirstCallInsertsAndReturnsID", func(t *testing.T) {
 		store, orgID, _ := factory(t)
@@ -167,7 +236,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 			t.Fatalf("Create: %v", err)
 		}
 		autonomy := 0.85
-		if err := store.Update(ctx, orgID, domain.Agent{
+		if _, err := store.Update(ctx, orgID, domain.Agent{
 			ID:                         id,
 			DisplayName:                "Renamed",
 			DefaultModel:               "claude-sonnet-4-6",
@@ -194,21 +263,20 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 	})
 
-	t.Run("Update_OnInvalidUUID_IsNoop", func(t *testing.T) {
-		// Postgres-only constraint; SQLite TEXT keys accept anything.
-		// The conformance asserts the contract (no error returned) for
-		// both backends — SQLite's no-op behavior comes from "WHERE
-		// id = ?" matching zero rows.
+	t.Run("Update_OnInvalidUUID_RefusesTheID", func(t *testing.T) {
+		// A malformed id answers to no row, which both backends now report as
+		// db.ErrNoSuchAgent rather than a silent success — an id nothing can
+		// carry is the same answer as an id nothing does.
 		store, orgID, _ := factory(t)
 		ctx := context.Background()
 		if _, err := store.Create(ctx, orgID, domain.Agent{DisplayName: "Real"}); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := store.Update(ctx, orgID, domain.Agent{
+		if _, err := store.Update(ctx, orgID, domain.Agent{
 			ID:          "not-a-uuid",
 			DisplayName: "Hijacked",
-		}); err != nil {
-			t.Errorf("Update with invalid UUID: want nil, got %v", err)
+		}); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("Update with invalid UUID: want db.ErrNoSuchAgent, got %v", err)
 		}
 		// Real row untouched.
 		got, _ := store.GetForOrg(ctx, orgID)
@@ -230,7 +298,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if err := store.SetGitHubPATUser(ctx, orgID, id, patUserID); err != nil {
+		if _, err := store.SetGitHubPATUser(ctx, orgID, id, patUserID); err != nil {
 			t.Fatalf("SetGitHubPATUser: %v", err)
 		}
 		got, _ := store.GetForOrg(ctx, orgID)
@@ -258,10 +326,10 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 		// Seed a valid PAT user first so we can prove the refused call
 		// leaves it untouched.
-		if err := store.SetGitHubPATUser(ctx, orgID, id, patUserID); err != nil {
+		if _, err := store.SetGitHubPATUser(ctx, orgID, id, patUserID); err != nil {
 			t.Fatalf("seed SetGitHubPATUser: %v", err)
 		}
-		err = store.SetGitHubPATUser(ctx, orgID, id, "alice@example.com")
+		_, err = store.SetGitHubPATUser(ctx, orgID, id, "alice@example.com")
 		if err == nil {
 			t.Fatal("SetGitHubPATUser accepted malformed userID; would silently wipe the credential field")
 		}
@@ -274,10 +342,10 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 	})
 
-	t.Run("SetGitHubPATUser_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
+	t.Run("SetGitHubPATUser_OnInvalidAgentUUID_RefusesTheID", func(t *testing.T) {
 		store, orgID, _ := factory(t)
-		if err := store.SetGitHubPATUser(context.Background(), orgID, "not-a-uuid", uuid.New().String()); err != nil {
-			t.Errorf("SetGitHubPATUser invalid agent UUID: want nil, got %v", err)
+		if _, err := store.SetGitHubPATUser(context.Background(), orgID, "not-a-uuid", uuid.New().String()); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("SetGitHubPATUser invalid agent UUID: want db.ErrNoSuchAgent, got %v", err)
 		}
 	})
 
@@ -297,7 +365,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		if got == nil || got.GitHubOrgLogin != "" {
 			t.Fatalf("fresh agent GitHubOrgLogin=%v, want empty", got)
 		}
-		if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
 			t.Fatalf("SetGitHubOrgIdentity: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
@@ -308,7 +376,7 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		if got.DisplayName != "Test" {
 			t.Errorf("DisplayName=%q corrupted by SetGitHubOrgIdentity", got.DisplayName)
 		}
-		if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "", ""); err != nil {
+		if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "", ""); err != nil {
 			t.Fatalf("SetGitHubOrgIdentity clear: %v", err)
 		}
 		got, _ = store.GetForOrg(ctx, orgID)
@@ -326,10 +394,10 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 		for _, partial := range partials {
 			t.Run(partial.name, func(t *testing.T) {
-				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
+				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, "acme-bot[bot]", "bot@example.com"); err != nil {
 					t.Fatalf("seed full identity: %v", err)
 				}
-				if err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, partial.email); err != nil {
+				if _, err := store.SetGitHubOrgIdentity(ctx, orgID, id, partial.login, partial.email); err != nil {
 					t.Fatalf("SetGitHubOrgIdentity partial: %v", err)
 				}
 				got, err := store.GetForOrg(ctx, orgID)
@@ -343,10 +411,10 @@ func RunAgentStoreConformance(t *testing.T, factory AgentStoreFactory) {
 		}
 	})
 
-	t.Run("SetGitHubOrgIdentity_OnInvalidAgentUUID_IsNoop", func(t *testing.T) {
+	t.Run("SetGitHubOrgIdentity_OnInvalidAgentUUID_RefusesTheID", func(t *testing.T) {
 		store, orgID, _ := factory(t)
-		if err := store.SetGitHubOrgIdentity(context.Background(), orgID, "not-a-uuid", "octocat", "octocat@example.com"); err != nil {
-			t.Errorf("SetGitHubOrgIdentity invalid agent UUID: want nil, got %v", err)
+		if _, err := store.SetGitHubOrgIdentity(context.Background(), orgID, "not-a-uuid", "octocat", "octocat@example.com"); !errors.Is(err, db.ErrNoSuchAgent) {
+			t.Errorf("SetGitHubOrgIdentity invalid agent UUID: want db.ErrNoSuchAgent, got %v", err)
 		}
 	})
 }

@@ -21,10 +21,11 @@ import (
 func seedProjectWithConversation(t *testing.T, s *Server) (projectID, convID string) {
 	t.Helper()
 	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	projectID, err := s.projects.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	created, err := s.projects.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID = created.ID
 	if err := s.tx.SyntheticClaimsWithTx(t.Context(), org, user, func(ts db.TxStores) error {
 		conv, err := ts.Curator.GetOrCreateConversation(t.Context(), org, projectID, user)
 		if err != nil {
@@ -107,10 +108,11 @@ func TestProjectPatch_QueuesPinnedRepoChange(t *testing.T) {
 func TestProjectPatch_NoQueueWithoutConversation(t *testing.T) {
 	s := newTestServer(t)
 	repoID := seedConfiguredRepo(t, s, "sky-ai-eng", "triage-factory")
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	created, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	id := created.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repository_ids": []string{repoID},
@@ -135,7 +137,7 @@ func TestProjectPatch_NoQueueWhenNothingChanged(t *testing.T) {
 
 	// Seed an initial pinned repo via direct DB write, then PATCH the
 	// same value back. The diff should fold to "no change."
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
+	if _, err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:          id,
 		Name:        "P",
 		PinnedRepos: []string{"sky-ai-eng/triage-factory"},
@@ -232,7 +234,7 @@ func TestProjectPatch_NoQueueOnPureReorder(t *testing.T) {
 
 	// Seed a known order via direct DB write so the comparison below
 	// is unambiguously a reorder.
-	if err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
+	if _, err := s.projects.Update(t.Context(), runmode.LocalDefaultOrgID, domain.Project{
 		ID:          id,
 		Name:        "P",
 		PinnedRepos: []string{"sky-ai-eng/triage-factory", "sky-ai-eng/another"},

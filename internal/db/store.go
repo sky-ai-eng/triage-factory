@@ -15,13 +15,18 @@ import (
 // The bundle exists for main.go wiring and for the WithTx wrapper —
 // nothing else. See docs/for-agents/specs/sky-246-d2-store-abstraction.html §5.
 //
-// Every single-row Insert/Update/Upsert in here returns the row it persisted,
-// off RETURNING on the write statement, sharing the point read's column list
-// and scanner. RepositoryStore's doc states the rule and its exemptions in
-// full; ArtifactStore is the other converted store.
+// A single-row Insert/Update/Upsert returns the row it persisted, off
+// RETURNING on the write statement, sharing the point read's column list and
+// scanner. RepositoryStore's doc states the rule and its exemptions in full;
+// ArtifactStore, PromptStore, ProjectStore, EventHandlerStore, BlueprintStore,
+// EntityStore, AgentStore, TeamAgentStore, CuratorHomeStore,
+// PlacementOverrideStore, JiraAppsStore and TeamsStore hold it too. Every
+// write in those stores that still returns a bare error carries its exemption
+// at the method.
 //
-// TODO(TFAC-838): converge the remaining single-row store writes on that
-// standard; don't add new writes in the old shape.
+// TODO(TFAC-838): the stores not in that list have their unconverged writes
+// named in a marker on their own interface — converge them, and don't add new
+// writes in the old shape anywhere.
 type Stores struct {
 	// Scores is the first store to land on the D2 wave 0 pilot.
 	// Subsequent waves add the remaining 21 fields here.

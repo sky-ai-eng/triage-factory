@@ -22,6 +22,10 @@ import (
 // JWT claims. org_id stays in every WHERE/INSERT clause as defense in depth;
 // SQLite is N=1 and asserts LocalDefaultOrgID. There is no app-pool
 // variant — no request handler reads or writes the queue.
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: AppendSystem. Each is a
+// genuine single-row insert/update/upsert, not one of the exempt buckets — the
+// ticket tracks the conversion.
 type StagedInjectionStore interface {
 	// AppendSystem enqueues one injection for a conversation. The impl writes
 	// an undelivered message row and writes the row id back to n.ID (a
@@ -56,5 +60,7 @@ type StagedInjectionStore interface {
 	// tf_system role holds no DELETE on messages, and a retired row is
 	// equally invisible to the flush, assembly, and the display reads. A
 	// no-op (no error) if the row is already gone or was flushed.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	DeleteSystem(ctx context.Context, orgID, id string) error
 }

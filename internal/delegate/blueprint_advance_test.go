@@ -237,7 +237,7 @@ func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testi
 // Mirrors the setup the advance-task chain-step guard test uses.
 func makeConversationBlueprintStep(t *testing.T, database *sql.DB, conversationID, taskID string) {
 	t.Helper()
-	if err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := sqlitestore.New(database).Blueprints.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: "bp-" + conversationID, Name: "bp-" + conversationID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)

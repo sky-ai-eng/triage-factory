@@ -150,7 +150,7 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID)
+	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID, nil)
 	if !ok {
 		return
 	}
@@ -161,12 +161,21 @@ func (s *Server) handleTeamSettingsGet(w http.ResponseWriter, r *http.Request) {
 // team's Jira project rules, and the caller-relative annotations the settings
 // page collapses its layout on. Shared by the GET and by the PATCH's read-back,
 // so the write answers with exactly what a follow-up read would return.
-func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string) (teamSettingsResponse, bool) {
+// known is the settings row a caller already holds — the one a save's write
+// just returned. When non-nil this skips the settings read and composes the
+// rest of the response around it, so a PATCH never re-reads the row its own
+// write produced. The GET route passes nil.
+func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID, userID, teamID string, known *domain.TeamSettings) (teamSettingsResponse, bool) {
 	var resp teamSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		settings, err := tx.Teams.GetSettings(r.Context(), teamID)
-		if err != nil {
-			return fmt.Errorf("team settings: %w", err)
+		settings := domain.TeamSettings{}
+		if known != nil {
+			settings = *known
+		} else {
+			var err error
+			if settings, err = tx.Teams.GetSettings(r.Context(), teamID); err != nil {
+				return fmt.Errorf("team settings: %w", err)
+			}
 		}
 		resp.TeamSettings = settings
 
@@ -268,6 +277,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		prevModel  string
 		savedModel string
 		orgMaxTier string
+		saved      domain.TeamSettings
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamSet, err := tx.Teams.GetSettings(r.Context(), teamID)
@@ -280,7 +290,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		}
 		apply(&teamSet)
 		savedModel = teamSet.DefaultModel
-		if err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
+		if saved, err = tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
 		return nil
@@ -289,7 +299,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID)
+	resp, ok := s.readTeamSettings(w, r, orgID, userID, teamID, &saved)
 	if !ok {
 		return
 	}

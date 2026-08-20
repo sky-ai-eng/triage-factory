@@ -38,16 +38,35 @@ var ErrVisibilityForbidden = errors.New("db: insufficient privilege for that pro
 // org's identity scope (projectclassify runner). RLS policies
 // projects_select / projects_insert / projects_update / projects_delete
 // gate every statement; org_id defense-in-depth fires alongside.
+//
+// # Every single-row write returns the row it persisted
+//
+// Create and Update hand back the stored row, read off RETURNING on the write
+// statement itself rather than from a follow-up SELECT, projecting the point
+// read's column list and scanner so the write shape cannot drift from the read
+// shape. p is an input and is wrong about the row by design: Create mints the
+// id when p carries none, resolves creator_user_id from the session, drops a
+// team_id the visibility does not permit and defaults the visibility itself;
+// both writes restamp updated_at and neither touches created_at.
+//
+// PinnedRepos is the one field RETURNING cannot project — it lives in its own
+// table and is written as a set — so both writes reconcile it and then read
+// the reconciled set onto the returned row, inside the same transaction. That
+// is the set's own read, not a re-read of the projects row the statement
+// produced.
+//
+// Exempt, each said so at the method: Delete (a delete) and BumpUpdatedAt
+// (fire-and-forget bookkeeping on a sort key).
 type ProjectStore interface {
-	// Create inserts a new project and returns its id. If p.ID is
-	// non-empty it's used verbatim; otherwise a uuid is generated.
-	// PinnedRepos serializes to JSON (nil → []). teamID populates
+	// Create inserts a new project and returns the persisted row. If p.ID is
+	// non-empty it's used verbatim; otherwise a uuid is generated — and the
+	// returned row is where a caller learns which. teamID populates
 	// team_id (required by the projects_team_visibility_requires_team
 	// CHECK when the row defaults to visibility='team'); the SQLite
 	// impl uses the local sentinel teamID, the Postgres impl binds
 	// the caller-supplied value directly and refuses the SQLite
 	// sentinel.
-	Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error)
+	Create(ctx context.Context, orgID, teamID string, p domain.Project) (domain.Project, error)
 
 	// Get returns a project by id, or (nil, nil) if not found.
 	Get(ctx context.Context, orgID, id string) (*domain.Project, error)
@@ -77,7 +96,11 @@ type ProjectStore interface {
 	// resulting RLS denial to ErrVisibilityForbidden. Returns
 	// sql.ErrNoRows when the project doesn't exist so handlers can map
 	// to 404.
-	Update(ctx context.Context, orgID string, p domain.Project) error
+	//
+	// Returns the updated row — the restamped updated_at, the preserved
+	// created_at/creator/team, and the reconciled pinned-repo set — so the
+	// handler renders the resource rather than the request body it merged.
+	Update(ctx context.Context, orgID string, p domain.Project) (domain.Project, error)
 
 	// Delete removes the project. The entities.project_id FK is
 	// declared ON DELETE SET NULL so tagged entities become untagged
@@ -87,6 +110,8 @@ type ProjectStore interface {
 	// On-disk knowledge artifacts (`~/.triagefactory/projects/<id>/`)
 	// are NOT removed here — the handler owns that to keep this layer
 	// pure DB. Same split as the rest of the codebase.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Delete(ctx context.Context, orgID, id string) error
 
 	// BumpUpdatedAt stamps updated_at = now() without changing any
@@ -98,6 +123,10 @@ type ProjectStore interface {
 	// has already responded against the in-memory project id; a
 	// vanished row is rare and doesn't affect the on-disk action's
 	// success).
+	//
+	// Exempt from the returned-row rule: fire-and-forget bookkeeping. It
+	// exists precisely so a caller does not have to hold the row to touch its
+	// timestamp, and nothing reads the answer — the next list read spends it.
 	BumpUpdatedAt(ctx context.Context, orgID, id string) error
 
 	// --- Admin-pool variants (`...System`) ---

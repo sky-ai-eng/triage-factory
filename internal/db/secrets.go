@@ -44,6 +44,10 @@ var ErrSecretStoreUnavailable = errors.New("secret store not available on this r
 //
 // D5 owns the consumer side (wiring real handlers + secret-name
 // catalog); D2 provides the interface and both impls.
+// TODO(TFAC-838): these single-row writes still return a bare error and have
+// not been converged on the returned-row standard: Put, PutUser,
+// PutUserSystem. Each is a genuine single-row insert/update/upsert, not one of
+// the exempt buckets — the ticket tracks the conversion.
 type SecretStore interface {
 	// Put writes (or rotates) an org-scoped secret. description is
 	// optional (stored as ""). The value is encrypted app-side and

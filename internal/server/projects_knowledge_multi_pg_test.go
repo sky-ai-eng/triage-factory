@@ -35,10 +35,11 @@ func TestKnowledgeMulti_RoundTrip(t *testing.T) {
 
 	ctx := context.Background()
 	org, user, team := pgtest.SeedOrgWithUser(t, h, "kb-multi")
-	projectID, err := stores.Projects.Create(ctx, org, team, domain.Project{Name: "KB Project"})
+	created, err := stores.Projects.Create(ctx, org, team, domain.Project{Name: "KB Project"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID := created.ID
 
 	authed := func(req *http.Request) *http.Request {
 		c := httpx.WithOrgID(req.Context(), org)

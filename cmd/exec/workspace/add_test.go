@@ -176,7 +176,7 @@ func seedJiraConversation(t *testing.T, database *db.DB, conversationID, issueKe
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if _, err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
@@ -204,7 +204,7 @@ func seedGitHubConversation(t *testing.T, database *db.DB, conversationID string
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if _, err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	dbtest.SeedConversation(t, database.Conn, domain.Conversation{
@@ -1103,7 +1103,7 @@ func seedEventTriggeredJiraConversation(t *testing.T, database *db.DB, conversat
 	if err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
+	if _, err := sqlitestore.New(database.Conn).Prompts.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Prompt{ID: "p-" + conversationID, Name: "T", Body: "x", Source: "user"}); err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
 	dbtest.SeedConversation(t, database.Conn, domain.Conversation{

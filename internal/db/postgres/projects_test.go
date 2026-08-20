@@ -46,12 +46,13 @@ func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	teamA := firstTeamForOrg(t, h, orgA)
 	orgB, _, _ := seedPgProjectOrg(t, h)
 
-	id, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
+	created, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
 		Name: "orgA project", Description: "secret",
 	})
 	if err != nil {
 		t.Fatalf("Create orgA: %v", err)
 	}
+	id := created.ID
 
 	if got, err := stores.Projects.Get(ctx, orgB, id); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
@@ -65,7 +66,7 @@ func TestProjectStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB List returned %d rows, want 0", len(got))
 	}
 
-	if err := stores.Projects.Update(ctx, orgB, domain.Project{ID: id, Name: "hack"}); err == nil {
+	if _, err := stores.Projects.Update(ctx, orgB, domain.Project{ID: id, Name: "hack"}); err == nil {
 		t.Errorf("orgB Update on orgA project should error")
 	}
 	if err := stores.Projects.Delete(ctx, orgB, id); err == nil {
@@ -95,12 +96,13 @@ func TestProjectStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed a project in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	projA, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
+	createdA, err := stores.Projects.Create(ctx, orgA, teamA, domain.Project{
 		Name: "orgA RLS project", Description: "secret",
 	})
 	if err != nil {
 		t.Fatalf("seed project in orgA: %v", err)
 	}
+	projA := createdA.ID
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
@@ -287,10 +289,11 @@ func TestProjectStore_Postgres_GetPopulatesTeamID(t *testing.T) {
 	// A second, non-default team in the same org.
 	teamB := pgtest.SeedTeam(t, h, orgA, "team-b")
 
-	id, err := stores.Projects.Create(ctx, orgA, teamB, domain.Project{Name: "B's project"})
+	created, err := stores.Projects.Create(ctx, orgA, teamB, domain.Project{Name: "B's project"})
 	if err != nil {
 		t.Fatalf("Create under teamB: %v", err)
 	}
+	id := created.ID
 
 	got, err := stores.Projects.Get(ctx, orgA, id)
 	if err != nil {

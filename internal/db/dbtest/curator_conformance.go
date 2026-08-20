@@ -928,7 +928,7 @@ func RunCuratorStoreConformance(t *testing.T, mk CuratorStoreFactory) {
 		}
 
 		// Homed elsewhere: invisible to this executor, claimable by the home.
-		if err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
+		if _, err := h.Stores.CuratorHomes.Upsert(ctx, h.OrgID, projectID, "home-1", 1); err != nil {
 			t.Fatalf("home upsert: %v", err)
 		}
 		if other, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "home-2", 1, db.ClaimPlacement{}); err != nil || other != nil {
