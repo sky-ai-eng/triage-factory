@@ -44,6 +44,11 @@ var ErrSecretStoreUnavailable = errors.New("secret store not available on this r
 //
 // D5 owns the consumer side (wiring real handlers + secret-name
 // catalog); D2 provides the interface and both impls.
+// TODO(TFAC-871): Put, PutUser and PutUserSystem still return a bare error and
+// are unclassified. This store answers reads with values rather than rows, so
+// the standard's mechanism has no point read to project — the ticket is
+// expected to land on a stated exemption, but the reason has to be written
+// down here either way.
 type SecretStore interface {
 	// Put writes (or rotates) an org-scoped secret. description is
 	// optional (stored as ""). The value is encrypted app-side and

@@ -59,7 +59,27 @@ func newProjectStore(q, admin queryer) db.ProjectStore {
 
 var _ db.ProjectStore = (*projectStore)(nil)
 
-func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (string, error) {
+// pgProjectColumns is the canonical projection of a projects row, in the order
+// scanProjectRow reads them. Every point read SELECTs it and both single-row
+// writes RETURN it, so the write shape cannot drift from the read shape as
+// columns are added.
+const pgProjectColumns = `id, name, description,
+		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
+		       team_id, visibility, creator_user_id, created_at, updated_at`
+
+// attachProjectPinsAfterWrite reconciles the project's pinned-repo set and
+// hangs the reconciled set on the row the write returned. The pins live in
+// their own table and are written as a set, so RETURNING cannot project them
+// and the set write has no single row to hand back — reading them here is the
+// set's own read, not a re-read of the projects row this statement produced.
+func attachProjectPinsAfterWrite(ctx context.Context, q queryer, orgID string, p *domain.Project, pins []string) error {
+	if err := replacePinnedRepos(ctx, q, orgID, p.ID, pins); err != nil {
+		return err
+	}
+	return attachPinnedRepos(ctx, q, []*domain.Project{p})
+}
+
+func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domain.Project) (domain.Project, error) {
 	id := p.ID
 	if id == "" {
 		id = uuid.New().String()
@@ -83,7 +103,7 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 		visibility = domain.ProjectVisibilityTeam
 	}
 	if visibility == domain.ProjectVisibilityTeam && teamBind == "" {
-		return "", fmt.Errorf("project store: team_id required for Postgres Create under visibility=%q (handler must thread the user-selected team from request context; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the projects_insert RLS policy)", domain.ProjectVisibilityTeam)
+		return domain.Project{}, fmt.Errorf("project store: team_id required for Postgres Create under visibility=%q (handler must thread the user-selected team from request context; the SQLite-only LocalDefaultTeamID sentinel does not satisfy the projects_insert RLS policy)", domain.ProjectVisibilityTeam)
 	}
 
 	// creator_user_id: pulled from tf.current_user_id() set by WithTx
@@ -92,8 +112,12 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 	// fallback covers the pgtest admin-pool path (BYPASSRLS, no
 	// claims set); in production multi-mode under tf_app, claims are
 	// always set and the COALESCE stops at the first branch.
+	var created *domain.Project
 	if err := inTx(ctx, s.q, func(tx queryer) error {
-		if _, err := tx.ExecContext(ctx, `
+		// RETURNING carries the id this method minted when p had none, the
+		// creator identity the COALESCE resolved and the team_id the NULLIF
+		// dropped — none of which p can describe.
+		row, err := scanProjectRow(tx.QueryRowContext(ctx, `
 			INSERT INTO projects
 			  (id, org_id, creator_user_id, team_id, visibility, name, description,
 			   jira_project_key, linear_project_key, spec_authorship_blueprint_id)
@@ -104,18 +128,20 @@ func (s *projectStore) Create(ctx context.Context, orgID, teamID string, p domai
 			   $4,
 			   $5, $6,
 			   NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''))
-		`,
+			RETURNING `+pgProjectColumns,
 			id, orgID, teamBind, visibility,
 			p.Name, p.Description,
 			p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
-		); err != nil {
+		))
+		if err != nil {
 			return translateVisibilityErr(err)
 		}
-		return replacePinnedRepos(ctx, tx, orgID, id, p.PinnedRepos)
+		created = row
+		return attachProjectPinsAfterWrite(ctx, tx, orgID, created, p.PinnedRepos)
 	}); err != nil {
-		return "", err
+		return domain.Project{}, err
 	}
-	return id, nil
+	return *created, nil
 }
 
 func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Project, error) {
@@ -187,9 +213,7 @@ func listProjects(ctx context.Context, q queryer, orgID string, opts db.ListOpts
 		return nil, 0, err
 	}
 	query := `
-		SELECT id, name, description,
-		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, visibility, creator_user_id, created_at, updated_at
+		SELECT ` + pgProjectColumns + `
 		FROM projects
 		WHERE org_id = $1
 		ORDER BY LOWER(name) ASC, id`
@@ -313,14 +337,23 @@ func attachPinnedRepos(ctx context.Context, q queryer, projects []*domain.Projec
 	return rows.Err()
 }
 
-func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) error {
-	return inTx(ctx, s.q, func(tx queryer) error {
-		return updateProject(ctx, tx, orgID, p)
-	})
+func (s *projectStore) Update(ctx context.Context, orgID string, p domain.Project) (domain.Project, error) {
+	var updated domain.Project
+	if err := inTx(ctx, s.q, func(tx queryer) error {
+		var e error
+		updated, e = updateProject(ctx, tx, orgID, p)
+		return e
+	}); err != nil {
+		return domain.Project{}, err
+	}
+	return updated, nil
 }
 
-func updateProject(ctx context.Context, q queryer, orgID string, p domain.Project) error {
-	res, err := q.ExecContext(ctx, `
+func updateProject(ctx context.Context, q queryer, orgID string, p domain.Project) (domain.Project, error) {
+	// No row scanned means the id matched nothing — or that RLS hides whatever
+	// does — the same sql.ErrNoRows the rows-affected probe here used to
+	// synthesize, now reported by the statement that knows it.
+	row, err := scanProjectRow(q.QueryRowContext(ctx, `
 		UPDATE projects
 		SET name = $1, description = $2,
 		    jira_project_key = NULLIF($3, ''),
@@ -329,23 +362,22 @@ func updateProject(ctx context.Context, q queryer, orgID string, p domain.Projec
 		    visibility = $6,
 		    updated_at = now()
 		WHERE org_id = $7 AND id = $8
-	`,
+		RETURNING `+pgProjectColumns,
 		p.Name, p.Description,
 		p.JiraProjectKey, p.LinearProjectKey, p.SpecAuthorshipBlueprintID,
 		p.Visibility,
 		orgID, p.ID,
-	)
+	))
 	if err != nil {
-		return translateVisibilityErr(err)
+		return domain.Project{}, translateVisibilityErr(err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
+	if row == nil {
+		return domain.Project{}, sql.ErrNoRows
 	}
-	if n == 0 {
-		return sql.ErrNoRows
+	if err := attachProjectPinsAfterWrite(ctx, q, orgID, row, p.PinnedRepos); err != nil {
+		return domain.Project{}, err
 	}
-	return replacePinnedRepos(ctx, q, orgID, p.ID, p.PinnedRepos)
+	return *row, nil
 }
 
 func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
@@ -363,6 +395,7 @@ func (s *projectStore) Delete(ctx context.Context, orgID, id string) error {
 	return nil
 }
 
+// BumpUpdatedAt is exempt from the returned-row rule; see the interface doc.
 func (s *projectStore) BumpUpdatedAt(ctx context.Context, orgID, id string) error {
 	_, err := s.q.ExecContext(ctx,
 		`UPDATE projects SET updated_at = now() WHERE org_id = $1 AND id = $2`,

@@ -49,12 +49,18 @@ type ExternalActionStore interface {
 	// collapse. Empty optional columns serialize to SQL NULL. A returned error
 	// rolls back the surrounding transaction — the action and its audit row are
 	// atomic (intentional).
+	//
+	// Exempt from the returned-row rule: it appends to an audit log. The row
+	// is written to be read by a later listing, never by its own writer.
 	Record(ctx context.Context, orgID string, entry domain.ExternalAction) error
 
 	// RecordSystem is the admin-pool (BYPASSRLS) variant of Record for
 	// system-service writers with no JWT-claims context — the event-triggered bot
 	// exec choke point and the Jira board mirror. Identical insert semantics
 	// (uuid fill, ON CONFLICT DO NOTHING); identical to Record in SQLite.
+	//
+	// Exempt from the returned-row rule: it appends to an audit log, same as
+	// Record.
 	RecordSystem(ctx context.Context, orgID string, entry domain.ExternalAction) error
 
 	// ListByOrgSystem returns the org's actions across EVERY team, newest first

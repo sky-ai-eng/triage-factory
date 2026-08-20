@@ -1084,7 +1084,7 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		// matters: the pointer is set first so a crash between here and the
 		// enqueue leaves current_step_index naming the step the boot reconcile
 		// would re-drive.
-		if err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
+		if _, err := s.blueprints.SetRunCurrentStepSystem(ctx, orgID, br.ID, next); err != nil {
 			dispatchLog.Warn("set current_step_index for blueprint_run failed", "blueprint_run", br.ID, "error", err)
 		}
 		if err := s.enqueueBlueprintStep(ctx, orgID, br.ID, *task, plan[next].Step(br.BlueprintID), stepModelOrInherit(plan[next].Model, stepConversation.Model), triggerType, br.TriggerID, creatorUserID, br.ActorAgentID); err != nil {
@@ -1277,7 +1277,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.workspace = domain.WorkspaceProvenanceFresh
 		// Stamp the shared worktree path onto the blueprint_run so later steps
 		// (and the resume/cancel cleanup) can reconstruct it.
-		if e := s.blueprints.SetRunWorktreePathSystem(context.WithoutCancel(ctx), orgID, br.ID, cfg.wtPath); e != nil {
+		if _, e := s.blueprints.SetRunWorktreePathSystem(context.WithoutCancel(ctx), orgID, br.ID, cfg.wtPath); e != nil {
 			dispatchLog.Warn("set worktree_path for blueprint_run failed", "blueprint_run", br.ID, "error", e)
 		}
 		return cfg, nil

@@ -28,10 +28,11 @@ func curatorTestSetup(t *testing.T) (*Server, *curator.Curator, string) {
 	srv.SetCurator(c)
 	t.Cleanup(c.Shutdown)
 
-	projectID, err := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Curator HTTP test"})
+	created, err := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Curator HTTP test"})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	projectID := created.ID
 	return srv, c, projectID
 }
 
@@ -317,7 +318,8 @@ func TestHandleCuratorSend_NotConfiguredWhenRuntimeUnset(t *testing.T) {
 	// we keep the guard so a future test or a partial init can't
 	// crash the server.
 	srv := newTestServer(t)
-	projectID, _ := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-curator"})
+	created, _ := srv.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-curator"})
+	projectID := created.ID
 
 	rr := doJSON(t, srv, http.MethodPost, "/api/projects/"+projectID+"/curator/messages", map[string]string{"content": "hi"})
 	if rr.Code != http.StatusConflict {

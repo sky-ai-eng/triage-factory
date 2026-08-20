@@ -525,22 +525,23 @@ func TestChannelsHandler_PreexistingTrigger_NoSeed(t *testing.T) {
 	promptID := "00000000-0000-0000-0000-0000000000c1"
 	blueprintID := "00000000-0000-0000-0000-0000000000c2"
 	if err := r.stor.Tx.WithTx(t.Context(), orgID, owner, func(tx db.TxStores) error {
-		if err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
+		if _, err := tx.Prompts.Create(t.Context(), orgID, teamID, domain.Prompt{ID: promptID, Name: "custom", Body: "custom body", Source: "user"}); err != nil {
 			return err
 		}
-		if err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
+		if _, err := tx.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{ID: blueprintID, Name: "custom", Source: "user"}); err != nil {
 			return err
 		}
-		if err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
+		if _, err := tx.Blueprints.ReplaceSteps(t.Context(), orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
 			return err
 		}
 		threshold, minAutonomy := 5, 0.2
-		return tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
+		_, e := tx.EventHandlers.Create(t.Context(), orgID, teamID, domain.EventHandler{
 			ID: "00000000-0000-0000-0000-0000000000c3", Kind: domain.EventHandlerKindTrigger,
 			EventType: domain.EventSlackMessage, Enabled: true, Source: domain.EventHandlerSourceUser,
 			BlueprintID: blueprintID, TriggerType: domain.TriggerTypeEvent,
 			BreakerThreshold: &threshold, MinAutonomySuitability: &minAutonomy,
 		})
+		return e
 	}); err != nil {
 		t.Fatalf("seed pre-existing trigger: %v", err)
 	}

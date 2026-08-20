@@ -93,6 +93,8 @@ type OrgMembershipsStore interface {
 	// (self-leave, any role) or, as an org admin, anyone. Returns
 	// ErrLastOwnerGuard when removing the org's last owner (guard trigger),
 	// and ErrOrgMemberNotFound when no row matches.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Remove(ctx context.Context, orgID, userID string) error
 
 	// TransferOwnership hands org ownership from currentOwnerID to newOwnerID

@@ -53,6 +53,12 @@ var _ db.PromptStore = (*promptStore)(nil)
 
 // --- CRUD ----------------------------------------------------------
 
+// pgPromptColumns is the canonical projection of a prompts row, in the order
+// scanPromptRowPG reads them. Every point read SELECTs it and every single-row
+// write RETURNs it, so the write shape cannot drift from the read shape as
+// columns are added.
+const pgPromptColumns = `id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at`
+
 func (s *promptStore) List(ctx context.Context, orgID string, teamID string, opts db.ListOpts) ([]domain.Prompt, int, error) {
 	args := []any{orgID}
 	where := ` WHERE org_id = $1 AND hidden = FALSE AND deleted_at IS NULL`
@@ -112,7 +118,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 		return nil, errors.New("postgres prompts: GetBySystemSlug requires team_id")
 	}
 	p, err := scanPromptRowPG(s.app.QueryRowContext(ctx, `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT `+pgPromptColumns+`
 		FROM prompts WHERE org_id = $1 AND team_id = $2 AND system_slug = $3 AND deleted_at IS NULL
 	`, orgID, teamID, systemSlug).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -126,7 +132,7 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 
 func getPrompt(ctx context.Context, q queryer, orgID, id string, includeDeleted bool) (*domain.Prompt, error) {
 	query := `
-		SELECT id, name, body, source, allowed_tools, model, usage_count, team_id, system_slug, created_at, updated_at
+		SELECT ` + pgPromptColumns + `
 		FROM prompts WHERE org_id = $1 AND id = $2`
 	if !includeDeleted {
 		query += ` AND deleted_at IS NULL`
@@ -157,7 +163,7 @@ func scanPromptRowPG(scanFn func(dst ...any) error) (domain.Prompt, error) {
 	return p, nil
 }
 
-func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) error {
+func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain.Prompt) (domain.Prompt, error) {
 	// creator_user_id is NOT NULL. Two execution contexts:
 	//   - Production request path: WithTx has set request.jwt.claims,
 	//     so tf.current_user_id() returns the caller's UUID. That's
@@ -186,32 +192,50 @@ func (s *promptStore) Create(ctx context.Context, orgID, teamID string, p domain
 	// (tf.user_in_team) satisfied. Empty is a handler bug (it must thread
 	// the resolved team), so reject it rather than write an invalid row.
 	if teamID == "" {
-		return fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
+		return domain.Prompt{}, fmt.Errorf("postgres prompts Create: team_id required (handler must thread the resolved acting team from request context)")
 	}
-	_, err := s.app.ExecContext(ctx, `
+	// RETURNING projects the point read's column list, so the row handed back
+	// carries the usage_count, the timestamps and the team_id the statement
+	// resolved — p describes none of them.
+	return scanPromptRowPG(s.app.QueryRowContext(ctx, `
 		INSERT INTO prompts (id, org_id, creator_user_id, team_id, name, body, source, allowed_tools, model, usage_count, created_at, updated_at)
 		VALUES ($1, $2,
 			COALESCE(tf.current_user_id(), (SELECT owner_user_id FROM orgs WHERE id = $2)),
 			$3::uuid,
 			$4, $5, $6, $7, $8, 0, now(), now())
-	`, p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model)
-	return err
+		RETURNING `+pgPromptColumns,
+		p.ID, orgID, teamID, p.Name, p.Body, p.Source, p.AllowedTools, p.Model,
+	).Scan)
 }
 
-func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) error {
-	_, err := s.app.ExecContext(ctx, `
+func (s *promptStore) Update(ctx context.Context, orgID string, id, name, body, model string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx, `
 		UPDATE prompts SET name = $1, body = $2, model = $3, user_modified = TRUE, updated_at = now()
 		WHERE org_id = $4 AND id = $5
-	`, name, body, model, orgID, id)
-	return err
+		RETURNING `+pgPromptColumns,
+		name, body, model, orgID, id,
+	))
 }
 
-func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) error {
-	_, err := s.app.ExecContext(ctx, `
+func (s *promptStore) UpdateImported(ctx context.Context, orgID string, id, name, body, allowedTools string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx, `
 		UPDATE prompts SET name = $1, body = $2, allowed_tools = $3, updated_at = now()
 		WHERE org_id = $4 AND id = $5
-	`, name, body, allowedTools, orgID, id)
-	return err
+		RETURNING `+pgPromptColumns,
+		name, body, allowedTools, orgID, id,
+	))
+}
+
+// scanUpdatedPrompt decodes an id-keyed UPDATE … RETURNING. No row scanned
+// means the id matched nothing — or, on the app pool, that RLS hides whatever
+// does — and both are db.ErrNoSuchPrompt, the answer these writes used to give
+// silently as zero rows affected.
+func scanUpdatedPrompt(row *sql.Row) (domain.Prompt, error) {
+	p, err := scanPromptRowPG(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Prompt{}, db.ErrNoSuchPrompt
+	}
+	return p, err
 }
 
 // Delete soft-deletes: it stamps deleted_at rather than removing the row,
@@ -233,14 +257,14 @@ func (s *promptStore) Delete(ctx context.Context, orgID string, id string) error
 	return nil
 }
 
-func (s *promptStore) Hide(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET hidden = TRUE WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+func (s *promptStore) Hide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = TRUE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
 }
 
-func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) error {
-	_, err := s.app.ExecContext(ctx, `UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2`, orgID, id)
-	return err
+func (s *promptStore) Unhide(ctx context.Context, orgID string, id string) (domain.Prompt, error) {
+	return scanUpdatedPrompt(s.app.QueryRowContext(ctx,
+		`UPDATE prompts SET hidden = FALSE WHERE org_id = $1 AND id = $2 RETURNING `+pgPromptColumns, orgID, id))
 }
 
 func (s *promptStore) CountConversationReferences(ctx context.Context, orgID, id string) (int, error) {

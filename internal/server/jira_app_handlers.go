@@ -224,7 +224,7 @@ func (s *Server) handleJiraAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
+		if _, err := tx.JiraApps.UpsertForOrg(r.Context(), domain.OrgJiraApp{
 			OrgID:              orgID,
 			ClientID:           clientID,
 			ClientSecretRef:    jiraOAuthClientSecretKey,

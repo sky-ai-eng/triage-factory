@@ -114,10 +114,11 @@ func TestCuratorGitAuthorizeDecision(t *testing.T) {
 // minted by the curator engine, not any delegate-side store.
 func seedCuratorTurn(t *testing.T, database *sql.DB, stores db.Stores, executorID string, bootEpoch int64) (conversationID string) {
 	t.Helper()
-	projectID, err := stores.Projects.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
+	created, err := stores.Projects.Create(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "homed"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID := created.ID
 	conversationID = "conv-curator-turn"
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id)

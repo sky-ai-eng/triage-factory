@@ -27,11 +27,12 @@ func TestCuratorStore_SQLite_Conformance(t *testing.T) {
 			UserID: runmode.LocalDefaultUserID,
 			SeedProject: func(t *testing.T, name string) string {
 				t.Helper()
-				id, err := stores.Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				created, err := stores.Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 					domain.Project{Name: name})
 				if err != nil {
 					t.Fatalf("create project %q: %v", name, err)
 				}
+				id := created.ID
 				return id
 			},
 		}

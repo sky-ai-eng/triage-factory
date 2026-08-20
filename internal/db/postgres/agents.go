@@ -136,25 +136,36 @@ func (s *agentStore) Create(ctx context.Context, orgID string, a domain.Agent) (
 	return existing, nil
 }
 
-func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) error {
-	if !isValidUUID(a.ID) {
-		return nil
+// scanUpdatedAgent decodes an id-keyed UPDATE … RETURNING. No row scanned
+// means the (org, id) pair named nothing — or that RLS hides whatever does —
+// and both are db.ErrNoSuchAgent.
+func scanUpdatedAgent(row *sql.Row) (domain.Agent, error) {
+	a, err := scanAgentRowPG(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Agent{}, db.ErrNoSuchAgent
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return a, err
+}
+
+func (s *agentStore) Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error) {
+	if !isValidUUID(a.ID) {
+		return domain.Agent{}, db.ErrNoSuchAgent
+	}
+	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
 		UPDATE agents
 		SET display_name = $1,
 		    default_model = $2,
 		    default_autonomy_suitability = $3,
 		    jira_service_account_id = $4
 		WHERE org_id = $5 AND id = $6
-	`, a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
-		nullString(a.JiraServiceAccountID), orgID, a.ID)
-	return err
+		RETURNING `+pgAgentColumns,
+		a.DisplayName, nullString(a.DefaultModel), a.DefaultAutonomySuitability,
+		nullString(a.JiraServiceAccountID), orgID, a.ID))
 }
 
-func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error {
+func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error) {
 	if !isValidUUID(agentID) {
-		return nil
+		return domain.Agent{}, db.ErrNoSuchAgent
 	}
 	// "" = caller-intentional clear, valid UUID = caller-intentional set.
 	// Any other shape (e.g. "alice@example.com" passed by mistake) is a
@@ -163,19 +174,19 @@ func (s *agentStore) SetGitHubPATUser(ctx context.Context, orgID, agentID, userI
 	// the cast would 22P02-error anyway, but refusing up front gives a
 	// caller-friendly error shape.
 	if userID != "" && !isValidUUID(userID) {
-		return fmt.Errorf("postgres agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
+		return domain.Agent{}, fmt.Errorf("postgres agents: SetGitHubPATUser: userID %q is not empty and not a valid UUID", userID)
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_pat_user_id = $1
 		WHERE org_id = $2 AND id = $3
-	`, nullUUID(userID), orgID, agentID)
-	return err
+		RETURNING `+pgAgentColumns,
+		nullUUID(userID), orgID, agentID))
 }
 
-func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) error {
+func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error) {
 	if !isValidUUID(agentID) {
-		return nil
+		return domain.Agent{}, db.ErrNoSuchAgent
 	}
 	// login is a free-form GitHub login (e.g. "octocat" or "acme-bot[bot]"),
 	// stored in the text column github_org_login — no UUID shape check, unlike
@@ -184,13 +195,13 @@ func (s *agentStore) SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, l
 	if login == "" || email == "" {
 		login, email = "", ""
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return scanUpdatedAgent(s.app.QueryRowContext(ctx, `
 		UPDATE agents
 		SET github_org_login = $1,
 		    github_org_email = $2
 		WHERE org_id = $3 AND id = $4
-	`, nullString(login), nullString(email), orgID, agentID)
-	return err
+		RETURNING `+pgAgentColumns,
+		nullString(login), nullString(email), orgID, agentID))
 }
 
 // nullString returns nil when s is empty so the column ends up SQL NULL.

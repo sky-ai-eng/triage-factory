@@ -28,6 +28,9 @@ type AuthEventStore interface {
 	// entry.ID may be empty (the impls generate a uuid; Postgres via
 	// gen_random_uuid()); created_at is stamped server-side (the column DEFAULT).
 	// Empty optional columns serialize to SQL NULL.
+	//
+	// Exempt from the returned-row rule: it appends to an audit log. The row
+	// is written to be read by a later listing, never by its own writer.
 	RecordSystem(ctx context.Context, entry domain.AuthEvent) error
 
 	// ListByOrgSystem returns orgID's events newest-first (created_at DESC, id

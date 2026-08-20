@@ -22,6 +22,10 @@ import (
 // writer is a delegate goroutine with no JWT-claims context, and tf_app holds
 // no INSERT/UPDATE grant on the table. SQLite is N=1 and collapses to the one
 // connection.
+// TODO(TFAC-865): these single-row writes still return a bare error rather
+// than the row they persisted: Create (which mints the id and stamps
+// requested_at) and Resolve (a guarded transition whose declined arm a bare
+// error cannot express).
 type PermissionStore interface {
 	// Create inserts a freshly surfaced prompt. p.State must be
 	// domain.PermissionStatePending; p.ID is minted when empty and p.RequestedAt
@@ -78,5 +82,9 @@ type PermissionStore interface {
 	// conclusion from the claim alone — and that is precisely what makes the
 	// arrangement robust against a crash, which by definition never runs its
 	// cleanup.
+	//
+	// Exempt from the returned-row rule: it expires every outstanding request
+	// on a claim in one statement, so there is no single row a return value
+	// could name.
 	ExpireForClaim(ctx context.Context, orgID, claimID string) error
 }

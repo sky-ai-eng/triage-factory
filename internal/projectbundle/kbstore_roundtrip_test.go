@@ -30,10 +30,11 @@ func TestBundle_MultiMode_StoreRoundTrip(t *testing.T) {
 	// Source project with KB only in the store (no pinned repos, no session).
 	srcDB := newBundleTestDB(t)
 	srcStores := sqlitestore.New(srcDB)
-	projectID, err := srcStores.Projects.Create(ctx, org, team, domain.Project{Name: "Store RT"})
+	created, err := srcStores.Projects.Create(ctx, org, team, domain.Project{Name: "Store RT"})
 	if err != nil {
 		t.Fatalf("create project: %v", err)
 	}
+	projectID := created.ID
 	srcKB := kbstore.New(storage.NewFS(t.TempDir()))
 	kbFiles := map[string]string{"design.md": "# design", "diagram.bin": "\x00\x01\x02binary"}
 	for name, body := range kbFiles {

@@ -104,7 +104,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}); err != nil {
 			t.Fatalf("reserve worktree: %v", err)
 		}
-		projectID, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
+		projectIDRow, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
 			Name:        "pins the dropped repo",
 			Visibility:  domain.ProjectVisibilityTeam,
 			PinnedRepos: []string{untrackedSlug},
@@ -112,6 +112,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if err != nil {
 			t.Fatalf("Projects.Create: %v", err)
 		}
+		projectID := projectIDRow.ID
 
 		// The untrack.
 		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
@@ -168,12 +169,13 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
 		pins := []string{"octo/zeta", "octo/alpha"}
-		projectID, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
+		projectIDRow, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
 			Name: "ordered pins", Visibility: domain.ProjectVisibilityTeam, PinnedRepos: pins,
 		})
 		if err != nil {
 			t.Fatalf("Projects.Create: %v", err)
 		}
+		projectID := projectIDRow.ID
 		proj, err := s.Projects.Get(ctx, orgID, projectID)
 		if err != nil || proj == nil {
 			t.Fatalf("Projects.Get: %v, %v", proj, err)
@@ -184,7 +186,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 		// An update replaces the set wholesale, order and all.
 		proj.PinnedRepos = []string{"octo/alpha"}
-		if err := s.Projects.Update(ctx, orgID, *proj); err != nil {
+		if _, err := s.Projects.Update(ctx, orgID, *proj); err != nil {
 			t.Fatalf("Projects.Update: %v", err)
 		}
 		updated, err := s.Projects.Get(ctx, orgID, projectID)

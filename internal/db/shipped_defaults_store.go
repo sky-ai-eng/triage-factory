@@ -41,6 +41,10 @@ type ShippedDefaultsStore interface {
 	//
 	// Runs on the admin pool; must run OUTSIDE any WithTx — enforced by both
 	// dialects' impls.
+	//
+	// Exempt from the returned-row rule: it seeds a whole team's shipped set
+	// across three tables, most of it to no-ops, so there is no single row a
+	// return value could name.
 	SeedShippedIntoTeam(ctx context.Context, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error
 
 	// SyncShippedIntoTeam brings teamID's UNMODIFIED copies of the shipped
@@ -85,5 +89,8 @@ type ShippedDefaultsStore interface {
 	// Idempotent and cheap to repeat every boot — the equality check makes an
 	// already-synced team a pure read. Runs on the admin pool; must run OUTSIDE
 	// any WithTx.
+	//
+	// Exempt from the returned-row rule: it reconciles a whole team's shipped
+	// set, same as SeedShippedIntoTeam.
 	SyncShippedIntoTeam(ctx context.Context, orgID, teamID string, shippedPrompts []domain.Prompt, shippedBlueprints []domain.SeedBlueprint) error
 }

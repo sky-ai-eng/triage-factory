@@ -143,18 +143,14 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 		AllowedTools: meta.AllowedTools,
 	}
 
-	var created *domain.Prompt
+	var created domain.Prompt
 	if err := sk.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
-		if e := tx.Prompts.Create(r.Context(), orgID, teamID, prompt); e != nil {
-			return e
-		}
-		var ge error
-		created, ge = tx.Prompts.Get(r.Context(), orgID, id)
-		return ge
+		created, e = tx.Prompts.Create(r.Context(), orgID, teamID, prompt)
+		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return

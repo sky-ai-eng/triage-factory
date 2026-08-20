@@ -88,6 +88,8 @@ type ConversationWorktreeStore interface {
 	// path was reaped (e.g. startup orphan sweep) so a subsequent
 	// `workspace add` can re-reserve. Idempotent: deleting a row
 	// that doesn't exist is a no-op (no error).
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error
 
 	// DeleteByPathSystem removes the row for a (conversation_id, path)
@@ -96,6 +98,8 @@ type ConversationWorktreeStore interface {
 	// are reaped, so a per-path failure to remove from disk leaves
 	// the corresponding DB row intact for the next sweep. Admin
 	// pool only; the only caller is the delegate goroutine.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error
 
 	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
@@ -107,5 +111,8 @@ type ConversationWorktreeStore interface {
 	// non-System methods.
 	InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 	GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error)
+
+	// DeleteByRepoRefSystem is exempt from the returned-row rule: it is a
+	// delete.
 	DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error
 }

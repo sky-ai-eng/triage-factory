@@ -87,6 +87,9 @@ type ReachableReposStore interface {
 	//
 	// Rows are keyed on the case-folded slug, so two casings of one repository in
 	// the same answer are one row rather than two.
+	//
+	// Exempt from the returned-row rule: it reconciles a whole cache set in
+	// one transaction, so there is no single row a return value could name.
 	ReplaceForInstallationSystem(ctx context.Context, orgID, installationID string, repos []domain.ReachableRepository) error
 
 	// ReplaceForPATSystem is the PAT tier's twin: it replaces the org's ENTIRE
@@ -102,6 +105,9 @@ type ReachableReposStore interface {
 	// Same all-or-nothing contract as the App tier, and for the same reason: a
 	// partial enumeration written as a whole one makes every repository past the
 	// cut look unreachable, which the write gate would then reject.
+	//
+	// Exempt from the returned-row rule: it reconciles a whole cache set, same
+	// as ReplaceForInstallationSystem.
 	ReplaceForPATSystem(ctx context.Context, orgID, host string, repos []domain.ReachableRepository) error
 
 	// ClearForInstallationSystem drops one installation's entries. This is the
@@ -118,6 +124,9 @@ type ReachableReposStore interface {
 	// malformed org or an empty installation id as "nothing to clear" — a delete
 	// that silently matched no rows would report success for a grant that is
 	// still on the page.
+	//
+	// Exempt from the returned-row rule: it clears a set, so there is no
+	// single row a return value could name.
 	ClearForInstallationSystem(ctx context.Context, orgID, installationID string) error
 
 	// ListForOrgSystem returns every App-tier entry across the org's LIVE

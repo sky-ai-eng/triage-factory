@@ -101,7 +101,7 @@ func TestHandleFactoryDelegate_409OnClosedEntity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
+	if _, err := sqlitestore.New(s.db).Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, entity.ID); err != nil {
 		t.Fatalf("close entity: %v", err)
 	}
 	eid := entity.ID

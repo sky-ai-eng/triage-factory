@@ -347,7 +347,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 					return terr
 				}
 				teamSet.JiraProjects = cfg.jiraProjects
-				if uerr := tx.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, teamSet); uerr != nil {
+				if _, uerr := tx.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, teamSet); uerr != nil {
 					return uerr
 				}
 				if rerr := tx.JiraStatusRules.ReplaceForTeam(ctx, runmode.LocalDefaultTeamID, headlessJiraRules(cfg)); rerr != nil {

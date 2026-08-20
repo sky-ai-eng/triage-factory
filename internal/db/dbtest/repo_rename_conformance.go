@@ -603,7 +603,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "orphan")
 
-		if err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
 			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: renameNewSlug, Replicas: 9,
 		}); err != nil {
 			t.Fatalf("seed target placement override: %v", err)
@@ -757,13 +757,14 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed worktree: %v", err)
 	}
 
-	projectID, err := s.Projects.Create(ctx, orgID, seed.TeamID, domain.Project{
+	projectIDRow, err := s.Projects.Create(ctx, orgID, seed.TeamID, domain.Project{
 		Name:        "Platform " + suffix,
 		PinnedRepos: []string{renameOldSlug, renameNeighbourSlug},
 	})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	projectID := projectIDRow.ID
 
 	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameOldSlug+"#18", "pr", "A pull request",
 		"https://github.com/"+renameOldSlug+"/pull/18")
@@ -823,12 +824,12 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed neighbour artifact: %v", err)
 	}
 
-	if err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
 		OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: renameOldSlug, Replicas: 3,
 	}); err != nil {
 		t.Fatalf("seed placement override: %v", err)
 	}
-	if err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
 		OrgID: orgID, KeyKind: domain.PlacementKindProject, KeyValue: projectID, Replicas: 2,
 	}); err != nil {
 		t.Fatalf("seed project placement override: %v", err)

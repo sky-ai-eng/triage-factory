@@ -684,7 +684,7 @@ const (
 // app-pool Create path rather than the admin-pool seeders.
 func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID, teamID string) error {
 	promptID := uuid.New().String()
-	if err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
+	if _, err := tx.Prompts.Create(ctx, orgID, teamID, domain.Prompt{
 		ID:     promptID,
 		Name:   slackMessagePromptName,
 		Body:   slackMessagePromptBody,
@@ -694,21 +694,21 @@ func seedDefaultSlackMessageBlueprint(ctx context.Context, tx db.TxStores, orgID
 	}
 
 	blueprintID := uuid.New().String()
-	if err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{
+	if _, err := tx.Blueprints.Create(ctx, orgID, teamID, domain.Blueprint{
 		ID:     blueprintID,
 		Name:   slackMessagePromptName,
 		Source: "user",
 	}); err != nil {
 		return fmt.Errorf("seed slack message blueprint: %w", err)
 	}
-	if err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
+	if _, err := tx.Blueprints.ReplaceSteps(ctx, orgID, blueprintID, []string{promptID}, []string{""}); err != nil {
 		return fmt.Errorf("seed slack message blueprint steps: %w", err)
 	}
 
 	predicate := `{"channel_in":[]}`
 	threshold := slackMessageTriggerBreakerThreshold
 	minAutonomy := slackMessageTriggerMinAutonomy
-	if err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
+	if _, err := tx.EventHandlers.Create(ctx, orgID, teamID, domain.EventHandler{
 		ID:                     uuid.New().String(),
 		Kind:                   domain.EventHandlerKindTrigger,
 		EventType:              domain.EventSlackMessage,

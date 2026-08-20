@@ -123,7 +123,11 @@ type TeamsStore interface {
 	// read-modify-write and never sets the cap from its request body, so a
 	// team-admin save round-trips the org-admin-configured cap untouched
 	// (TFAC-482) — the cap is *changed* only by SetDailyCostCapSystem.
-	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) error
+	//
+	// Returns the persisted settings, read off RETURNING on the write
+	// statement itself rather than from a follow-up SELECT and projecting
+	// GetSettings' column list and scanner.
+	UpdateSettings(ctx context.Context, teamID string, updates domain.TeamSettings) (domain.TeamSettings, error)
 
 	// SetDailyCostCapSystem upserts ONLY team_settings.max_daily_cost_usd for
 	// teamID — the org-admin per-team daily LLM spend cap (TFAC-482, the team-
@@ -134,7 +138,13 @@ type TeamsStore interface {
 	// RequireOrgAdminRole gate authorizes this System path. It touches only the
 	// cap column (the other settings are never clobbered) and creates the row from
 	// schema defaults when none exists. SQLite is N=1 / no RLS and writes directly.
-	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) error
+	//
+	// Returns the whole persisted settings row, which is the point: the write
+	// touches one column and the row it lands in may have just been created
+	// from schema defaults, so nothing the caller holds describes it. Two
+	// admins racing on the same cap each get the value that actually landed
+	// rather than an echo of their own request.
+	SetDailyCostCapSystem(ctx context.Context, teamID string, capUSD float64) (domain.TeamSettings, error)
 
 	// ListForUser returns one page of the requesting user's active teams in
 	// the org plus the unpaged total, ordered oldest-first (the same
@@ -226,7 +236,13 @@ type TeamsStore interface {
 	// handler. Postgres routes through the app pool: teams_update RLS gates the
 	// write to team-admin-or-org-admin, and the handler additionally restricts to
 	// org-admin (TFAC-448).
-	Archive(ctx context.Context, teamID string) error
+	//
+	// Returns the archived row — carrying the deleted_at it stamped — so the
+	// handler answers with the team the write produced rather than patching
+	// the tombstone onto a copy it read beforehand. Team.Role is left empty:
+	// it is the *caller's* membership role, which Get joins on and no column
+	// of the teams row carries, so it is not part of what a write returns.
+	Archive(ctx context.Context, teamID string) (domain.Team, error)
 
 	// Restore clears teamID's deleted_at (back to NULL), but only when the team
 	// is currently archived (deleted_at IS NOT NULL). Returns ErrTeamNotFound when
@@ -234,7 +250,9 @@ type TeamsStore interface {
 	// deliberately does NOT resurrect the runs / curator sessions that archive
 	// force-stopped — those stay terminal. App pool: teams_update RLS (org-admin
 	// via the handler gate).
-	Restore(ctx context.Context, teamID string) error
+	//
+	// Returns the restored row, with the same Role caveat as Archive.
+	Restore(ctx context.Context, teamID string) (domain.Team, error)
 
 	// GetSystem returns a single team by id WITHOUT the request-facing
 	// deleted_at read filter (so an archived team resolves), or nil when no row
@@ -309,6 +327,13 @@ type TeamsStore interface {
 	// admins or org admins. Returns ErrTeamMemberExists when the user is
 	// already on the team (the PK collides). Callers validate role against the
 	// allowed set and confirm the target is an org member before calling.
+	//
+	// Exempt from the returned-row rule: memberships is exposed here only
+	// through ListMembers, an identity-enriched roster read that joins two
+	// other tables per member — there is no plain row read whose column list
+	// and scanner a RETURNING could share, and the enrichment is not something
+	// an insert can produce. ErrTeamMemberExists already answers "did this
+	// land".
 	AddMember(ctx context.Context, teamID, userID, role string) error
 
 	// ChangeMemberRole sets userID's team role on teamID and returns the prior
@@ -325,5 +350,7 @@ type TeamsStore interface {
 	// (self-leave, any role) or, as a team/org admin, anyone. Returns
 	// ErrLastTeamAdminGuard when removing the team's last admin (guard
 	// trigger), and ErrTeamMemberNotFound when no row matches.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	RemoveMember(ctx context.Context, teamID, userID string) error
 }

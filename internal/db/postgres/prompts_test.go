@@ -135,9 +135,10 @@ func TestPromptStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// org_id = tf.current_org_id(), so 42501 is the expected
 		// outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			return pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgA, teamA, domain.Prompt{
+			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Prompts.Create(ctx, orgA, teamA, domain.Prompt{
 				ID: "p-rls-write-" + orgA[:8], Name: "x-write", Body: "x", Source: "user",
 			})
+			return e
 		})
 		pgtest.AssertRLSViolation(t, err)
 	})

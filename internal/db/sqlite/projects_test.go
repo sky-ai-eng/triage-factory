@@ -41,7 +41,7 @@ func TestProjectStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, _, err := store.List(ctx, bogusOrg, db.ListOpts{Limit: 200}); err == nil {
 		t.Errorf("List with non-local orgID should error")
 	}
-	if err := store.Update(ctx, bogusOrg, domain.Project{ID: "any", Name: "x"}); err == nil {
+	if _, err := store.Update(ctx, bogusOrg, domain.Project{ID: "any", Name: "x"}); err == nil {
 		t.Errorf("Update with non-local orgID should error")
 	}
 	if err := store.Delete(ctx, bogusOrg, "any"); err == nil {

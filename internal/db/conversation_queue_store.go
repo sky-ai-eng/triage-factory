@@ -79,6 +79,10 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
+// TODO(TFAC-868): these single-row writes still return a bare error rather
+// than the row they persisted: EnqueueConversation, which mints the
+// conversation row a caller then has to learn the id of some other way, and
+// RequeueConversation.
 type ConversationQueueStore interface {
 	// EnqueueConversation mints a delegation conversation for a blueprint step with
 	// NO stored status — the absence of an outcome is what makes it

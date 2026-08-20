@@ -16,11 +16,16 @@ import (
 //   - RETURNING semantics. The write is projecting the stored row and not, say,
 //     the values the caller proposed — which for these writes differ by design
 //     (a COALESCEd id, a preserved base branch, the stored casing of a slug).
-//   - Policy visibility. Under Postgres RLS an upsert's UPDATE arm has to be
-//     able to SEE the existing row for `UPDATE … RETURNING` to produce one.
-//     Org-scoped policies satisfy that today; a policy narrowed later fails
-//     here — loudly, on the app pool — rather than silently handing back
-//     nothing. Run it on the app pool for that reason.
+//   - Policy visibility, but ONLY when the suite is wired under claims. Under
+//     Postgres RLS an upsert's UPDATE arm has to be able to SEE the existing
+//     row for `UPDATE … RETURNING` to produce one, so a policy narrowed later
+//     fails here rather than silently handing back nothing. On a BYPASSRLS
+//     connection there is no policy to narrow and the clause returns its row
+//     unconditionally — which is what most store suites run on, deliberately,
+//     to keep behavior independent of the auth path. A suite whose store is
+//     RLS-gated on the write should run inside a claims-carrying transaction
+//     instead; RunJiraAppsReturnedRowConformance's Postgres wiring is the
+//     shape.
 //   - Column-list drift. The RETURNING list and the point read's SELECT list
 //     are supposed to be the same list. A column added to one and not the other
 //     shows up as a field that differs between the two rows.

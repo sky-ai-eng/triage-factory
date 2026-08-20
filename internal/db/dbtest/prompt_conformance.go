@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -50,15 +51,95 @@ type ConversationSeederForStats func(t *testing.T, promptID string, statusByOffs
 //   - Stats aggregation — totals + success rate + per-day grouping.
 //   - Context cancellation — passing a cancelled ctx fails fast
 //     rather than blocking.
+//   - Every single-row write returns the row it persisted, and refuses an id
+//     no row answers to.
 func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Helper()
+
+	t.Run("every_single_row_write_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard applied to each converted method in turn.
+		// The property is one line — what the write handed back is what a point
+		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
+		// stands in for (RETURNING semantics, RLS visibility on the update arm,
+		// column-list drift).
+		store, orgID, teamID, _ := factory(t)
+		ctx := context.Background()
+		read := func(id string) func() (*domain.Prompt, error) {
+			return func() (*domain.Prompt, error) { return store.Get(ctx, orgID, id) }
+		}
+
+		created, err := store.Create(ctx, orgID, teamID, domain.Prompt{
+			ID: "ret-1", Name: "Mine", Body: "v1", Source: "user", AllowedTools: "Read",
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Create", created, read("ret-1"))
+		// The three columns the input cannot describe, because the statement
+		// and not the caller supplies them.
+		if created.UsageCount != 0 || created.TeamID == "" || created.CreatedAt.IsZero() {
+			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
+		}
+
+		updated, err := store.Update(ctx, orgID, "ret-1", "Mine v2", "v2", "opus")
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Update", updated, read("ret-1"))
+		if updated.Name != "Mine v2" || updated.Model != "opus" {
+			t.Errorf("Update returned %+v, want the rewritten name and model", updated)
+		}
+
+		// Bump the counter between two writes: the returned row has to carry
+		// the value this statement left alone, which is the whole reason an
+		// input struct cannot stand in for it.
+		if err := store.IncrementUsage(ctx, orgID, "ret-1"); err != nil {
+			t.Fatalf("IncrementUsage: %v", err)
+		}
+		imported, err := store.UpdateImported(ctx, orgID, "ret-1", "Mine v3", "v3", "Read,Write")
+		if err != nil {
+			t.Fatalf("UpdateImported: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpdateImported", imported, read("ret-1"))
+		if imported.UsageCount != 1 || imported.AllowedTools != "Read,Write" {
+			t.Errorf("UpdateImported returned %+v, want usage_count 1 and the rewritten tools", imported)
+		}
+
+		hidden, err := store.Hide(ctx, orgID, "ret-1")
+		if err != nil {
+			t.Fatalf("Hide: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Hide", hidden, read("ret-1"))
+
+		unhidden, err := store.Unhide(ctx, orgID, "ret-1")
+		if err != nil {
+			t.Fatalf("Unhide: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Unhide", unhidden, read("ret-1"))
+
+		// A miss is an error rather than a silent no-op, on every id-keyed
+		// write — that is what retires the rows-affected probes.
+		missing := "ret-nope"
+		if _, err := store.Update(ctx, orgID, missing, "n", "b", ""); !errors.Is(err, db.ErrNoSuchPrompt) {
+			t.Errorf("Update on a missing id: got %v, want db.ErrNoSuchPrompt", err)
+		}
+		if _, err := store.UpdateImported(ctx, orgID, missing, "n", "b", ""); !errors.Is(err, db.ErrNoSuchPrompt) {
+			t.Errorf("UpdateImported on a missing id: got %v, want db.ErrNoSuchPrompt", err)
+		}
+		if _, err := store.Hide(ctx, orgID, missing); !errors.Is(err, db.ErrNoSuchPrompt) {
+			t.Errorf("Hide on a missing id: got %v, want db.ErrNoSuchPrompt", err)
+		}
+		if _, err := store.Unhide(ctx, orgID, missing); !errors.Is(err, db.ErrNoSuchPrompt) {
+			t.Errorf("Unhide on a missing id: got %v, want db.ErrNoSuchPrompt", err)
+		}
+	})
 
 	t.Run("CRUD_Roundtrip", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		// Create
 		p := domain.Prompt{ID: "user-1", Name: "Mine", Body: "body", Source: "user", AllowedTools: "Read,Write"}
-		if err := store.Create(ctx, orgID, teamID, p); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, p); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, "user-1")
@@ -69,7 +150,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 			t.Fatalf("allowed_tools=%q want Read,Write", got.AllowedTools)
 		}
 		// Update
-		if err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", "opus"); err != nil {
+		if _, err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", "opus"); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		got2, _ := store.Get(ctx, orgID, "user-1")
@@ -106,12 +187,12 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// pin from the outside is that the three fields round-trip.
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{
 			ID: "imp-1", Name: "Imported", Body: "v1", Source: "imported", AllowedTools: "Read",
 		}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := store.UpdateImported(ctx, orgID, "imp-1", "Renamed", "v2", "Read,Write"); err != nil {
+		if _, err := store.UpdateImported(ctx, orgID, "imp-1", "Renamed", "v2", "Read,Write"); err != nil {
 			t.Fatalf("update imported: %v", err)
 		}
 		got, _ := store.Get(ctx, orgID, "imp-1")
@@ -123,13 +204,13 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Run("Hide_Unhide_FiltersList", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-visible", Name: "V", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-visible", Name: "V", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create visible: %v", err)
 		}
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-hidden", Name: "H", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-hidden", Name: "H", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create hidden: %v", err)
 		}
-		if err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
+		if _, err := store.Hide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("hide: %v", err)
 		}
 		list, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
@@ -150,7 +231,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 
 		// The pages partition the visible set. Two visible rows, a one-row
 		// window: each page returns one row and both report total 2.
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-second", Name: "S", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "u-second", Name: "S", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create second visible: %v", err)
 		}
 		firstPage, total, err := store.List(ctx, orgID, "", db.ListOpts{Limit: 1})
@@ -179,7 +260,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 			t.Fatalf("Get should still return hidden rows by ID")
 		}
 		// Unhide brings it back
-		if err := store.Unhide(ctx, orgID, "u-hidden"); err != nil {
+		if _, err := store.Unhide(ctx, orgID, "u-hidden"); err != nil {
 			t.Fatalf("unhide: %v", err)
 		}
 		list2, _, _ := store.List(ctx, orgID, "", db.ListOpts{Limit: 50})
@@ -193,7 +274,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		ctx := context.Background()
 		// Set up: a prompt + 5 runs (3 completed, 1 failed, 1 running).
 		id := "stats-p"
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "S", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "S", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create stats prompt: %v", err)
 		}
 		seedConversations(t, id, []string{"completed", "completed", "completed", "failed", "running"})
@@ -235,7 +316,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		ctx := context.Background()
 
 		id := "day-bucket-p"
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "DB", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "DB", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		seedConversations(t, id, []string{"completed", "completed", "failed"})
@@ -271,7 +352,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
 		id := "unused-p"
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "U", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "U", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		stats, err := store.Stats(ctx, orgID, id)
@@ -292,7 +373,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 	t.Run("SoftDelete_HidesFromListAndGetButSystemResolves", func(t *testing.T) {
 		store, orgID, teamID, _ := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "sd-1", Name: "SD", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "sd-1", Name: "SD", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		if err := store.Delete(ctx, orgID, "sd-1"); err != nil {
@@ -318,7 +399,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		// would 500). Soft-delete sidesteps the FK and keeps the audit trail.
 		store, orgID, teamID, seedConversations := factory(t)
 		ctx := context.Background()
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "rh-1", Name: "RH", Body: "x", Source: "user"}); err != nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "rh-1", Name: "RH", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 		seedConversations(t, "rh-1", []string{"completed", "failed"})
@@ -350,7 +431,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		store, orgID, teamID, _ := factory(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "ctxtest", Name: "C", Body: "x", Source: "user"}); err == nil {
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "ctxtest", Name: "C", Body: "x", Source: "user"}); err == nil {
 			t.Fatalf("Create with cancelled ctx returned nil error")
 		}
 	})

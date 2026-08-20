@@ -15,6 +15,7 @@ import (
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // permalinkResolveTimeout bounds the whole resolvePermalink chain (bot
@@ -29,7 +30,7 @@ const permalinkResolveTimeout = 10 * time.Second
 // db.EntityStore's entire surface; db.EntityStore satisfies this
 // structurally, so the production wiring (install.go) needs no adapter.
 type entityURLUpdater interface {
-	UpdateURLSystem(ctx context.Context, orgID, entityID, url string) error
+	UpdateURLSystem(ctx context.Context, orgID, entityID, url string) (domain.Entity, error)
 }
 
 // PermalinkResolver resolves a Slack thread entity's chat.getPermalink URL
@@ -113,7 +114,7 @@ func (r *PermalinkResolver) resolvePermalink(ctx context.Context, ws slackstore.
 	if permalink == "" {
 		return
 	}
-	if err := r.entities.UpdateURLSystem(ctx, ws.OrgID, entityID, permalink); err != nil {
+	if _, err := r.entities.UpdateURLSystem(ctx, ws.OrgID, entityID, permalink); err != nil {
 		slackLog.Warn("permalink: update url failed", "workspace", ws.WorkspaceID, "entity", entityID, "error", err)
 	}
 }

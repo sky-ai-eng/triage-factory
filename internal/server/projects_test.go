@@ -267,10 +267,11 @@ func TestProjectExportPreview_IncludesManifestAndKnowledge(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Export me"})
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "Export me"})
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	id := idRow.ID
 	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir kb: %v", err)
@@ -308,13 +309,14 @@ func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	source := newTestServer(t)
-	sourceID, err := source.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	sourceIDRow, err := source.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:        "HTTP Export Source",
 		Description: "from source",
 	})
 	if err != nil {
 		t.Fatalf("seed source project: %v", err)
 	}
+	sourceID := sourceIDRow.ID
 	kbDir := filepath.Join(tempHome, ".triagefactory", "projects", sourceID, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir kb: %v", err)
@@ -365,7 +367,7 @@ func TestProjectImport_RoundTripThroughHTTP(t *testing.T) {
 func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	s := newTestServer(t)
 	repoID := seedConfiguredRepo(t, s, "a", "b")
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:        "Original",
 		Description: "Original description",
 		PinnedRepos: []string{"a/b"},
@@ -373,6 +375,7 @@ func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"description": "Updated description",
@@ -400,7 +403,8 @@ func TestProjectPatch_PartialFieldsLeaveOthersUnchanged(t *testing.T) {
 func TestProjectPatch_PinnedReposExplicitEmptyClears(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "a", "b")
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"a/b"}})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P", PinnedRepos: []string{"a/b"}})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repository_ids": []string{},
@@ -421,7 +425,8 @@ func TestProjectPatch_PinnedReposExplicitEmptyClears(t *testing.T) {
 func TestProjectPatch_RejectsOldPinnedReposField(t *testing.T) {
 	s := newTestServer(t)
 	seedConfiguredRepo(t, s, "a", "b")
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repos": []string{"a/b"},
 	})
@@ -488,7 +493,8 @@ func TestProjectPins_SurviveRename(t *testing.T) {
 
 func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{"name": "  "})
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
@@ -502,11 +508,12 @@ func TestProjectPatch_RejectsEmptyName(t *testing.T) {
 // accepted.
 func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 	s := newTestServer(t)
-	if err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	if _, err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		domain.Blueprint{ID: "spec-ok", Name: "Spec", Source: "user", TeamID: runmode.LocalDefaultTeamID}); err != nil {
 		t.Fatalf("seed blueprint: %v", err)
 	}
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"spec_authorship_blueprint_id": "spec-ok",
@@ -528,7 +535,8 @@ func TestProjectPatch_SpecBlueprintAcceptsVisible(t *testing.T) {
 // we pin the handler wiring and the 400 on the SQLite path.
 func TestProjectPatch_SpecBlueprintRejectsInvisible(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"spec_authorship_blueprint_id": "ghost-id-not-a-real-prompt",
@@ -548,7 +556,8 @@ func TestProjectPatch_404OnMissing(t *testing.T) {
 
 func TestProjectDelete_Happy(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "doomed"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "doomed"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
@@ -576,7 +585,8 @@ func TestProjectDelete_RemovesKnowledgeDir(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-files"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-files"})
+	id := idRow.ID
 
 	dir := filepath.Join(tempHome, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -602,7 +612,8 @@ func TestProjectDelete_RemovesKnowledgeDir(t *testing.T) {
 // on-disk artifacts must still 204, not 500.
 func TestProjectDelete_MissingKnowledgeDir_NoError(t *testing.T) {
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-files"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "no-files"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("status = %d, want 204", rec.Code)
@@ -621,7 +632,8 @@ func TestProjectDelete_PathResolutionFailure_StillWarns(t *testing.T) {
 	t.Setenv("LOGNAME", "")
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 
 	rec := doJSON(t, s, http.MethodDelete, "/api/projects/"+id, nil)
 	if rec.Code != http.StatusNoContent {
@@ -650,7 +662,8 @@ func TestProjectDelete_CleanupWarningRedactsPath(t *testing.T) {
 	t.Setenv("HOME", tempHome)
 
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "padded"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "padded"})
+	id := idRow.ID
 
 	dir := filepath.Join(tempHome, ".triagefactory", "projects", id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -864,7 +877,8 @@ func TestProjectCreate_PaddedIDsResolve(t *testing.T) {
 func TestProjectPatch_PaddedIDsResolve(t *testing.T) {
 	s := newTestServer(t)
 	repoID := seedConfiguredRepo(t, s, "only", "one")
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "P"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPatch, "/api/projects/"+id, map[string]any{
 		"pinned_repository_ids": []string{" \t" + repoID + "  "},
 	})
@@ -975,7 +989,8 @@ func TestProjectKnowledge_404OnMissing(t *testing.T) {
 func TestProjectKnowledge_EmptyForFreshProject(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "fresh"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "fresh"})
+	id := idRow.ID
 	rec := doJSON(t, s, http.MethodPost, "/api/projects/"+id+"/knowledge/list", map[string]any{})
 	page := decodeList[knowledgeFile](t, rec)
 	if len(page.Items) != 0 || page.Total() != 0 {
@@ -997,7 +1012,8 @@ func TestProjectKnowledge_ReturnsAllFileTypes(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-knowledge"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-knowledge"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1059,7 +1075,8 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-big-file"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "with-big-file"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1090,10 +1107,11 @@ func TestProjectKnowledge_LargeTextNotInlined(t *testing.T) {
 func TestProjectDelete_404sDuringConcurrentPatch(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "racy"})
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "racy"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
+	id := idRow.ID
 
 	// Delete the project, then try a PATCH against it. The PATCH
 	// should 404, not 500. (We can't reliably exercise the actual
@@ -1142,7 +1160,8 @@ func TestProjectKnowledge_HidesUnsanitizableNames(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "filter"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "filter"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1172,7 +1191,8 @@ func TestProjectKnowledge_SkipsSymlinks(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-test"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-test"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1241,7 +1261,8 @@ func TestProjectKnowledgeUpload_Happy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "uploads"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "uploads"})
+	id := idRow.ID
 
 	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
 		"hello.md": []byte("# hello\n"),
@@ -1268,7 +1289,8 @@ func TestProjectKnowledgeUpload_RejectsConflict(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "conflicts"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "conflicts"})
+	id := idRow.ID
 
 	// Pre-seed an existing file.
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
@@ -1329,7 +1351,8 @@ func TestProjectKnowledgeUpload_SizeLimit(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "sizecap"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "sizecap"})
+	id := idRow.ID
 
 	huge := bytes.Repeat([]byte("x"), knowledgeMaxUploadBytes+10)
 	rec := doMultipartUpload(t, s, "/api/projects/"+id+"/knowledge", map[string][]byte{
@@ -1362,7 +1385,8 @@ func TestProjectKnowledgeFile_StreamsRaw(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "raw"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "raw"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1395,7 +1419,8 @@ func TestProjectKnowledgeFile_RejectsSymlink(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-fetch"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "symlink-fetch"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1425,7 +1450,8 @@ func TestProjectKnowledgeFile_RejectsTraversal(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "traversal"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "traversal"})
+	id := idRow.ID
 
 	// URL-encoded forms bypass net/http's path cleanup and reach the
 	// handler intact — that's where our resolveKnowledgePath defense
@@ -1452,7 +1478,8 @@ func TestProjectKnowledgeDelete_RemovesFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	s := newTestServer(t)
-	id, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "delete"})
+	idRow, _ := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{Name: "delete"})
+	id := idRow.ID
 
 	kbDir := filepath.Join(home, ".triagefactory", "projects", id, "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
@@ -1529,13 +1556,14 @@ func TestProjectCreate_RejectsUnconfiguredJira(t *testing.T) {
 func TestProjectPatch_PartialTrackerUpdateValidatesOnlyChangedSide(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	s := newTestServer(t)
-	id, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	idRow, err := s.projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           "Drifted",
 		JiraProjectKey: "STALE", // not in (empty) config — set directly via DB
 	})
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
+	id := idRow.ID
 
 	// PATCH only linear_project_key (clearing it). Should succeed
 	// despite the Jira side being out of sync with config.

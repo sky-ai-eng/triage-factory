@@ -251,14 +251,14 @@ func delegatableFixture(t *testing.T, database *sql.DB, suffix string) (domain.T
 	}
 
 	bpID := "capbp-" + suffix
-	if err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
+	if _, err := stores.Blueprints.Create(ctx, org, runmode.LocalDefaultTeamID, domain.Blueprint{
 		ID: bpID, Name: bpID, Source: "user", TeamID: runmode.LocalDefaultTeamID,
 	}); err != nil {
 		t.Fatalf("blueprint: %v", err)
 	}
 	pid := "capp-" + suffix
 	ensureTestPrompt(t, database, domain.Prompt{ID: pid, Name: pid, Body: "b", Source: "user"})
-	if err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{pid}, nil); err != nil {
+	if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{pid}, nil); err != nil {
 		t.Fatalf("ReplaceSteps: %v", err)
 	}
 	return *task, bpID
@@ -366,7 +366,7 @@ func licenseGovernance(t *testing.T) {
 func setTeamDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 	t.Helper()
 	store := sqlitestore.New(database).Teams
-	if err := store.SetDailyCostCapSystem(context.Background(), runmode.LocalDefaultTeamID, cap); err != nil {
+	if _, err := store.SetDailyCostCapSystem(context.Background(), runmode.LocalDefaultTeamID, cap); err != nil {
 		t.Fatalf("set team daily cost cap: %v", err)
 	}
 }

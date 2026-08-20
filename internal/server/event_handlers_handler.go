@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -377,18 +378,14 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		}
 	}
 
-	var fresh *domain.EventHandler
+	var fresh domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
 		}
-		if e := tx.EventHandlers.Create(r.Context(), orgID, teamID, h); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, h.ID)
-		return ge
+		fresh, e = tx.EventHandlers.Create(r.Context(), orgID, teamID, h)
+		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -404,11 +401,7 @@ func (eh *eventHandlersHandler) handleEventHandlerCreate(w http.ResponseWriter, 
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if fresh != nil {
-		writeJSON(w, http.StatusCreated, fresh)
-		return
-	}
-	writeJSON(w, http.StatusCreated, h)
+	writeJSON(w, http.StatusCreated, fresh)
 }
 
 // PATCH /api/event-handlers/{id} (also bound to PUT for trigger-style replace)
@@ -547,23 +540,23 @@ func (eh *eventHandlersHandler) handleEventHandlerUpdate(w http.ResponseWriter, 
 		}
 	}
 
-	var fresh *domain.EventHandler
+	var fresh domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.EventHandlers.Update(r.Context(), orgID, updated); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		fresh, e = tx.EventHandlers.Update(r.Context(), orgID, updated)
+		return e
 	}); err != nil {
+		// The read above resolved the handler, so a miss here is the row going
+		// away between the two transactions. It used to answer 200 with the
+		// merged struct — a response describing a write that did not land.
+		if errors.Is(err, db.ErrNoSuchEventHandler) {
+			notFound(w, "event handler")
+			return
+		}
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if fresh != nil {
-		writeJSON(w, http.StatusOK, fresh)
-		return
-	}
-	writeJSON(w, http.StatusOK, updated)
+	writeJSON(w, http.StatusOK, fresh)
 }
 
 // DELETE /api/event-handlers/{id}
@@ -641,26 +634,23 @@ func (eh *eventHandlersHandler) handleEventHandlerToggle(w http.ResponseWriter, 
 	if !eh.gateHandlerWrite(w, r, orgID, userID, id) {
 		return
 	}
-	var existing *domain.EventHandler
+	var toggled domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		existing, e = tx.EventHandlers.Get(r.Context(), orgID, id)
-		if e != nil {
-			return e
-		}
-		if existing == nil {
-			return nil
-		}
-		return tx.EventHandlers.SetEnabled(r.Context(), orgID, id, enabled)
+		toggled, e = tx.EventHandlers.SetEnabled(r.Context(), orgID, id, enabled)
+		return e
 	}); err != nil {
+		if errors.Is(err, db.ErrNoSuchEventHandler) {
+			notFound(w, "event handler")
+			return
+		}
 		internalError(w, "event_handlers", err)
 		return
 	}
-	if existing == nil {
-		notFound(w, "event handler")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "enabled": enabled})
+	// The handler itself, not {id, enabled}: the write knows the row, and a
+	// client that has to re-fetch to see the rest of it is the reason the
+	// status stub was a bug rather than a shortcut.
+	writeJSON(w, http.StatusOK, toggled)
 }
 
 // POST /api/event-handlers/{id}/promote
@@ -797,14 +787,11 @@ func (eh *eventHandlersHandler) handleEventHandlerPromote(w http.ResponseWriter,
 		MinAutonomySuitability: req.MinAutonomySuitability,
 		ScopePredicateJSON:     predicate,
 	}
-	var fresh *domain.EventHandler
+	var fresh domain.EventHandler
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		if e := tx.EventHandlers.Promote(r.Context(), orgID, id, target); e != nil {
-			return e
-		}
-		var ge error
-		fresh, ge = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return ge
+		var e error
+		fresh, e = tx.EventHandlers.Promote(r.Context(), orgID, id, target)
+		return e
 	}); err != nil {
 		// The blueprintHasTrigger pre-check and this Promote run in separate
 		// transactions, so a concurrent promote onto the same blueprint can pass
@@ -899,11 +886,12 @@ func (eh *eventHandlersHandler) handleEventHandlerRetarget(w http.ResponseWriter
 			hasTrigger = true
 			return nil
 		}
-		if e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID); e != nil {
+		retargeted, e := tx.EventHandlers.RetargetBlueprint(r.Context(), orgID, id, req.BlueprintID)
+		if e != nil {
 			return e
 		}
-		fresh, e = tx.EventHandlers.Get(r.Context(), orgID, id)
-		return e
+		fresh = &retargeted
+		return nil
 	}); err != nil {
 		if isUniqueViolation(err) {
 			eventHandlersLog.Warn("retarget conflict, blueprint already triggered", "error", err)

@@ -201,7 +201,7 @@ func TestAuthorCentric_ProjectOwned_OwnerIsProjectTeam(t *testing.T) {
 		t.Fatalf("create project: %v", err)
 	}
 	entityID := reviewEntity(t, database, "owner/repo#proj")
-	if err := st.Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entityID, &projectID, "test"); err != nil {
+	if _, err := st.Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entityID, &projectID, "test"); err != nil {
 		t.Fatalf("assign project: %v", err)
 	}
 

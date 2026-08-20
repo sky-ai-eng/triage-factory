@@ -111,7 +111,7 @@ func TestResolveSDKPermissionMode(t *testing.T) {
 			stores := sqlitestore.New(database)
 			settings := domain.DefaultTeamSettings()
 			settings.AutoModeEnabled = tc.teamEnabled
-			if err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
+			if _, err := stores.Teams.UpdateSettings(t.Context(), runmode.LocalDefaultTeamID, settings); err != nil {
 				t.Fatalf("UpdateSettings: %v", err)
 			}
 			s := NewSpawner(database, stores, nil, nil, "")

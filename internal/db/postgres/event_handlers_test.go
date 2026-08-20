@@ -43,7 +43,7 @@ func TestEventHandlerStore_Postgres(t *testing.T) {
 				// shape is exercised in the shipped-defaults sync suite). The id is a
 				// random UUID, captured for the FK wiring.
 				id := uuid.New().String()
-				if err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
+				if _, err := stores.Blueprints.Create(t.Context(), orgID, teamID, domain.Blueprint{
 					ID: id, Name: slug, Source: "user",
 				}); err != nil {
 					t.Fatalf("seed blueprint %s: %v", slug, err)

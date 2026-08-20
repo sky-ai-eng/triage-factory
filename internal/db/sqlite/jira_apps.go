@@ -28,7 +28,7 @@ func (s *jiraAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.Or
 		regBy sql.NullString
 	)
 	err := s.q.QueryRowContext(ctx, `
-		SELECT org_id, client_id, client_secret_ref, registered_at, registered_by_user_id
+		SELECT `+sqliteJiraAppColumns+`
 		  FROM org_jira_apps
 		 WHERE org_id = ?
 	`, orgID).Scan(
@@ -44,6 +44,23 @@ func (s *jiraAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.Or
 	return &a, nil
 }
 
+// sqliteJiraAppColumns is the canonical projection of an org_jira_apps row, in
+// the order scanSQLiteJiraApp reads them. GetForOrg SELECTs it and UpsertForOrg
+// RETURNs it, so the write shape cannot drift from the read shape.
+const sqliteJiraAppColumns = `org_id, client_id, client_secret_ref, registered_at, registered_by_user_id`
+
+func scanSQLiteJiraApp(scan func(...any) error) (domain.OrgJiraApp, error) {
+	var (
+		a     domain.OrgJiraApp
+		regBy sql.NullString
+	)
+	if err := scan(&a.OrgID, &a.ClientID, &a.ClientSecretRef, &a.RegisteredAt, &regBy); err != nil {
+		return a, err
+	}
+	a.RegisteredByUserID = regBy.String
+	return a, nil
+}
+
 // GetForOrgSystem is identical to GetForOrg in local mode — single conn, no
 // RLS — but exists so the resolver uses the same interface shape it would in
 // multi mode.
@@ -51,22 +68,25 @@ func (s *jiraAppsStore) GetForOrgSystem(ctx context.Context, orgID string) (*dom
 	return s.GetForOrg(ctx, orgID)
 }
 
-func (s *jiraAppsStore) UpsertForOrg(ctx context.Context, app domain.OrgJiraApp) error {
+func (s *jiraAppsStore) UpsertForOrg(ctx context.Context, app domain.OrgJiraApp) (domain.OrgJiraApp, error) {
 	// registered_at is set only on insert (defaulting to CURRENT_TIMESTAMP) and
 	// preserved on conflict; client_id, client_secret_ref, and the registrant
-	// are refreshed so re-entering the BYO app replaces the credentials in place.
-	_, err := s.q.ExecContext(ctx, `
+	// are refreshed so re-entering the BYO app replaces the credentials in
+	// place — which is why RETURNING and not app is what a caller reads
+	// afterwards.
+	stored, err := scanSQLiteJiraApp(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_jira_apps (org_id, client_id, client_secret_ref, registered_by_user_id)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(org_id) DO UPDATE SET
 			client_id             = excluded.client_id,
 			client_secret_ref     = excluded.client_secret_ref,
 			registered_by_user_id = excluded.registered_by_user_id
-	`, app.OrgID, app.ClientID, app.ClientSecretRef, nullStringValue(app.RegisteredByUserID))
+		RETURNING `+sqliteJiraAppColumns,
+		app.OrgID, app.ClientID, app.ClientSecretRef, nullStringValue(app.RegisteredByUserID)).Scan)
 	if err != nil {
-		return fmt.Errorf("upsert org_jira_apps: %w", err)
+		return domain.OrgJiraApp{}, fmt.Errorf("upsert org_jira_apps: %w", err)
 	}
-	return nil
+	return stored, nil
 }
 
 func (s *jiraAppsStore) DeleteForOrg(ctx context.Context, orgID string) error {

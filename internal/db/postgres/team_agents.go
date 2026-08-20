@@ -105,31 +105,42 @@ func (s *teamAgentStore) AddForTeam(ctx context.Context, orgID, teamID, agentID 
 	return err
 }
 
-func (s *teamAgentStore) SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) error {
-	if !isValidUUID(teamID) || !isValidUUID(agentID) {
-		return nil
+// scanUpdatedTeamAgent decodes a key-addressed UPDATE … RETURNING. No row
+// scanned means the (team, agent) pair named nothing — or that RLS hides
+// whatever does — and both are db.ErrNoSuchTeamAgent.
+func scanUpdatedTeamAgent(row *sql.Row) (domain.TeamAgent, error) {
+	ta, err := scanTeamAgentRowPG(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
 	}
-	_, err := s.app.ExecContext(ctx, `
-		UPDATE team_agents SET enabled = $1 WHERE team_id = $2 AND agent_id = $3
-	`, enabled, teamID, agentID)
-	return err
+	return ta, err
 }
 
-func (s *teamAgentStore) SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) error {
+func (s *teamAgentStore) SetEnabled(ctx context.Context, orgID, teamID, agentID string, enabled bool) (domain.TeamAgent, error) {
 	if !isValidUUID(teamID) || !isValidUUID(agentID) {
-		return nil
+		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
+	}
+	return scanUpdatedTeamAgent(s.app.QueryRowContext(ctx, `
+		UPDATE team_agents SET enabled = $1 WHERE team_id = $2 AND agent_id = $3
+		RETURNING `+pgTeamAgentColumns,
+		enabled, teamID, agentID))
+}
+
+func (s *teamAgentStore) SetOverrides(ctx context.Context, orgID, teamID, agentID string, model *string, autonomy *float64) (domain.TeamAgent, error) {
+	if !isValidUUID(teamID) || !isValidUUID(agentID) {
+		return domain.TeamAgent{}, db.ErrNoSuchTeamAgent
 	}
 	var modelArg any
 	if model != nil && *model != "" {
 		modelArg = *model
 	}
-	_, err := s.app.ExecContext(ctx, `
+	return scanUpdatedTeamAgent(s.app.QueryRowContext(ctx, `
 		UPDATE team_agents
 		SET per_team_model = $1,
 		    per_team_autonomy_suitability = $2
 		WHERE team_id = $3 AND agent_id = $4
-	`, modelArg, autonomy, teamID, agentID)
-	return err
+		RETURNING `+pgTeamAgentColumns,
+		modelArg, autonomy, teamID, agentID))
 }
 
 func (s *teamAgentStore) Remove(ctx context.Context, orgID, teamID, agentID string) error {

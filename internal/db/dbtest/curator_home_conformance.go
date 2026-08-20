@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // CuratorHomeStoreFactory hands the conformance suite a wired store and the
@@ -20,6 +21,33 @@ func RunCuratorHomeStoreConformance(t *testing.T, mk CuratorHomeStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("Upsert_returns_the_stored_row", func(t *testing.T) {
+		// The returned-row standard: what the write handed back is what a point
+		// read finds. homed_at is the case it is for — the conflict arm keeps
+		// the original, so a re-home's returned row disagrees with its own
+		// arguments about when the project was first homed.
+		store, orgID := mk(t)
+		read := func() (*domain.CuratorHome, error) { return store.Get(ctx, orgID, "proj-ret") }
+
+		first, err := store.Upsert(ctx, orgID, "proj-ret", "exec-1", 3)
+		if err != nil {
+			t.Fatalf("Upsert (insert): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (insert)", first, read)
+		if first.HomedAt.IsZero() {
+			t.Error("Upsert returned a row with no homed_at, the column it stamps")
+		}
+
+		rehomed, err := store.Upsert(ctx, orgID, "proj-ret", "exec-2", 4)
+		if err != nil {
+			t.Fatalf("Upsert (re-home): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert (re-home)", rehomed, read)
+		if rehomed.HomeInstanceID != "exec-2" || !rehomed.HomedAt.Equal(first.HomedAt) {
+			t.Errorf("re-home returned %+v, want the new home with the original homed_at", rehomed)
+		}
+	})
+
 	t.Run("absent_get_is_nil_not_error", func(t *testing.T) {
 		store, orgID := mk(t)
 		h, err := store.Get(ctx, orgID, "proj-ghost")
@@ -33,7 +61,7 @@ func RunCuratorHomeStoreConformance(t *testing.T, mk CuratorHomeStoreFactory) {
 
 	t.Run("upsert_roundtrips", func(t *testing.T) {
 		store, orgID := mk(t)
-		if err := store.Upsert(ctx, orgID, "proj-a", "exec-7", 3); err != nil {
+		if _, err := store.Upsert(ctx, orgID, "proj-a", "exec-7", 3); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, "proj-a")
@@ -50,7 +78,7 @@ func RunCuratorHomeStoreConformance(t *testing.T, mk CuratorHomeStoreFactory) {
 
 	t.Run("rehome_replaces_and_keeps_homed_at", func(t *testing.T) {
 		store, orgID := mk(t)
-		if err := store.Upsert(ctx, orgID, "proj-b", "exec-1", 1); err != nil {
+		if _, err := store.Upsert(ctx, orgID, "proj-b", "exec-1", 1); err != nil {
 			t.Fatalf("upsert first: %v", err)
 		}
 		first, err := store.Get(ctx, orgID, "proj-b")
@@ -61,7 +89,7 @@ func RunCuratorHomeStoreConformance(t *testing.T, mk CuratorHomeStoreFactory) {
 		// original mint (sticky); updated_at moves forward (or stays equal —
 		// same-instant writes are legal, so assert not-before rather than
 		// strictly-after).
-		if err := store.Upsert(ctx, orgID, "proj-b", "exec-2", 5); err != nil {
+		if _, err := store.Upsert(ctx, orgID, "proj-b", "exec-2", 5); err != nil {
 			t.Fatalf("re-home: %v", err)
 		}
 		second, err := store.Get(ctx, orgID, "proj-b")
@@ -81,7 +109,7 @@ func RunCuratorHomeStoreConformance(t *testing.T, mk CuratorHomeStoreFactory) {
 
 	t.Run("clear_is_idempotent_and_scoped", func(t *testing.T) {
 		store, orgID := mk(t)
-		if err := store.Upsert(ctx, orgID, "proj-c", "exec-9", 2); err != nil {
+		if _, err := store.Upsert(ctx, orgID, "proj-c", "exec-9", 2); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
 		if err := store.Clear(ctx, orgID, "proj-c"); err != nil {

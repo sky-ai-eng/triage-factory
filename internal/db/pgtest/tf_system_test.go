@@ -393,10 +393,10 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.Blueprints.ActiveStepConversationIDsSystem(ctx, orgID, blueprintRunID); err != nil {
 			t.Errorf("Blueprints.ActiveStepConversationIDsSystem: %v", err)
 		}
-		if err := stores.Blueprints.SetRunCurrentStepSystem(ctx, orgID, blueprintRunID, 1); err != nil {
+		if _, err := stores.Blueprints.SetRunCurrentStepSystem(ctx, orgID, blueprintRunID, 1); err != nil {
 			t.Errorf("Blueprints.SetRunCurrentStepSystem: %v", err)
 		}
-		if err := stores.Blueprints.SetRunWorktreePathSystem(ctx, orgID, blueprintRunID, "/tmp/conformance-shared-wt"); err != nil {
+		if _, err := stores.Blueprints.SetRunWorktreePathSystem(ctx, orgID, blueprintRunID, "/tmp/conformance-shared-wt"); err != nil {
 			t.Errorf("Blueprints.SetRunWorktreePathSystem: %v", err)
 		}
 		if _, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, blueprintRunID); err != nil {

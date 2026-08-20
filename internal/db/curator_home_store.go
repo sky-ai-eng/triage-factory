@@ -27,10 +27,17 @@ type CuratorHomeStore interface {
 	// stamping updated_at (and homed_at on first insert). Idempotent re-home:
 	// re-writing the same home just refreshes updated_at. Called on the
 	// control pod at turn dispatch, never on the executor's claim path.
-	Upsert(ctx context.Context, orgID, projectID, instanceID string, bootEpoch int64) error
+	//
+	// Returns the persisted row, read off RETURNING on the write statement
+	// itself rather than from a follow-up SELECT and projecting Get's column
+	// list and scanner. homed_at is the point: the conflict arm preserves the
+	// original, so only the row says when this project was first homed.
+	Upsert(ctx context.Context, orgID, projectID, instanceID string, bootEpoch int64) (domain.CuratorHome, error)
 
 	// Clear removes the home row for (orgID, projectID). Idempotent — a missing
 	// row is not an error. Used when a project is deleted / its curator session
 	// reset so a stale mapping can't outlive the project.
+	//
+	// Exempt from the returned-row rule: it is a delete.
 	Clear(ctx context.Context, orgID, projectID string) error
 }

@@ -73,7 +73,7 @@ func InvalidModelError() string {
 // p.
 func SoftDeleteBySource(ctx context.Context, tx db.TxStores, orgID string, p *domain.Prompt) (status string, err error) {
 	if p.Source == "system" || p.Source == "imported" {
-		if e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {
+		if _, e := tx.Prompts.Hide(ctx, orgID, p.ID); e != nil {
 			return "", e
 		}
 		return "hidden", nil

@@ -34,6 +34,10 @@ var ErrOrgSettingsVersion = errors.New("org settings version conflict")
 //
 // SQLite collapses the pool split to one connection; the `...System`
 // variants delegate to their non-System counterparts.
+// TODO(TFAC-862): these single-row writes still return a bare error rather
+// than the row they persisted: CreateLocalTenant, SetGitHubCredentialClass,
+// UpdateSettings, UpdateSettingsVersioned. TeamsStore is the converged twin to
+// copy.
 type OrgsStore interface {
 	// GetOrg returns the org's metadata row, or nil if the org does
 	// not exist. App pool in Postgres (RLS gates by org membership);

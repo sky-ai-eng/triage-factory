@@ -383,5 +383,6 @@ func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID, s
 	if err != nil {
 		return err
 	}
-	return entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched))
+	_, e := entities.PatchSnapshot(ctx, orgID, entity.ID, string(patched))
+	return e
 }

@@ -29,6 +29,9 @@ type AccessChangeLogStore interface {
 	// recording failure" contract only insofar as a returned error rolls back
 	// the surrounding transaction (intentional — the action and its audit row
 	// are atomic).
+	//
+	// Exempt from the returned-row rule: it appends to an audit log. The row
+	// is written to be read by a later listing, never by its own writer.
 	Record(ctx context.Context, orgID string, entry domain.AccessChange) error
 
 	// RecordSystem is the admin-pool (BYPASSRLS) variant of Record for
@@ -42,6 +45,9 @@ type AccessChangeLogStore interface {
 	// RecordSystem is the standalone admin primitive for a writer that doesn't
 	// compose into a caller tx. Identical to Record in SQLite (N=1, no pool
 	// split). See TFAC-486.
+	//
+	// Exempt from the returned-row rule: it appends to an audit log, same as
+	// Record.
 	RecordSystem(ctx context.Context, orgID string, entry domain.AccessChange) error
 
 	// ListByOrg returns orgID's audit rows newest-first, bounded by opts.Limit

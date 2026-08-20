@@ -25,7 +25,7 @@ func TestDelegate_EventPath_StampsTriggerIDOnStepRun(t *testing.T) {
 	// blueprint_run insert requires both).
 	breaker, minSuit := 3, 0.5
 	trigID := "trigprov-handler"
-	if err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
+	if _, err := stores.EventHandlers.Create(t.Context(), org, runmode.LocalDefaultTeamID, domain.EventHandler{
 		ID: trigID, Kind: domain.EventHandlerKindTrigger, EventType: domain.EventGitHubPRCICheckFailed,
 		BlueprintID: bpID, BreakerThreshold: &breaker, MinAutonomySuitability: &minSuit, Enabled: true,
 	}); err != nil {

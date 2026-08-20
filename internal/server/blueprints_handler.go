@@ -243,7 +243,7 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 		// step — all in this tx so a mid-stream failure leaves no orphan prompt.
 		if req.FirstPrompt != nil {
 			firstPromptID = uuid.New().String()
-			if e := tx.Prompts.Create(r.Context(), orgID, teamID, domain.Prompt{
+			if _, e := tx.Prompts.Create(r.Context(), orgID, teamID, domain.Prompt{
 				ID:     firstPromptID,
 				Name:   req.FirstPrompt.Name,
 				Body:   req.FirstPrompt.Body,
@@ -253,21 +253,24 @@ func (bh *blueprintsHandler) handleBlueprintCreate(w http.ResponseWriter, r *htt
 				return e
 			}
 		}
-		if e := tx.Blueprints.Create(r.Context(), orgID, teamID, domain.Blueprint{
+		row, e := tx.Blueprints.Create(r.Context(), orgID, teamID, domain.Blueprint{
 			ID:     id,
 			Name:   req.Name,
 			Source: "user",
-		}); e != nil {
+		})
+		if e != nil {
 			return e
 		}
+		// Seeding a first step re-stamps the header (user_modified,
+		// updated_at), so the row the create returned is superseded by the one
+		// the step write returns — not by a re-read.
 		if firstPromptID != "" {
-			if e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, []string{firstPromptID}, nil); e != nil {
+			if row, e = tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, []string{firstPromptID}, nil); e != nil {
 				return e
 			}
 		}
-		var ge error
-		created, ge = tx.Blueprints.Get(r.Context(), orgID, id)
-		return ge
+		created = &row
+		return nil
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
@@ -311,23 +314,19 @@ func (bh *blueprintsHandler) handleBlueprintUpdate(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var updated *domain.Blueprint
+	var updated domain.Blueprint
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Blueprints.Get(r.Context(), orgID, id)
-		if e != nil || existing == nil {
-			return e
-		}
-		if e := tx.Blueprints.Rename(r.Context(), orgID, id, name); e != nil {
-			return e
-		}
-		updated, e = tx.Blueprints.Get(r.Context(), orgID, id)
+		var e error
+		updated, e = tx.Blueprints.Rename(r.Context(), orgID, id, name)
 		return e
 	}); err != nil {
+		// The rename itself reports a missing or soft-deleted row now, so the
+		// probe read this handler used to bracket the write with is gone.
+		if errors.Is(err, db.ErrNoSuchBlueprint) {
+			notFound(w, "blueprint")
+			return
+		}
 		internalError(w, "blueprints", err)
-		return
-	}
-	if updated == nil {
-		notFound(w, "blueprint")
 		return
 	}
 	writeJSON(w, http.StatusOK, updated)
@@ -679,7 +678,8 @@ func (bh *blueprintsHandler) handleBlueprintStepsPut(w http.ResponseWriter, r *h
 		if fault.status != 0 {
 			return nil
 		}
-		return tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		_, e := tx.Blueprints.ReplaceSteps(r.Context(), orgID, id, stepIDs, briefs)
+		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
 		return

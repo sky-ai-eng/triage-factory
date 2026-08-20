@@ -326,7 +326,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	if err := stores.TeamAgents.AddForTeam(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("add agent to team B: %v", err)
 	}
-	if err := stores.TeamAgents.SetEnabled(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID, false); err != nil {
+	if _, err := stores.TeamAgents.SetEnabled(t.Context(), runmode.LocalDefaultOrgID, teamB, runmode.LocalDefaultAgentID, false); err != nil {
 		t.Fatalf("disable agent for team B: %v", err)
 	}
 

@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 
@@ -10,6 +11,11 @@ import (
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=AgentStore --output=./mocks --case=underscore --with-expecter
+
+// ErrNoSuchAgent means an id-keyed write named no agent row in the given org.
+// Only the writes return it; GetForOrg keeps answering a miss with (nil, nil),
+// because "this org has no bot yet" is a state its callers already render.
+var ErrNoSuchAgent = errors.New("no agent with that id in this org")
 
 // AgentStore owns the agents table — the org's workload identity.
 // One row per org (UNIQUE(org_id) in Postgres; idempotent INSERT on a
@@ -47,6 +53,20 @@ import (
 //     isn't yet an admin per RLS's lookup.
 //
 // SQLite has one connection; assertLocalOrg pins orgID to LocalDefaultOrgID.
+//
+// # Every single-row write returns the row it persisted
+//
+// Update, SetGitHubPATUser and SetGitHubOrgIdentity hand back the stored row,
+// read off RETURNING on the write statement itself rather than from a
+// follow-up SELECT, projecting the point read's column list and scanner. Each
+// of them normalizes its input on the way in — an empty model or service
+// account becomes NULL, and SetGitHubOrgIdentity clears both identity columns
+// when either is empty — so the row and the argument disagree by design. A
+// miss is ErrNoSuchAgent.
+//
+// Create is the exception, and its reason is stated at the method: its insert
+// is ON CONFLICT DO NOTHING, which returns nothing at all on the idempotent
+// re-run it exists to support.
 type AgentStore interface {
 	// GetForOrg returns the org's agent row, or (nil, nil) if not yet
 	// bootstrapped. Callers reading credentials handle the nil case
@@ -67,20 +87,32 @@ type AgentStore interface {
 	// UNIQUE(org_id) constraint, so a caller-supplied custom id
 	// would create rows that GetForOrg's deterministic lookup could
 	// never reach). The returned id is the deterministic derivation.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape: the
+	// insert is ON CONFLICT DO NOTHING so that a re-run leaves an established
+	// row untouched, and that returns zero rows precisely on the re-run — so
+	// the established id comes from a follow-up read, which is also what makes
+	// the idempotency observable. The id is what bootstrap needs; nothing here
+	// renders the row.
 	Create(ctx context.Context, orgID string, a domain.Agent) (id string, err error)
 
 	// Update changes the agent's mutable metadata: display name,
 	// default model, default autonomy threshold, Jira service account.
 	// The credential FK uses SetGitHubPATUser at a smaller surface
 	// rather than letting Update touch it. Admin-only in Postgres via
-	// RLS. No-op on invalid UUID in Postgres (matches SQLite TEXT-keyed
-	// semantics).
-	Update(ctx context.Context, orgID string, a domain.Agent) error
+	// RLS.
+	//
+	// Returns the updated row, or ErrNoSuchAgent — which is what an id no row
+	// answers to now gets, including the invalid-UUID input Postgres used to
+	// turn into a silent no-op.
+	Update(ctx context.Context, orgID string, a domain.Agent) (domain.Agent, error)
 
 	// SetGitHubPATUser sets the PAT-borrow user FK. Used by local
 	// install (where userID is the sentinel local user) and by
 	// multi-mode small-org fallback. Admin-only in Postgres.
-	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) error
+	//
+	// Returns the updated row, or ErrNoSuchAgent.
+	SetGitHubPATUser(ctx context.Context, orgID, agentID, userID string) (domain.Agent, error)
 
 	// SetGitHubOrgIdentity records the org credential's OWN GitHub login and
 	// verified primary email — the account the bot/org PAT authenticates as,
@@ -93,7 +125,11 @@ type AgentStore interface {
 	// pool + RLS as SetGitHubPATUser. App-tier orgs never write here —
 	// the App bot login (<slug>[bot]) resolves live from the App
 	// registration, so this is the PAT path only.
-	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) error
+	//
+	// Returns the updated row, or ErrNoSuchAgent. The row is where the
+	// all-or-nothing rule is visible: pass one half and both columns come back
+	// empty.
+	SetGitHubOrgIdentity(ctx context.Context, orgID, agentID, login, email string) (domain.Agent, error)
 
 	// GetForOrgSystem mirrors GetForOrg but routes through the admin
 	// pool in Postgres. Used by system / claims-free callers that have

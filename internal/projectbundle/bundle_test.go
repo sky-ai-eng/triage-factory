@@ -83,7 +83,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	}
 
 	sessionID := "11111111-2222-3333-4444-555555555555"
-	projectID, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
+	created, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           projectName,
 		Description:    "Fixture project",
 		PinnedRepos:    []string{slug},
@@ -92,6 +92,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	if err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	projectID := created.ID
 
 	root, err := curator.KnowledgeDir(runmode.LocalDefaultOrgID, projectID)
 	if err != nil {

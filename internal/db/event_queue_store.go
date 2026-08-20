@@ -121,18 +121,28 @@ type EventQueueStore interface {
 	// MarkDone marks a claimed row done (processed_at = now). Guarded by
 	// status = 'processing' so a stale call can't flip an already-terminal
 	// row. org_id is bound as defense in depth.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping.
+	// The worker that flips the row is done with it; the next claim reads the
+	// state, not this caller.
 	MarkDone(ctx context.Context, orgID string, id int64) error
 
 	// MarkFailed marks a claimed row failed with lastErr — the poison-pill
 	// terminal, reserved for a row that has exhausted its retry budget.
 	// Failed rows are retained (not pruned) for debugging. Guarded by
 	// status = 'processing'.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
+	// same as MarkDone.
 	MarkFailed(ctx context.Context, orgID string, id int64, lastErr string) error
 
 	// Requeue returns a claimed row to pending after a transient failure,
 	// recording lastErr for visibility. attempts is left as-is (the claim
 	// already counted it), so the worker can fail the row out once
 	// attempts crosses its retry budget. Guarded by status = 'processing'.
+	//
+	// Exempt from the returned-row rule: fire-and-forget queue bookkeeping,
+	// same as MarkDone.
 	Requeue(ctx context.Context, orgID string, id int64, lastErr string) error
 
 	// ResetProcessing flips 'processing' rows back to pending and returns

@@ -155,7 +155,7 @@ func (r *Runner) run(ctx context.Context) {
 		// project-creation popup is the path to retro-assign these once
 		// projects exist.
 		for _, e := range entities {
-			if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, nil, ""); err != nil {
+			if _, err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, nil, ""); err != nil {
 				classifyLog.Warn("stamp classified_at failed", "org", r.orgID, "entity", e.ID, "error", err)
 			}
 		}
@@ -213,7 +213,7 @@ func (r *Runner) run(ctx context.Context) {
 			}
 			classifyLog.Info("entity unassigned, best score below threshold", "entity", e.ID, "best_score", best, "threshold", ConfidenceThreshold)
 		}
-		if err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
+		if _, err := r.entities.AssignProjectSystem(ctx, r.orgID, e.ID, winner, rationale); err != nil {
 			classifyLog.Error("assign entity failed", "entity", e.ID, "error", err)
 		}
 	}

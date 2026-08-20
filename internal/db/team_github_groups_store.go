@@ -46,6 +46,9 @@ type TeamGitHubGroupsStore interface {
 	// match regardless of how the admin typed them. Postgres routes
 	// through the app pool (team_github_groups_insert / _delete gate
 	// writes by team admin).
+	//
+	// Exempt from the returned-row rule: it reconciles a set, so there is no
+	// single row a return value could name.
 	SetForTeam(ctx context.Context, teamID string, groups []domain.TeamGitHubGroup) error
 
 	// TeamsForGroup returns the TF team IDs mapped to the given GitHub

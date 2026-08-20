@@ -61,6 +61,11 @@ type CuratorInFlightTurn struct {
 //
 // SQLite collapses both pools onto its single connection and asserts the
 // local sentinel org on the org-scoped methods.
+// TODO(TFAC-866): these writes still return a bare error and are unclassified:
+// SetSDKSession, RevertTurnContext, QueueContextChangeSystem,
+// ImportConversationStateSystem. Only the first is plainly a single-row write;
+// the ticket classifies the rest, some of which are expected to end as stated
+// exemptions.
 type CuratorStore interface {
 	// --- Send path (app pool, claims-bound) ---
 

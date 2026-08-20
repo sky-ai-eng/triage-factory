@@ -38,7 +38,7 @@ func setPolicy(t *testing.T, stores db.Stores, policy string) {
 		t.Fatalf("read team settings: %v", err)
 	}
 	settings.BaseBranchPushPolicy = policy
-	if err := stores.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, settings); err != nil {
+	if _, err := stores.Teams.UpdateSettings(ctx, runmode.LocalDefaultTeamID, settings); err != nil {
 		t.Fatalf("write team settings: %v", err)
 	}
 }
