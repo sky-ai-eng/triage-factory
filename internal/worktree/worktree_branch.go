@@ -634,6 +634,15 @@ func addExcludesOrRollback(rootKey, wtDir string) error {
 // then rides the agent's next commit.
 const ScratchDir = "_tfac"
 
+// CILogsDir is the subdirectory of ScratchDir that `exec gh actions
+// download-logs` extracts a workflow run's log archive into, one <run_id>
+// subtree per run. It is named here rather than at either use site because two
+// packages have to agree on it: the exec verb writes that tree, and the
+// workspace snapshot skips it as re-downloadable rather than carrying a log
+// archive in the blob. A rename that reached only one of them would silently
+// put GBs of logs back in every snapshot.
+const CILogsDir = "ci-logs"
+
 // legacyScratchDir is what ScratchDir was called before. It survives in two
 // places on purpose: the managed exclude list, so a tree built by an older
 // binary can't leak its leftovers into a commit, and AdoptLegacyScratchDir.

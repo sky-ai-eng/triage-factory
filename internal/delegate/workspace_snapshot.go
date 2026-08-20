@@ -59,15 +59,49 @@ const (
 	snapScratchPrefix = "scratch/"
 )
 
-// scratchExcludes are the top-level _tfac entries that already re-materialize on
-// the next run and so never ride in the snapshot: entity-memory rebuilds from
+// scratchExcludes are the top-level _tfac entries that come back by a route of
+// their own and so never ride in the snapshot: entity-memory rebuilds from
 // conversation_memory (and under a jail is not even a directory — it is the
 // symlink standing in for the read-only mount, which the walk skips as
-// non-regular regardless), project-knowledge is re-copied from
-// the project KB. Everything else under _tfac (ci-logs, skill scratch,
-// ad-hoc agent files, and the agent's own memory.md — which is not in the DB
-// until termination ingests it) is non-recoverable and IS captured.
-var scratchExcludes = map[string]bool{"entity-memory": true, "project-knowledge": true}
+// non-regular regardless), project-knowledge is re-copied from the project KB,
+// and ci-logs is the extracted output of `exec gh actions download-logs`, which
+// the agent re-runs to get byte-identical content back from GitHub. Everything
+// else under _tfac (skill scratch, ad-hoc agent files, and the agent's own
+// memory.md — which is not in the DB until termination ingests it) is
+// non-recoverable and IS captured.
+//
+// ci-logs is the only one of the three the agent can notice missing: the other
+// two are re-materialized before it looks, while a full Actions log archive —
+// routinely hundreds of MB to GBs of text, and the largest thing a park would
+// ever compress — is re-fetched on demand rather than restored. So a cold
+// rehydrate whose snapshot dropped a populated ci-logs plants ciLogsNotice
+// where the logs were, rather than handing back a tree that quietly lost them.
+var scratchExcludes = map[string]bool{
+	"entity-memory":     true,
+	"project-knowledge": true,
+	worktree.CILogsDir:  true,
+}
+
+// ciLogsNoticeFile is the notice a cold rehydrate leaves under ci-logs in place
+// of the logs the blob did not carry, and ciLogsNotice is what it says. An
+// agent resuming into a rebuilt tree may remember reading a log at that path;
+// this is the difference between an explained absence and a mystery.
+const ciLogsNoticeFile = "NOT-RESTORED.md"
+
+const ciLogsNotice = `# CI logs were not restored
+
+This workspace was rebuilt from a snapshot after its host copy was lost. A
+snapshot carries only state that exists nowhere else, and extracted CI logs are
+not that: they are a verbatim copy of a GitHub Actions log archive, so the same
+bytes are still one download away.
+
+Anything that was under _tfac/ci-logs/ before the rebuild is therefore gone —
+the work that read it still happened. To get the identical content back:
+
+    triagefactory exec gh actions download-logs <workflow_run_id>
+
+That writes ./_tfac/ci-logs/<run_id>/ exactly as it was.
+`
 
 // restoreWorkspaceGit is the git half of a cold rehydrate. A package var, in the
 // same spirit as worktreePushTargetBranch: the credential a rehydrate hands git
@@ -83,6 +117,13 @@ type snapshotManifest struct {
 	Head      string `json:"head"`
 	SessionID string `json:"session_id"`
 	HasGit    bool   `json:"has_git"`
+	// CILogsOmitted says the captured workspace held extracted CI logs that
+	// this blob deliberately left out, which is what a rehydrate needs to know
+	// to explain the absence in the tree it rebuilds. Absent on a snapshot
+	// whose workspace never downloaded any — an empty ci-logs directory needs
+	// no explanation — and absent on blobs written before the exclusion, which
+	// carry their logs as ordinary scratch members and restore them normally.
+	CILogsOmitted bool `json:"ci_logs_omitted,omitempty"`
 }
 
 // snapshotKey is the storage key for a parked workspace's snapshot blob. keyID
@@ -332,9 +373,11 @@ func writeSnapshotTar(w io.Writer, captured worktree.CapturedState, wtPath strin
 			}
 		}
 	}
-	if err := tarScratch(tw, wtPath); err != nil {
+	omittedCILogs, err := tarScratch(tw, wtPath)
+	if err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
 	}
+	man.CILogsOmitted = omittedCILogs
 	if captured.SessionID != "" {
 		if len(captured.Transcript) > 0 || captured.TranscriptPath != "" {
 			if err := writeCapturedMember(tw, snapSession, captured.Transcript, captured.TranscriptPath); err != nil {
@@ -683,6 +726,16 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 			return fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
+	if man.CILogsOmitted {
+		// AFTER the scratch install, for the same reason the memory symlink is:
+		// the install is a wholesale rename onto _tfac, which fails outright if
+		// this notice's parent already exists. Best-effort — the notice
+		// explains an absence, and failing the resume over it would trade a
+		// missing explanation for a missing workspace.
+		if err := plantCILogsNotice(wtDir); err != nil {
+			delegateLog.Warn("plant ci-logs notice on rehydrated tree failed; an agent that read a log under _tfac/ci-logs before the rebuild will find no explanation for its absence", "dir", wtDir, "error", err)
+		}
+	}
 	// Plant the jail's memory symlink AFTER the scratch install, never before: the
 	// install is a wholesale rename onto _tfac, which fails outright if the link's
 	// parent already exists. This is the rehydrated tree's one orchestrator-owned
@@ -752,14 +805,19 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 }
 
 // tarScratch walks wtPath/_tfac and writes every regular file under the
-// snapScratchPrefix, skipping the re-materializable entity-memory and
-// project-knowledge subtrees. A missing _tfac is fine (nothing to capture).
-func tarScratch(tw *tar.Writer, wtPath string) error {
+// snapScratchPrefix, skipping the scratchExcludes subtrees. A missing _tfac is
+// fine (nothing to capture).
+//
+// It reports whether a ci-logs subtree with something in it was skipped, which
+// is the manifest's CILogsOmitted and the gate on the rehydrate's notice. An
+// empty ci-logs directory reports false: nothing was dropped, so there is
+// nothing to explain.
+func tarScratch(tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
 	root := filepath.Join(wtPath, worktree.ScratchDir)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		return nil
+		return false, nil
 	}
-	return filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
+	err = filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -776,6 +834,9 @@ func tarScratch(tw *tar.Writer, wtPath string) error {
 		}
 		if scratchExcludes[top] {
 			if fi.IsDir() {
+				if rel == worktree.CILogsDir && dirHasEntry(path) {
+					omittedCILogs = true
+				}
 				return filepath.SkipDir
 			}
 			return nil
@@ -783,10 +844,36 @@ func tarScratch(tw *tar.Writer, wtPath string) error {
 		if !fi.Mode().IsRegular() {
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
-		// Stream each file into the tar rather than reading it whole — _tfac
-		// (ci-logs, etc.) is the part that can run to GBs.
+		// Stream each file into the tar rather than reading it whole — the
+		// agent's own intermediates are unbounded even with the log archives
+		// excluded.
 		return writeTarFile(tw, snapScratchPrefix+filepath.ToSlash(rel), path, fi.Size())
 	})
+	return omittedCILogs, err
+}
+
+// dirHasEntry reports whether path holds at least one entry, reading only far
+// enough to answer rather than listing a directory the walk is about to skip.
+// A read failure answers false: this decides whether to explain an absence, and
+// a directory that cannot be read is not evidence that anything was dropped.
+func dirHasEntry(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	names, err := f.Readdirnames(1)
+	return err == nil && len(names) > 0
+}
+
+// plantCILogsNotice writes ciLogsNotice into the rehydrated tree's ci-logs
+// directory, recreating that directory since the snapshot carried none of it.
+func plantCILogsNotice(wtDir string) error {
+	dir := filepath.Join(wtDir, worktree.ScratchDir, worktree.CILogsDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("mkdir ci-logs: %w", err)
+	}
+	return os.WriteFile(filepath.Join(dir, ciLogsNoticeFile), []byte(ciLogsNotice), 0o600)
 }
 
 // stageScratchMember streams one _tfac tar member to relPath under
