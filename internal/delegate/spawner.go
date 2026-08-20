@@ -288,6 +288,16 @@ type Spawner struct {
 	// their writes against the same issue (which could drag a Done ticket back
 	// to In Progress). Its own keyed lock, independent of mu; zero value ready.
 	jiraMirrorLocks keyedMutex
+	// workspaceLocks serializes mutation of one snapshot key's workspace tree
+	// within this process. Two things in an executor touch a parked tree: an
+	// engagement materializing it (ensureWorkspace — warm stat or cold
+	// rehydrate) and the eviction sweep deleting it. They run in the same
+	// process, so a bare "is anyone claimed on this key" read is a check
+	// against a fact that can change a line later; holding this across the
+	// decision is what makes the answer still true at the removal. Keyed by
+	// (org, blueprint_run_id) — the key a tree belongs to, not a conversation.
+	// Its own keyed lock, independent of mu; zero value ready.
+	workspaceLocks keyedMutex
 
 	// blobs is the durable blob/object store handle for the blueprint
 	// workspace seam: local mode → an on-disk store under the state root,

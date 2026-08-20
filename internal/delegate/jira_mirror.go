@@ -323,7 +323,29 @@ type refMutex struct {
 // lock acquires the per-key mutex and returns its unlock func, which the caller
 // must invoke exactly once (defer is the usual shape).
 func (k *keyedMutex) lock(key string) func() {
+	rm := k.reserve(key)
+	rm.mu.Lock()
+	return func() { k.releaseUnlock(key, rm) }
+}
+
+// tryLock is lock for a caller with something better to do than wait: it takes
+// the key's mutex if it is free and reports false without blocking if it is
+// not. ok=false hands back no unlock func — there is nothing to release.
+func (k *keyedMutex) tryLock(key string) (unlock func(), ok bool) {
+	rm := k.reserve(key)
+	if !rm.mu.TryLock() {
+		k.release(key, rm)
+		return nil, false
+	}
+	return func() { k.releaseUnlock(key, rm) }, true
+}
+
+// reserve returns the key's refMutex with this caller counted against it, so
+// the entry cannot be collected out from under a caller that is about to lock
+// (or is holding) it. Every reserve is paired with exactly one release.
+func (k *keyedMutex) reserve(key string) *refMutex {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	if k.locks == nil {
 		k.locks = make(map[string]*refMutex)
 	}
@@ -333,16 +355,22 @@ func (k *keyedMutex) lock(key string) func() {
 		k.locks[key] = rm
 	}
 	rm.refs++
-	k.mu.Unlock()
+	return rm
+}
 
-	rm.mu.Lock()
-	return func() {
-		rm.mu.Unlock()
-		k.mu.Lock()
-		rm.refs--
-		if rm.refs == 0 {
-			delete(k.locks, key)
-		}
-		k.mu.Unlock()
+// release drops this caller's reservation, collecting the entry once nobody
+// holds one. A holder's own reservation is still counted while it holds the
+// mutex, so an entry can never be collected while locked.
+func (k *keyedMutex) release(key string, rm *refMutex) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	rm.refs--
+	if rm.refs == 0 {
+		delete(k.locks, key)
 	}
+}
+
+func (k *keyedMutex) releaseUnlock(key string, rm *refMutex) {
+	rm.mu.Unlock()
+	k.release(key, rm)
 }

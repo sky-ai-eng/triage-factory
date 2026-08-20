@@ -245,13 +245,17 @@ func recordedWorktreePath(adminDir string) string {
 	return filepath.Dir(gitPath)
 }
 
-// isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
+// IsRunWorktreePath reports whether p is one of TF's own ephemeral run
 // worktrees — i.e. a child of the triagefactory-runs temp namespace
 // (runDir = <tmp>/triagefactory-runs/<rootKey>). Matched on the runsDir
 // path segment rather than the full os.TempDir() prefix because $TMPDIR
-// can differ between the run that created the worktree and this restart;
-// the namespace itself is constant.
-func isTFRunWorktreePath(p string) bool {
+// can differ between the run that created the worktree and the process
+// asking; the namespace itself is constant.
+//
+// Exported for callers that reclaim a tree named by a recorded path rather
+// than found by walking the runs dir: the path is the only evidence they
+// have that what they are about to delete is a run tree of ours at all.
+func IsRunWorktreePath(p string) bool {
 	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
 }
 
@@ -295,7 +299,7 @@ func clearStaleLockedWorktrees(bareDir string) int {
 			continue // unlocked → plain prune reclaims it if stale
 		}
 		wtPath := recordedWorktreePath(adminDir)
-		if !isTFRunWorktreePath(wtPath) {
+		if !IsRunWorktreePath(wtPath) {
 			// Locked and not one of our ephemeral run worktrees — could be
 			// a user worktree on a currently-unmounted volume. Honor the
 			// lock and leave it for git/the user to manage.

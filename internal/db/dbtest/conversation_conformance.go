@@ -102,6 +102,13 @@ type ConversationSeeder struct {
 	// multi-conversation-per-task subtests realistic.
 	BlueprintRun func(t *testing.T, taskID string) string
 
+	// SetSnapshotState upserts the key's workspace_snapshots row to the given
+	// state ('pending' | 'written' | 'failed'). WorkspaceSnapshotStore owns
+	// that table, so it is a seeded precondition here rather than a store call
+	// — the eviction enumeration reads it as its safety gate, and the suite
+	// has to be able to stage all three states plus the no-row case.
+	SetSnapshotState func(t *testing.T, blueprintRunID, state string)
+
 	// SetBlueprintRunStatus raw-updates a blueprint_run's status, WITHOUT
 	// touching its child conversations (a plain UPDATE, not
 	// BlueprintStore.MarkRunStatus, which now cascades a terminal flip onto
@@ -1275,6 +1282,127 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		if reapKeysContain(fresh, bpr) {
 			t.Errorf("just-completed blueprint %s is already reapable; the TTL has not elapsed", bpr)
+		}
+	})
+
+	// Workspace eviction's enumeration. The warm tree is a cache whose only
+	// licence to be deleted is that the durable blob exists, so every arm here
+	// is about refusing rather than finding: the safety gates are the test.
+	t.Run("ListEvictableWorkspaces_WrittenSnapshotAtRestAndUnclaimed", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, bpr := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		const wtPath = "/tmp/triagefactory-runs/evictable"
+		if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, wtPath); err != nil {
+			t.Fatalf("SetWorktreePathSystem: %v", err)
+		}
+		if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		seed.SetSnapshotState(t, bpr, domain.WorkspaceSnapshotWritten)
+
+		got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr)
+		if got == nil {
+			t.Fatalf("parked key %s with a written snapshot is not evictable; its warm tree would be reclaimed only by a restart", bpr)
+		}
+		if len(got.WorktreePaths) != 1 || got.WorktreePaths[0] != wtPath {
+			t.Errorf("worktree paths = %v, want [%s] — the caller evicts by path and has no other source for it", got.WorktreePaths, wtPath)
+		}
+		if got.OrgID != orgID {
+			t.Errorf("org = %q, want %q", got.OrgID, orgID)
+		}
+
+		// The TTL half: a cutoff before the park is "nothing has been idle
+		// long enough yet".
+		if got := evictableFor(t, store, ctx, time.Now().Add(-time.Hour), bpr); got != nil {
+			t.Errorf("just-parked key %s is already evictable; the idle window has not elapsed", bpr)
+		}
+	})
+
+	t.Run("ListEvictableWorkspaces_RefusesUnlessSnapshotIsWritten", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		// A key whose snapshot never got a lifecycle row at all: the tree is
+		// the only copy of the agent's work, and nothing says otherwise.
+		absent := parkedEvictionCandidate(t, store, ctx, orgID, seed, "absent")
+		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), absent); got != nil {
+			t.Errorf("key %s with no snapshot state row is evictable; its tree is the only copy of the work", absent)
+		}
+		for _, state := range []string{domain.WorkspaceSnapshotPending, domain.WorkspaceSnapshotFailed} {
+			bpr := parkedEvictionCandidate(t, store, ctx, orgID, seed, "state-"+state)
+			seed.SetSnapshotState(t, bpr, state)
+			if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got != nil {
+				t.Errorf("key %s with snapshot state %q is evictable; only a written blob makes the tree a cache", bpr, state)
+			}
+		}
+	})
+
+	// Blueprint steps share one tree, so any live engagement anywhere under the
+	// key is working in the directory this enumeration would hand to a delete.
+	t.Run("ListEvictableWorkspaces_RefusesWhileAnyStepIsClaimed", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		ent := seed.Entity(t, "evict-shared")
+		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
+		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
+		bpr := seed.BlueprintRun(t, taskID)
+		mkStep := func() string {
+			return seed.Conversation(t, domain.Conversation{
+				TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "running",
+				Model: "m", BlueprintRunID: bpr,
+			})
+		}
+		parked, live := mkStep(), mkStep()
+		if err := store.SetWorktreePathSystem(ctx, orgID, parked, "/tmp/triagefactory-runs/"+bpr); err != nil {
+			t.Fatalf("SetWorktreePathSystem: %v", err)
+		}
+		if _, err := store.ParkOpen(ctx, orgID, parked, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		seed.SetSnapshotState(t, bpr, domain.WorkspaceSnapshotWritten)
+
+		// The sibling step is mid-engagement.
+		if err := store.SetExecutorSystem(ctx, orgID, live, "exec-live", 1); err != nil {
+			t.Fatalf("SetExecutorSystem: %v", err)
+		}
+		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got != nil {
+			t.Errorf("key %s is evictable while a sibling step holds a live claim; the tree would vanish under a running agent", bpr)
+		}
+		has, err := store.HasActiveClaimForBlueprintRunSystem(ctx, orgID, bpr)
+		if err != nil || !has {
+			t.Fatalf("HasActiveClaimForBlueprintRunSystem with a live sibling = %v (err %v), want true", has, err)
+		}
+
+		// Release it and the key becomes evictable — the claim, not the
+		// sibling's existence, is what held it back.
+		if err := store.SetExecutorSystem(ctx, orgID, live, "", 0); err != nil {
+			t.Fatalf("release claim: %v", err)
+		}
+		if err := store.Complete(ctx, orgID, live, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
+			t.Fatalf("complete sibling: %v", err)
+		}
+		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got == nil {
+			t.Errorf("key %s is not evictable once every step is at rest and unclaimed", bpr)
+		}
+		has, err = store.HasActiveClaimForBlueprintRunSystem(ctx, orgID, bpr)
+		if err != nil || has {
+			t.Fatalf("HasActiveClaimForBlueprintRunSystem after release = %v (err %v), want false", has, err)
+		}
+	})
+
+	// A conversation that never recorded a path names no tree, so there is
+	// nothing on disk for the sweep to act on — enumerating it would hand the
+	// caller a key it can only skip.
+	t.Run("ListEvictableWorkspaces_SkipsRowsWithNoWorktreePath", func(t *testing.T) {
+		store, orgID, _, seed := mk(t)
+		ctx := context.Background()
+		conversationID, bpr := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+		if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+			t.Fatalf("ParkOpen: %v", err)
+		}
+		seed.SetSnapshotState(t, bpr, domain.WorkspaceSnapshotWritten)
+		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), bpr); got != nil {
+			t.Errorf("key %s with no recorded worktree_path enumerated as %+v; it names no tree to evict", bpr, got)
 		}
 	})
 
@@ -3723,6 +3851,40 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 // reapKeysContain reports whether the retention sweep's key set names this
 // blueprint_run.
+// evictableFor runs the eviction enumeration and returns the entry for
+// blueprintRunID, or nil when the key is not evictable. The suite asserts on
+// one key at a time because the query is fleet-wide and other subtests' rows
+// share the backend.
+func evictableFor(t *testing.T, store db.ConversationStore, ctx context.Context, cutoff time.Time, blueprintRunID string) *domain.EvictableWorkspace {
+	t.Helper()
+	keys, err := store.ListEvictableWorkspacesSystem(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("ListEvictableWorkspacesSystem: %v", err)
+	}
+	for i := range keys {
+		if keys[i].BlueprintRunID == blueprintRunID {
+			return &keys[i]
+		}
+	}
+	return nil
+}
+
+// parkedEvictionCandidate stages the shape every eviction refusal starts from:
+// one conversation, parked with a worktree path recorded, so the ONLY thing
+// left for a subtest to vary is the snapshot state. Returns the blueprint run
+// id — the snapshot key.
+func parkedEvictionCandidate(t *testing.T, store db.ConversationStore, ctx context.Context, orgID string, seed ConversationSeeder, suffix string) string {
+	t.Helper()
+	conversationID, bpr := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
+	if err := store.SetWorktreePathSystem(ctx, orgID, conversationID, "/tmp/triagefactory-runs/"+suffix); err != nil {
+		t.Fatalf("SetWorktreePathSystem: %v", err)
+	}
+	if _, err := store.ParkOpen(ctx, orgID, conversationID, db.ParkIdle()); err != nil {
+		t.Fatalf("ParkOpen: %v", err)
+	}
+	return bpr
+}
+
 func reapKeysContain(keys []domain.SnapshotReapKey, blueprintRunID string) bool {
 	for _, k := range keys {
 		if k.BlueprintRunID == blueprintRunID {

@@ -686,3 +686,83 @@ func TestTerminateBlueprint_CompletedButUserTookOver_NoMirror(t *testing.T) {
 		t.Errorf("transitions = %v, want none after takeover", transitions)
 	}
 }
+
+// TestKeyedMutex_ExclusionPerKeyAndEntryCollection covers the primitive both
+// the Jira mirror and the workspace evictor serialize on. The refcount is the
+// part worth pinning: it has to keep an entry alive for a waiter that has not
+// locked yet, and still collect it once nobody holds a reservation, or a
+// long-running process leaks a mutex per key it ever touched.
+func TestKeyedMutex_ExclusionPerKeyAndEntryCollection(t *testing.T) {
+	var k keyedMutex
+
+	unlockA := k.lock("a")
+	if _, ok := k.tryLock("a"); ok {
+		t.Fatal("tryLock took a key another holder has; the two must exclude each other")
+	}
+	// A failed tryLock must not have left its reservation behind.
+	unlockB, ok := k.tryLock("b")
+	if !ok {
+		t.Fatal("tryLock refused a free key")
+	}
+	unlockB()
+	unlockA()
+
+	unlockA2, ok := k.tryLock("a")
+	if !ok {
+		t.Fatal("tryLock refused a key whose holder released it")
+	}
+	unlockA2()
+
+	k.mu.Lock()
+	remaining := len(k.locks)
+	k.mu.Unlock()
+	if remaining != 0 {
+		t.Errorf("entries left after every holder released = %d, want 0 — the map grows forever otherwise", remaining)
+	}
+}
+
+// TestKeyedMutex_SerializesConcurrentHoldersOfOneKey is the property the
+// evictor's race depends on, exercised under -race: whatever mix of blocking
+// and non-blocking acquisitions arrives, only one runs the critical section at
+// a time.
+func TestKeyedMutex_SerializesConcurrentHoldersOfOneKey(t *testing.T) {
+	var (
+		k       keyedMutex
+		wg      sync.WaitGroup
+		inside  int
+		guarded int
+		mu      sync.Mutex
+	)
+	enter := func() {
+		mu.Lock()
+		inside++
+		if inside > 1 {
+			t.Error("two holders inside the critical section at once")
+		}
+		guarded++
+		mu.Unlock()
+		mu.Lock()
+		inside--
+		mu.Unlock()
+	}
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%2 == 0 {
+				unlock := k.lock("shared")
+				enter()
+				unlock()
+				return
+			}
+			if unlock, ok := k.tryLock("shared"); ok {
+				enter()
+				unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if guarded < 16 {
+		t.Errorf("critical section entered %d times, want at least the 16 blocking acquisitions", guarded)
+	}
+}

@@ -391,6 +391,23 @@ type SnapshotReapKey struct {
 	BlueprintRunID string
 }
 
+// EvictableWorkspace is one snapshot key whose warm workspace tree may be
+// reclaimed from the executor holding it: every conversation sharing the key is
+// at rest, none is claimed, the key aged past the eviction TTL, and the durable
+// snapshot is recorded written. WorktreePaths are the distinct non-empty
+// worktree_path values those conversations recorded — normally one, since a
+// blueprint's steps share a tree, but a key resumed on a host with a different
+// $TMPDIR records a second.
+//
+// The paths are candidates, not facts about this machine: the enumerating pod
+// is not necessarily the pod holding the tree, so a caller stats each one
+// itself and evicts only what is actually here.
+type EvictableWorkspace struct {
+	OrgID          string
+	BlueprintRunID string
+	WorktreePaths  []string
+}
+
 // ModelSynthetic is the model id the agent runtime stamps on an assistant
 // message it composed itself rather than received from a provider — an API
 // error notice, an interrupt/abort line, a stop-reason placeholder. It names
