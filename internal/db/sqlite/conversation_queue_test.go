@@ -50,7 +50,7 @@ func TestConversationQueueStore_SQLite_EnqueueClaim(t *testing.T) {
 	}
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rq-conv-0", TaskID: task.ID, PromptID: "rq-p0", Model: "claude-sonnet-4-6",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -127,7 +127,7 @@ func TestConversationQueueStore_SQLite_CancelRequestedNotClaimed(t *testing.T) {
 	}
 	brID := created.ID
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqc-conv-0", TaskID: task.ID, PromptID: "rqc-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -175,7 +175,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 	brID := created.ID
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqr-conv-0", TaskID: task.ID, PromptID: "rqr-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -189,7 +189,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// RequeueConversation puts it back to queued (attempts retained), re-claimable.
-	if err := stores.ConversationQueue.RequeueConversation(ctx, org, "rqr-conv-0", "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, "rqr-conv-0", "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{})
@@ -248,7 +248,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 			}
 			brID := created.ID
 			step0 := 0
-			if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+			if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 				ID: "rqs-conv-0", TaskID: task.ID, PromptID: "rqs-p0", Model: "m",
 				TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 			}); err != nil {
@@ -264,7 +264,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if err := stores.ConversationQueue.RequeueConversation(ctx, org, "rqs-conv-0", "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, "rqs-conv-0", "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, org, "rqs-conv-0")
@@ -356,7 +356,7 @@ func TestConversationQueueStore_SQLite_ResetProcessingConversations_ScopedToOwne
 	}
 	brID := created.ID
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqso-conv-0", TaskID: task.ID, PromptID: "rqso-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -453,7 +453,7 @@ func TestConversationQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	brID := created.ID
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqa-conv-0", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
 		TriggerType: "manual", ActorAgentID: agentID,
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,
@@ -475,7 +475,7 @@ func TestConversationQueueStore_SQLite_EnqueueStampsActorAgent(t *testing.T) {
 	// A conversation with no actor reads back with both fields empty — the nullable
 	// column + LEFT JOIN degrade to "" rather than erroring.
 	step1 := 1
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqa-conv-1", TaskID: task.ID, PromptID: "rqa-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step1,
 	}); err != nil {
@@ -522,7 +522,7 @@ func TestConversationQueueStore_SQLite_EnqueueStampsTheSDKEngine(t *testing.T) {
 	brID := created.ID
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rqe-conv-0", TaskID: task.ID, PromptID: "rqe-p0", Model: "m",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -572,7 +572,7 @@ func TestConversationQueueStore_SQLite_Credentials(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				conversationID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: conversationID, TaskID: task.ID, PromptID: "rqcr-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -637,7 +637,7 @@ func TestConversationQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 					t.Fatalf("CreateRun: %v", err)
 				}
 				brID := created.ID
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: conversationID, TaskID: task.ID, PromptID: "rqfqs-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step,
 				}); err != nil {
@@ -671,10 +671,10 @@ func TestConversationQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, bogusOrg, domain.Conversation{}); err == nil {
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, bogusOrg, domain.Conversation{}); err == nil {
 		t.Errorf("EnqueueConversation with non-local orgID should error")
 	}
-	if err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", "x"); err == nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", "x"); err == nil {
 		t.Errorf("RequeueConversation with non-local orgID should error")
 	}
 }
@@ -706,7 +706,7 @@ func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 	brID := created.ID
 
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 		ID: "rq-dwell-conv", TaskID: task.ID, PromptID: "rq-dwell-p0", Model: "claude-sonnet-4-6",
 		TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	}); err != nil {
@@ -739,7 +739,7 @@ func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if err := stores.ConversationQueue.RequeueConversation(ctx, org, "rq-dwell-conv", "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, "rq-dwell-conv", "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.Get(ctx, org, "rq-dwell-conv")
@@ -795,7 +795,7 @@ func TestConversationQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 				idx := nextStep
 				nextStep++
 				conversationID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: conversationID, TaskID: task.ID, PromptID: "rqec-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -880,7 +880,7 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 					t.Fatalf("advance current_step_index: %v", err)
 				}
 				convID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: convID, TaskID: task.ID, PromptID: "rqpr-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -895,10 +895,11 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 			},
 			EnqueueUnindexed: func(t *testing.T) error {
 				t.Helper()
-				return stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				_, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: uuid.New().String(), TaskID: task.ID, PromptID: "rqpr-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID,
 				})
+				return err
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()
@@ -1011,7 +1012,7 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 				idx := nextStep
 				nextStep++
 				convID := uuid.New().String()
-				if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+				if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 					ID: convID, TaskID: task.ID, PromptID: "rqrc-p0", Model: "m",
 					TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &idx,
 				}); err != nil {
@@ -1047,5 +1048,42 @@ func TestConversationQueueStore_SQLite_ReconcileOrphanedConversations(t *testing
 			},
 		}
 		return stores.ConversationQueue, seed
+	})
+}
+
+// TestConversationQueueStore_SQLite_ReturnedRow runs the returned-row
+// conformance suite against the SQLite impl.
+func TestConversationQueueStore_SQLite_ReturnedRow(t *testing.T) {
+	dbtest.RunConversationQueueReturnedRowConformance(t, func(t *testing.T) (db.ConversationQueueStore, db.ConversationStore, string, dbtest.ConversationQueueReturnedRowScaffold) {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		org := runmode.LocalDefaultOrgID
+
+		task := seedEntityEventTask(t, conn, "cqrr")
+		next := 0
+		scaffold := func(t *testing.T) (taskID, promptID, blueprintRunID string) {
+			t.Helper()
+			next++
+			suffix := fmt.Sprintf("cqrr-%d", next)
+			promptID = suffix + "-p0"
+			insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: promptID, Name: "Step 0", Body: "b", Source: "user"})
+			bpID := suffix + "-bp"
+			insertBlueprintForTest(t, conn, bpID, "CQ Returned-Row Blueprint")
+			if _, err := stores.Blueprints.ReplaceSteps(ctx, org, bpID, []string{promptID}, nil); err != nil {
+				t.Fatalf("ReplaceSteps: %v", err)
+			}
+			created, err := stores.Blueprints.CreateRun(ctx, org, domain.BlueprintRun{
+				ID: suffix + "-br", BlueprintID: bpID, TaskID: task.ID,
+				TriggerType: domain.BlueprintTriggerManual, Status: domain.BlueprintRunStatusRunning,
+				WorktreePath: "/tmp/wt-" + suffix,
+			})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			return task.ID, promptID, created.ID
+		}
+		return stores.ConversationQueue, stores.Conversations, org, scaffold
 	})
 }

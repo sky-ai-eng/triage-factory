@@ -72,7 +72,7 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 
 	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: userID, BlueprintRunID: blueprintRunID, BlueprintStepIndex: &step0,
 	}); err != nil {

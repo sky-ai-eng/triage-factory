@@ -38,7 +38,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 
 	step0 := 0
 	for _, id := range []string{"fr-run-0", "fr-run-1"} {
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
+		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, org, domain.Conversation{
 			ID: id, TaskID: task.ID, PromptID: "fr-p0", Model: "claude-sonnet-4-6",
 			TriggerType: "manual", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		}); err != nil {

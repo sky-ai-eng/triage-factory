@@ -87,7 +87,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 // then flips + RETURNINGs the conversation on the app pool — non-atomic by
 // design; see releaseActiveClaim for why the split is acceptable (the
 // janitor arms make both crash shapes self-healing). The order matters
-// beyond that: updateConversationReturning's derived columns (total_cost_usd,
+// beyond that: writeConversationReturning's derived columns (total_cost_usd,
 // duration_ms, num_turns, executor_id) come from claims/messages, so they
 // only agree with a follow-up Get if those tables already hold this call's
 // writes by the time the flip runs. Each admin-pool statement commits before
@@ -261,7 +261,7 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 	// lump on the invocation's last message row above. A resume's Complete
 	// stamps its own invocation's lump on its own last row, so nothing
 	// accumulates or doubles.
-	return updateConversationReturning(ctx, q, `
+	return writeConversationReturning(ctx, q, `
 		UPDATE conversations
 		SET status = $1,
 		    completed_at = $2,
@@ -584,16 +584,16 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 }
 
 func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
-	return updateConversationReturning(ctx, q, `
+	return writeConversationReturning(ctx, q, `
 		UPDATE conversations SET sdk_session_id = $1 WHERE org_id = $2 AND id = $3
 		RETURNING *
 	`, sessionID, orgID, conversationID)
 }
 
-// updateClaimReturning is updateConversationReturning's claims-row twin: wrap
+// updateClaimReturning is writeConversationReturning's claims-row twin: wrap
 // a single-row UPDATE/INSERT on claims in a data-modifying CTE, then re-join
 // its output through executorClaimSelectCols exactly as executorClaimCols
-// does for the live table — see updateConversationReturning for the shared
+// does for the live table — see writeConversationReturning for the shared
 // caveats (one data-modifying CTE only; any dependent write runs earlier, its
 // own statement). updateSQL must itself end in `RETURNING *`.
 func updateClaimReturning(ctx context.Context, q queryer, updateSQL string, args ...any) (*domain.ExecutorClaim, error) {
@@ -803,7 +803,7 @@ func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, o
 }
 
 func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversationID, path string) (*domain.Conversation, error) {
-	return updateConversationReturning(ctx, q, `
+	return writeConversationReturning(ctx, q, `
 		UPDATE conversations SET worktree_path = $1 WHERE org_id = $2 AND id = $3
 		RETURNING *
 	`, path, orgID, conversationID)
@@ -977,9 +977,9 @@ const conversationLedgerLateral = `
 	) msum ON true
 `
 
-// updateConversationReturning wraps a single-row UPDATE on conversations in a
-// data-modifying CTE, then re-joins its output row through the exact same
-// projection getConversation uses (pgConversationColumns, the
+// writeConversationReturning wraps a single-row INSERT or UPDATE on
+// conversations in a data-modifying CTE, then re-joins its output row through
+// the exact same projection getConversation uses (pgConversationColumns, the
 // conversation_memory/agents LEFT JOINs, the claim/ledger laterals) — so a
 // conversations-row write shares the point read's column list and scanner
 // without hand-duplicating those joins as scalar subqueries the way the
@@ -988,20 +988,20 @@ const conversationLedgerLateral = `
 // SELECT that reads it — so it is still "the write statement itself", not a
 // follow-up read.
 //
-// Only sound when nothing else in updateSQL's own WHERE/SET depends on a
+// Only sound when nothing else in writeSQL's own WHERE/SET depends on a
 // sibling data-modifying CTE in the same statement: Postgres evaluates
 // multiple data-modifying CTEs against one shared snapshot, so a second CTE
 // would NOT see this one's write. There is exactly one data-modifying CTE
 // here, so that caveat doesn't apply — but it is why any prep work this
 // write's derived columns depend on (a claim release, a cost settlement) must
 // run as its own EARLIER statement in the same transaction, never folded into
-// this WITH. See completeConversationReturning for the write that has such
-// prep work.
+// this WITH. See completeConversationFlip for the write that has such prep
+// work.
 //
-// updateSQL must itself end in `RETURNING *`.
-func updateConversationReturning(ctx context.Context, q queryer, updateSQL string, args ...any) (*domain.Conversation, error) {
+// writeSQL must itself end in `RETURNING *`.
+func writeConversationReturning(ctx context.Context, q queryer, writeSQL string, args ...any) (*domain.Conversation, error) {
 	row := q.QueryRowContext(ctx, `
-		WITH updated AS (`+updateSQL+`)
+		WITH updated AS (`+writeSQL+`)
 		SELECT `+pgConversationColumns+`
 		FROM updated r
 		LEFT JOIN conversation_memory rm ON rm.conversation_id = r.id AND rm.org_id = r.org_id
