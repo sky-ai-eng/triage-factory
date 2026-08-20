@@ -54,11 +54,6 @@ type SealedBundle struct {
 // Postgres-only in substance: local mode reads the live secret store
 // directly, so the SQLite schema has no claim_credentials table and the
 // SQLite impl refuses with ErrNotApplicableInLocal.
-// TODO(TFAC-870): Put still returns a bare error and is unclassified. It is a
-// real single-row upsert with a real conflict arm, but the row is credential
-// material, so the ticket decides between returning a metadata row and
-// exempting with the reason stated — and keeps that answer consistent with
-// SecretStore's.
 type ClaimCredentialsStore interface {
 	// Put seals sealed (already-encrypted by the caller via credseal) into
 	// claim_credentials for conversationID's active claim, replacing any existing
@@ -83,6 +78,23 @@ type ClaimCredentialsStore interface {
 	// the conversation (released between the caller's read and this write),
 	// Put inserts zero rows and returns nil. Callers must treat delivery as
 	// confirmed only by the executor's own Get poll, never by Put's return.
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape:
+	// the write is an upsert with two distinct silent-no-op arms (no active
+	// claim to attach to; an existing row already carrying a strictly newer
+	// boot_epoch), so a RETURNING clause reports zero rows on either —
+	// exactly the ON-CONFLICT-DO-NOTHING shape the standard calls out as
+	// non-mechanical — and the store's own contract above already tells
+	// callers not to read landedness off Put's return in the first place.
+	// What a returned row could add beyond that is either metadata the
+	// caller already supplied (conversationID, executorID, bootEpoch — the
+	// only value this write resolves server-side is the claim id, which no
+	// caller consumes) or the sealed ciphertext itself, and handing the
+	// latter back to satisfy a shape rule is worse than the rule: this
+	// store's whole purpose is that sealed material flows into it and out
+	// of it only through Get, gated on the reader's own boot_epoch. Same
+	// answer as SecretStore's analogous write methods, for the same reason
+	// — a credential surface with nothing non-secret worth echoing back.
 	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false
