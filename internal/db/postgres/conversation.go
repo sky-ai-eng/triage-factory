@@ -348,18 +348,39 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
-// claim, exactly like a fresh EnqueueConversation'd row). preferred_executor_id is
-// cleared: a long-parked conversation's old stamp is exactly the
-// outlives-a-dwell case placement calls out — NULL re-queues it as
-// unowned/immediately-claimable, and the claiming executor re-warms and
-// re-earns affinity on the next enqueue. queued_at is NOT re-stamped: it
-// records when the conversation first entered the queue and is display-only
-// (the scheduler orders by started_at).
+// claim, exactly like a fresh EnqueueConversation'd row).
+//
+// preferred_executor_id is re-stamped, in this statement, to the executor of
+// the conversation's newest claim. A resume knows something better than a
+// fresh rendezvous hash: which executor's engagement drove this conversation
+// last, and therefore holds the workspace tree worktree_path names (plus the
+// SDK session file, where the runtime keeps one). A stamp that predates the
+// park would indeed be stale by now; this one is written here, as the row
+// re-enters the queue, so the claim reads it no older than an enqueue-time
+// stamp. A conversation with no claims stamps NULL: nothing ever drove it, so
+// there is no warmth to chase, and it re-queues unowned/immediately-claimable.
+//
+// The stamp stays advisory, which is what makes chasing warmth safe: if that
+// executor has since died past liveness, drained, or gated, tier 2 admits any
+// executor at once; if it is merely busy, the aging window bounds the wait.
+//
+// The claims read is a plain correlated subquery, unlike the blueprint guard
+// above, because claims RLS composes through the conversation — a teammate
+// who may UPDATE this row can SELECT its claims by construction, so there is
+// no invisible-row arm for the lookup to fall through.
+//
+// queued_at is NOT re-stamped: it records when the conversation first entered
+// the queue and is display-only (the scheduler orders by started_at).
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
-		                preferred_executor_id = NULL
+		                preferred_executor_id = (
+		                    SELECT c.executor_id FROM claims c
+		                    WHERE c.org_id = conversations.org_id
+		                      AND c.conversation_id = conversations.id
+		                    `+newestEngagementFirstSQL("c")+`
+		                    LIMIT 1)
 		WHERE org_id = $1 AND id = $2
 		  AND (status = 'open'
 		       OR (status = 'completed'
@@ -522,6 +543,27 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 	})
 }
 
+// newestEngagementFirstSQL orders one conversation's claims by how recently
+// each engagement held it, nearest first, for the alias the caller gave the
+// claims table. Two reads take this order — the resume flip's affinity stamp
+// and the predecessor lookup below — and "which engagement came later" is one
+// question, so it has one answer here rather than a copy at each site.
+//
+// The sort must be TOTAL, not merely usually-total. claimed_at and created_at
+// both default to now(), which is the transaction timestamp, so two claims
+// minted in one transaction tie on every timestamp column and the row Postgres
+// returns would be whatever the plan happened to produce — a nondeterministic
+// answer feeding a sentence about what the agent's workspace has been through,
+// or a stamp pointing at either of two machines. released_at breaks the tie
+// meaningfully (of two claims that started together, the one that finished
+// later is the nearer engagement, and an unreleased one is nearer still, hence
+// NULLS FIRST); the primary key is the backstop that makes the order total
+// when even that ties, where "which came first" is genuinely undefined and
+// only stability is left to want.
+func newestEngagementFirstSQL(alias string) string {
+	return `ORDER BY ` + alias + `.claimed_at DESC, ` + alias + `.released_at DESC NULLS FIRST, ` + alias + `.id DESC`
+}
+
 // PriorClaimExecutorSystem reads the predecessor engagement's executor.
 //
 // The caller's own claim is excluded by id rather than by liveness: it is the
@@ -529,23 +571,12 @@ func (s *conversationStore) SetClaimPhaseSystem(ctx context.Context, orgID, conv
 // on the id the caller actually holds means a fenced-out caller reads the
 // claim before its own, not itself. The id comparison is on text so a
 // malformed id is simply no match, the same answer as a missing row.
-//
-// The sort must be TOTAL, not merely usually-total. claimed_at and created_at
-// both default to now(), which is the transaction timestamp, so two claims
-// minted in one transaction tie on every timestamp column and the row Postgres
-// returns would be whatever the plan happened to produce — a nondeterministic
-// answer feeding a sentence about what the agent's workspace has been through.
-// released_at breaks the tie meaningfully (of two claims that started
-// together, the one that finished later is the nearer predecessor, and an
-// unreleased one is nearer still, hence NULLS FIRST); the primary key is the
-// backstop that makes the order total when even that ties, where "which came
-// first" is genuinely undefined and only stability is left to want.
 func (s *conversationStore) PriorClaimExecutorSystem(ctx context.Context, orgID, conversationID, claimID string) (string, error) {
 	var executorID string
 	err := s.admin.QueryRowContext(ctx, `
-		SELECT executor_id FROM claims
-		WHERE org_id = $1 AND conversation_id = $2 AND id::text <> $3
-		ORDER BY claimed_at DESC, released_at DESC NULLS FIRST, id DESC
+		SELECT c.executor_id FROM claims c
+		WHERE c.org_id = $1 AND c.conversation_id = $2 AND c.id::text <> $3
+		`+newestEngagementFirstSQL("c")+`
 		LIMIT 1
 	`, orgID, conversationID, claimID).Scan(&executorID)
 	if errors.Is(err, sql.ErrNoRows) {

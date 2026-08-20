@@ -192,6 +192,11 @@ type ConversationStore interface {
 	// park_reason together — both describe a park this call is undoing, and a
 	// resumed conversation that went on to conclude must not still name the
 	// stop it was picked back up from.
+	//
+	// Re-stamps preferred_executor_id to the executor of the conversation's
+	// newest claim — advisory placement preference, not ownership: a resume
+	// should land where the workspace tree already is, and the last engagement
+	// is what says where that is. NULL when nothing ever claimed it.
 	// ok=false means the conversation is no longer resumable (a concurrent
 	// resume/cancel/claim already moved it, or it failed) — the caller maps
 	// the miss to 409.
