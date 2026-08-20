@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// This file records the TFAC-874 decision for the helpers duplicated between
+// This file records the decision for the helpers duplicated between
 // the SQLite and Postgres stores.
 //
 // Tier A stays duplicated because its small pure-Go helpers are safe but
