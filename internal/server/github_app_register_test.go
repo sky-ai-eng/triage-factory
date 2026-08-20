@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/zalando/go-keyring"
 )
 
 // TestGitHubAppRegister_LocalMode_NilDeployConfig_Returns404 pins that
@@ -238,8 +240,8 @@ func TestGitHubAppRegister_LocalManifest_PlaceholderHookAndNoInstallationEvents(
 		t.Errorf("redirect_url = %v, must point at the local deployment, not the homepage", got)
 	}
 	permissions, ok := m["default_permissions"].(map[string]any)
-	if !ok || permissions["email_addresses"] != "read" {
-		t.Errorf("manifest email_addresses permission = %v, want read", permissions["email_addresses"])
+	if !ok || permissions["emails"] != "read" {
+		t.Errorf("manifest emails permission = %v, want read", permissions["emails"])
 	}
 
 	rawEvents, ok := m["default_events"].([]any)
@@ -877,4 +879,42 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 			t.Errorf("redirect=%q, want %q", loc, want)
 		}
 	})
+}
+
+// TestGitHubAppManifest_PermissionsMatchImportBar holds the manifest's
+// default_permissions and the bring-your-own-App preflight bar to the same set,
+// which is what makes an imported App comparable to a TF-registered one. It is
+// also the guard on the permission names themselves: GitHub validates the
+// manifest against its permission-resource names and rejects the entire
+// registration when one is unknown, so a name that only one of the two sites
+// learns about is a registration or an import that fails in the field.
+func TestGitHubAppManifest_PermissionsMatchImportBar(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
+	s.SetDeployConfig("http://localhost:3000", key)
+
+	_, manifestJSON, _, err := s.buildManifestAndState(context.Background(),
+		runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "user", "testuser", "settings")
+	if err != nil {
+		t.Fatalf("buildManifestAndState: %v", err)
+	}
+	var m struct {
+		Permissions map[string]string `json:"default_permissions"`
+	}
+	if err := json.Unmarshal([]byte(manifestJSON), &m); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+
+	want := make(map[string]string, len(importRequiredPermissions))
+	for _, req := range importRequiredPermissions {
+		want[req.name] = req.level
+	}
+	if !reflect.DeepEqual(m.Permissions, want) {
+		t.Errorf("manifest default_permissions = %v, want the import bar %v", m.Permissions, want)
+	}
 }
