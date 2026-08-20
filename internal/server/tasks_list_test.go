@@ -364,6 +364,18 @@ func TestTaskList_StrictBody(t *testing.T) {
 			wantField:  "closed_since",
 		},
 		{
+			name:       "malformed created_since",
+			body:       map[string]any{"created_since": "last tuesday"},
+			wantReason: "INVALID_FIELD",
+			wantField:  "created_since",
+		},
+		{
+			name:       "unknown source",
+			body:       map[string]any{"sources": []string{"github", "bogus"}},
+			wantReason: "INVALID_FIELD",
+			wantField:  "sources",
+		},
+		{
 			name:       "page_size over the max",
 			body:       map[string]any{"page_size": 500},
 			wantReason: "OUT_OF_RANGE",
@@ -469,5 +481,44 @@ func TestTaskList_TokenIsBoundToItsFilters(t *testing.T) {
 	}
 	if page := postTaskList(t, s, sameQuery); len(page.Items) != 1 {
 		t.Errorf("second page under an equivalent filter spelling = %d items, want 1", len(page.Items))
+	}
+}
+
+// TestTaskList_CreatedSinceAndSources covers the two flow filters together
+// with the count-only page they exist to serve: "how many tasks arrived from
+// this source in this window" is one request with no rows in the answer.
+func TestTaskList_CreatedSinceAndSources(t *testing.T) {
+	s := newTestServer(t)
+	a := seedTaskFixture(t, s.db, taskFixture{name: "flow-a", status: "queued"})
+	b := seedTaskFixture(t, s.db, taskFixture{name: "flow-b", status: "queued"})
+
+	// The fixtures are github entities, so the github narrow keeps both and
+	// the jira narrow keeps neither — an empty page, not an error.
+	page := postTaskList(t, s, map[string]any{"sources": []string{"github"}})
+	if got := listedIDs(page); !slices.Contains(got, a) || !slices.Contains(got, b) {
+		t.Errorf("sources=[github] returned %v, want both %s and %s", got, a, b)
+	}
+	page = postTaskList(t, s, map[string]any{"sources": []string{"jira"}})
+	if len(page.Items) != 0 || page.TotalCount != 0 {
+		t.Errorf("sources=[jira] = %+v, want an empty page", page)
+	}
+
+	// created_since applies to every status, bounded by created_at.
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	page = postTaskList(t, s, map[string]any{"created_since": past})
+	if page.TotalCount < 2 {
+		t.Errorf("created_since in the past counted %d, want >= 2", page.TotalCount)
+	}
+	page = postTaskList(t, s, map[string]any{"created_since": future})
+	if page.TotalCount != 0 {
+		t.Errorf("created_since in the future counted %d, want 0", page.TotalCount)
+	}
+
+	// The figure request: filters + page_size 0. No rows come back, the
+	// total is the filtered count, and no token is minted.
+	page = postTaskList(t, s, map[string]any{"sources": []string{"github"}, "page_size": 0})
+	if len(page.Items) != 0 || page.TotalCount < 2 || page.NextPageToken != "" {
+		t.Errorf("count-only page = %+v, want no items, total >= 2, no token", page)
 	}
 }

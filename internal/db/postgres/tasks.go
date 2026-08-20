@@ -189,6 +189,14 @@ func pgTaskListWhere(orgID string, f db.TaskListFilter) (string, []any) {
 		clauses = append(clauses, fmt.Sprintf(
 			"(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND t.closed_at >= $%d))", len(args)))
 	}
+	if f.CreatedSince != nil {
+		args = append(args, f.CreatedSince.UTC())
+		clauses = append(clauses, fmt.Sprintf("t.created_at >= $%d", len(args)))
+	}
+	if len(f.Sources) > 0 {
+		args = append(args, f.Sources)
+		clauses = append(clauses, fmt.Sprintf("e.source = ANY($%d)", len(args)))
+	}
 	teamClause, args := pgTaskTeamFilter(f.TeamIDs, args)
 	// pgTaskTeamFilter renders as " AND (...)" and numbers its placeholders
 	// off len(args), so it must stay last.

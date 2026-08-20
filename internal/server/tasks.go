@@ -154,6 +154,15 @@ type taskListRequest struct {
 	// Absent = no window. The board asks for the seven days it wants to
 	// render; the server no longer applies one behind the caller's back.
 	ClosedSince string `json:"closed_since"`
+	// CreatedSince (RFC3339) keeps rows created at or after it, whatever
+	// their status — combined with a count-only page it is the "tasks over
+	// the last N days" figure. Absent = no window.
+	CreatedSince string `json:"created_since"`
+	// Sources narrows to tasks whose entity came from these sources.
+	// Validated against the event catalog's source vocabulary
+	// (domain.EventSources); an unknown value is a client fault, not an
+	// empty page. Empty = all sources.
+	Sources []string `json:"sources"`
 
 	httpx.PageRequest
 }
@@ -168,6 +177,8 @@ type taskListFilterKey struct {
 	OnlyUnclaimed  bool     `json:"only_unclaimed"`
 	IncludeSnoozed bool     `json:"include_snoozed"`
 	ClosedSince    string   `json:"closed_since"`
+	CreatedSince   string   `json:"created_since"`
+	Sources        []string `json:"sources"`
 }
 
 // taskCreateRequest is the body of POST /api/tasks: the station a task is
@@ -448,12 +459,33 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			closedSinceKey = ts.Format(time.RFC3339Nano)
 		}
 	}
+	var createdSince *time.Time
+	createdSinceKey := ""
+	if req.CreatedSince != "" {
+		ts, err := time.Parse(time.RFC3339, req.CreatedSince)
+		if err != nil {
+			v.Invalid("created_since", "created_since must be an RFC3339 timestamp")
+		} else {
+			ts = ts.UTC()
+			createdSince = &ts
+			createdSinceKey = ts.Format(time.RFC3339Nano)
+		}
+	}
+	sources := canonicalStrings(req.Sources)
+	for _, src := range sources {
+		if !slices.Contains(domain.EventSources(), src) {
+			v.Invalid("sources", fmt.Sprintf("unknown source %q; must be one of: %s",
+				src, strings.Join(domain.EventSources(), ", ")))
+		}
+	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{
 		Statuses:       statuses,
 		TeamIDs:        teamIDs,
 		OnlyUnclaimed:  req.OnlyUnclaimed,
 		IncludeSnoozed: req.IncludeSnoozed,
 		ClosedSince:    closedSinceKey,
+		CreatedSince:   createdSinceKey,
+		Sources:        sources,
 	}), 0)
 	if v.Flush(w, http.StatusBadRequest) {
 		return
@@ -469,6 +501,8 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 			OnlyUnclaimed:  req.OnlyUnclaimed,
 			IncludeSnoozed: req.IncludeSnoozed,
 			ClosedSince:    closedSince,
+			CreatedSince:   createdSince,
+			Sources:        sources,
 		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
