@@ -39,7 +39,7 @@ func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
 	const sessionID = "sess-warm"
 	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -97,7 +97,7 @@ func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
 	const sessionID = "sess-cold"
 	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testin
 	const sessionID = "sess-present"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
@@ -201,7 +201,7 @@ func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testin
 	const sessionID = "sess-lost"
 	// Deliberately NO writeSession: the conversation carries a session id but its
 	// transcript is not on disk when the snapshot is taken.
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	if err := os.RemoveAll(wtPath); err != nil {
@@ -237,7 +237,7 @@ func TestSnapshotWorkspace_StoresZstd(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
 	const conversationID = "wt-zstd"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -272,7 +272,7 @@ func TestEnsureWorkspace_ColdPath_TruncatedZstdErrors(t *testing.T) {
 	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
 	src := t.TempDir()
 	writeFile(t, filepath.Join(src, "_tfac", "ci-logs", "x.log"), "log bytes the zstd frame checksum covers")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, src, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -359,7 +359,7 @@ func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
 		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
 
 	const conversationID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
@@ -473,7 +473,7 @@ func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -520,7 +520,7 @@ func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
 	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -736,7 +736,7 @@ func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
 	const sessionID = "sess-spans"
 	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"spans"}`)
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 
@@ -814,7 +814,7 @@ func TestSnapshotWorkspace_PhaseSpans_NonGitNoSession(t *testing.T) {
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
 
 	const conversationID = "wt-spans-native"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeNative); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 

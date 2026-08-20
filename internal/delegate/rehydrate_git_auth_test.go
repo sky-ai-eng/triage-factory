@@ -178,7 +178,7 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	wtPath, owner, repo := setupTestWorktree(t, conversationID)
 	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
 	writeSession(t, wtPath, "sess-proxy", `{"type":"summary"}`)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 	// The concluded blueprint's worktree is gone — cold rehydrate.
@@ -237,7 +237,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	gitT(t, wtPath, "commit", "-m", "agent work")
 
 	s := newStorageSpawner(t)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, wtPath, "", domain.ConversationRuntimeSDK); err != nil {
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
 

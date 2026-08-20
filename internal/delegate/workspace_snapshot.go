@@ -112,11 +112,23 @@ func snapshotKey(orgID, keyID string) string {
 // attribute would look like a property of all snapshots. Empty is a caller that doesn't know
 // (a fixture), and simply omits the attribute.
 //
+// claimID is the engagement writing this snapshot, and it is what makes the
+// blob's lifecycle knowable and its ordering safe. The write is bracketed by a
+// durable state record (workspace_snapshots): 'pending' before the capture, so
+// a resume that finds no blob can tell "a persist is in flight, here is who
+// owes it" from "there is nothing"; then 'written' or 'failed' on the way out,
+// CAS'd on this claim. The same claim id gates the upload — an engagement a
+// successor has displaced skips its Put rather than overwriting the
+// successor's newer blob. Empty claimID (a claimless caller, a fixture) writes
+// no state and takes no guard: with no engagement to name, there is nothing a
+// waiter could ask about and nothing a CAS could fence on, so the blob is
+// written with its lifecycle unrecorded.
+//
 // Best-effort by contract: callers log and proceed on error, because the warm
 // worktree (preserved on dormancy by the per-run guards) is the primary resume
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
-func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, wtPath, sessionID, runtime string) (err error) {
+func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
@@ -145,6 +157,33 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	if wtPath == "" {
 		return fmt.Errorf("snapshot: empty worktree path")
 	}
+
+	// From here on a persist is owed, and that is recorded before any of the
+	// work rather than after it: the record's whole purpose is to be readable
+	// while the blob does not yet exist. The rejections above are deliberately
+	// outside it — nothing was ever owed for a call that names no key.
+	//
+	// owned says this engagement holds the key's lifecycle. False for a
+	// claimless caller or an unwired store, and then the branches below skip
+	// the guard and the terminal write: the blob is still produced, untracked.
+	//
+	// The lifecycle writes run detached from cancellation — the same
+	// WithoutCancel the park's own writes take, and for a sharper reason: a
+	// cancelled ctx is precisely when the capture below fails, so a
+	// cancellation that also swallowed the 'failed' write would leave the key
+	// pending forever and a later resume waiting out its full bound on a
+	// persist nobody is producing.
+	stateCtx := context.WithoutCancel(ctx)
+	owned := s.beginSnapshotState(stateCtx, orgID, keyID, claimID)
+	defer func() {
+		// A durable 'failed' is what lets a waiting resume stop waiting and
+		// fall back, so every error exit below lands here rather than leaving
+		// the key pending forever. The success and superseded exits write
+		// their own outcome and return nil.
+		if err != nil && owned {
+			s.finishSnapshotState(stateCtx, orgID, keyID, claimID, false)
+		}
+	}()
 
 	// Non-recoverable state — the git delta (nil for a non-git run-root, e.g. a
 	// Jira lazy run) AND the session transcript. In multi mode both are read
@@ -216,6 +255,28 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	archSpan.SetAttributes(telemetry.SnapshotRawBytes(rawBytes), telemetry.SizeBytes(compressedBytes))
 	archSpan.End()
 
+	// Pre-Put guard: a newer engagement may have taken the key over while this
+	// teardown was capturing — a cross-pod stop releases the claim the instant
+	// the user asks, and the successor can be running, parking, and writing its
+	// own snapshot before this one reaches the upload. Its blob is the truth,
+	// so this one is not written at all.
+	//
+	// The guard keys on who owns the key, never on whether a successor claim
+	// exists: a successor on a different executor may be waiting for exactly
+	// this blob to rehydrate from, and skipping the Put there would strand it.
+	//
+	// Accepted race, stated so nobody "fixes" it: between this read and the Put
+	// a successor could complete an entire park-and-snapshot cycle, landing the
+	// older blob after the newer one. That needs a full claim -> run -> park ->
+	// capture -> put inside a window measured in microseconds, and the
+	// successor's next park overwrites it again. Closing it completely means
+	// versioned blob keys, which changes key derivation everywhere.
+	if owned && s.snapshotSuperseded(stateCtx, orgID, keyID, claimID) {
+		delegateLog.Info("snapshot superseded by a newer engagement; not writing",
+			"conversation", conversationID, "key", snapshotKey(orgID, keyID), "claim_id", claimID)
+		return nil
+	}
+
 	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", runtime)
 	putSpan.SetAttributes(telemetry.SizeBytes(compressedBytes))
 	putErr := blobs.Put(putCtx, snapshotKey(orgID, keyID), f)
@@ -228,8 +289,73 @@ func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, 
 	// snapshot's real compressed footprint so it's answerable from the field.
 	// On the span too, where it explains the duration beside it.
 	span.SetAttributes(telemetry.SizeBytes(compressedBytes))
+	if owned {
+		s.finishSnapshotState(stateCtx, orgID, keyID, claimID, true)
+	}
 	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_compressed", compressedBytes)
 	return nil
+}
+
+// beginSnapshotState records that claimID owes a snapshot for this key and
+// reports whether this engagement now holds the key's lifecycle. False when
+// there is nothing to record against — no store wired (a fixture), no claim to
+// fence on (a claimless caller) — and the caller then neither guards its upload
+// nor writes a terminal state.
+//
+// A failure to record is not a failure to snapshot: the blob is the thing the
+// resume actually reads, so a store error logs and the snapshot proceeds
+// untracked rather than being abandoned.
+func (s *Spawner) beginSnapshotState(ctx context.Context, orgID, keyID, claimID string) bool {
+	if s.workspaceSnapshots == nil || claimID == "" {
+		return false
+	}
+	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, orgID, keyID, claimID); err != nil {
+		delegateLog.Warn("record workspace snapshot as pending failed; snapshotting untracked",
+			"org", orgID, "key_id", keyID, "claim_id", claimID, "error", err)
+		return false
+	}
+	return true
+}
+
+// finishSnapshotState closes out this engagement's write. An unmatched CAS is
+// the ordinary outcome of losing the key to a successor mid-write, not an
+// error: the successor owns the row and its own finish is the one that counts,
+// so this says so at INFO and leaves the row alone.
+func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID string, ok bool) {
+	if s.workspaceSnapshots == nil {
+		return
+	}
+	matched, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, orgID, keyID, claimID, ok)
+	if err != nil {
+		delegateLog.Warn("record workspace snapshot outcome failed",
+			"org", orgID, "key_id", keyID, "claim_id", claimID, "written", ok, "error", err)
+		return
+	}
+	if !matched {
+		delegateLog.Info("workspace snapshot state was re-owned by a newer engagement; outcome not recorded",
+			"org", orgID, "key_id", keyID, "claim_id", claimID, "written", ok)
+	}
+}
+
+// snapshotSuperseded reports whether the key's lifecycle row has moved to
+// another engagement since this one began. A read failure answers false — the
+// guard exists to prevent an older blob overwriting a newer one, and a store
+// that cannot answer is not evidence that happened; refusing the Put on it
+// would strand a cross-executor resume waiting for this very blob.
+func (s *Spawner) snapshotSuperseded(ctx context.Context, orgID, keyID, claimID string) bool {
+	if s.workspaceSnapshots == nil {
+		return false
+	}
+	state, err := s.workspaceSnapshots.GetSnapshotStateSystem(ctx, orgID, keyID)
+	if err != nil {
+		delegateLog.Warn("read workspace snapshot state before writing failed; writing anyway",
+			"org", orgID, "key_id", keyID, "claim_id", claimID, "error", err)
+		return false
+	}
+	// A vanished row is not a takeover either — a terminal cleanup or the
+	// retention reaper may have dropped it, and this teardown's blob is still
+	// the newest thing anyone has.
+	return state != nil && state.WriterClaimID != claimID
 }
 
 // snapshotPhase opens one phase child under the workspace.snapshot span in
@@ -741,13 +867,24 @@ func (s *Spawner) DiscardWorkspaceSnapshot(orgID, blueprintRunID string) {
 // doesn't accumulate orphans. keyID is memoryNamespace(blueprintRunID).
 // Idempotent — Delete on a missing key is a no-op — so terminal paths call it
 // unconditionally without first checking whether a snapshot was ever written.
+//
+// The lifecycle record goes with the blob. A discard that dropped only the blob
+// would leave a 'written' row pointing at nothing — manufacturing the one state
+// a resume has no honest reading of — where dropping both says the truth: this
+// key has no snapshot lifecycle at all.
 func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID string) {
-	blobs := s.Storage()
-	if blobs == nil || keyID == "" {
+	if keyID == "" {
 		return
 	}
-	if err := blobs.Delete(ctx, snapshotKey(orgID, keyID)); err != nil {
-		delegateLog.Warn("discard workspace snapshot failed", "org", orgID, "key_id", keyID, "error", err)
+	if blobs := s.Storage(); blobs != nil {
+		if err := blobs.Delete(ctx, snapshotKey(orgID, keyID)); err != nil {
+			delegateLog.Warn("discard workspace snapshot failed", "org", orgID, "key_id", keyID, "error", err)
+		}
+	}
+	if s.workspaceSnapshots != nil {
+		if err := s.workspaceSnapshots.DeleteSnapshotStateSystem(ctx, orgID, keyID); err != nil {
+			delegateLog.Warn("discard workspace snapshot state failed", "org", orgID, "key_id", keyID, "error", err)
+		}
 	}
 }
 

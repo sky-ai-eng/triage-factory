@@ -418,6 +418,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ConversationSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
 		ClaimCredentials: newClaimCredentialsStore(admin),
+		// WorkspaceSnapshots is admin-pool only, same posture as
+		// ClaimCredentials: the workspace-snapshot lifecycle record is written
+		// by an executor's teardown and read by the resume path and the
+		// retention reaper, never by a request handler.
+		WorkspaceSnapshots: newWorkspaceSnapshotStore(admin),
 		// Enterprise Edition SSO stores attach via Ext, built from the same
 		// (app, admin) pool handles as core's stores.
 		Ext: db.BuildStoreExtensions("postgres", app, admin),

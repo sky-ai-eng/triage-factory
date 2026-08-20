@@ -476,7 +476,7 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	// deliberately-stopped run with no workspace at all.
 	snapshotted := false
 	if park.claudeCwd != "" && park.namespace != "" {
-		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.namespace, park.claudeCwd, sessionID, park.runtime); err != nil {
+		if err := s.snapshotWorkspace(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime); err != nil {
 			delegateLog.Warn("snapshot workspace before parking open failed", "conversation", park.conversationID, "error", err)
 		} else {
 			snapshotted = true

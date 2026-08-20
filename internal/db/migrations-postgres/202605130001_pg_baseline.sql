@@ -9007,6 +9007,62 @@ GRANT ALL ON TABLE public.conversation_permissions TO service_role;
 GRANT SELECT ON TABLE public.conversation_permissions TO tf_app;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_permissions TO tf_system;
 
+-- workspace_snapshots: the durable lifecycle of one snapshot key's workspace
+-- blob — pending, written, or failed — and the engagement that owns the write.
+--
+-- The blob store answers "is there a blob" and nothing else, so its silence is
+-- four different situations wearing one face: a persist still in flight, a
+-- persist that failed, a conversation that never got far enough to have a
+-- workspace, and a snapshot the retention reaper collected. A resume that
+-- cannot tell them apart has to treat every one of them as gone forever. This
+-- row is what separates them: no row is the last two (nothing was ever owed),
+-- 'pending' names a write in flight and, through writer_claim_id, the
+-- engagement to ask about it, and 'failed' is the durable answer that stops a
+-- waiter waiting.
+--
+-- writer_claim_id is also the stale-write guard. A cross-pod stop parks the
+-- conversation and releases the claim immediately while the old executor's
+-- teardown snapshots afterwards, so an older engagement's Put can land after a
+-- successor has already written its own newer blob. A writer re-reads this
+-- column just before uploading and skips the upload when the key has moved on;
+-- the completion CAS keys on it too, so a displaced writer cannot close out a
+-- write it no longer owns. Keying on "does a successor claim exist" instead
+-- would be wrong — a successor on another executor may be waiting for exactly
+-- this blob.
+--
+-- The key is the snapshot key: (org_id, blueprint_run_id), because a
+-- blueprint's steps share one workspace tree and one blob. No claims FK on
+-- writer_claim_id: the column identifies a writer, and a claim row's fate must
+-- not decide whether the blob's state is knowable.
+CREATE TABLE public.workspace_snapshots (
+    org_id uuid NOT NULL,
+    blueprint_run_id uuid NOT NULL,
+    state text NOT NULL,
+    writer_claim_id uuid NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT workspace_snapshots_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'written'::text, 'failed'::text])))
+);
+
+ALTER TABLE ONLY public.workspace_snapshots
+    ADD CONSTRAINT workspace_snapshots_pkey PRIMARY KEY (org_id, blueprint_run_id);
+
+ALTER TABLE ONLY public.workspace_snapshots
+    ADD CONSTRAINT workspace_snapshots_blueprint_run_id_org_id_fkey FOREIGN KEY (blueprint_run_id, org_id) REFERENCES public.blueprint_runs(id, org_id) ON DELETE CASCADE;
+
+-- Admin-pool only, same posture as claim_credentials: every caller is an
+-- executor-side teardown goroutine or a system sweep, and no request handler
+-- reads it — so RLS is on with no policy at all and the app roles hold no
+-- grant.
+ALTER TABLE public.workspace_snapshots ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.workspace_snapshots FROM PUBLIC;
+REVOKE ALL ON public.workspace_snapshots FROM anon, authenticated, service_role;
+
+-- The executor writes the whole lifecycle (INSERT/UPDATE on begin and finish),
+-- reads it back for the pre-Put supersede check (SELECT), and drops it
+-- alongside the blob at terminal cleanup and in the retention reaper (DELETE).
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_system;
+
 
 --
 -- Name: llm_spend; Type: VIEW; Schema: public; Owner: -

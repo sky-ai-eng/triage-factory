@@ -172,6 +172,13 @@ type Spawner struct {
 	// RunDispatcher). Also the liveness read the cross-pod signal seam
 	// (TFAC-585) uses to decide whether a run's executor is still around.
 	instances db.InstanceStore
+	// workspaceSnapshots is the durable per-snapshot-key lifecycle record the
+	// teardown writes around its blob write: 'pending' before the capture,
+	// 'written'/'failed' after, CAS'd on this engagement's claim so a late
+	// upload from a displaced engagement never overwrites a successor's newer
+	// blob. A plain store ref like s.instances; nil-safe (a partial test
+	// Stores still writes the blob, with no lifecycle recorded against it).
+	workspaceSnapshots db.WorkspaceSnapshotStore
 	// instanceStats is the 1-minute fleet telemetry sink RunInstanceStatSampler
 	// writes (TFAC-589). Nil-safe: a nil store makes the sampler a logged no-op,
 	// same shape as instances on the heartbeat loop.
@@ -532,6 +539,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		repos:                 stores.Repos,
 		teams:                 stores.Teams,
 		instances:             stores.Instances,
+		workspaceSnapshots:    stores.WorkspaceSnapshots,
 		instanceStats:         stores.InstanceStats,
 		sandboxStats:          stores.SandboxStats,
 		pendingInput:          stores.ConversationPendingInput,
