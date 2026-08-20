@@ -384,7 +384,7 @@ func seedMemory(t *testing.T, ctx context.Context, stores db.Stores, database *s
 		ID: f.conversationID, TaskID: f.taskID, PromptID: f.promptID, Status: "completed", Model: "m",
 		BlueprintRunID: f.blueprintRunID, BlueprintStepIndex: &stepIndex,
 	})
-	if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, f.conversationID, f.entityID, f.blueprintRunID, f.content); err != nil {
+	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, f.conversationID, f.entityID, f.blueprintRunID, f.content); err != nil {
 		t.Fatalf("upsert memory %s: %v", f.conversationID, err)
 	}
 	// The primary join row a real run's completion writes — the entity-scoped

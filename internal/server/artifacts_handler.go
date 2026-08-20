@@ -643,7 +643,8 @@ func (ah *artifactsHandler) handleArtifactApprove(w http.ResponseWriter, r *http
 	if art.ConversationID != "" && derr == nil {
 		humanContent := formatPRHumanFeedback(details.Proposed.Title, details.Proposed.Body, finalTitle, finalBody)
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, art.ConversationID, humanContent)
+			return err
 		}); err != nil {
 			artifactsLog.Warn("failed to record human verdict", "conversation", art.ConversationID, "error", err)
 		}

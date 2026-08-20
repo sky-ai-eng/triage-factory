@@ -162,7 +162,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("conversation_queue_enqueue_and_claim", func(t *testing.T) {
 		conversationID := newUUID(t, h)
 		step0 := 0
-		if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+		if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 			ID:                 conversationID,
 			TaskID:             taskID,
 			PromptID:           promptID,
@@ -251,7 +251,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("conversation_memory", func(t *testing.T) {
 		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
-		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, blueprintRunID, "agent narrative"); err != nil {
+		if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, blueprintRunID, "agent narrative"); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
 		}
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {
@@ -554,7 +554,7 @@ func seedQueuedConversation(t *testing.T, h *Harness, stores db.Stores, ctx cont
 	t.Helper()
 	conversationID := newUUID(t, h)
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID: conversationID, TaskID: taskID, PromptID: promptID, Model: "test-model",
 		TriggerType: "manual", CreatorUserID: "", BlueprintRunID: blueprintRunID,
 		BlueprintStepIndex: &step0,

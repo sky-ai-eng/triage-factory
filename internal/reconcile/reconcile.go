@@ -318,7 +318,7 @@ func (rc *Reconciler) recordConversationOutcome(ctx context.Context, orgID, conv
 	if note == "" {
 		return
 	}
-	if err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
+	if _, err := rc.memory.UpdateConversationMemoryHumanContentSystem(ctx, orgID, conversationID, note); err != nil {
 		reconcileLog.Warn("record conversation outcome memory failed", "org", orgID, "conversation", conversationID, "error", err)
 	}
 }

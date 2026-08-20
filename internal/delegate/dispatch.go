@@ -1191,7 +1191,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 	// and never outlives one queue dwell. Empty = no affinity (placement off,
 	// non-repo task, or a failed read) → the claim treats it as unowned.
 	preferred := s.preferredExecutorFor(ctx, orgID, task, conversationID)
-	return s.conversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
+	_, err := s.conversationQueue.EnqueueConversation(ctx, orgID, domain.Conversation{
 		ID:                  conversationID,
 		TaskID:              task.ID,
 		PromptID:            step.StepPromptID,
@@ -1204,6 +1204,7 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 		BlueprintStepIndex:  &stepIdx,
 		PreferredExecutorID: preferred,
 	})
+	return err
 }
 
 // freshStepWorkspace rebuilds a step's run tree from nothing by running the
@@ -1469,7 +1470,7 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", conv.Attempts, "error", cause)
-	if err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
+	if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
 		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
 	}
 	return true
@@ -1652,7 +1653,7 @@ func (s *Spawner) driveClaimedCuratorTurn(conv *domain.Conversation) {
 // releasing the claim is the whole requeue, since the conversation is
 // mid-flight and still holds its undelivered turn.
 func (s *Spawner) releaseCuratorClaim(conv *domain.Conversation, reason string) {
-	if err := s.conversationQueue.RequeueConversation(context.Background(), conv.OrgID, conv.ID, reason); err != nil {
+	if _, err := s.conversationQueue.RequeueConversation(context.Background(), conv.OrgID, conv.ID, reason); err != nil {
 		dispatchLog.Warn("release curator claim failed", "conversation", conv.ID, "error", err)
 	}
 }

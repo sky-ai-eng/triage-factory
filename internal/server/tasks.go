@@ -996,7 +996,7 @@ func (s *Server) teardownTaskArtifacts(ctx context.Context, orgID, userID, taskI
 			if len(draftPRs) > 0 {
 				kind = "pr"
 			}
-			if err := tx.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, buildDiscardHumanContent(outcome, kind)); err != nil {
+			if _, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(ctx, orgID, conversationID, buildDiscardHumanContent(outcome, kind)); err != nil {
 				return fmt.Errorf("human_content write: %w", err)
 			}
 

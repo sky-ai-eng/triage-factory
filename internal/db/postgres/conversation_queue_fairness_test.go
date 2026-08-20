@@ -45,7 +45,7 @@ func (f *fairnessFixture) enqueue(t *testing.T, stores db.Stores, preferred stri
 	t.Helper()
 	conversationID := uuid.New().String()
 	step0 := 0
-	if err := stores.ConversationQueue.EnqueueConversation(context.Background(), f.orgID, domain.Conversation{
+	if _, err := stores.ConversationQueue.EnqueueConversation(context.Background(), f.orgID, domain.Conversation{
 		ID: conversationID, TaskID: f.taskID, PromptID: f.promptID, Model: "m",
 		TriggerType: "manual", CreatorUserID: f.userID,
 		BlueprintRunID:      seedPgBlueprintRunOn(t, f.h, f.orgID, f.userID, f.bpID, f.taskID),

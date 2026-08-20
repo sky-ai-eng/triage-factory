@@ -154,12 +154,12 @@ const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALES
 // 'sdk': SQLite is local mode, which keeps the Claude Code SDK runtime.
 // The Postgres sibling stamps 'native' — the dialect IS the mode, so the
 // split lands where the row is written rather than as a caller-passed knob.
-func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error {
+func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
 	if err := db.AssertBlueprintStepIndexed(conv); err != nil {
-		return err
+		return nil, err
 	}
 	triggerType := conv.TriggerType
 	if triggerType == "" {
@@ -172,17 +172,17 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 	if conv.BlueprintStepIndex != nil {
 		stepIdx = *conv.BlueprintStepIndex
 	}
-	_, err := s.conn.ExecContext(ctx, `
+	row := s.conn.QueryRowContext(ctx, `
 		INSERT INTO conversations (id, type, runtime, task_id, prompt_id, model, worktree_path,
 		                  trigger_type, trigger_id, team_id, visibility,
 		                  creator_user_id, actor_agent_id, blueprint_run_id, blueprint_step_index,
 		                  preferred_executor_id, queued_at)
 		VALUES (?, 'delegation', 'sdk', ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, ?, NULLIF(?, ''), CURRENT_TIMESTAMP)
-	`, conv.ID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
+		RETURNING `+sqliteConversationReturningColumns, conv.ID, conv.TaskID, nullIfEmpty(conv.PromptID), conv.Model, conv.WorktreePath,
 		triggerType, nullIfEmpty(conv.TriggerID), runmode.LocalDefaultTeamID,
 		nullIfEmpty(conv.CreatorUserID), nullIfEmpty(conv.ActorAgentID),
 		nullIfEmpty(conv.BlueprintRunID), stepIdx, conv.PreferredExecutorID)
-	return err
+	return scanConversationReturning(row)
 }
 
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.Conversation, error) {
@@ -272,24 +272,28 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	return conv, nil
 }
 
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) error {
+// RequeueConversation releases the claim FIRST and flips the conversation
+// row SECOND, in that order — the reverse of ConversationStore.Complete's
+// prep-then-flip split, but the same reason drives it: the returned row's
+// derived display status (sqliteReturningDisplayStatusSQL, folded into
+// sqliteConversationReturningColumns) reads 'queued' only once no active
+// claim remains, so the release has to be visible to the LAST statement's
+// RETURNING for the answer to agree with a follow-up Get. The guard — a
+// mid-flight conversation with a live claim — moves onto the claims release
+// itself (matched only when the owning conversation's status IS NULL), so
+// checking RowsAffected there tells the whole guard's outcome without a
+// separate probe.
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return err
+		return nil, err
 	}
-	// Releasing the claim IS the requeue: the conversation stays mid-flight
-	// (status NULL), so the moment its last claim releases it matches the
-	// needs-driving predicate again. Guarded on NULL status, matching the
-	// Postgres impl, so a stale requeue can't resurrect a terminal or parked
-	// row. The claim releases as 'requeued' (it already counted this try —
-	// Attempts is the claim count), and the placement stamp clears: an
-	// unclaimed row has no owner.
-	return inTx(ctx, s.conn, func(q queryer) error {
+	var result *domain.Conversation
+	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL
-			WHERE id = ? AND status IS NULL
-			  AND EXISTS (SELECT 1 FROM claims cl
-			              WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL)
-		`, lastErr, conversationID)
+			UPDATE claims SET released_at = ?, outcome = 'requeued'
+			WHERE conversation_id = ? AND released_at IS NULL
+			  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.status IS NULL)
+		`, time.Now().UTC(), conversationID)
 		if err != nil {
 			return err
 		}
@@ -297,8 +301,21 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		if err != nil || n == 0 {
 			return err
 		}
-		return releaseActiveClaim(ctx, q, conversationID, "requeued")
+		row := q.QueryRowContext(ctx, `
+			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL
+			WHERE id = ?
+			RETURNING `+sqliteConversationReturningColumns, lastErr, conversationID)
+		r, err := scanConversationReturning(row)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // MarkAwaitingCredentials mirrors the Postgres impl: the phase park and

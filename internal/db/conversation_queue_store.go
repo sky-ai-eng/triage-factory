@@ -79,10 +79,6 @@ type ClaimPlacement struct {
 	Liveness time.Duration
 }
 
-// TODO(TFAC-868): these single-row writes still return a bare error rather
-// than the row they persisted: EnqueueConversation, which mints the
-// conversation row a caller then has to learn the id of some other way, and
-// RequeueConversation.
 type ConversationQueueStore interface {
 	// EnqueueConversation mints a delegation conversation for a blueprint step with
 	// NO stored status — the absence of an outcome is what makes it
@@ -97,7 +93,11 @@ type ConversationQueueStore interface {
 	// with no JWT-claims context; the row's creator_user_id is still stamped
 	// for audit and later RLS-scoped reads. The schema CHECK pairing
 	// trigger_type with creator_user_id nullability is the caller's contract.
-	EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) error
+	//
+	// Returns the minted row, sharing ConversationStore.Get/GetSystem's
+	// projection and scanner — the queued_at stamp and any team_id the insert
+	// derived from the task need no separate lookup.
+	EnqueueConversation(ctx context.Context, orgID string, conv domain.Conversation) (*domain.Conversation, error)
 
 	// ClaimNextConversation claims the next conversation that needs driving, of ANY
 	// surface, and mints the claim that records the engagement (executor id,
@@ -157,7 +157,14 @@ type ConversationQueueStore interface {
 	// that fails the same way every time. Guarded on a mid-flight
 	// conversation with a live claim, so a stale call can't act on a terminal
 	// or parked row.
-	RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) error
+	//
+	// Returns the requeued row (ConversationStore.Get/GetSystem's
+	// projection), or nil when the guard declined — nothing mid-flight with a
+	// live claim to hand back (already terminal, parked, or claimless). The
+	// EntityStore.Close shape: a second requeue of an already-requeued
+	// conversation is not an error, and the caller that wants to know whether
+	// this call was the one that requeued it now can.
+	RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) (*domain.Conversation, error)
 
 	// ResetProcessingConversations is the boot reconcile sweep: every conversation
 	// left mid-flight by a crash (no outcome written, a claim still live) has
