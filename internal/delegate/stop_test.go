@@ -197,14 +197,14 @@ func TestStop_OpenStep_FreezesBlueprintRun(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun pins the other
+// TestStopConversationAndCancelBlueprint_OpenStep_FinalizesBlueprintRun pins the other
 // half of the split: when the layer above the conversation has already ended
 // — a closed or swiped task, an archived team — the teardown verb carries the
 // blueprint terminal with it. Nothing will resume these conversations, so a
 // frozen 'running' blueprint would hold a worktree and count as live work
 // forever. seedConversation links the conversation to a 1-step blueprint_run
 // "seedbpr-<conversationID>".
-func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-teardown", "sess-teardown", "/tmp/wt-rt")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-teardown'`); err != nil {
@@ -213,7 +213,7 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-teardown", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-teardown", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 	}
 }
 
-// TestCancelBlueprint_FinalizesRunAndParksSteps pins the layer the stop verb
+// TestCancelBlueprintRun_FinalizesRunAndParksSteps pins the layer the stop verb
 // hands cancellation off TO. Now that stopping a conversation only freezes the
 // plan, this is the only verb that can end one — a blueprint sitting 'running'
 // with no queued step and no live claim has no other exit short of resuming
@@ -245,7 +245,7 @@ func TestStopAndCancelBlueprint_OpenStep_FinalizesBlueprintRun(t *testing.T) {
 // It lives beside the stop tests on purpose: the pair is the split. The
 // conversation verb parks and freezes; the blueprint verb finalizes. Both park
 // the step, and only one writes a blueprint terminal.
-func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
+func TestCancelBlueprintRun_FinalizesRunAndParksSteps(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	const conversationID = "r-bp-cancel"
@@ -254,10 +254,10 @@ func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	// No registered subprocess handle, so this takes CancelBlueprint's
+	// No registered subprocess handle, so this takes CancelBlueprintRun's
 	// paused-blueprint branch: park every active step itself, then finalize.
-	if err := s.CancelBlueprint(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("CancelBlueprint: %v", err)
+	if err := s.CancelBlueprintRun(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("CancelBlueprintRun: %v", err)
 	}
 
 	var bpStatus string
@@ -279,10 +279,10 @@ func TestCancelBlueprint_FinalizesRunAndParksSteps(t *testing.T) {
 	}
 }
 
-// TestCancelBlueprint_AlreadyTerminalIsNoOp: the blueprint verb is idempotent
+// TestCancelBlueprintRun_AlreadyTerminalIsNoOp: the blueprint verb is idempotent
 // against a plan that already ended, so a second click cannot re-stamp a
 // terminal over the one that recorded how the blueprint actually finished.
-func TestCancelBlueprint_AlreadyTerminalIsNoOp(t *testing.T) {
+func TestCancelBlueprintRun_AlreadyTerminalIsNoOp(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	const conversationID = "r-bp-done"
@@ -293,8 +293,8 @@ func TestCancelBlueprint_AlreadyTerminalIsNoOp(t *testing.T) {
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.CancelBlueprint(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("CancelBlueprint on a terminal plan: %v", err)
+	if err := s.CancelBlueprintRun(runmode.LocalDefaultOrgID, brID, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("CancelBlueprintRun on a terminal plan: %v", err)
 	}
 
 	var bpStatus string
@@ -675,12 +675,12 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone: a stale
+// TestStopConversationAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone: a stale
 // teardown — one aimed at a conversation that already concluded — must stay a pure
 // no-op. The blueprint-layer signal is the reason this needs its own guard:
 // raising cancel_requested on a blueprint that has moved on to its next step
 // would cancel work the caller never aimed at.
-func TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-stale", "sess-stale", "/tmp/wt-stale")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = 'r-stale'`); err != nil {
@@ -688,7 +688,7 @@ func TestStopAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-stale", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err == nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-stale", runmode.LocalDefaultUserID, StopCauseTaskDispositioned); err == nil {
 		t.Fatal("expected 'no active conversation' on a concluded conversation")
 	}
 

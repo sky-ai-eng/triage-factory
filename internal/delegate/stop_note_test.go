@@ -151,16 +151,16 @@ func TestStop_SystemStopSpeaksAsTheSystem(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_NoteNamesTheCause: nothing resumes a conversation
+// TestStopConversationAndCancelBlueprint_NoteNamesTheCause: nothing resumes a conversation
 // torn down by the layer above it, so its note is the only explanation its
 // history will ever carry. "Stopped" alone is what the row's presence already
 // says; the cause is the part worth writing.
-func TestStopAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-closed", "sess-closed", "/tmp/wt-closed")
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-closed", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -176,14 +176,14 @@ func TestStopAndCancelBlueprint_NoteNamesTheCause(t *testing.T) {
 	}
 }
 
-// TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote is the case the plain
+// TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote is the case the plain
 // verb's skip must not swallow. Every teardown caller enumerates its task's
 // non-terminal runs — `open` among them — so a parked conversation is the
 // ordinary thing a closed or swiped task tears down, not an edge case. That
 // teardown is permanent, so the note is the only explanation the transcript
 // will ever carry; skipping it as a "re-stop" would end the conversation in
 // silence.
-func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
+func TestStopConversationAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-parked-teardown", "sess-pt", "/tmp/wt-pt")
 	if _, err := database.Exec(`UPDATE conversations SET status = 'open' WHERE id = 'r-parked-teardown'`); err != nil {
@@ -191,7 +191,7 @@ func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 	}
 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestStopAndCancelBlueprint_ParkedRunStillGetsItsNote(t *testing.T) {
 
 	// A second teardown reaching the same row — the router closes the task,
 	// then the team is archived — says nothing new, so it writes nothing.
-	if err := s.StopAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
+	if err := s.StopConversationAndCancelBlueprint(runmode.LocalDefaultOrgID, "r-parked-teardown", "", StopCauseTaskClosed); err != nil {
 		t.Fatalf("second teardown: %v", err)
 	}
 	if notes := stopNotes(t, database, "r-parked-teardown"); len(notes) != 1 {

@@ -579,7 +579,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	toast.Info(s.wsHub, orgID, fmt.Sprintf("Blueprint step %d/%d: %s (%s)",
 		stepIdx+1, len(plan), truncateToastMsg(stepPrompt.Name, 60), shortConversationID(conv.ID)))
 
-	// Per-step cancel handle so CancelBlueprint can SIGKILL the active subprocess.
+	// Per-step cancel handle so CancelBlueprintRun can SIGKILL the active subprocess.
 	stepCtx, stepCancel := context.WithCancel(ctx)
 	s.mu.Lock()
 	s.cancels[conv.ID] = stepCancel

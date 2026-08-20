@@ -24,9 +24,10 @@ import (
 // importantly, its edges — the finished blueprint a user may still resume, and
 // the replayed close that must not reach back to touch it.
 
-// stoppingSpawner records every StopAndCancelBlueprint call and can be made to
-// fail them all, standing in for the kill half failing after the close
-// committed — the exact window this ticket exists to make survivable.
+// stoppingSpawner records every StopConversationAndCancelBlueprint call and
+// can be made to fail them all, standing in for the kill half failing after
+// the close committed — the exact window this ticket exists to make
+// survivable.
 type stoppingSpawner struct {
 	stubDelegator
 	mu      sync.Mutex
@@ -34,7 +35,7 @@ type stoppingSpawner struct {
 	fail    bool
 }
 
-func (s *stoppingSpawner) StopAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
+func (s *stoppingSpawner) StopConversationAndCancelBlueprint(orgID, conversationID, userID string, cause delegate.StopCause) error {
 	s.mu.Lock()
 	s.stopped = append(s.stopped, conversationID)
 	s.mu.Unlock()

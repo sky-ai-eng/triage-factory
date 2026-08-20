@@ -182,16 +182,17 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 
-	// Force-stop the conversations. StopAndCancelBlueprint("" userID) hard-kills a live
-	// process or parks one that has none, and cancels the blueprint behind it —
-	// an archived team's work is over, so a frozen 'running' blueprint would
-	// hold a worktree nobody can resume. All on the admin pool. A per-conversation error
-	// is a benign race (the conversation reached terminal on its own) — log and keep going
-	// so one stuck conversation can't strand the rest; count only the ones we stopped.
+	// Force-stop the conversations. StopConversationAndCancelBlueprint with an
+	// empty userID hard-kills a live process or parks one that has none, and
+	// cancels the blueprint behind it — an archived team's work is over, so a
+	// frozen 'running' blueprint would hold a worktree nobody can resume. All
+	// on the admin pool. A per-conversation error is a benign race (the
+	// conversation reached terminal on its own) — log and keep going so one
+	// stuck conversation can't strand the rest; count only the ones we stopped.
 	cancelledRuns := 0
 	if sp := th.spawnerRuntime(); sp != nil {
 		for _, conversationID := range conversationIDs {
-			if cErr := sp.StopAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseTeamArchived); cErr != nil {
+			if cErr := sp.StopConversationAndCancelBlueprint(orgID, conversationID, "", delegate.StopCauseTeamArchived); cErr != nil {
 				teamsLog.Warn("archive: conversation stop failed", "team", teamID, "conversation", conversationID, "error", cErr)
 				continue
 			}

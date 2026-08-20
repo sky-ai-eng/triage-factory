@@ -587,7 +587,7 @@ func TestBlueprintStore_Postgres_CreateRun_UnderAppPoolRLS(t *testing.T) {
 	// The blueprint_runs_select RLS policy was widened so event-triggered
 	// rows (creator_user_id NULL) resolve via plain org membership
 	// rather than the creator-equals-caller predicate. Without that,
-	// the request-facing GetRun / GetRunForConversation / CancelBlueprint paths
+	// the request-facing GetRun / GetRunForConversation / CancelBlueprintRun paths
 	// would silently 404 on every auto-fired blueprint because the
 	// app-pool SELECT can't match a NULL creator. Verify a WithTx
 	// read of the event-triggered row succeeds.
