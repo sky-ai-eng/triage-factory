@@ -16,21 +16,36 @@ import (
 // narrow means those handlers import this instead of the full task
 // lifecycle.
 //
-// Atomicity: every mutating method writes the swipe_events row AND
-// updates the corresponding task in a single transaction — a partial
-// state ("status updated but no audit row" or vice versa) would
-// break the Board's undo flow and the analytics views.
+// Atomicity: a method that writes both an audit row and a task update
+// does so in a single transaction — a partial state ("status updated
+// but no audit row" or vice versa) would break the undo flow and the
+// analytics views, and it is what lets a refused write leave no trace
+// at all. RequeueTask and ClearSnooze are the deliberate exceptions:
+// they change task state and write no audit row, because neither is a
+// card gesture (see each method).
+//
+// Where a method refuses on task state, the predicate rides its own
+// UPDATE's WHERE clause rather than a check before it. A handler that
+// reads the task in one statement and writes in another cannot close a
+// state hole — the row can change in between — so these predicates are
+// the enforcement and the ok bools report what they refused; a
+// handler's pre-read only buys the common case a more specific answer.
+// RequeueTask is the one method with nothing to refuse: re-opening
+// whatever it is handed is the whole job, so its ok=false means only
+// that no such row exists.
 type SwipeStore interface {
 	// RecordSwipe inserts a swipe_events row and transitions the
 	// task's lifecycle (status + snooze_until) in one tx. Action
 	// → status mapping: "dismiss" → dismissed, "complete" → done,
-	// "snooze" → snoozed (with snoozeUntil as the wake time);
-	// "claim", "delegate" and "reassign" map to status='queued'
-	// — those are responsibility-axis actions and don't move
-	// lifecycle, but the no-op coercion is kept for defensive
-	// idempotency. Unknown action defaults to 'queued' so a
-	// misuse doesn't silently strand the task. Returns the new
-	// task status the handler echoes back in the JSON response.
+	// "snooze" → snoozed (with snoozeUntil as the wake time).
+	// "claim", "delegate" and "reassign" are responsibility-axis
+	// actions and leave the lifecycle status where it stands — a
+	// takeover of an in_progress task keeps it in_progress — except
+	// that a snoozed row wakes to 'queued', since "snoozed" and
+	// "claimed by somebody" is a state nothing downstream renders or
+	// drains. Unknown action defaults to 'queued' so a misuse
+	// doesn't silently strand the task. Returns the resulting task
+	// status, which the handler echoes back in its JSON response.
 	//
 	// A closed task takes no swipe: the UPDATE carries its own
 	// status predicate, so a row that went done/dismissed since the
@@ -88,18 +103,32 @@ type SwipeStore interface {
 	// ok=false to 409.
 	ClearSnooze(ctx context.Context, orgID string, taskID string) (ok bool, err error)
 
-	// UndoLastSwipe reverses the caller's own last gesture on a task:
-	// it writes an 'undo' swipe_events row + flips the task back to
-	// 'queued' with snooze_until cleared. The undo toast maps to this;
-	// the audit row makes the undo itself visible in the swipe-history
-	// view.
+	// UndoLastSwipe reverses the last gesture made on a task, provided
+	// that gesture is the caller's: it writes an 'undo' swipe_events
+	// row + flips the task back to 'queued' with snooze_until cleared.
+	// The undo toast maps to this; the audit row makes the undo itself
+	// visible in the swipe-history view.
 	//
-	// It is scoped to userID's own audit rows and refuses (ok=false,
-	// nothing written) when the caller's most recent row on this task
-	// is absent or is itself an 'undo'. Without that guard the route is
-	// a force-reset for any task the caller can see, and a second undo
-	// re-reverses a gesture that was already reversed. "Put this back
-	// in the queue" as a deliberate state change is RequeueTask.
+	// The guard is on the task's NEWEST swipe_events row, whoever wrote
+	// it: that row must belong to userID and must not itself be an
+	// 'undo'. Both halves are load-bearing, and the first is not the
+	// weaker "userID has some gesture here" — gestures never expire and
+	// RequeueTask deliberately writes none, so a released claim stays a
+	// user's own newest row indefinitely, and a caller holding one could
+	// otherwise reverse an action somebody else took afterwards (wiping
+	// their closed_at / close_reason, and the task's claim with it).
+	// Write access is team-scoped, so that caller need not be anyone in
+	// particular. The second half stops a second undo re-reversing a
+	// gesture already reversed. "Put this back in the queue" as a
+	// deliberate state change is RequeueTask.
+	//
+	// The guard rides the UPDATE rather than a read before it, so the
+	// check and the write are one statement and two undos racing on one
+	// task can't both pass; the audit row goes in after, or it would be
+	// the newest row and shadow the thing being tested. Implementations
+	// need to read rows the requesting user did not write, which is why
+	// the Postgres one runs on the admin pool — see its own comment.
+	// Handlers map ok=false to 409.
 	UndoLastSwipe(ctx context.Context, orgID string, taskID, userID string) (ok bool, err error)
 }
 
