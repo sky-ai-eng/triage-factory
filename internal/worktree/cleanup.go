@@ -249,10 +249,31 @@ func recordedWorktreePath(adminDir string) string {
 // worktrees — i.e. a child of the triagefactory-runs temp namespace
 // (runDir = <tmp>/triagefactory-runs/<rootKey>). Matched on the runsDir
 // path segment rather than the full os.TempDir() prefix because $TMPDIR
-// can differ between the run that created the worktree and this restart;
-// the namespace itself is constant.
+// can differ between the run that created the worktree and the process
+// asking; the namespace itself is constant.
 func isTFRunWorktreePath(p string) bool {
 	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
+}
+
+// IsRunTreeFor reports whether p is the run tree of rootKey specifically:
+// TF's own ephemeral run namespace AND the directory that key names within it
+// (runDir = <tmp>/triagefactory-runs/<rootKey>, so the basename IS the key).
+//
+// This, rather than a bare "is it in the namespace", is what a caller wants
+// when it holds a recorded path and is about to act on it as if it belonged to
+// a key it resolved separately. Those are two different facts: a path can be a
+// perfectly valid run tree and still be some OTHER key's, in which case every
+// check the caller made about its own key — that nothing is claimed on it,
+// that its snapshot is safely written — says nothing whatever about the
+// directory in hand. Requiring the key to name the path is what collapses the
+// two facts into one.
+//
+// Namespace-relative like its sibling above, deliberately: a tree recorded
+// under a different $TMPDIR still resolves here if that directory survives, so
+// pinning this process's os.TempDir() would reject a tree that really is the
+// key's.
+func IsRunTreeFor(p, rootKey string) bool {
+	return rootKey != "" && isTFRunWorktreePath(p) && filepath.Base(p) == rootKey
 }
 
 // clearStaleLockedWorktrees force-removes admin registrations under

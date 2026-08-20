@@ -735,6 +735,16 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		span.End()
 	}()
 
+	// Held across the whole resolution, warm stat included: the eviction sweep
+	// runs in this same process and deletes exactly this tree, so a warm hit
+	// taken outside the lock could be a directory that no longer exists by the
+	// time the agent runs in it. Under the lock the sweep either goes first
+	// (this resolution then cold-rehydrates, which is correct and merely
+	// slower) or finds this engagement's claim on its re-check and declines.
+	keyID := memoryNamespace(conv.BlueprintRunID)
+	unlock := s.workspaceLocks.lock(workspaceLockKey(orgID, keyID))
+	defer unlock()
+
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
 			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
@@ -745,7 +755,6 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	if blobs == nil {
 		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
-	keyID := memoryNamespace(conv.BlueprintRunID)
 	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
 	if errors.Is(err, storage.ErrNotFound) {
 		// Not there yet, or not there at all — the lifecycle record is what

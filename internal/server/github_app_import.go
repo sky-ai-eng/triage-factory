@@ -103,7 +103,7 @@ type importRequiredPermission struct {
 // importRequiredPermissions is the bar an imported App is preflighted against —
 // the exact set buildManifestAndState requests (github_app_register.go).
 //
-//   - Hard (block): email_addresses:read, issues:write, pull_requests:write,
+//   - Hard (block): emails:read, issues:write, pull_requests:write,
 //     contents:write, metadata:read — core function (identity capture, open
 //     PRs, comment, push branches) breaks without them.
 //   - Soft (warn): checks:read / actions:read (CI check + workflow events),
@@ -112,7 +112,7 @@ type importRequiredPermission struct {
 //     team-based review-request detection) — specific features degrade, the rest
 //     works.
 var importRequiredPermissions = []importRequiredPermission{
-	{name: "email_addresses", level: "read", hard: true},
+	{name: "emails", level: "read", hard: true},
 	{name: "issues", level: "write", hard: true},
 	{name: "pull_requests", level: "write", hard: true},
 	{name: "contents", level: "write", hard: true},
