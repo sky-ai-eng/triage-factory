@@ -95,6 +95,60 @@ func TestCollectSkipsTestFiles(t *testing.T) {
 	}
 }
 
+// A linked worktree under the repo is a different commit's checkout. Walking
+// it double-counts every shared route and resurrects paths this commit
+// deleted — which reads as an unfinished migration, so it must not be walked.
+// Both .git shapes are covered: a worktree writes it as a file, a clone as a
+// directory.
+func TestCollectSkipsNestedCheckouts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mark func(t *testing.T, dir string)
+	}{
+		{"linked worktree", func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: ../../.git/worktrees/x\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"nested clone", func(t *testing.T, dir string) {
+			if err := os.Mkdir(filepath.Join(dir, ".git"), 0o750); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// A .git symlink whose target is gone or unmounted still marks a
+		// checkout, so presence of the entry is the test — not whether it
+		// resolves.
+		{"dangling .git symlink", func(t *testing.T, dir string) {
+			if err := os.Symlink(filepath.Join(dir, "no-such-gitdir"), filepath.Join(dir, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeGo(t, root, "routes.go", "package p\nfunc f() { s.api(\"GET /api/real\", nil) }\n")
+
+			nested := filepath.Join(root, ".worktrees", "other-branch")
+			if err := os.MkdirAll(nested, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			tc.mark(t, nested)
+			// The stale checkout shares one route with the real tree and
+			// carries one the real tree no longer has. Neither may appear.
+			writeGo(t, nested, "routes.go",
+				"package p\nfunc f() {\n\ts.api(\"GET /api/real\", nil)\n\ts.api(\"GET /api/deleted-last-week\", nil)\n}\n")
+
+			got, err := collect(root)
+			if err != nil {
+				t.Fatalf("collect: %v", err)
+			}
+			if len(got) != 1 || got[0].Path != "/api/real" {
+				t.Fatalf("got %+v, want just /api/real — the nested checkout was walked", got)
+			}
+		})
+	}
+}
+
 func TestSplitPattern(t *testing.T) {
 	for _, c := range []struct{ in, method, path string }{
 		{"GET /api/x", "GET", "/api/x"},

@@ -1,7 +1,7 @@
 import { useEffect, useCallback, useState } from 'react'
 import { ChevronDown, ExternalLink } from 'lucide-react'
-import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { toast } from './Toast/toastStore'
+import { usePagedList } from '../hooks/usePagedList'
 import { useWebSocket } from '../hooks/useWebSocket'
 
 interface ProjectEntity {
@@ -27,9 +27,25 @@ interface Props {
 // a single line; click to expand and reveal the classifier's
 // rationale.
 export default function ProjectEntitiesPanel({ projectId }: Props) {
-  const [entities, setEntities] = useState<ProjectEntity[] | null>(null)
-  const [loadError, setLoadError] = useState('')
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // The panel renders rows for reading rather than reasoning over the whole
+  // set, so it takes a page and offers the next one.
+  const {
+    items: entities,
+    total,
+    hasMore,
+    loading,
+    error: loadError,
+    load,
+    loadMore,
+  } = usePagedList<ProjectEntity>(
+    `/api/projects/${encodeURIComponent(projectId)}/entities/list`,
+    "Could not load the project's entities.",
+  )
+  // Only a page that actually arrived flips this. A failed FIRST load must
+  // fall to the error branch, not to "no entities yet" — that would be a false
+  // statement about what the project holds.
+  const [loaded, setLoaded] = useState(false)
 
   // Bumped to force a refetch on websocket events without needing a
   // setState-in-effect callback (which the react-hooks lint flags).
@@ -37,25 +53,19 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
 
   useEffect(() => {
     let cancelled = false
-    ;(async () => {
-      try {
-        const data = await apiJSON<{ entities: ProjectEntity[] }>(
-          `/api/projects/${encodeURIComponent(projectId)}/entities`,
-        )
-        if (cancelled) return
-        setEntities(data.entities ?? [])
-        setLoadError('')
-      } catch (err) {
-        if (cancelled) return
-        const msg = httpErrorMessage(err, "Could not load the project's entities.")
-        setLoadError(msg)
-        toast.error(msg)
-      }
-    })()
+    void load({}).then((page) => {
+      if (page && !cancelled) setLoaded(true)
+    })
     return () => {
       cancelled = true
     }
-  }, [projectId, refetchKey])
+  }, [projectId, refetchKey, load])
+
+  // The hook holds the last failure's message; the panel also toasts it, which
+  // it cannot do from the render pass.
+  useEffect(() => {
+    if (loadError) toast.error(loadError)
+  }, [loadError])
 
   // Refetch when the backfill popup applies assignments OR when the
   // classifier auto-claims something for this project. Both flows
@@ -76,16 +86,16 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
     })
   }, [])
 
-  const isLoading = entities === null && !loadError
-  const isEmpty = entities !== null && entities.length === 0
+  const isLoading = !loaded && !loadError
+  const isEmpty = loaded && entities.length === 0
 
   return (
     <section className="rounded-2xl border border-line-1 bg-raised/60 backdrop-blur-sm shadow-float shadow-black/[0.02] flex flex-col max-h-[40vh] overflow-hidden">
       <header className="px-5 pt-4 pb-3 border-b border-line-1">
         <h2 className="text-body font-semibold text-ink-1 tracking-tight">
           Entities{' '}
-          {entities && entities.length > 0 ? (
-            <span className="text-ink-3 font-normal">({entities.length})</span>
+          {entities.length > 0 ? (
+            <span className="text-ink-3 font-normal">({total ?? entities.length})</span>
           ) : null}
         </h2>
         <p className="text-ui text-ink-3 mt-0.5 leading-relaxed">
@@ -104,17 +114,31 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
             create-project popup will appear here.
           </p>
         )}
-        {!isLoading && !loadError && (entities?.length ?? 0) > 0 && (
-          <ul className="space-y-0.5">
-            {(entities ?? []).map((e) => (
-              <EntityRow
-                key={e.id}
-                entity={e}
-                expanded={expanded.has(e.id)}
-                onToggle={() => toggle(e.id)}
-              />
-            ))}
-          </ul>
+        {!isLoading && !loadError && entities.length > 0 && (
+          <>
+            <ul className="space-y-0.5">
+              {entities.map((e) => (
+                <EntityRow
+                  key={e.id}
+                  entity={e}
+                  expanded={expanded.has(e.id)}
+                  onToggle={() => toggle(e.id)}
+                />
+              ))}
+            </ul>
+            {hasMore && (
+              <button
+                type="button"
+                onClick={loadMore}
+                disabled={loading}
+                className="mt-1.5 w-full py-1.5 text-[11px] text-accent transition-colors hover:text-accent/70 disabled:opacity-50"
+              >
+                {loading
+                  ? 'Loading…'
+                  : `Load more (${entities.length} of ${total ?? entities.length})`}
+              </button>
+            )}
+          </>
         )}
       </div>
     </section>
