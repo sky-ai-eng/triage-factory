@@ -116,7 +116,7 @@ func TestBootstrapLocalOrg_Idempotent(t *testing.T) {
 // it stays deleted) is a property of the *provision endpoint*, not of
 // BootstrapLocalOrg itself: the materializer is INSERT-OR-IGNORE keyed on
 // (org, team, system_slug), so calling the bare function again WOULD
-// re-create a deleted handler. The endpoint (handleSetupStart) no-ops
+// re-create a deleted handler. The endpoint (createLocalOrg) no-ops
 // once a tenant exists, which is what makes deletions durable — see
 // TestSetupStart_NonResurrection in internal/server.
 

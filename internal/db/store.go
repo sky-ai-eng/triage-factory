@@ -141,7 +141,7 @@ type Stores struct {
 	Projects ProjectStore
 
 	// Events owns the events audit log — append-only event rows the
-	// router records and the factory/delegate paths read. Holds both
+	// router records and the task-creation paths read. Holds both
 	// pools: app for request-handler equivalents (stock
 	// carry-over, factory drag-to-delegate) and admin for background
 	// goroutines without JWT-claims context (router RecordSystem +

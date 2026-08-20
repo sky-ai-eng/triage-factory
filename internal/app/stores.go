@@ -41,7 +41,7 @@ func (a *App) openStores(ctx context.Context) error {
 		registerPoolMetrics(database, "sqlite", db.PoolLocal)
 		// No tenant rows exist on a fresh local DB — provisioning is the
 		// explicit "Start your factory" action (db.BootstrapLocalOrg via
-		// POST /api/setup/start), not a boot- or migration-time side
+		// POST /api/orgs), not a boot- or migration-time side
 		// effect. The server, pollers, scorer, router, and spawner all
 		// start and idle cleanly with zero tenant rows.
 		a.database = database

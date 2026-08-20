@@ -22,17 +22,17 @@ import (
 // store-layer port made them mode-agnostic.)
 func TestMultiModeGates_Return404(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	sk := &skillsHandler{}
+	sk := &promptImportHandler{}
 
-	req := httptest.NewRequest(http.MethodPost, "/api/skills/import", nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/prompts/from-disk", nil)
 	ctx := httpx.WithClaims(req.Context(), &verify.Claims{Subject: "user-1"})
 	ctx = httpx.WithOrgID(ctx, "org-1")
 	req = req.WithContext(ctx)
 
 	rec := httptest.NewRecorder()
-	sk.handleSkillsImport(rec, req)
+	sk.handlePromptImportFromDisk(rec, req)
 	if rec.Code != http.StatusNotFound {
-		t.Fatalf("POST /api/skills/import in multi mode = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("POST /api/prompts/from-disk in multi mode = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
 	}
 	assertFirstError(t, rec, httpx.ReasonNotFound, "")
 }

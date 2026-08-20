@@ -628,7 +628,7 @@ func TestGitHubAccessSwitchToPAT_Success(t *testing.T) {
 	seedLocalApp(t, s, true)
 	seedInstallation(t, s, 1, "acme")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("switch-to-pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -658,7 +658,7 @@ func TestGitHubAccessSwitchToPAT_InvalidPAT(t *testing.T) {
 	setOrgGitHubBase(t, s, stub.URL)
 	seedLocalApp(t, s, true)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_bad"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_bad"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("switch-to-pat with bad token = %d, want 422; body=%s", rec.Code, rec.Body.String())
 	}
@@ -677,7 +677,7 @@ func TestGitHubAccessSwitchToPAT_NoApp404(t *testing.T) {
 	stub := newGitHubAccessStub(t, ghAccessStub{login: "octocat"})
 	setOrgGitHubBase(t, s, stub.URL)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("switch-to-pat with no app = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -707,7 +707,7 @@ func TestGitHubAccessSwitchToPAT_RegistrationVanishesUnderTheGuard(t *testing.T)
 	apps = hookGitHubApps(s, hook)
 
 	rec := doJSON(t, s, http.MethodPost,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("switch-to-pat for a registration discarded under the guard = %d, want 404; body=%s", rec.Code, rec.Body.String())
 	}
@@ -732,7 +732,7 @@ func TestGitHubAccessPATPreflight_StoresNothing(t *testing.T) {
 	seedConfiguredRepo(t, s, "acme", "web")
 	seedConfiguredRepo(t, s, "acme", "api")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/pat-preflight", map[string]string{"pat": "ghp_x"})
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/preflight", map[string]string{"pat": "ghp_x"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat-preflight = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
@@ -988,5 +988,5 @@ func orgPATLogin(t *testing.T, s *Server) string {
 
 // patRoute is the org's GitHub-PAT credential resource in local mode.
 func patRoute() string {
-	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/access/pat"
+	return "/api/orgs/" + runmode.LocalDefaultOrgID + "/github/pat"
 }

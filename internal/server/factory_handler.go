@@ -141,8 +141,8 @@ type factoryEntityJSON struct {
 	// PendingTasks groups active tasks for this entity by event_type.
 	// Drives the station drawer's drag-to-delegate flow: the frontend
 	// reads the dropped station's first entry and forwards its
-	// dedup_key (with entity_id + event_type) to /api/factory/delegate,
-	// which find-or-creates via the unique index on (entity_id,
+	// dedup_key (with entity_id + event_type) to POST /api/tasks, which
+	// find-or-creates via the unique index on (entity_id,
 	// event_type, dedup_key). If pending_tasks has no entry for the
 	// dropped station's event_type yet, that means there is no existing
 	// task for that event_type; the request still carries event_type and
@@ -160,7 +160,7 @@ type factoryEntityJSON struct {
 
 // pendingTaskRef is the minimal task reference shipped per queued
 // entity for the drag-to-delegate flow. dedup_key is what the request
-// to /api/factory/delegate carries (the handler keys find-or-create
+// to POST /api/tasks carries (the handler keys find-or-create
 // on entity_id + event_type + dedup_key). task_id is informational —
 // not consumed by the request today — and is kept available for
 // future UI hints like "this chip already has a task here."

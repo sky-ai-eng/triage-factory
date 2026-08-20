@@ -745,10 +745,6 @@ func (s *Server) routes() {
 	// operator view is a later ticket, same interim as the placement explainer
 	// above). Read-only.
 	s.api("GET /api/fleet/queue", s.handleFleetQueue)
-	// Local-mode "Start your factory" provision action — creates
-	// the synthetic tenant + materializes shipped defaults via the shared
-	// bootstrap chain. Idempotent; no-op once a tenant exists.
-	s.apiMutating("POST /api/setup/start", s.handleSetupStart)
 	// Logout-everywhere: must be authenticated to use it (you can only
 	// nuke your own sessions).
 	s.apiMutating("POST /api/auth/logout/all", s.handleLogoutAll)
@@ -763,9 +759,14 @@ func (s *Server) routes() {
 	s.api("GET /api/me/identities", s.handleMeIdentities)
 	// Switch the session's active org.
 	s.apiMutating("POST /api/me/active-org", s.handleActiveOrgUpdate)
-	// Create a net-new org with default settings — the multi-mode
-	// "Start your Factory" onboarding CTA. Multi-mode only (404 in
-	// local); 403 when org creation is disabled on the instance.
+	// The caller's own settings row. Viewer-relative, so the subject comes
+	// from the session and there is no id to address.
+	s.api("GET /api/me/settings", s.handleMeSettingsGet)
+	s.apiMutating("PATCH /api/me/settings", s.handleMeSettingsPatch)
+	// Create the workspace — the "Start your Factory" onboarding CTA in
+	// both modes. Multi mints a net-new org (403 when org creation is
+	// disabled on the instance); local provisions its single synthetic
+	// tenant, idempotently.
 	s.apiMutating("POST /api/orgs", s.handleOrgCreate)
 	// The canonical single read for an org: the same {id, name, role} row
 	// /api/me carries per membership. Member-visible; a non-member 404s.
@@ -807,6 +808,14 @@ func (s *Server) routes() {
 	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
 	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
 	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
+	// The other two child collections, siblings of jira-projects: the team's
+	// tracked GitHub repos and its GitHub-team mappings, both replace-set PUTs.
+	// github-repos, not repos — it reads as the sibling it is and does not
+	// collide with the top-level /api/repos registry resource.
+	s.api("GET /api/teams/{team_id}/github-repos", s.handleTeamReposGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
+	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
+	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
 	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
 	s.api("GET /api/teams/{team_id}/archive/preview", th.handleTeamArchivePreview)
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
@@ -861,41 +870,44 @@ func (s *Server) routes() {
 	// owner sentinel, demotes the former owner — all in one tx as the owner.
 	s.apiMutating("POST /api/orgs/{org_id}/transfer-ownership", omh.handleOrgOwnershipTransfer)
 
-	// Usage (spend layer) — the core Usage page's read API (TFAC-478). All
-	// session-org-scoped (org from claims, not the path), like /api/dashboard/*.
+	// Usage (spend layer) — the core Usage page's read API, each route under
+	// the scope it reports on: usage is a fact about a caller, a team, or an
+	// org, the same way a roster is. /api/me/usage is viewer-relative and takes
+	// its org from the session; the team and org routes name their scope in the
+	// path, and the org routes authorize against THAT org rather than whichever
+	// one the session points at.
 	// Scope is role-gated: /me is any org member, /teams/{id} is team-admin OR
-	// org-admin, /org is org-admin. The team/org reads use the admin-pool
+	// org-admin, /orgs/{id} is org-admin. The team/org reads use the admin-pool
 	// ListSpendSystem (the role gate is the authorization for crossing RLS).
 	uh := &usageHandler{tx: s.tx, az: s.az, conversationQueue: s.allStores.ConversationQueue}
-	s.api("GET /api/usage/me", uh.handleUsageMe)
-	s.api("GET /api/usage/teams/{team_id}", uh.handleUsageTeam)
-	s.api("GET /api/usage/org", uh.handleUsageOrg)
+	s.api("GET /api/me/usage", uh.handleUsageMe)
+	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
+	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
 	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
 	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet console.
-	s.api("GET /api/usage/org/ops", uh.handleUsageOrgOps)
+	s.api("GET /api/orgs/{org_id}/usage/ops", uh.handleUsageOrgOps)
 	// Activity feed (EE, FeatureGovernance): the team/org Actions (external-action
-	// audit log) + Objects (artifact history) lenses, selected by ?view= — same
-	// scope gates as the spend reads above, plus the entitlement (unlicensed →
-	// 404). TFAC-483.
+	// audit log) + Objects (artifact history) lenses — same scope gates as the
+	// spend reads above, plus the entitlement (unlicensed → 404).
 	// Two resources, two routes each. The single ?view=-multiplexed /activity
 	// route they replaced answered with two different row shapes and two
 	// different filter vocabularies from one address.
-	s.apiMutating("POST /api/usage/teams/{team_id}/artifacts/list", uh.handleUsageTeamArtifacts)
-	s.apiMutating("POST /api/usage/teams/{team_id}/actions/list", uh.handleUsageTeamActions)
-	s.apiMutating("POST /api/usage/org/artifacts/list", uh.handleUsageOrgArtifacts)
-	s.apiMutating("POST /api/usage/org/actions/list", uh.handleUsageOrgActions)
+	s.apiMutating("POST /api/teams/{team_id}/usage/artifacts/list", uh.handleUsageTeamArtifacts)
+	s.apiMutating("POST /api/teams/{team_id}/usage/actions/list", uh.handleUsageTeamActions)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/artifacts/list", uh.handleUsageOrgArtifacts)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/actions/list", uh.handleUsageOrgActions)
 	// Per-team daily spend cap (TFAC-482) — org-admin-set, EE/governance-gated
 	// (the handlers 404 when unlicensed). The GET lists every active team + its cap
 	// for the editor (so an idle team can be pre-capped); the PUT writes one cap and
 	// is mutating, so it runs through the CSRF + session wrap. Both write/read the
 	// admin pool: an org admin may cap a team they don't belong to.
-	s.apiMutating("POST /api/usage/org/team-caps/list", uh.handleUsageTeamCaps)
-	s.apiMutating("PUT /api/usage/teams/{team_id}/cap", uh.handleUsageTeamCap)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/team-caps/list", uh.handleUsageTeamCaps)
+	s.apiMutating("PUT /api/teams/{team_id}/usage/cap", uh.handleUsageTeamCap)
 	// EE governance audit surface (TFAC-484): the access & credential change-log
 	// viewer. Org-admin-gated AND FeatureGovernance-gated (404 unlicensed) inside
 	// the handler — the data is core, only the cross-team lens is Enterprise.
-	s.apiMutating("POST /api/usage/org/access-log/list", uh.handleUsageAccessLog)
+	s.apiMutating("POST /api/orgs/{org_id}/usage/access-log/list", uh.handleUsageAccessLog)
 
 	// Avatar proxy (TFAC-480): serves a user's OAuth-captured avatar first-party
 	// so it renders under the app's tight `img-src 'self'` CSP instead of being
@@ -968,6 +980,12 @@ func (s *Server) routes() {
 	// view hides), and one address per read is what keeps that from
 	// happening again. apiMutating is deliberate for a body-carrying read —
 	// see handleTaskList.
+	// Find-or-create the task at a station. The Factory's drop gesture is this
+	// plus POST /api/tasks/{id}/delegate: the task is the row, delegating is
+	// what you then do to it, so the in-between state — task resolved, run not
+	// started — is addressable rather than a partial success buried in one
+	// call's response.
+	s.apiMutating("POST /api/tasks", s.handleTaskCreate)
 	s.apiMutating("POST /api/tasks/list", s.handleTaskList)
 	s.api("GET /api/tasks/{id}", s.handleTaskGet)
 	// The task's field-write path. It replaces the former /swipe
@@ -1055,13 +1073,6 @@ func (s *Server) routes() {
 	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
 	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
 
-	s.api("GET /api/settings/user", s.handleUserSettingsGet)
-	s.apiMutating("POST /api/settings/user", s.handleUserSettingsPost)
-	s.api("GET /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
-	s.apiMutating("PUT /api/settings/team/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
-	s.api("GET /api/settings/team/{team_id}/repos", s.handleTeamReposGet)
-	s.apiMutating("PUT /api/settings/team/{team_id}/repos", s.handleTeamReposPut)
-
 	// Team roster for the predicate editor. Fetched fresh on
 	// every consumer mount (the FE dedups concurrent in-flight calls
 	// within a render but doesn't hold a persistent cache — the roster
@@ -1069,9 +1080,12 @@ func (s *Server) routes() {
 	// AuthGate boot endpoint — is mounted pre-auth above; per-user
 	// identity that used to live on /api/config moved to /api/me.
 	s.api("GET /api/team/members", s.handleTeamMembers)
-	sk := &skillsHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
-	s.apiMutating("POST /api/skills/import", sk.handleSkillsImport)
-	s.apiMutating("POST /api/skills/upload", sk.handleSkillUpload)
+	// Prompt imports. Two routes rather than one with a source field: they
+	// take different bodies (a paste vs. nothing) and only one of them can
+	// exist in multi mode, where the process has no per-tenant disk to scan.
+	pi := &promptImportHandler{db: s.db, prompts: s.prompts, tx: s.tx, az: s.az}
+	s.apiMutating("POST /api/prompts/from-disk", pi.handlePromptImportFromDisk)
+	s.apiMutating("POST /api/prompts/upload", pi.handlePromptUpload)
 	// Proxy list: the rows come from GitHub, which reports no total for this
 	// read, so total_count is null and page_token wraps the upstream cursor.
 	s.apiMutating("POST /api/github/repos/list", s.handleGitHubRepos)
@@ -1143,7 +1157,6 @@ func (s *Server) routes() {
 
 	fh := &factoryHandler{tx: s.tx}
 	s.api("GET /api/factory/snapshot", fh.handleFactorySnapshot)
-	s.apiMutating("POST /api/factory/delegate", s.handleFactoryDelegate)
 
 	ph := &promptsHandler{db: s.db, tx: s.tx, az: s.az}
 	// **Declared exceptions to the paginated-list rule.** These two are not
@@ -1268,18 +1281,20 @@ func (s *Server) routes() {
 	// GitHub access either/or transitions. GitHub access is
 	// strictly App XOR PAT per org; these commit the switches and surface the
 	// inform-only reachability diffs. All org-admin (gated inside the handler).
-	//   - cutover: commit a staged PAT→App switch (activate App + delete PAT).
-	//   - switch-to-pat: full App teardown, validate + store the new PAT.
+	//   - app/cutover: commit a staged PAT→App switch (activate App + delete PAT).
+	//   - pat/switch-to: full App teardown, validate + store the new PAT.
 	//   - DELETE github/app: discard a staged (not-yet-live) App registration.
-	//   - cutover-preflight / pat-preflight: inform-only reachability diffs.
+	//   - app/cutover-preflight, pat/preflight: inform-only reachability diffs,
+	//     each under the flavor it is a preflight for.
 	// The two commits + the discard mutate state (apiMutating, CSRF); the
-	// cutover-preflight is a read (api); pat-preflight POSTs a token to probe
-	// reach but stores nothing — still apiMutating for the same-origin guard.
+	// cutover preflight is a read (api); the PAT preflight POSTs a token to
+	// probe reach but stores nothing — still apiMutating for the same-origin
+	// guard.
 	s.apiMutating("POST /api/orgs/{org_id}/github/app/cutover", s.handleGitHubAppCutover)
-	s.apiMutating("POST /api/orgs/{org_id}/github/access/switch-to-pat", s.handleGitHubAccessSwitchToPAT)
+	s.apiMutating("POST /api/orgs/{org_id}/github/pat/switch-to", s.handleGitHubAccessSwitchToPAT)
 	s.apiMutating("DELETE /api/orgs/{org_id}/github/app", s.handleGitHubAppDiscard)
 	s.api("GET /api/orgs/{org_id}/github/app/cutover-preflight", s.handleGitHubAppCutoverPreflight)
-	s.apiMutating("POST /api/orgs/{org_id}/github/access/pat-preflight", s.handleGitHubAccessPATPreflight)
+	s.apiMutating("POST /api/orgs/{org_id}/github/pat/preflight", s.handleGitHubAccessPATPreflight)
 
 	// The org integration credentials, each an addressable resource with an
 	// explicit bind + unbind rather than a field on the bulk settings save.
@@ -1291,8 +1306,11 @@ func (s *Server) routes() {
 	// no outbound call, and it can no longer revoke access as a side effect.
 	// The Jira half of the pair is registered with the rest of the Jira
 	// surface below; the rationale above covers both.
-	s.apiMutating("PUT /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATPut)
-	s.apiMutating("DELETE /api/orgs/{org_id}/github/access/pat", s.handleGitHubPATDelete)
+	// The PAT is a credential flavor, and the flavor is the resource: its bind
+	// and unbind here, its preflight and the switch onto it beside them, all
+	// under github/pat as the App's routes sit under github/app.
+	s.apiMutating("PUT /api/orgs/{org_id}/github/pat", s.handleGitHubPATPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/github/pat", s.handleGitHubPATDelete)
 
 	// The org's pure CONFIG — hosts, poller cadence, clone transport, spend
 	// governance. Path-scoped like the credential resources beside it because

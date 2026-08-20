@@ -58,7 +58,7 @@ type ImportFailure struct {
 // Anyone lifting the local-mode gate has to port them first.
 //
 // ctx flows through every DB call and the per-file processing loop,
-// so the request-triggered import (POST /api/skills/import) cancels
+// so the request-triggered import (POST /api/prompts/from-disk) cancels
 // promptly if the HTTP client disconnects or the request times out.
 // Startup callers pass context.Background.
 func ImportAll(ctx context.Context, database *sql.DB, prompts db.PromptStore) ImportResult {

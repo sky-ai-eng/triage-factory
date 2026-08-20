@@ -72,7 +72,7 @@ describe('ActivityFeed', () => {
       }),
     ])
 
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
 
     // The action's target + humanized verb render once the feed loads (the verb
     // also labels an action-filter <option>, so assert on the row via getAllByText).
@@ -86,7 +86,7 @@ describe('ActivityFeed', () => {
 
     // The first request addressed the actions resource and asked for the
     // default page size in the body.
-    expect(calledUrls(fetchMock)[0]).toBe('/api/usage/teams/t1/actions/list')
+    expect(calledUrls(fetchMock)[0]).toBe('/api/teams/t1/usage/actions/list')
     expect(calledBodies(fetchMock)[0]).toMatchObject({ page_size: 50 })
   })
 
@@ -96,7 +96,7 @@ describe('ActivityFeed', () => {
       [artifact({ id: 'art', target: 'org/repo#42', url: 'https://gh/pr42', state: 'merged' })],
     )
 
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#1') // actions lens first
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
@@ -105,7 +105,7 @@ describe('ActivityFeed', () => {
     // artifacts route.
     expect(await screen.findByText('org/repo#42')).toBeInTheDocument()
     await waitFor(() =>
-      expect(calledUrls(fetchMock)).toContain('/api/usage/teams/t1/artifacts/list'),
+      expect(calledUrls(fetchMock)).toContain('/api/teams/t1/usage/artifacts/list'),
     )
     // The merged artifact's state badge rides its row (terminal states included).
     const prLink = screen
@@ -132,7 +132,7 @@ describe('ActivityFeed', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#1')
 
     fireEvent.click(screen.getByRole('tab', { name: /objects/i }))
@@ -147,13 +147,13 @@ describe('ActivityFeed', () => {
 
   it('shows a zero state when the log is empty', async () => {
     stubByLens([])
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     expect(await screen.findByText(/no actions/i)).toBeInTheDocument()
   })
 
   it('drives a server-side filter in the body when the action filter changes', async () => {
     const fetchMock = stubByLens([action({ id: 'pr', target: 'org/repo#9' })])
-    render(<ActivityFeed basePath="/api/usage/org" showTeam />)
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
     await screen.findByText('org/repo#9')
 
     // Picking an action refetches with action in the body (the backend filters
@@ -194,7 +194,7 @@ describe('ActivityFeed', () => {
       }),
     ])
 
-    render(<ActivityFeed basePath="/api/usage/org" showTeam />)
+    render(<ActivityFeed basePath="/api/orgs/o1/usage" showTeam />)
 
     // Both rows present, tagged with team + the authorizing actor.
     expect(await screen.findByText('org/repo#1')).toBeInTheDocument()
@@ -220,7 +220,7 @@ describe('ActivityFeed', () => {
       .mockResolvedValueOnce({ ok: true, ...listBody(page2, '', 51) })
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     await screen.findByText('org/repo#0')
 
     fireEvent.click(screen.getByRole('button', { name: /load more/i }))
@@ -241,7 +241,7 @@ describe('ActivityFeed', () => {
           Promise.resolve(JSON.stringify({ errors: [{ reason: 'CONFLICT', message: 'boom' }] })),
       }),
     )
-    render(<ActivityFeed basePath="/api/usage/teams/t1" />)
+    render(<ActivityFeed basePath="/api/teams/t1/usage" />)
     // The server's message reaches the user verbatim — no fallback prefix.
     await waitFor(() => expect(screen.getByText('boom')).toBeInTheDocument())
   })

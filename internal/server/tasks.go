@@ -14,9 +14,11 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -166,6 +168,237 @@ type taskListFilterKey struct {
 	OnlyUnclaimed  bool     `json:"only_unclaimed"`
 	IncludeSnoozed bool     `json:"include_snoozed"`
 	ClosedSince    string   `json:"closed_since"`
+}
+
+// taskCreateRequest is the body of POST /api/tasks: the station a task is
+// wanted at, named the way the dedup index names it. dedup_key may be empty —
+// it is only non-empty for the open-set discriminators (a label name, a status
+// name) that get a task per value.
+//
+// team_id is the acting team the task is created under. Required in the UI when
+// the caller belongs to ≥2 teams; empty falls back to the sole team.
+//
+// There is deliberately no blueprint_id: firing a run is POST
+// /api/tasks/{id}/delegate, a second call on the row this one resolved.
+type taskCreateRequest struct {
+	EntityID  string `json:"entity_id"`
+	EventType string `json:"event_type"`
+	DedupKey  string `json:"dedup_key"`
+	TeamID    string `json:"team_id"`
+}
+
+// handleTaskCreate resolves the task at (entity_id, event_type, dedup_key) for
+// the acting team, creating it if the station has none — the write behind the
+// Factory's drag-to-delegate gesture, and the way any caller says "this entity
+// needs attention here" without waiting for a poller to say it.
+//
+// Find-or-create rather than create: the partial unique index
+// idx_tasks_active_entity_event_dedup makes concurrent calls resolve to the
+// same row, so the gesture is idempotent by construction and two users dropping
+// the same chip get one task. 201 when this call minted it, 200 when it found
+// one — the only thing the two answers differ in, since both hand back the same
+// resource a GET /api/tasks/{id} would.
+//
+// Three refusals, all before any write:
+//   - the entity must exist (404) and be active (409) — the factory snapshot's
+//     60s soft-close grace lets a chip ride the final animation hop after its
+//     entity flipped to merged/closed, and a task synthesized there would run
+//     to completion against a closed PR with no close-cascade to clean it up;
+//   - the (entity, event_type, dedup_key) triple must resolve a real event
+//     (422). tasks.primary_event_id is NOT NULL: a task cannot exist without an
+//     anchor, and if nothing matches, the entity isn't at this station;
+//   - a viewer is rejected on the acting team (403) before anything is
+//     synthesized — without the explicit gate the tasks_insert RLS WITH CHECK
+//     would fail the write as a generic 500 rather than a role-named refusal.
+//
+// POST /api/tasks
+func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := s.requireOrg(w, r)
+	if !ok {
+		return
+	}
+	userID := ClaimsFrom(r.Context()).Subject
+	var req taskCreateRequest
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	var v httpx.Validation
+	if req.EntityID == "" {
+		v.Missing("entity_id")
+	}
+	if req.EventType == "" {
+		v.Missing("event_type")
+	}
+	if v.Flush(w, http.StatusBadRequest) {
+		return
+	}
+
+	// Resolve the acting team read-only (no last-acting stamp — we may be about
+	// to 403) and gate on it. A bad team pick 400s via the selection-error
+	// mapping, same as the write path below.
+	var actingTeam string
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		actingTeam, e = teamscope.ResolveActingNoStamp(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		return e
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "tasks", err)
+		return
+	}
+	if !s.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
+		return
+	}
+
+	var entity *domain.Entity
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		entity, e = tx.Entities.Get(r.Context(), orgID, req.EntityID)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return
+	}
+	if entity == nil {
+		notFound(w, "entity")
+		return
+	}
+	if entity.State != "active" {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonAlreadyTerminal,
+			Message: "entity is closed; cannot create a task on it",
+		})
+		return
+	}
+
+	// Anchor on the most recent event matching all three of (entity_id,
+	// event_type, dedup_key). The dedup_key filter is pushed into the SQL —
+	// picking the latest event by type alone and rejecting a mismatch would 422
+	// every time a sibling discriminator (label_added "help wanted") fired more
+	// recently than the requested one (label_added "bug").
+	var primaryEvent *domain.Event
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		primaryEvent, e = tx.Events.LatestForEntityTypeAndDedupKey(r.Context(), orgID, req.EntityID, req.EventType, req.DedupKey)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return
+	}
+	if primaryEvent == nil {
+		// The body parsed fine; the triple it names doesn't exist — a semantic
+		// fault in what was referenced, so 422 rather than 400.
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "no matching event for entity at this station",
+		})
+		return
+	}
+
+	schema, schemaOK := events.Get(req.EventType)
+
+	var (
+		task    *domain.Task
+		created bool
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// Resolve the acting team FIRST, so the priority scan below can limit
+		// itself to that team's rules. Scanning before resolving let a sibling
+		// team's high-priority rule inflate a task created for a different team.
+		teamID, e := teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
+		if e != nil {
+			return e
+		}
+
+		priority, e := teamDefaultPriority(r.Context(), tx, orgID, teamID, req.EventType, primaryEvent, schema, schemaOK)
+		if e != nil {
+			return e
+		}
+
+		task, created, e = tx.Tasks.FindOrCreate(r.Context(), orgID, teamID, req.EntityID, req.EventType, req.DedupKey, primaryEvent.ID, priority)
+		if e != nil {
+			return e
+		}
+		// Mirror the router's audit linkage: a brand-new task gets a task_events
+		// row linking it to the event it was anchored on, kind="spawned", so a
+		// timeline reading task_events sees one shape regardless of which path
+		// created the task. Non-fatal — an audit gap beats failing a write that
+		// already landed.
+		//
+		// No kind="bumped" on the find branch: nothing new landed, the caller
+		// just named a station that already has a task.
+		if created {
+			if recErr := tx.Tasks.RecordEvent(r.Context(), orgID, task.ID, primaryEvent.ID, "spawned"); recErr != nil {
+				tasksLog.Warn("failed to record spawned task_event", "task", task.ID, "error", recErr)
+			}
+		}
+		return nil
+	}); err != nil {
+		if teamscope.WriteIfSelectionError(w, err) {
+			return
+		}
+		internalError(w, "tasks", err)
+		return
+	}
+
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, taskToJSON(*task))
+}
+
+// teamDefaultPriority is the priority a task gets at creation when no scorer has
+// run yet: the highest default among the enabled rules that both belong to
+// teamID and match this event, floored at 0.5. It mirrors the predicate-match
+// filter in internal/routing so a task minted by hand lands at the same priority
+// the router would have given one minted by a poll.
+//
+// Only rules belonging to the acting team (or org-visible system rules with no
+// team) count: a rule owned by another team must not lift the priority of a task
+// created for this one. The predicate gate stays for the same reason in the other
+// direction — iterating every enabled rule would inflate priority whenever a
+// high-priority rule's scope_predicate doesn't match this event's metadata.
+// Empty predJSON always matches, per the events package contract.
+func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eventType string, primaryEvent *domain.Event, schema events.EventSchema, schemaOK bool) (float64, error) {
+	priority := 0.5
+	handlers, err := tx.EventHandlers.GetEnabledForEvent(ctx, orgID, eventType)
+	if err != nil {
+		return 0, err
+	}
+	for _, h := range handlers {
+		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
+			// Trigger rows have no DefaultPriority; skip.
+			continue
+		}
+		// Multi-mode system rules are seeded per-team (visibility='team', real
+		// team_id), so this counts the acting team's own shipped rules and
+		// excludes siblings'.
+		if h.TeamID != "" && h.TeamID != teamID {
+			continue
+		}
+		if !schemaOK {
+			// No registered schema → the predicate can't be evaluated. Mirrors
+			// matchPredicate's quietly-permissive behavior: skip the rule and
+			// fall back to the floor.
+			continue
+		}
+		predJSON := ""
+		if h.ScopePredicateJSON != nil {
+			predJSON = *h.ScopePredicateJSON
+		}
+		matched, merr := schema.Match(predJSON, primaryEvent.MetadataJSON)
+		if merr != nil {
+			tasksLog.Warn("event_handler predicate error, skipping", "event_handler", h.ID, "error", merr)
+			continue
+		}
+		if matched && *h.DefaultPriority > priority {
+			priority = *h.DefaultPriority
+		}
+	}
+	return priority, nil
 }
 
 // handleTaskList is the tasks resource's list read — every task-list surface

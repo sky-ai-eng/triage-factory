@@ -1009,7 +1009,7 @@ func upstreamPageFromCursor(v *httpx.Validation, cursor string) (int, bool) {
 }
 
 // Repo *tracking* selection is per-team: writes go through
-// PUT /api/settings/team/{id}/repos (handleTeamReposPut), which writes
+// PUT /api/teams/{team_id}/github-repos (handleTeamReposPut), which writes
 // team_github_repos and brings any newly-tracked repository into the registry.
 // That save stays name-shaped, and deliberately: it is the ingest edge, where
 // tracking a repository is what mints its registry row, so its input names

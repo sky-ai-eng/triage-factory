@@ -15,26 +15,36 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 )
 
-// skillsHandler serves the skill-import endpoints: the local-mode
-// filesystem scan (db + prompts, raw handles the legacy importer still
-// takes) and the mode-agnostic paste/upload flow (tx + az, the same
-// claims-bound path handlePromptCreate uses).
-type skillsHandler struct {
+// promptImportHandler serves the two prompt-import routes: the local-mode
+// filesystem scan of the process's ~/.claude/skills (db + prompts, the raw
+// handles the importer still takes) and the mode-agnostic paste/upload flow
+// (tx + az, the same claims-bound path handlePromptCreate uses).
+//
+// They live under /api/prompts because that is what they write. A skill is a
+// SKILL.md file — a format an import reads — not a second kind of row: both
+// routes land a prompts row with source='imported'.
+type promptImportHandler struct {
 	db      *sql.DB
 	prompts db.PromptStore
 	tx      db.TxRunner
 	az      *authz.Checker
 }
 
-func (sk *skillsHandler) handleSkillsImport(w http.ResponseWriter, r *http.Request) {
+// handlePromptImportFromDisk scans the TF process's own ~/.claude/skills and
+// imports each SKILL.md it finds as a prompt. Local-mode only, and the path
+// says why: what it reads is a directory on this machine's disk, which only
+// exists as a per-tenant thing when the tenant IS the machine.
+//
+// POST /api/prompts/from-disk
+func (sk *promptImportHandler) handlePromptImportFromDisk(w http.ResponseWriter, r *http.Request) {
 	// The filesystem scan reads the TF process's own ~/.claude/skills —
 	// meaningful only in local mode where the process runs on the single
 	// trusted user's machine. In multi mode there is no per-tenant
 	// filesystem to scan (and the importer's raw SQLite SQL + sentinel
 	// org would fail against Postgres anyway — previously as a 200 with
 	// a swallowed errors array). Multi-mode skill import is the
-	// paste/upload flow, which writes a prompts row scoped to the
-	// requesting org/team.
+	// paste/upload flow (POST /api/prompts/upload), which writes a prompts
+	// row scoped to the requesting org/team.
 	if runmode.Current() != runmode.ModeLocal {
 		// A route that doesn't exist in this deployment mode is a 404, not a
 		// 501 — the marketplace's mode gate already answered that way, and one
@@ -46,29 +56,29 @@ func (sk *skillsHandler) handleSkillsImport(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, result)
 }
 
-// skillUploadRequest is the paste/upload wire shape: the raw SKILL.md
+// promptUploadRequest is the paste/upload wire shape: the raw SKILL.md
 // markdown (frontmatter + body), an optional display-name override, and
 // the multi-team caller's acting-team pick.
-type skillUploadRequest struct {
+type promptUploadRequest struct {
 	Content string `json:"content"`
 	Name    string `json:"name,omitempty"`
 	TeamID  string `json:"team_id,omitempty"`
 }
 
-// maxSkillUploadBytes bounds a pasted SKILL.md. Real skills are a few
-// KB; 256KiB is generous without letting a paste balloon a prompt row.
-const maxSkillUploadBytes = 256 << 10
+// maxPromptUploadBytes bounds a pasted SKILL.md. Real ones are a few KB;
+// 256KiB is generous without letting a paste balloon a prompt row.
+const maxPromptUploadBytes = 256 << 10
 
-// handleSkillUpload imports one skill from pasted/uploaded SKILL.md
-// content — the multi-mode counterpart of the filesystem scan (the
-// design of record: skills are not a separate concept in multi mode;
-// they're imported as prompts). Mode-agnostic on purpose: in multi
-// there is no per-tenant filesystem to scan, and in local a paste is
-// just another way to add a prompt. The row is created through the
-// exact WithTx + Prompts.Create path handlePromptCreate uses, scoped
-// to the requesting org and acting team, with source='imported' so the
-// library renders it alongside scan-imported skills.
-func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Request) {
+// handlePromptUpload imports one prompt from pasted/uploaded SKILL.md
+// content — the counterpart of the filesystem scan. Mode-agnostic on
+// purpose: in multi there is no per-tenant filesystem to scan, and in local
+// a paste is just another way to add a prompt. The row is created through
+// the exact WithTx + Prompts.Create path handlePromptCreate uses, scoped to
+// the requesting org and acting team, with source='imported' so the library
+// renders it alongside scan-imported rows.
+//
+// POST /api/prompts/upload
+func (sk *promptImportHandler) handlePromptUpload(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := requireOrg(w, r)
 	if !ok {
 		return
@@ -78,8 +88,8 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 	// allocated in full by the JSON decoder before rejection. 4x the
 	// content cap leaves room for JSON string escaping (worst-case
 	// \uXXXX inflation) plus the envelope fields.
-	var req skillUploadRequest
-	if !httpx.DecodeJSONStrictLimit(w, r, &req, int64(maxSkillUploadBytes)*4) {
+	var req promptUploadRequest
+	if !httpx.DecodeJSONStrictLimit(w, r, &req, int64(maxPromptUploadBytes)*4) {
 		return
 	}
 	content := strings.TrimSpace(req.Content)
@@ -89,7 +99,7 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 		})
 		return
 	}
-	if len(content) > maxSkillUploadBytes {
+	if len(content) > maxPromptUploadBytes {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason: httpx.ReasonOutOfRange, Message: "skill content exceeds the 256KiB limit", Field: "content",
 		})
@@ -127,7 +137,7 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "skills", err)
+		internalError(w, "prompts/import", err)
 		return
 	}
 	if !sk.az.RequireTeamWrite(w, r, orgID, userID, actingTeam) {
@@ -155,7 +165,7 @@ func (sk *skillsHandler) handleSkillUpload(w http.ResponseWriter, r *http.Reques
 		if teamscope.WriteIfSelectionError(w, err) {
 			return
 		}
-		internalError(w, "skills", err)
+		internalError(w, "prompts/import", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)

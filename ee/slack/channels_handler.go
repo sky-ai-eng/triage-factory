@@ -6,7 +6,7 @@
 // tracked channel seeds its default slack:message blueprint so mentions in a
 // newly tracked channel have somewhere to route once TFAC-510's routing flip
 // lands. Deliberately under /api/slack/* rather than
-// /api/settings/team/... — ee-owned routes stay in the slack namespace.
+// /api/teams/{team_id}/... — ee-owned routes stay in the slack namespace.
 package slack
 
 import (

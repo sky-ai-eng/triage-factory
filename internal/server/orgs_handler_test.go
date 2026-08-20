@@ -181,16 +181,35 @@ func TestOrgCreate_InvalidName_400(t *testing.T) {
 	}
 }
 
-// TestOrgCreate_LocalModeIsNotFound pins the multi-only gate: in local
-// mode (N=1, provisions via POST /api/setup/start) POST /api/orgs is
-// 404. Uses the SQLite test server so it runs without Docker.
-func TestOrgCreate_LocalModeIsNotFound(t *testing.T) {
+// TestOrgCreate_LocalModeIgnoresName pins the local arm's body contract: the
+// sentinel tenant's name is a seeded row, so a name a multi-mode-shaped client
+// sends is ignored rather than half-applied. The test server is already
+// provisioned, so this is the idempotent no-op arm (200, already_provisioned).
+// Uses the SQLite test server so it runs without Docker.
+func TestOrgCreate_LocalModeIgnoresName(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	s := newTestServer(t)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/orgs", map[string]string{"name": "Acme"})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status=%d, want 404 (multi-only); body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 (already provisioned); body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID                 string `json:"id"`
+		Name               string `json:"name"`
+		AlreadyProvisioned bool   `json:"already_provisioned"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.ID != runmode.LocalDefaultOrgID {
+		t.Errorf("id=%q, want the local sentinel org", resp.ID)
+	}
+	if resp.Name == "Acme" {
+		t.Errorf("name=%q — the local arm must not take a name from the body", resp.Name)
+	}
+	if !resp.AlreadyProvisioned {
+		t.Error("already_provisioned=false on an already-provisioned install; want true")
 	}
 }
 

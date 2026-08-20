@@ -42,7 +42,7 @@ function stubFetch(rows: unknown[]) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
     if (url.startsWith('/api/repos/list')) return { ok: true, ...listBody(rows) }
-    if (url.includes('/repos') && url.startsWith('/api/settings/team/')) {
+    if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
       return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
     }
     if (/^\/api\/orgs\/[^/]+\/settings/.test(url)) {
@@ -119,7 +119,7 @@ describe('Repos page addressing', () => {
           ),
         }
       }
-      if (url.includes('/repos') && url.startsWith('/api/settings/team/')) {
+      if (url.includes('/github-repos') && url.startsWith('/api/teams/')) {
         return { ok: true, ...jsonBody({ repos: ['acme/api'], role: 'admin' }) }
       }
       if (url.startsWith('/api/settings/org')) {

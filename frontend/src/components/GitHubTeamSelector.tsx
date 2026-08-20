@@ -43,7 +43,7 @@ interface Props {
 // badges all live in the shared body.
 //
 // Candidate-source invariant. The rows come from the SAME org-wide
-// source as the Settings editor — GET /api/settings/team/{id}/github-groups,
+// source as the Settings editor — GET /api/teams/{id}/github-groups,
 // which lists every team in the configured repos' GitHub orgs, NOT the
 // caller's personal memberships. The only onboarding-specific behavior is
 // pre-checking: with ?include_membership=true the server flags the teams the
@@ -76,7 +76,7 @@ export default function GitHubTeamSelector({
     setError('')
     try {
       const data = await apiJSON<GroupsResponse>(
-        `/api/settings/team/${encodeURIComponent(teamId)}/github-groups?include_membership=true`,
+        `/api/teams/${encodeURIComponent(teamId)}/github-groups?include_membership=true`,
       )
       const list = data.candidates ?? []
       setCandidates(list)

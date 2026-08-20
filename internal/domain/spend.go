@@ -77,7 +77,7 @@ type SpendBucket struct {
 // narrows to one team's spend (system rows carry a NULL team_id and so are
 // excluded by a non-nil TeamID — intended: the team dashboard sees its own
 // runs + team-attributed curator, not org-level overhead). CreatorUserID
-// narrows to one human's spend (the /api/usage/me personal view, TFAC-478):
+// narrows to one human's spend (the /api/me/usage personal view, TFAC-478):
 // manual runs + curator turns that human created — autonomous/system rows
 // carry a NULL creator and are excluded. Rows come back newest-first
 // (occurred_at DESC).

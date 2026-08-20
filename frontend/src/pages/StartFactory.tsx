@@ -9,13 +9,13 @@ import { apiFetch, httpErrorMessage } from '../lib/apiClient'
  * tenant-less, so the app routes (behind LocalAuthGate) redirect an
  * unconfigured user here. There's no org-name field: local provisions the
  * fixed synthetic sentinel tenant, so the only input is the deliberate
- * "Start your factory" action that fires POST /api/setup/start
- * (idempotent — see handleSetupStart). On success we route into the /setup
- * wizard; the wizard route's own LocalAuthGate re-reads
- * /api/integrations/status and now sees configured=true.
+ * "Start your factory" action that fires POST /api/orgs (idempotent — see
+ * createLocalOrg). On success we route into the /setup wizard; the wizard
+ * route's own LocalAuthGate re-reads /api/integrations/status and now sees
+ * configured=true.
  *
- * Local-mode only — multi mounts Onboarding instead (org creation is a
- * named-org POST, not a single sentinel provision).
+ * Local-mode only — multi mounts Onboarding instead, which posts the same
+ * route with a name.
  */
 export default function StartFactory() {
   const navigate = useNavigate()
@@ -35,10 +35,10 @@ export default function StartFactory() {
     setStarting(true)
     setError('')
     try {
-      // No body: the endpoint provisions the fixed LocalDefault sentinel and
-      // is idempotent, so a double-click or a reload-then-retry can't create
-      // a second tenant or re-seed over user changes.
-      await apiFetch('/api/setup/start', { method: 'POST' })
+      // No body: in local mode the endpoint provisions the fixed LocalDefault
+      // sentinel and is idempotent, so a double-click or a reload-then-retry
+      // can't create a second tenant or re-seed over user changes.
+      await apiFetch('/api/orgs', { method: 'POST' })
       // Provisioned. Route into the setup wizard; its LocalAuthGate re-reads
       // status and now admits us (configured=true).
       navigate('/setup', { replace: true })

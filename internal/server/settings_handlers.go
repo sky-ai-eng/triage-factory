@@ -20,19 +20,39 @@ import (
 )
 
 // --------------------------------------------------------------------
-// /api/settings/user — any authenticated user
+// /api/me/settings — the caller's own settings row, GET and PATCH.
+//
+// Under /api/me because the subject is the caller: the handlers read and
+// write user_settings for the session principal, and no caller may address
+// another's, so there is no id to put in the path.
+//
+// The response carries the settings row alone. A user's GitHub / Jira
+// identities are the same rows GET /api/orgs/{org_id}/{github,jira}/identity
+// answers — one fact belongs in one place, and the identity reads are the
+// place, since they are the ones that also say which host it is keyed under.
 // --------------------------------------------------------------------
 
 type userSettingsResponse struct {
-	UserSettings   domain.UserSettings `json:"user_settings"`
-	GitHubUsername string              `json:"github_username,omitempty"`
-	JiraAccountID  string              `json:"jira_account_id,omitempty"`
+	UserSettings domain.UserSettings `json:"user_settings"`
 }
 
-func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
+// handleMeSettingsGet answers the caller's settings resource.
+//
+// GET /api/me/settings
+func (s *Server) handleMeSettingsGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
 
+	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// readUserSettings reads the settings resource, shared by the GET and the
+// PATCH's read-back so the write answers exactly what a follow-up read would.
+func (s *Server) readUserSettings(w http.ResponseWriter, r *http.Request, orgID, userID string) (userSettingsResponse, bool) {
 	var resp userSettingsResponse
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		settings, err := tx.Users.GetSettings(r.Context(), userID)
@@ -40,44 +60,31 @@ func (s *Server) handleUserSettingsGet(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("user settings: %w", err)
 		}
 		resp.UserSettings = settings
-
-		// Identity is host-scoped: resolve the org's GitHub host
-		// from org_settings, then look up the login for (user, host). An
-		// absent row degrades to "" exactly as the old NULL column did.
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("org settings: %w", err)
-		}
-		ghUsername, err := tx.Users.GetGitHubLogin(r.Context(), userID, orgSet.GitHubBaseURL)
-		if err != nil {
-			return fmt.Errorf("github identity: %w", err)
-		}
-		resp.GitHubUsername = ghUsername
-
-		// Jira identity is host-scoped too: look it up for the
-		// org's Jira host (same org_settings already loaded above).
-		jiraAccountID, _, err := tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
-		if err != nil {
-			return fmt.Errorf("jira identity: %w", err)
-		}
-		resp.JiraAccountID = jiraAccountID
 		return nil
 	}); err != nil {
-		internalError(w, "settings/user", err)
-		return
+		internalError(w, "me/settings", err)
+		return resp, false
 	}
-
-	writeJSON(w, http.StatusOK, resp)
+	return resp, true
 }
 
-type userSettingsUpdate struct {
+// userSettingsPatch is the PATCH body. user_settings absent keeps the stored
+// row; present replaces the fields it carries. v1's domain.UserSettings has no
+// fields yet, so strict decoding makes any key inside it a named 400 rather
+// than a value quietly dropped.
+type userSettingsPatch struct {
 	UserSettings *domain.UserSettings `json:"user_settings,omitempty"`
 }
 
-func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) {
+// handleMeSettingsPatch applies a partial update to the caller's settings row
+// and answers the settings resource as a follow-up GET would return it — so a
+// body that describes no change answers the state, not the word "saved".
+//
+// PATCH /api/me/settings
+func (s *Server) handleMeSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	orgID := OrgIDFrom(r.Context())
-	var req userSettingsUpdate
+	var req userSettingsPatch
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
@@ -86,12 +93,19 @@ func (s *Server) handleUserSettingsPost(w http.ResponseWriter, r *http.Request) 
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 			return tx.Users.UpdateSettings(r.Context(), userID, *req.UserSettings)
 		}); err != nil {
-			internalError(w, "settings/user", err)
+			internalError(w, "me/settings", err)
 			return
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+	// Read back rather than echo the request: UpdateSettings is exempt from the
+	// returned-row rule while domain.UserSettings is empty (see UsersStore), so
+	// there is no persisted row to hand back from the write itself.
+	resp, ok := s.readUserSettings(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --------------------------------------------------------------------

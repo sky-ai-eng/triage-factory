@@ -265,26 +265,25 @@ func TestViewer_TaskClaim_Forbidden(t *testing.T) {
 	}
 }
 
-// TestViewer_Delegate_Forbidden: a viewer hitting POST /api/factory/delegate
-// 403s at the acting-team write gate, before any task is synthesized. A member's
-// request passes the gate (and proceeds to fail on the bogus entity, not 403).
-func TestViewer_Delegate_Forbidden(t *testing.T) {
+// TestViewer_TaskCreate_Forbidden: a viewer hitting POST /api/tasks 403s at the
+// acting-team write gate, before any task is synthesized. A member's request
+// passes the gate (and proceeds to fail on the bogus entity, not 403).
+func TestViewer_TaskCreate_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	body := map[string]string{
-		"entity_id":    "00000000-0000-0000-0000-000000000001",
-		"event_type":   "github:pr:opened",
-		"blueprint_id": "bp-anything",
+		"entity_id":  "00000000-0000-0000-0000-000000000001",
+		"event_type": "github:pr:opened",
 	}
 
 	rec := httptest.NewRecorder()
-	r.s.handleFactoryDelegate(rec, r.req(http.MethodPost, "/api/factory/delegate", r.viewer, body))
-	assertViewOnly403(t, rec, "viewer delegate")
+	r.s.handleTaskCreate(rec, r.req(http.MethodPost, "/api/tasks", r.viewer, body))
+	assertViewOnly403(t, rec, "viewer task create")
 
 	// Member passes the role gate — they get a non-403 (404 for the bogus
 	// entity), proving the gate doesn't block writers.
 	rec = httptest.NewRecorder()
-	r.s.handleFactoryDelegate(rec, r.req(http.MethodPost, "/api/factory/delegate", r.member, body))
+	r.s.handleTaskCreate(rec, r.req(http.MethodPost, "/api/tasks", r.member, body))
 	if rec.Code == http.StatusForbidden {
-		t.Fatalf("member delegate: got 403 (role gate must allow members); body=%s", rec.Body.String())
+		t.Fatalf("member task create: got 403 (role gate must allow members); body=%s", rec.Body.String())
 	}
 }

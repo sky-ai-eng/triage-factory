@@ -18,17 +18,21 @@ import (
 )
 
 // --------------------------------------------------------------------
-// /api/settings/team/{team_id}/repos — the per-team GitHub repo
+// /api/teams/{team_id}/github-repos — the per-team GitHub repo
 // *tracking* selection, and the source of truth for what TF polls and
 // profiles. GET (any team member) returns the team's tracked repo slugs; PUT
 // (team admin) replace-sets them, bringing any newly-tracked repository into
 // the registry the rows reference. Untracking removes the tracking row alone:
 // the registry row survives whatever still names it. The {team_id} segment
 // resolves through authz.ResolveTeamID — a UUID, plus the literal "default"
-// in local mode — same as the sibling team-settings routes. The candidate
-// list (the repos the user's token can see) is fetched separately via
-// GET /api/github/repos, mirroring how the existing repo picker sources
+// in local mode — same as the sibling team routes. The candidate list (the
+// repos the user's token can see) is fetched separately via
+// POST /api/github/repos/list, mirroring how the existing repo picker sources
 // its options.
+//
+// A child collection of the team, named github-repos rather than repos: it
+// sits beside jira-projects and github-groups, and the bare word would read
+// as the top-level /api/repos registry, which is a different resource.
 // --------------------------------------------------------------------
 
 type teamReposResponse struct {
@@ -47,7 +51,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "teams/github-repos", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -56,7 +60,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 
 	_, role, err := s.az.TeamMemberCountAndRole(r.Context(), orgID, userID, teamID)
 	if err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -66,7 +70,7 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 
@@ -84,7 +88,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	userID := ClaimsFrom(r.Context()).Subject
 	teamID, err := s.az.ResolveTeamID(r.Context(), orgID, userID, r.PathValue("team_id"))
 	if err != nil {
-		authz.WriteResolveError(w, "settings/team/repos", err)
+		authz.WriteResolveError(w, "teams/github-repos", err)
 		return
 	}
 	if !s.az.VerifyTeamInOrg(w, r, orgID, userID, teamID) {
@@ -128,7 +132,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
 		return e
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 	added := newlyAddedRepos(existing, repos)
@@ -140,7 +144,7 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, repos)
 	}); err != nil {
-		internalError(w, "settings/team/repos", err)
+		internalError(w, "teams/github-repos", err)
 		return
 	}
 

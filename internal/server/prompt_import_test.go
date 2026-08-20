@@ -23,7 +23,7 @@ func TestSkillUpload_CreatesImportedPrompt(t *testing.T) {
 		"Summarize the merged PRs since the last tag.",
 	}, "\n")
 
-	rec := doJSON(t, s, http.MethodPost, "/api/skills/upload", map[string]string{"content": content})
+	rec := doJSON(t, s, http.MethodPost, "/api/prompts/upload", map[string]string{"content": content})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("upload = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -51,20 +51,20 @@ func TestSkillUpload_CreatesImportedPrompt(t *testing.T) {
 func TestSkillUpload_RejectsUnnamedAndEmpty(t *testing.T) {
 	s := newTestServer(t)
 
-	rec := doJSON(t, s, http.MethodPost, "/api/skills/upload", map[string]string{"content": ""})
+	rec := doJSON(t, s, http.MethodPost, "/api/prompts/upload", map[string]string{"content": ""})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty content = %d, want 400", rec.Code)
 	}
 
 	// No frontmatter name and no explicit name → 400 (a pasted skill has
 	// no directory to derive a default name from).
-	rec = doJSON(t, s, http.MethodPost, "/api/skills/upload", map[string]string{"content": "just some markdown"})
+	rec = doJSON(t, s, http.MethodPost, "/api/prompts/upload", map[string]string{"content": "just some markdown"})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unnamed content = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
 	}
 
 	// Explicit name rescues frontmatter-less content.
-	rec = doJSON(t, s, http.MethodPost, "/api/skills/upload", map[string]string{
+	rec = doJSON(t, s, http.MethodPost, "/api/prompts/upload", map[string]string{
 		"content": "just some markdown",
 		"name":    "pasted-skill",
 	})

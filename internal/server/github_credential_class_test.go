@@ -240,7 +240,7 @@ func TestCredentialClass_SwitchToPAT(t *testing.T) {
 	assertCredentialClass(t, s, domain.GitHubCredentialClassBYOApp, "registering a live App")
 
 	rec := doJSON(t, s, http.MethodPost,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/access/switch-to-pat", map[string]string{"pat": "ghp_valid"})
+		"/api/orgs/"+runmode.LocalDefaultOrgID+"/github/pat/switch-to", map[string]string{"pat": "ghp_valid"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("switch-to-pat = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}

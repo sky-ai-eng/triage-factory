@@ -448,13 +448,13 @@ func TestTeamReposPut_GateReadsTheMirrorFromAnotherPod(t *testing.T) {
 	// picker read and therefore never warmed anything of its own.
 	writer := New(picker.db, sqlitestore.New(picker.db))
 
-	if rec := doJSON(t, writer, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, writer, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("reachable PUT on pod B = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
-	rec := doJSON(t, writer, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, writer, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked", "owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -496,7 +496,7 @@ func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
 	// Fresh mirror: a slug it does not hold is rejected without any probe.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/absent"},
 	}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("fresh-mirror PUT of an absent slug = %d, want 400; body=%s", rec.Code, rec.Body.String())
@@ -507,7 +507,7 @@ func TestTeamReposPut_StaleMirrorFallsToTheColdPath(t *testing.T) {
 
 	// Aged past what the gate trusts: the probe decides instead, and it says yes.
 	ageMirror(t, srv.db, reachableGateMaxAge+time.Hour)
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/absent"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("stale-mirror PUT = %d, want 200 (the probe decides); body=%s", rec.Code, rec.Body.String())

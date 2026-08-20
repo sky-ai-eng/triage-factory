@@ -157,7 +157,7 @@ func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
 	wireReachRefresh(t, srv).refresh(t, runmode.LocalDefaultOrgID, true)
 
 	// Mirrored, and owner/ghost is not in it → 400.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -168,7 +168,7 @@ func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
 	}
 
 	// And a slug that IS mirrored is accepted without a probe.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("reachable PUT against a fresh mirror = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -205,7 +205,7 @@ func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/whatever"},
 	})
 	if rec.Code != http.StatusOK {
@@ -282,14 +282,14 @@ func TestTeamReposPut_RejectsUnreachableRepo(t *testing.T) {
 	}
 
 	// Reachable repo → accepted.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("reachable repo PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// Unreachable repo → rejected before any write.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/tracked", "owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -318,7 +318,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed wide creds: %v", err)
 	}
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/stale", "owner/other"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("initial track PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -337,7 +337,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	// Re-saving the current set (still carrying the now-unreachable
 	// owner/stale) must succeed — it's already tracked, so it's not
 	// reachability-checked.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/stale", "owner/other"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("re-save with stale tracked repo = %d, want 200 (already tracked, not re-checked); body=%s", rec.Code, rec.Body.String())
@@ -345,7 +345,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Dropping owner/stale while ADDING a reachable owner/fresh must
 	// succeed: the only newly-added repo (owner/fresh) is reachable.
-	if rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/other", "owner/fresh"},
 	}); rec.Code != http.StatusOK {
 		t.Fatalf("drop-stale + add-reachable PUT = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -353,7 +353,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Control: a NEWLY-added unreachable repo is still rejected — the guard
 	// didn't go slack, it just scopes to additions.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/other", "owner/ghost"},
 	})
 	if rec.Code != http.StatusBadRequest {
@@ -370,7 +370,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 	srv := newTestServer(t)
 	// No credentials seeded → fanOutUnreachableRepo returns checked=false.
-	rec := doJSON(t, srv, http.MethodPut, "/api/settings/team/default/repos", map[string]any{
+	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"anyone/anything"},
 	})
 	if rec.Code != http.StatusOK {

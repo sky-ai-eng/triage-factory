@@ -265,7 +265,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 
 	t.Run("me_own_spend_only", func(t *testing.T) {
 		var resp usageMeResponse
-		doUsage(t, s, "/api/usage/me?since=2000-01-01", &resp)
+		doUsage(t, s, "/api/me/usage?since=2000-01-01", &resp)
 		// Only the local user's manual run (1.00) + their two curator turns
 		// (0.50 + 0.10); the autonomous run + system row carry a NULL creator.
 		if !floatEq(resp.TotalCostUSD, 1.60) {
@@ -287,7 +287,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 
 	t.Run("team_full_breakdown", func(t *testing.T) {
 		var resp usageTeamResponse
-		doUsage(t, s, "/api/usage/teams/"+runmode.LocalDefaultTeamID+"?since=2000-01-01", &resp)
+		doUsage(t, s, "/api/teams/"+runmode.LocalDefaultTeamID+"/usage?since=2000-01-01", &resp)
 		if resp.TeamID != runmode.LocalDefaultTeamID {
 			t.Errorf("/teams team_id = %q, want %q", resp.TeamID, runmode.LocalDefaultTeamID)
 		}
@@ -314,7 +314,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 
 	t.Run("org_rollup", func(t *testing.T) {
 		var resp usageOrgResponse
-		doUsage(t, s, "/api/usage/org?since=2000-01-01", &resp)
+		doUsage(t, s, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage?since=2000-01-01", &resp)
 		if !floatEq(resp.TotalCostUSD, 1.90) {
 			t.Errorf("/org total = %v, want 1.90", resp.TotalCostUSD)
 		}
@@ -347,7 +347,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 	})
 
 	t.Run("invalid_window_400", func(t *testing.T) {
-		rec := doJSON(t, s, "GET", "/api/usage/me?since=not-a-date", nil)
+		rec := doJSON(t, s, "GET", "/api/me/usage?since=not-a-date", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("/me?since=not-a-date = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}
@@ -356,7 +356,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 	t.Run("inverted_window_400", func(t *testing.T) {
 		// since >= until is a non-positive window — reject rather than return an
 		// empty 200 that masks the client bug.
-		rec := doJSON(t, s, "GET", "/api/usage/me?since=2026-06-30&until=2026-06-01", nil)
+		rec := doJSON(t, s, "GET", "/api/me/usage?since=2026-06-30&until=2026-06-01", nil)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("/me with since>until = %d, want 400; body=%s", rec.Code, rec.Body.String())
 		}

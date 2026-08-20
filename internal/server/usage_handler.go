@@ -10,30 +10,33 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// usageHandler serves the core Usage page's spend layer (TFAC-478): three
-// role-gated, session-org-scoped read endpoints over the llm_spend view
-// (TFAC-472). Spend is core at every scope; the SCOPE is what's role-gated:
+// usageHandler serves the core Usage page's spend layer: three role-gated read
+// endpoints over the llm_spend view. Spend is core at every scope; the SCOPE is
+// what's role-gated, and each route is addressed by the scope it is about — a
+// team's spend is a fact about the team, like its roster:
 //
-//   - GET /api/usage/me          — the caller's own spend (any org member).
-//   - GET /api/usage/teams/{id}  — one team's breakdown (team admin).
-//   - GET /api/usage/org         — the org rollup (org admin).
+//   - GET /api/me/usage           — the caller's own spend (any org member).
+//   - GET /api/teams/{id}/usage   — one team's breakdown (team admin).
+//   - GET /api/orgs/{id}/usage    — the org rollup (org admin).
 //
-// All three take the org from the session claims (like /api/dashboard/*), NOT
-// from the path. /me runs on the APP pool under the caller's claims (RLS + a
-// creator filter scope it to them). /teams is team-admin-only, so its names
-// resolve under the member's own claims; its spend read uses ListSpendSystem
-// because curator conversations are private-visibility (creator-scoped RLS —
-// an app-pool read would miss peers' curator turns) — the team-admin gate
-// authorizes it. /org is the
-// org-admin governance rollup: a cross-team ListSpendSystem read, no per-rule
-// detail. Aggregation happens in Go from the rows; per-org/-team/-month volumes
-// are modest, so we materialize nothing here.
+// /me is viewer-relative, so its org comes from the session claims and its
+// subject from the principal; it runs on the APP pool under those claims (RLS
+// + a creator filter scope it to them). /teams names the team in the path and
+// resolves the org from the session, like every other {team_id} route; it is
+// team-admin-only, so its names resolve under the member's own claims, while
+// its spend read uses ListSpendSystem because curator conversations are
+// private-visibility (creator-scoped RLS — an app-pool read would miss peers'
+// curator turns) and the team-admin gate authorizes it. /orgs names the org in
+// the path and authorizes the caller against THAT org, so an admin of three
+// orgs can read all three without first moving a session cursor: it is the
+// org-admin governance rollup, a cross-team ListSpendSystem read with no
+// per-rule detail. Aggregation happens in Go from the rows; per-org/-team/-month
+// volumes are modest, so we materialize nothing here.
 type usageHandler struct {
 	tx db.TxRunner
 	az *authz.Checker
@@ -152,7 +155,7 @@ type usageOrgResponse struct {
 // the filter). Gate: any authenticated org member. Read on the app pool under
 // the caller's claims, narrowed by CreatorUserID = self.
 //
-// GET /api/usage/me?since=&until=
+// GET /api/me/usage?since=&until=
 func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -188,7 +191,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 
 // handleUsageTeam returns one team's full breakdown. Gate: TEAM ADMIN — the
 // team's own members. Per-rule (per-blueprint) detail is operational, so it
-// stays with the team; org admins get the cross-team rollup from /api/usage/org
+// stays with the team; org admins get the cross-team rollup from /api/orgs/{org_id}/usage
 // instead, never another team's per-rule view.
 //
 // Because the caller is a team member, every name resolves under their own RLS:
@@ -201,7 +204,7 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 // rows by the firing trigger; system rows (NULL team) never appear (the TeamID
 // filter excludes them).
 //
-// GET /api/usage/teams/{team_id}?since=&until=
+// GET /api/teams/{team_id}/usage?since=&until=
 func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
@@ -286,16 +289,13 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 // org-wide, by_category splits automated / delegated / curator / system, and
 // org_level is the NULL-team rows (curator on non-team projects + system_
 // overhead) by category. Deliberately NO by_rule — per-rule detail stays with
-// the owning team (/api/usage/teams), so the org view never reaches into another
-// team's event_handlers.
+// the owning team (/api/teams/{team_id}/usage), so the org view never reaches
+// into another team's event_handlers.
 //
-// GET /api/usage/org?since=&until=
+// GET /api/orgs/{org_id}/usage?since=&until=
 func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	orgID, userID, ok := h.az.RequireOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 	since, until, errMsg := parseUsageWindow(r.URL.Query(), time.Now().UTC())
@@ -353,18 +353,18 @@ func (h *usageHandler) handleUsageOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// teamCapUpdate is the PUT /api/usage/teams/{team_id}/cap body. A pointer so an
+// teamCapUpdate is the PUT /api/teams/{team_id}/usage/cap body. A pointer so an
 // explicit null and an omitted field both decode to nil → 0 → "clear the cap".
 type teamCapUpdate struct {
 	MaxDailyCostUSD *float64 `json:"max_daily_cost_usd"`
 }
 
 // handleUsageTeamCap sets one team's per-team daily LLM spend cap (TFAC-482).
-// Gate: the governance entitlement AND org admin. The entitlement is checked
-// first so an unlicensed deployment 404s the route entirely (the EE-feature-
-// hidden posture — per-team caps are dormant without governance, with the org
-// cap as the safety net); a non-org-admin on a licensed deployment then gets a
-// 403. A team admin can NOT set their own team's cap — this is org-admin-only by
+// Gate: org admin AND the governance entitlement, in that order — a non-admin
+// gets the same 403 licensed or not, so the status can't be read as a licence
+// tier, and an admin on an unlicensed deployment gets the 404 that hides the
+// feature (per-team caps are dormant without governance, with the org cap as
+// the safety net). A team admin can NOT set their own team's cap — this is org-admin-only by
 // design, so the write goes through the admin pool (SetDailyCostCapSystem): the
 // org admin need not be a member of the team they're capping. The org comes from
 // the session (like the GET reads), the team from the path.
@@ -373,20 +373,20 @@ type teamCapUpdate struct {
 // negative value 400s. Echoes the stored value (null when cleared) so the FE can
 // update in place.
 //
-// PUT /api/usage/teams/{team_id}/cap
+// PUT /api/teams/{team_id}/usage/cap
 func (h *usageHandler) handleUsageTeamCap(w http.ResponseWriter, r *http.Request) {
 	orgID, userID, ok := h.resolveCaller(w, r)
 	if !ok {
 		return
 	}
-	// EE gate first: hide the route (404) when governance isn't licensed, before
-	// any role-based disclosure. Mode-agnostic — local is unlicensed, so the
-	// route 404s there too (per-team caps are a multi-tenant EE concept).
-	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		notFound(w, "route")
+	// Role, then the EE gate — the licence must not be readable off a status
+	// code by someone who isn't an org admin (see resolveGovernedOrgAdmin).
+	// The entitlement check is mode-agnostic: local is unlicensed, so the route
+	// 404s an admin there too (per-team caps are a multi-tenant EE concept).
+	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
+	if !requireGovernance(w, r, orgID) {
 		return
 	}
 	// The one {team_id} grammar; a segment that resolves to nothing is "not
@@ -454,27 +454,20 @@ type usageTeamCapEntry struct {
 }
 
 // handleUsageTeamCaps lists EVERY active team in the org with its per-team
-// daily cap, for the governance cap editor. Gate: governance (404 unlicensed)
-// + org admin (403) — same posture as the PUT. Unlike the spend rollup's
+// daily cap, for the governance cap editor. Gate: org admin (403) then
+// governance (404 unlicensed) — same posture as the PUT. Unlike the spend rollup's
 // by_team (only teams with spend in the window), this lists all active teams
 // so an org admin can pre-cap an idle team before any runaway happens. Admin
 // pool throughout: an org admin may not be a member of every team. Archived
 // teams are excluded — they can't be capped (the PUT 403s on archived). The FE
-// pairs each entry with its window spend looked up from /api/usage/org by_team
-// (0 if idle).
+// pairs each entry with its window spend looked up from
+// /api/orgs/{org_id}/usage by_team (0 if idle).
 //
-// POST /api/usage/org/team-caps/list
+// POST /api/orgs/{org_id}/usage/team-caps/list
 func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Request) {
-	orgID, userID, ok := h.resolveCaller(w, r)
+	// Org admin (403) then the EE gate (404 unlicensed) — mirrors the PUT.
+	orgID, userID, ok := h.resolveGovernedOrgAdmin(w, r)
 	if !ok {
-		return
-	}
-	// EE gate first (404 unlicensed), then org admin (403) — mirrors the PUT.
-	if !entitlements.For(orgID).Has(entitlements.FeatureGovernance) {
-		notFound(w, "route")
-		return
-	}
-	if !h.az.RequireOrgAdminRole(w, r, orgID, userID) {
 		return
 	}
 
@@ -513,9 +506,14 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 // --- gating ---
 
 // resolveCaller pulls the active org from the session and the caller's user id
-// from the claims — the shared prefix for every usage read. The active org is
-// one the user belongs to (set at login / active-org switch), so requireOrg is
-// the org-member floor for /me.
+// from the claims — the shared prefix for the viewer-relative read and for the
+// team-scoped ones, which name their team in the path but still resolve it
+// within the caller's org. The active org is one the user belongs to (set at
+// login / active-org switch), so requireOrg is the org-member floor for /me.
+//
+// The org-scoped reads do NOT use it: they name their org in the path and
+// authorize against that value — see resolveGovernedOrgAdmin and the direct
+// az.RequireOrgAdmin calls.
 func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
 	orgID, ok = requireOrg(w, r)
 	if !ok {
@@ -527,6 +525,31 @@ func (h *usageHandler) resolveCaller(w http.ResponseWriter, r *http.Request) (or
 		return "", "", false
 	}
 	return orgID, claims.Subject, true
+}
+
+// resolveGovernedOrgAdmin is the shared prefix of the org-scoped usage reads a
+// governance licence gates: the org-admin role against the {org_id} in the
+// path, THEN the entitlement.
+//
+// Role first, and the order is the whole point: a caller who is not an org
+// admin gets the same 403 whether or not the deployment is licensed, so the
+// status code they get back cannot be used to read off the org's plan tier.
+// Entitlement-first would answer them 404 on an unlicensed deployment and 403
+// on a licensed one — a licence oracle for anyone who can hit the route. What
+// it gives up is that a non-admin learns the route exists at all, which in a
+// public codebase is not a secret worth buying with the other one.
+//
+// An org admin on an unlicensed deployment still gets the 404 that hides the
+// feature, which is what the frontend's own entitlement gate renders.
+func (h *usageHandler) resolveGovernedOrgAdmin(w http.ResponseWriter, r *http.Request) (orgID, userID string, ok bool) {
+	orgID, userID, ok = h.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return "", "", false
+	}
+	if !requireGovernance(w, r, orgID) {
+		return "", "", false
+	}
+	return orgID, userID, true
 }
 
 // --- window parsing ---
@@ -745,7 +768,7 @@ func spendByRule(rows []domain.SpendRow, names map[string]string) []usageRuleBuc
 // rows go to org_level instead), resolving team names from the supplied map.
 // Sorted cost-desc. Per-team caps are NOT carried here — the governance cap
 // editor reads the full team list (incl. idle teams absent from this spend
-// rollup) from GET /api/usage/org/team-caps instead (TFAC-482).
+// rollup) from GET /api/orgs/{org_id}/usage/team-caps instead (TFAC-482).
 func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBucket {
 	byTeam := map[string]float64{}
 	for _, r := range rows {
@@ -815,9 +838,9 @@ func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain
 // resolveSpendRuleNames maps each distinct firing trigger (autonomous rows) to a
 // human-readable rule name. It uses the plain app-pool Get (RLS-scoped), NOT
 // GetSystem, and runs for two callers — both safe under that scoping:
-//   - /api/usage/teams (any mode): the caller is a team member (team-admin gate),
+//   - /api/teams/{team_id}/usage (any mode): the caller is a team member (team-admin gate),
 //     and event_handlers / blueprints RLS lets a member read their own team's rows.
-//   - /api/usage/org in LOCAL mode (N=1): there's one team and no RLS, so reading
+//   - /api/orgs/{org_id}/usage in LOCAL mode (N=1): there's one team and no RLS, so reading
 //     its rule names is unrestricted — and the multi-tenant boundary that keeps
 //     per-rule detail off the org rollup is moot at N=1.
 //

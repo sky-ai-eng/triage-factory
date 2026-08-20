@@ -25,7 +25,7 @@ import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
 // tracked-set read runs. That is not always the org-wide oldest team the
 // local alias resolves — deliberately: a member-visible team is the only
 // kind this page's reads and writes are authorized against.
-const teamReposPath = (teamId: string) => `/api/settings/team/${encodeURIComponent(teamId)}/repos`
+const teamReposPath = (teamId: string) => `/api/teams/${encodeURIComponent(teamId)}/github-repos`
 
 interface Repository {
   /** The registry row id. Identity: the React key, the websocket merge

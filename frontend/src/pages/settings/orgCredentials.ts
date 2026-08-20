@@ -1,6 +1,6 @@
 // The org's integration credentials — the GitHub bot PAT and the Jira service
 // credential — as bind/unbind actions against their backend resources
-// (PUT/DELETE /api/orgs/{org}/github/access/pat and .../jira/access/credential;
+// (PUT/DELETE /api/orgs/{org}/github/pat and .../jira/access/credential;
 // see internal/server/org_credentials.go, which this mirrors). They are not
 // fields inside the bulk org-settings save, so each action is a single request
 // that validates, stores, re-dues the poller, and lands an audit row.
@@ -39,7 +39,7 @@ export async function connectGitHubPAT(
   baseUrl: string,
   pat: string,
 ): Promise<CredentialResult> {
-  return credentialRequest(`/api/orgs/${orgId}/github/access/pat`, 'PUT', {
+  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'PUT', {
     base_url: baseUrl.trim(),
     pat: pat.trim(),
   })
@@ -49,7 +49,7 @@ export async function connectGitHubPAT(
 // host, in one server-side transaction. Idempotent. The caller's own GitHub
 // identity (PAT_2) is untouched — that's a separate surface.
 export async function disconnectGitHubPAT(orgId: string): Promise<CredentialResult> {
-  return credentialRequest(`/api/orgs/${orgId}/github/access/pat`, 'DELETE')
+  return credentialRequest(`/api/orgs/${orgId}/github/pat`, 'DELETE')
 }
 
 // disconnectJira unbinds the org's Jira service credential and clears the
