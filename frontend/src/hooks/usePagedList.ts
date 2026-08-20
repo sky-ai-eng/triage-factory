@@ -30,7 +30,9 @@ export interface PagedList<T> {
   /** True when the server minted a token for a further page. */
   hasMore: boolean
   /** Fetch the first page for `filters`, replacing whatever is held. Resolves
-   *  to the page, or null if the request failed. */
+   *  to the page, or null if the request failed or was superseded by a later
+   *  `load` before it resolved — a caller must not read the resolved page's
+   *  data directly, since a superseded page was never applied to state. */
   load: (filters: ListRequest) => Promise<ListPage<T> | null>
   /** Fetch the next page and append it. A no-op when there is no next page or
    *  a request is already in flight. */
@@ -99,7 +101,7 @@ export function usePagedList<T>(
       setLoading(true)
       try {
         const page = await apiList<T>(path, filters)
-        if (requestId !== requestIdRef.current) return page
+        if (requestId !== requestIdRef.current) return null
         setItems(page.items)
         setTotal(page.total_count)
         setNextToken(page.next_page_token)
