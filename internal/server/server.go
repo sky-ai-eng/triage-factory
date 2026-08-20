@@ -364,32 +364,6 @@ type Server struct {
 	leaseStatus LeaseStatusFunc
 }
 
-// agentEnabledForOrg returns the resolved agent and whether the bot is
-// enabled for the org's *default* team. Use only where there is no
-// specific acting team in play — the team-members roster hint
-// (config_handler) that just wants "is a bot generally available to
-// show in the picker." Delegation paths must use agentEnabledForTeam
-// with the actual acting team, or a non-default team's bot setting is
-// read off the default team (a multi-team bug).
-func (s *Server) agentEnabledForOrg(ctx context.Context, orgID, userID string) (*domain.Agent, bool, error) {
-	var (
-		a      *domain.Agent
-		teamID string
-	)
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var e error
-		teamID, e = tx.Teams.GetDefaultForOrg(ctx, orgID)
-		return e
-	}); err != nil {
-		return nil, false, fmt.Errorf("default team lookup: %w", err)
-	}
-	// Empty teamID (teamless org) flows through agentEnabledForTeam,
-	// which treats it as "team missing → disabled" — same posture as
-	// before.
-	a, enabled, err := s.agentEnabledForTeam(ctx, orgID, userID, teamID)
-	return a, enabled, err
-}
-
 // agentEnabledForTeam returns the resolved agent and whether the
 // team_agents.enabled flag is true for it *on the given team*. This is
 // the acceptance rule "delegating re-checks
@@ -821,14 +795,17 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/teams/{team_id}/archive", th.handleTeamArchive)
 	s.apiMutating("POST /api/teams/{team_id}/restore", th.handleTeamRestore)
 
-	// Team roster (TFAC-444): list members + add + change role + remove/leave.
-	// Multi-mode only (each handler 404s in local; local keeps the synthetic
-	// single-member /api/team/members roster). GET is any org member;
-	// POST/PATCH/DELETE gate team-admin-or-org-admin (DELETE also allows a
-	// self-leave). VerifyTeamInOrg 404s a cross-org team_id; the last-admin
-	// guard is a DB trigger surfaced as a 409.
+	// Team roster: list members + add + change role + remove/leave. The list
+	// read is the one roster on the surface — the management roster, the
+	// assignee picker and the predicate editor all read it — and answers in
+	// both modes, where {team_id} takes the "default" alias at N=1. The
+	// MUTATORS are multi-mode only (each 404s in local, which has nobody to
+	// enrol). List is any org member; POST/PATCH/DELETE gate
+	// team-admin-or-org-admin (DELETE also allows a self-leave).
+	// VerifyTeamInOrg 404s a cross-org team_id; the last-admin guard is a DB
+	// trigger surfaced as a 409.
 	tmh := &teamMembersHandler{tx: s.tx, az: s.az}
-	s.api("GET /api/teams/{team_id}/members", tmh.handleTeamRosterList)
+	s.apiMutating("POST /api/teams/{team_id}/members/list", tmh.handleTeamRosterList)
 	s.apiMutating("POST /api/teams/{team_id}/members", tmh.handleTeamMemberAdd)
 	s.apiMutating("PATCH /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRoleChange)
 	s.apiMutating("DELETE /api/teams/{team_id}/members/{user_id}", tmh.handleTeamMemberRemove)
@@ -1073,13 +1050,6 @@ func (s *Server) routes() {
 	s.api("GET /api/dashboard/prs/{owner}/{repo}/{number}/status", dh.handleDashboardPRStatus)
 	s.apiMutating("POST /api/dashboard/prs/{owner}/{repo}/{number}/draft", dh.handleDashboardPRDraft)
 
-	// Team roster for the predicate editor. Fetched fresh on
-	// every consumer mount (the FE dedups concurrent in-flight calls
-	// within a render but doesn't hold a persistent cache — the roster
-	// is mutable mid-session). One SELECT per call. /api/config — the
-	// AuthGate boot endpoint — is mounted pre-auth above; per-user
-	// identity that used to live on /api/config moved to /api/me.
-	s.api("GET /api/team/members", s.handleTeamMembers)
 	// Prompt imports. Two routes rather than one with a source field: they
 	// take different bodies (a paste vs. nothing) and only one of them can
 	// exist in multi mode, where the process has no per-tenant disk to scan.

@@ -84,15 +84,26 @@ export interface TeamSummary {
   is_last_acting?: boolean
 }
 
-// TeamBot mirrors the bot half of /api/team/members. Null
-// when no agent is bootstrapped OR team_agents.enabled is false for
-// the caller's team — same gate the swipe-delegate handler enforces.
-// Frontend hides the Bot row in the picker when this is null. The
-// per-user TeamMember + TeamMembersResponse shapes live further down
-// (where they were originally declared for the predicate editor).
+// TeamBot is the team's agent (its team_agents row) as the roster reports it —
+// beside the members, never among them, because the bot occupies the agent
+// claim slot rather than a user one. Null when the org has no bootstrapped
+// agent at all.
+//
+// `enabled` is the per-team switch, and the two consumers read it differently
+// on purpose: a picker offers the bot only when it is enabled (the same gate
+// the delegate handlers enforce, so it can't offer an option they'd refuse),
+// while the management roster renders a disabled bot as a disabled row —
+// "off" and "absent" are different states and the roster's job is to show
+// which one this team is in. The member row shape (TeamMember) is further
+// down, where it was first declared for the predicate editor.
 export interface TeamBot {
   agent_id: string
   display_name: string
+  enabled: boolean
+  model: string
+  /** Per-team autonomy-suitability override, or null to inherit the org
+   *  agent's default. */
+  autonomy: number | null
 }
 
 // The conversation status vocabulary — the frontend's ONE copy of it. Every
@@ -883,10 +894,11 @@ export interface BreakGlassPrincipal {
   created_at: string
 }
 
-/** GET /api/team/members row. Backs Variant B's searchable multi-select.
- *  Local mode returns a single-entry array containing the synthetic
- *  LocalDefaultUserID; multi mode returns the active
- *  user's team roster. */
+/** One row of `POST /api/teams/{team_id}/members/list` — the one team roster on
+ *  the surface. It backs the management roster, the board's assignee picker and
+ *  Variant B's searchable multi-select alike; a consumer that doesn't care about
+ *  `role` simply ignores it. Local mode answers with a single row: the synthetic
+ *  LocalDefaultUserID, whose role is always admin. */
 export interface TeamMember {
   user_id: string
   display_name: string
@@ -894,14 +906,9 @@ export interface TeamMember {
   /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null
+  /** Team role: 'admin' | 'member' | 'viewer'. */
+  role: string
   is_current_user: boolean
-}
-
-export interface TeamMembersResponse {
-  members: TeamMember[]
-  // Bot entry, populated when the caller's team has an
-  // enabled agent (otherwise null). Same gate as swipe-delegate.
-  bot: TeamBot | null
 }
 
 /** One team's tracking claim on a Slack channel (TFAC-543) — the tracked_by

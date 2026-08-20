@@ -44,6 +44,12 @@ var listRouteExceptions = map[string]string{
 	// credential classes), and mints its next token with httpx.NextPageToken.
 	// See githubRepoListResponse.
 	"POST /api/github/repos/list": "readiness discriminator beside the list",
+	// Carries the team's bot beside the list, because the bot is a workload
+	// identity and not a member: paging a list whose last element is not a
+	// member makes total_count a lie. Still resolves a page, still answers
+	// every paging key, and mints its next token with httpx.NextPageToken.
+	// See teamRosterListResponse.
+	"POST /api/teams/{team_id}/members/list": "team bot beside the list",
 }
 
 func TestListRoutesResolveAPage(t *testing.T) {

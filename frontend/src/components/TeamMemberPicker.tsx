@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, UserPlus } from 'lucide-react'
-import { apiFetch, apiJSON, apiList, httpErrorMessage } from '../lib/apiClient'
+import { apiFetch, apiList, httpErrorMessage } from '../lib/apiClient'
+import { fetchTeamRoster } from '../lib/teamRoster'
 import { TEAM_ROLE_LABELS } from '../lib/teamRoles'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
@@ -20,10 +21,6 @@ interface OrgMemberApiRow {
   display_name: string
   github_username: string | null
   role: string
-}
-
-interface TeamRosterApiRow {
-  user_id: string
 }
 
 // 'member' leads — the common add. The roster's own <select> orders these
@@ -85,7 +82,7 @@ function PickerModal({
       apiList<OrgMemberApiRow>(`/api/orgs/${encodeURIComponent(orgId)}/members/list`, {
         page_size: 200,
       }),
-      apiJSON<{ members: TeamRosterApiRow[] }>(`/api/teams/${teamId}/members`),
+      fetchTeamRoster(teamId),
     ])
       .then(([org, team]) => {
         if (!alive) return

@@ -623,31 +623,58 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 	return stored, nil
 }
 
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error) {
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+	// 0. The filtered total, on the same pool and the same FROM as the page
+	//    below — a count taken through a different join could disagree with
+	//    the rows it is meant to describe.
+	var total int
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM memberships m
+		JOIN users u ON u.id = m.user_id
+		WHERE m.team_id = $1
+	`, teamID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count team members: %w", err)
+	}
+
 	// 1. Core roster on the app pool (RLS-gated). memberships_select lets any
 	//    org member read a team-in-org's roster; display_name is nullable, so
 	//    COALESCE renders the empty string (matching GetDisplayName's "").
-	rows, err := s.app.QueryContext(ctx, `
+	//    The ORDER BY ends in m.user_id: two members sharing a display name
+	//    would otherwise tie, and a tie under LIMIT/OFFSET is a row that
+	//    repeats on one page and never appears on another.
+	query := `
 		SELECT m.user_id::text, COALESCE(u.display_name, ''), m.role::text
 		FROM memberships m
 		JOIN users u ON u.id = m.user_id
 		WHERE m.team_id = $1
-		ORDER BY COALESCE(u.display_name, ''), m.user_id
-	`, teamID)
+		ORDER BY COALESCE(u.display_name, ''), m.user_id`
+	args := []any{teamID}
+	if opts.Limit > 0 {
+		query += `
+		LIMIT $2 OFFSET $3`
+		args = append(args, opts.Limit, opts.Offset)
+	}
+	rows, err := s.app.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list team members: %w", err)
+		return nil, 0, fmt.Errorf("list team members: %w", err)
 	}
 	defer rows.Close()
 	out := []domain.TeamMember{}
+	ids := []string{}
 	for rows.Next() {
 		var m domain.TeamMember
 		if err := rows.Scan(&m.UserID, &m.DisplayName, &m.Role); err != nil {
-			return nil, fmt.Errorf("scan team member: %w", err)
+			return nil, 0, fmt.Errorf("scan team member: %w", err)
 		}
 		out = append(out, m)
+		ids = append(ids, m.UserID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate team members: %w", err)
+		return nil, 0, fmt.Errorf("iterate team members: %w", err)
+	}
+	if len(out) == 0 {
+		return out, total, nil
 	}
 
 	// 2. Identity enrichment on the admin pool, scoped to this team's members
@@ -656,26 +683,28 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	//    RLS can't show a peer's binding, but the roster's whole purpose is to
 	//    show every teammate's readiness; the membership join keeps the
 	//    admin-pool read scoped to exactly the members the RLS roster already
-	//    returned. Host resolution mirrors the org roster: an unset
-	//    github_base_url resolves to github.com (EffectiveGitHubHost), an unset
-	//    jira_base_url normalizes to "" and matches nothing.
+	//    returned, and the id list narrows it further to the page in hand so
+	//    the enrichment costs the window rather than the whole roster. Host
+	//    resolution mirrors the org roster: an unset github_base_url resolves
+	//    to github.com (EffectiveGitHubHost), an unset jira_base_url
+	//    normalizes to "" and matches nothing.
 	ghMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh
 		JOIN memberships m ON m.user_id = gh.user_id AND m.team_id = $1
-		WHERE gh.github_base_url = $2
-	`, teamID, db.EffectiveGitHubHost(githubBaseURL))
+		WHERE gh.github_base_url = $2 AND gh.user_id = ANY($3)
+	`, teamID, db.EffectiveGitHubHost(githubBaseURL), pgUUIDArray(ids))
 	if err != nil {
-		return nil, fmt.Errorf("list team member github identities: %w", err)
+		return nil, 0, fmt.Errorf("list team member github identities: %w", err)
 	}
 	jiraMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT j.user_id::text, j.account_id
 		FROM user_jira_identities j
 		JOIN memberships m ON m.user_id = j.user_id AND m.team_id = $1
-		WHERE j.jira_base_url = $2
-	`, teamID, db.NormalizeJiraHost(jiraBaseURL))
+		WHERE j.jira_base_url = $2 AND j.user_id = ANY($3)
+	`, teamID, db.NormalizeJiraHost(jiraBaseURL), pgUUIDArray(ids))
 	if err != nil {
-		return nil, fmt.Errorf("list team member jira identities: %w", err)
+		return nil, 0, fmt.Errorf("list team member jira identities: %w", err)
 	}
 
 	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
@@ -688,7 +717,7 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 			out[i].JiraAccountID = &acct
 		}
 	}
-	return out, nil
+	return out, total, nil
 }
 
 // queryIdentityMap runs a (user_id, value) query on q and returns the

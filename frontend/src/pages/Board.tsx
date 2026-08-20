@@ -1,14 +1,6 @@
 import { memo, useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef } from 'react'
 import { TERMINAL_CONVERSATION_STATUSES } from '../types'
-import type {
-  Task,
-  Conversation,
-  Message,
-  WSEvent,
-  TeamMembersResponse,
-  TeamMember,
-  TeamBot,
-} from '../types'
+import type { Task, Conversation, Message, WSEvent, TeamMember, TeamBot } from '../types'
 import { useWebSocket, setPresenceView } from '../hooks/useWebSocket'
 import { usePermissionQueues } from '../hooks/usePermissionQueues'
 import {
@@ -27,6 +19,8 @@ import {
 } from '../lib/conversationFeed'
 import type { PendingPermission, PermissionDecisionInput } from '../lib/permissions'
 import { useTeams, useTeamFilter } from '../hooks/useTeams'
+import { useTeamMembers } from '../hooks/useDeploymentConfig'
+import { usableBot } from '../lib/teamRoster'
 import { usePagedList } from '../hooks/usePagedList'
 import type { PagedList } from '../hooks/usePagedList'
 import { TASK_LIST_PATH, doneListBody, queueListBody, statusListBody } from '../lib/taskList'
@@ -231,9 +225,12 @@ export default function Board() {
     queuesRef.current = permQueueMap
   }, [permQueueMap])
 
-  // Team roster for the assignee picker. Includes bot when enabled.
-  const [members, setMembers] = useState<TeamMember[]>([])
-  const [bot, setBot] = useState<TeamBot | null>(null)
+  // Team roster for the assignee picker, on the team the board is acting as
+  // (the same one the write pickers seed to) rather than the org's default.
+  // The bot is filtered to the one the delegate handlers would accept: a
+  // disabled bot is not an assignable option.
+  const { members, bot: rosterBot } = useTeamMembers()
+  const bot = useMemo(() => usableBot(rosterBot), [rosterBot])
   const [currentUserID, setCurrentUserID] = useState<string>('')
 
   // multi-team. teamFilter is the per-page read scope (threaded
@@ -391,32 +388,17 @@ export default function Board() {
     [fetchChainStepConversations],
   )
 
-  // Fetch members + bot once at mount. The picker degrades gracefully
-  // if this fails (members=[], bot=null → only the avatar renders,
-  // picker dropdown is empty).
+  // The caller's identity, once at mount. /api/me returns it as `id`, not
+  // `user_id` — the picker uses currentUserID to recognize "claimed by me",
+  // and without this read every click on Me would take the claim path instead
+  // of toggling unclaim. A failure leaves the picker degraded (no "you"
+  // highlight) but the board working, which is why it swallows rather than
+  // rejects; the roster half degrades the same way inside its own hook.
   useEffect(() => {
     void (async () => {
-      try {
-        // Either read failing leaves the picker degraded but the board
-        // working, so both fall to null rather than rejecting the pair.
-        const [meRes, rosterRes] = await Promise.all([
-          apiJSON<unknown>('/api/me').catch(() => null),
-          apiJSON<unknown>('/api/team/members').catch(() => null),
-        ])
-        // /api/me returns the caller's identity as `id`, not `user_id`
-        // (see auth_handlers.go:514). The picker uses currentUserID to
-        // recognize "claimed by me" — without this read, every click on
-        // Me would take the claim path instead of toggling unclaim.
-        if (meRes && typeof meRes === 'object' && 'id' in meRes) {
-          setCurrentUserID((meRes as { id: string }).id ?? '')
-        }
-        if (rosterRes) {
-          const roster = rosterRes as TeamMembersResponse
-          setMembers(roster.members ?? [])
-          setBot(roster.bot ?? null)
-        }
-      } catch {
-        // Picker degrades; board still works.
+      const meRes = await apiJSON<unknown>('/api/me').catch(() => null)
+      if (meRes && typeof meRes === 'object' && 'id' in meRes) {
+        setCurrentUserID((meRes as { id: string }).id ?? '')
       }
     })()
   }, [])

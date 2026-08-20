@@ -57,20 +57,22 @@ var ErrTeamMemberExists = errors.New("db: user is already a member of this team"
 //     reads by team membership (via memberships) and writes by team
 //     admin; the request-handler caller has set the JWT claims via
 //     the TxRunner.
-//   - The roster methods (TFAC-444) split like
-//     OrgMembershipsStore: the membership read + the AddMember /
-//     ChangeMemberRole / RemoveMember mutations run on the app pool
-//     (memberships_select / _insert / _update / _delete RLS gate read
-//     by org access and writes by team-admin-or-org-admin), with the
-//     tf.guard_team_admins trigger the sole authority on the last-admin
-//     invariant; ListMembers' cross-member GitHub/Jira identity
-//     enrichment runs on the admin pool (the self-only identity RLS
-//     can't express it, scoped back to the team by a membership join).
+//   - The roster methods split like OrgMembershipsStore: the membership
+//     read + the AddMember / ChangeMemberRole / RemoveMember mutations
+//     run on the app pool (memberships_select / _insert / _update /
+//     _delete RLS gate read by org access and writes by
+//     team-admin-or-org-admin), with the tf.guard_team_admins trigger
+//     the sole authority on the last-admin invariant; ListMembers'
+//     cross-member GitHub/Jira identity enrichment runs on the admin
+//     pool (the self-only identity RLS can't express it, scoped back to
+//     the team by a membership join).
 //
 // SQLite collapses the pool split to one connection; the `...System`
-// variants delegate to their non-System counterparts. The roster
-// methods are multi-mode only (the team-roster handlers 404 in local);
-// the SQLite impls are stubs returning ErrNotApplicableInLocal.
+// variants delegate to their non-System counterparts. ListMembers is
+// implemented in both dialects — local mode reads its own roster, which
+// is one member — while the roster WRITES are multi-mode only (the
+// mutating handlers 404 in local) and their SQLite impls are stubs
+// returning ErrNotApplicableInLocal.
 type TeamsStore interface {
 	// GetDefaultForOrg returns the ID of the org's default team —
 	// defined as the oldest team row by created_at. Same shape as
@@ -307,20 +309,29 @@ type TeamsStore interface {
 	// map without a query.
 	NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error)
 
-	// ListMembers returns every member of teamID with their team role and
-	// host-scoped identity readiness, ordered by display name then user id
-	// for a stable roster — the team-tier sibling of
-	// OrgMembershipsStore.ListWithIdentity. githubBaseURL / jiraBaseURL are
-	// the org's configured hosts (raw, read from org_settings by the caller);
-	// the impl resolves them to the host identities are keyed under
+	// ListMembers returns one page of teamID's members with their team role
+	// and host-scoped identity readiness, plus the unpaged total, ordered by
+	// display name then user id for a stable roster — the team-tier sibling of
+	// OrgMembershipsStore.ListWithIdentity. The user-id tiebreaker is what
+	// makes offset paging total: display names collide freely, and a partial
+	// order drops and repeats rows across pages. githubBaseURL / jiraBaseURL
+	// are the org's configured hosts (raw, read from org_settings by the
+	// caller); the impl resolves them to the host identities are keyed under
 	// (EffectiveGitHubHost: an unset github_base_url resolves to github.com;
 	// NormalizeJiraHost: an unset jira_base_url matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
-	// host. The roster reads under the app pool (memberships_select RLS — any
-	// org member may read a team-in-org's roster); the identity enrichment
+	// host.
+	//
+	// Postgres: the roster reads under the app pool (memberships_select RLS —
+	// any org member may read a team-in-org's roster); the identity enrichment
 	// reads under the admin pool (the self-only identity RLS can't express a
 	// cross-member read, scoped back to the team by a membership join).
-	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string) ([]domain.TeamMember, error)
+	// SQLite is N=1 — one implicit user, enrolled on the sole team by the
+	// local tenant seed — so the same query shape answers with that single
+	// synthetic member. Local mode runs the roster's own consumers (the
+	// assignee picker, the predicate editor's variant choice), so this is a
+	// read both dialects owe an answer to.
+	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts ListOpts) ([]domain.TeamMember, int, error)
 
 	// AddMember enrolls userID on teamID with role ("admin" | "member" |
 	// "viewer"). App pool: memberships_insert RLS gates the write to team
