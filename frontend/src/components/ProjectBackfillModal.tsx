@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { toast } from './Toast/toastStore'
-import { apiJSON, httpErrorMessage, type ApiErrorItem } from '../lib/apiClient'
+import { apiJSON, apiListAll, httpErrorMessage, type ApiErrorItem } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
 
 interface BackfillCandidate {
@@ -69,11 +69,14 @@ export default function ProjectBackfillModal({ projectId, projectName, onClose }
     let cancelled = false
     ;(async () => {
       try {
-        const data = await apiJSON<{ candidates: BackfillCandidate[] }>(
-          `/api/projects/${encodeURIComponent(projectId)}/backfill-candidates`,
+        // The whole set, not a page: the body below partitions it into the
+        // claimed and unclaimed sections and the footer selects across both,
+        // so a partial load would silently drop candidates from a list the
+        // user is choosing from.
+        const list = await apiListAll<BackfillCandidate>(
+          `/api/projects/${encodeURIComponent(projectId)}/backfill-candidates/list`,
         )
         if (cancelled) return
-        const list = data.candidates ?? []
         setCandidates(list)
       } catch (err) {
         if (!cancelled) setLoadError(httpErrorMessage(err, 'Could not load the candidates.'))
