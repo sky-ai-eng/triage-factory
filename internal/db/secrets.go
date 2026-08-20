@@ -44,16 +44,23 @@ var ErrSecretStoreUnavailable = errors.New("secret store not available on this r
 //
 // D5 owns the consumer side (wiring real handlers + secret-name
 // catalog); D2 provides the interface and both impls.
-// TODO(TFAC-871): Put, PutUser and PutUserSystem still return a bare error and
-// are unclassified. This store answers reads with values rather than rows, so
-// the standard's mechanism has no point read to project — the ticket is
-// expected to land on a stated exemption, but the reason has to be written
-// down here either way.
 type SecretStore interface {
 	// Put writes (or rotates) an org-scoped secret. description is
 	// optional (stored as ""). The value is encrypted app-side and
 	// stored in org_secrets keyed on (orgID, NULL user, key); rotations
 	// overwrite the same row.
+	//
+	// Exempt from the returned-row rule: this store's reads answer with a
+	// value, never a row — Get/GetSystem hand back the decrypted secret
+	// string, not a projected column set — so there is no point read whose
+	// column list and scanner a RETURNING could share. Giving Put a row
+	// type would be a read-shape change, not a write-shape convergence,
+	// and it would widen what a caller can obtain: the only row-shaped
+	// facts beyond what the caller already passed (orgID, key,
+	// description) are the ciphertext and the plaintext value itself, and
+	// handing either back to satisfy a shape rule is worse than the rule.
+	// Same answer as ClaimCredentialsStore.Put, for the same reason — a
+	// credential surface with nothing non-secret worth echoing back.
 	Put(ctx context.Context, orgID, key, value, description string) error
 
 	// Get returns the stored secret value, or ("", nil) when no
@@ -100,6 +107,11 @@ type SecretStore interface {
 	// more than one Jira host, so host-scoping is the *consumer's* job:
 	// it composes the key (e.g. "jira_token/<host>") before calling.
 	// There is deliberately no separate host parameter here.
+	//
+	// Exempt from the returned-row rule, for the same reason as Put: no
+	// point read to project (GetUser answers with a value, not a row),
+	// and nothing non-secret worth handing back beyond what the caller
+	// already supplied.
 	PutUser(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// GetUser returns the stored per-user secret value, or ("", nil)
@@ -141,6 +153,9 @@ type SecretStore interface {
 	// System-code-only, same discipline as GetUserSystem. The app pool's
 	// RLS WITH CHECK would reject a write under another user's id, so
 	// request handlers stay on the claims-checked PutUser.
+	//
+	// Exempt from the returned-row rule, same reason as Put/PutUser: no
+	// point read to project and nothing non-secret worth echoing back.
 	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
 
 	// DeleteUser removes a per-user secret. Returns ok=false when no
