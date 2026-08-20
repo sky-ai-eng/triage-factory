@@ -86,7 +86,7 @@ func TestAttachConversationMemoryEntities_PrimaryAlwaysWritten(t *testing.T) {
 
 	// Empty content → agent_content NULL, matching a run whose agent never
 	// wrote its memory file. The upsert still lands a row.
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prim", entA.ID, "", ""); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prim", entA.ID, "", ""); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
@@ -110,7 +110,7 @@ func TestAttachConversationMemoryEntities_ProducedStubForUnpolledPR(t *testing.T
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-prod")
 
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-prod", entA.ID, "", "narrative"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// A PR the run just opened — no entity exists for it yet.
@@ -150,7 +150,7 @@ func TestAttachConversationMemoryEntities_RepoLevelTargetsSkipped(t *testing.T) 
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-skip")
 
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-skip", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-skip", entA.ID, "", "narrative"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// Branch push → provider "git", target "o/r": unmapped provider.
@@ -200,7 +200,7 @@ func TestAttachConversationMemoryEntities_ListFailureLeavesPrimaryIntact(t *test
 	ctx := context.Background()
 	entA := attachEntityBySource(t, database, "github", "owner/repo#r-fail")
 
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-fail", entA.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-fail", entA.ID, "", "narrative"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestAttachConversationMemoryEntities_Precedence(t *testing.T) {
 	entP := attachMakeEntity(t, database, "github", "o/r#100", "pr")
 	entB := attachMakeEntity(t, database, "github", "o/r#200", "pr")
 
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-prec", entP.ID, "", "narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-prec", entP.ID, "", "narrative"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// Mid-run touches recorded before termination.
@@ -277,7 +277,7 @@ func TestAttachConversationMemoryEntities_MotivatingCase(t *testing.T) {
 	entA := attachMakeEntity(t, database, "slack", domain.SlackSourceID("C0125", "1700000000.000100"), "thread")
 	entC := attachMakeEntity(t, database, "jira", "SKY-9", "issue")
 
-	if err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", entA.ID, "", "the run narrative"); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, "r-507", entA.ID, "", "the run narrative"); err != nil {
 		t.Fatalf("upsert memory: %v", err)
 	}
 	// C touched mid-run; B produced via an artifact.
@@ -343,7 +343,7 @@ func TestAttachConversationMemoryEntities_MultiStepPrimaryPerStep(t *testing.T) 
 	})
 
 	for _, conversationID := range []string{"r-step1", "r-step2"} {
-		if err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, conversationID, entA.ID, "", conversationID+" narrative"); err != nil {
+		if _, err := s.taskMemory.UpsertAgentMemorySystem(ctx, org, conversationID, entA.ID, "", conversationID+" narrative"); err != nil {
 			t.Fatalf("upsert memory %s: %v", conversationID, err)
 		}
 		s.attachConversationMemoryEntities(ctx, org, conversationID, entA.ID)

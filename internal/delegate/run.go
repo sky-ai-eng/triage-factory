@@ -809,7 +809,7 @@ func (s *Spawner) processCompletion(
 	// the next run's materializer can tell this workflow run's own steps from
 	// history.
 	agentContent, fileState := readConversationMemory(claudeCwd, priorMemory)
-	if err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, blueprintRunID, agentContent); err != nil {
+	if _, err := s.taskMemory.UpsertAgentMemorySystem(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID, blueprintRunID, agentContent); err != nil {
 		delegateLog.Warn("upsert memory for conversation failed", "conversation", conversationID, "error", err)
 	}
 	switch fileState {

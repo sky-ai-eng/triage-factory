@@ -482,7 +482,8 @@ func (ah *artifactsHandler) reviewApprove(w http.ResponseWriter, r *http.Request
 	if fresh.ConversationID != "" {
 		humanContent := FormatHumanFeedback(buildReviewHumanFeedbackInput(details, details.StagedComments))
 		if err := ah.tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-			return tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
+			_, err := tx.TaskMemory.UpdateConversationMemoryHumanContent(cleanupCtx, orgID, fresh.ConversationID, humanContent)
+			return err
 		}); err != nil {
 			artifactsLog.Warn("failed to record human verdict", "conversation", fresh.ConversationID, "error", err)
 		}

@@ -465,7 +465,7 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, conversationID); err != nil {
 			t.Fatalf("seed conversation: %v", err)
 		}
-		if err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, "", content); err != nil {
+		if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, conversationID, entityID, "", content); err != nil {
 			t.Fatalf("seed memory: %v", err)
 		}
 		// The primary join row a real conversation's completion will carry once
@@ -735,7 +735,7 @@ func TestReconcile_OutcomeSupersedesVerdict(t *testing.T) {
 	const conversationID = "77777777-7777-7777-7777-777777777777"
 	seedConversation("ent-7", conversationID, "agent narrative")
 	// Approval-time verdict already recorded.
-	if err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, conversationID, "Human approved with a tweaked body."); err != nil {
+	if _, err := stores.TaskMemory.UpdateConversationMemoryHumanContent(ctx, runmode.LocalDefaultOrgID, conversationID, "Human approved with a tweaked body."); err != nil {
 		t.Fatalf("seed verdict: %v", err)
 	}
 

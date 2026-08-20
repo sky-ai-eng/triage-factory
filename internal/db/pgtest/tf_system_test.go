@@ -251,7 +251,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("conversation_memory", func(t *testing.T) {
 		conversationID := seedQueuedConversation(t, h, stores, ctx, orgID, taskID, promptID, blueprintRunID)
-		if err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, blueprintRunID, "agent narrative"); err != nil {
+		if _, err := stores.TaskMemory.UpsertAgentMemorySystem(ctx, orgID, conversationID, entityID, blueprintRunID, "agent narrative"); err != nil {
 			t.Errorf("TaskMemory.UpsertAgentMemorySystem: %v", err)
 		}
 		if err := stores.TaskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, entityID, domain.MemoryRolePrimary); err != nil {

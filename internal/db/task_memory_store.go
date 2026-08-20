@@ -25,23 +25,19 @@ import (
 //     and must be inside WithTx in multi-mode so JWT claims (org_id,
 //     sub) are set for RLS evaluation.
 //   - `...System` methods (UpsertAgentMemorySystem,
-//     GetMemoriesForEntitySystem, RecordEntityTouchSystem,
-//     CountMemoriesForEntitySystem) run on the admin pool (BYPASSRLS).
-//     The consumers are background goroutines without a JWT-claims
-//     context — the delegate spawner's post-completion gate teardown
-//     and the engagement-start materializer both fire from inside the
-//     spawner's `runAgent` goroutine which has no request scope.
-//     org_id stays bound in the INSERT/SELECT as defense in depth.
+//     UpdateConversationMemoryHumanContentSystem, GetMemoriesForEntitySystem,
+//     RecordEntityTouchSystem, CountMemoriesForEntitySystem) run on the
+//     admin pool (BYPASSRLS). The consumers are background goroutines
+//     without a JWT-claims context — the delegate spawner's
+//     post-completion gate teardown, the artifact reconciler's post-run
+//     outcome capture, and the engagement-start materializer all fire
+//     from a goroutine with no request scope. org_id stays bound in the
+//     INSERT/SELECT/UPDATE as defense in depth.
 //
-// No System variant exists for UpdateConversationMemoryHumanContent (only
-// called from HTTP handlers under request claims). Adding a
-// speculative System variant would just be dead code the admin-pool
-// conformance suite would have to cover for no consumer; the
-// precedent (e.g. EventStore's missing app-side GetMetadata) is to
-// omit unused variants until a real caller arrives.
-//
-// RecordEntityTouchSystem and CountMemoriesForEntitySystem are the
-// deliberate exception to that precedent: they're the conversation_memory_entities
+// The precedent (e.g. EventStore's missing app-side GetMetadata) is to omit
+// a System (or plain) variant until a real caller arrives rather than add
+// one speculatively — RecordEntityTouchSystem and CountMemoriesForEntitySystem
+// are the deliberate exception: they're the conversation_memory_entities
 // foundation TFAC-622 lands ahead of their production callers, which
 // arrive with the sibling touch-capture (TFAC-623) and memory-load
 // (TFAC-624) tickets. Until then they're exercised only by tests and the
@@ -50,10 +46,6 @@ import (
 // SQLite collapses both pools onto the single connection. The
 // `...System` methods are thin wrappers around their non-System
 // counterparts; assertLocalOrg gates every entry point.
-// TODO(TFAC-867): these single-row writes still return a bare error rather
-// than the row they persisted: UpsertAgentMemory, UpsertAgentMemorySystem,
-// UpdateConversationMemoryHumanContent,
-// UpdateConversationMemoryHumanContentSystem.
 type TaskMemoryStore interface {
 	// UpsertAgentMemory writes the agent-side memory row for a conversation.
 	// Empty / whitespace-only content canonicalizes to SQL NULL on
@@ -71,14 +63,19 @@ type TaskMemoryStore interface {
 	// after a retry overwrites agent_content but preserves the row's
 	// id, created_at, and any human_content the user has already
 	// attached.
-	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
+	//
+	// Returns the stored row, sourced from RETURNING on the write statement
+	// itself — including the producing conversation's naming facts
+	// (StepIndex, PromptName) a caller would otherwise have to re-read
+	// GetMemoriesForEntity(System) to see, projected through the same join.
+	UpsertAgentMemory(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
 
 	// UpsertAgentMemorySystem is the admin-pool variant for the
 	// delegate spawner's post-completion gate teardown. Fires inside
 	// the runAgent goroutine, which has no JWT-claims context, so the
 	// write routes around RLS via BYPASSRLS. Same idempotency +
-	// NULL-on-empty contract as the non-System variant.
-	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) error
+	// NULL-on-empty contract and returned row as the non-System variant.
+	UpsertAgentMemorySystem(ctx context.Context, orgID, conversationID, entityID, blueprintRunID, content string) (domain.TaskMemory, error)
 
 	// UpdateConversationMemoryHumanContent records the human's verdict on a
 	// conversation's agent draft into the conversation_memory row keyed by
@@ -89,15 +86,16 @@ type TaskMemoryStore interface {
 	// Empty / whitespace-only content canonicalizes to NULL, matching
 	// UpsertAgentMemory's agent_content handling.
 	//
-	// A missing row is logged-and-returned-nil rather than failing
-	// the call: the only way a conversationID with no row reaches here is a
-	// non-agent review path or a cleanup race, and failing the
-	// response after GitHub already accepted the review would be
-	// worse than the missed memory write.
+	// Returns the stored row on a hit, sourced from RETURNING on the write
+	// statement itself. A missing row is a nil row with a nil error — an
+	// answer, not an error — logged and not fatal: the only way a
+	// conversationID with no row reaches here is a non-agent review path or a
+	// cleanup race, and failing the response after GitHub already accepted
+	// the review would be worse than the missed memory write.
 	//
 	// App pool only — every caller (reviews handler, artifact-PR approve
 	// handler, swipe-discard cleanup) runs under request claims.
-	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) error
+	UpdateConversationMemoryHumanContent(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
 
 	// UpdateConversationMemoryHumanContentSystem is the admin-pool (BYPASSRLS) variant
 	// of UpdateConversationMemoryHumanContent for the artifact reconciler (TFAC-464 β),
@@ -111,11 +109,11 @@ type TaskMemoryStore interface {
 	// version, superseding any approval-time account. The reconciler composes
 	// the note over the conversation's WHOLE artifact set each time one
 	// resolves, so a branch-then-PR conversation accumulates correctly without
-	// an append and a repeated cycle is idempotent. Same empty→NULL +
-	// missing-row-logged-not-fatal contract as the app-pool variant. org_id
-	// stays bound as defense in depth; SQLite collapses onto the one
-	// connection.
-	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) error
+	// an append and a repeated cycle is idempotent. Same empty→NULL,
+	// missing-row-is-a-nil-answer, and returned-row contract as the app-pool
+	// variant. org_id stays bound as defense in depth; SQLite collapses onto
+	// the one connection.
+	UpdateConversationMemoryHumanContentSystem(ctx context.Context, orgID, conversationID, content string) (*domain.TaskMemory, error)
 
 	// GetMemoriesForEntity returns every conversation_memory row reachable for
 	// this entity through conversation_memory_entities — the conversation

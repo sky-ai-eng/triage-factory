@@ -79,7 +79,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	// conversation_memory: agent finished and wrote its self-report (the
 	// termination upsert). We assert below that
 	// human_content lands without trampling agent_content.
-	if err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
+	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_pa", "e_pa", "", "agent self-report"); err != nil {
 		t.Fatalf("UpsertAgentMemory: %v", err)
 	}
 	// The primary join row a real conversation's completion will carry once the
