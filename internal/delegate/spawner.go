@@ -1293,7 +1293,7 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	if task.Status == target {
 		return
 	}
-	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
+	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, target); err != nil {
 		delegateLog.Warn("set board column for task failed", "column", target, "task", taskID, "error", err)
 		return
 	}
@@ -1337,7 +1337,7 @@ func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID s
 	if task.Status == "in_review" {
 		return // idempotent
 	}
-	if err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
+	if _, err := s.tasks.SetStatusSystem(ctx, orgID, taskID, "in_review"); err != nil {
 		delegateLog.Warn("place task in approval column failed", "task", taskID, "error", err)
 		return
 	}

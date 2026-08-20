@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -129,7 +130,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			}
 		}
 		// Now close it; should appear under done.
-		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		done, total, err := s.List(ctx, orgID, doneFilter, db.ListOpts{Limit: 50})
@@ -364,10 +365,10 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// Force task into snoozed via SetStatus (sufficient for this
 		// invariant — claim cols stay empty, satisfying the
 		// "snoozed ↔ unclaimed" invariant trivially).
-		if err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
+		if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
-		if err := s.Bump(ctx, orgID, taskID, eventID); err != nil {
+		if _, err := s.Bump(ctx, orgID, taskID, eventID); err != nil {
 			t.Fatalf("Bump: %v", err)
 		}
 		got, err := s.Get(ctx, orgID, taskID)
@@ -382,7 +383,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("Close_terminates_task", func(t *testing.T) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "close")
-		if err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		got, _ := s.Get(ctx, orgID, taskID)
@@ -404,7 +405,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if len(active) != 1 || active[0].ID != taskID {
 			t.Fatalf("active list = %+v, want [%s]", active, taskID)
 		}
-		_ = s.Close(ctx, orgID, taskID, "test", "")
+		_, _ = s.Close(ctx, orgID, taskID, "test", "")
 		active, _ = s.FindActiveByEntity(ctx, orgID, entityID)
 		if len(active) != 0 {
 			t.Errorf("active list post-close = %d rows, want 0", len(active))
@@ -427,7 +428,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		entityA, _, taskA := seed(t, "ref-a")
 		entityB, _, taskB := seed(t, "ref-b")
 		// Close B; only A should remain.
-		if err := s.Close(ctx, orgID, taskB, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskB, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		refs, err := s.ListActiveRefsForEntities(ctx, orgID, []string{entityA, entityB}, nil)
@@ -493,7 +494,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("ClaimQueuedForUser_rejects_terminal_task", func(t *testing.T) {
 		s, orgID, _, _, userID, seed, _ := mk(t)
 		_, _, taskID := seed(t, "cqfu-term")
-		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID)
@@ -528,7 +529,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 	t.Run("StampAgentClaimIfUnclaimed_refuses_terminal", func(t *testing.T) {
 		s, orgID, _, agentID, _, seed, _ := mk(t)
 		_, _, taskID := seed(t, "stamp-term")
-		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		ok, err := s.StampAgentClaimIfUnclaimed(ctx, orgID, taskID, agentID, "")
@@ -574,7 +575,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		// A user owns the task: the stamp must refuse rather than steal, and
 		// the fold must still be recorded — the injection already happened.
-		if err := s.SetClaimedByUser(ctx, orgID, taskID, userID); err != nil {
+		if _, err := s.SetClaimedByUser(ctx, orgID, taskID, userID); err != nil {
 			t.Fatalf("SetClaimedByUser: %v", err)
 		}
 		claimed, err := s.MarkEventInjectedSystem(ctx, orgID, taskID, eventID, db.AgentClaimStamp{AgentID: agentID})
@@ -613,7 +614,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 			t.Errorf("second handoff result=%v, want HandoffNoOp", result)
 		}
 		// Terminal task — HandoffRefused regardless of sticky claim.
-		if err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 		result, err = s.HandoffAgentClaim(ctx, orgID, taskID, agentID, userID)
@@ -723,7 +724,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		if ok, err := s.ClaimQueuedForUser(ctx, orgID, taskID, userID); err != nil || !ok {
 			t.Fatalf("claim: ok=%v err=%v", ok, err)
 		}
-		if err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, taskID, "test_close", ""); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 		ok, err := s.AdvanceStatusForUser(ctx, orgID, taskID, userID, "in_progress")
@@ -760,7 +761,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, liveID := seed(t, "qsnz-live")
 		_, _, snoozedID := seed(t, "qsnz-snoozed")
-		if err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
+		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
 
@@ -862,7 +863,7 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		// without consolidating an owner, so the claimed-⇒-owned CHECK must
 		// reject claiming a NULL-team task. (Production claims go through
 		// ClaimQueuedForUser, which sets the owning team atomically.)
-		if err := s.SetClaimedByUser(ctx, orgID, task.ID, userID); err == nil {
+		if _, err := s.SetClaimedByUser(ctx, orgID, task.ID, userID); err == nil {
 			t.Error("expected the claimed-requires-team CHECK to reject claiming an unowned task, got nil error")
 		}
 	})
@@ -932,6 +933,180 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 		}
 		if len(refs) != 0 {
 			t.Errorf("got %d refs, want 0", len(refs))
+		}
+	})
+
+	// --- Returned-row standard (TFAC-860) ---
+
+	t.Run("lifecycle_writes_return_the_stored_row", func(t *testing.T) {
+		// The returned-row standard on TaskStore's ten converted writes:
+		// Bump[System], Close[System], SetStatus[System], SetClaimedByAgent,
+		// SetClaimedByUser, SetOwnerTeam[System]. Each returns tasks' OWN
+		// columns, not the entity join Get reads alongside them — see the
+		// shape note on db.TaskStore. bareRead mirrors that: a Get with the
+		// join-populated display fields blanked, the same trick
+		// TeamsStore.Role's conformance test uses for a per-user column no
+		// write can see (settings_conformance.go).
+		s, orgID, _, agentID, userID, seed, seedTeam := mk(t)
+		bareRead := func(taskID string) func() (*domain.Task, error) {
+			return func() (*domain.Task, error) {
+				full, err := s.Get(ctx, orgID, taskID)
+				if err != nil || full == nil {
+					return full, err
+				}
+				bare := *full
+				bare.Title, bare.SourceURL, bare.EntitySourceID = "", "", ""
+				bare.EntitySource, bare.EntityKind = "", ""
+				bare.OpenSubtaskCount, bare.SlackMessageCount = 0, 0
+				return &bare, nil
+			}
+		}
+
+		// Bump / BumpSystem: wakes a snoozed task.
+		for _, sys := range []bool{false, true} {
+			_, eventID, taskID := seed(t, fmt.Sprintf("rr-bump-%v", sys))
+			if _, err := s.SetStatus(ctx, orgID, taskID, "snoozed"); err != nil {
+				t.Fatalf("seed snoozed: %v", err)
+			}
+			what, got, err := "Tasks.Bump", domain.Task{}, error(nil)
+			if sys {
+				what = "Tasks.BumpSystem"
+				got, err = s.BumpSystem(ctx, orgID, taskID, eventID)
+			} else {
+				got, err = s.Bump(ctx, orgID, taskID, eventID)
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
+			if got.Status != "queued" {
+				t.Errorf("%s returned status=%q, want queued (snooze cleared)", what, got.Status)
+			}
+		}
+
+		// Close / CloseSystem: the state guard's terminal side, not just the
+		// happy path — a second close against the now-terminal row hits it.
+		for _, sys := range []bool{false, true} {
+			_, _, taskID := seed(t, fmt.Sprintf("rr-close-%v", sys))
+			closeCall := func() (domain.Task, error) { return s.Close(ctx, orgID, taskID, "test_close", "") }
+			what := "Tasks.Close"
+			if sys {
+				what = "Tasks.CloseSystem"
+				closeCall = func() (domain.Task, error) { return s.CloseSystem(ctx, orgID, taskID, "test_close", "") }
+			}
+			got, err := closeCall()
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
+			if got.Status != "done" || got.ClosedAt == nil {
+				t.Errorf("%s returned status=%q closed_at=%v, want done + a timestamp", what, got.Status, got.ClosedAt)
+			}
+			if _, err := closeCall(); !errors.Is(err, db.ErrNoSuchTask) {
+				t.Errorf("%s on an already-terminal task = %v, want db.ErrNoSuchTask", what, err)
+			}
+		}
+
+		// SetStatus / SetStatusSystem.
+		for _, sys := range []bool{false, true} {
+			_, _, taskID := seed(t, fmt.Sprintf("rr-status-%v", sys))
+			what, got, err := "Tasks.SetStatus", domain.Task{}, error(nil)
+			if sys {
+				what = "Tasks.SetStatusSystem"
+				got, err = s.SetStatusSystem(ctx, orgID, taskID, "in_review")
+			} else {
+				got, err = s.SetStatus(ctx, orgID, taskID, "in_review")
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
+			if got.Status != "in_review" {
+				t.Errorf("%s returned status=%q, want in_review", what, got.Status)
+			}
+		}
+
+		// SetClaimedByAgent.
+		_, _, taskAgent := seed(t, "rr-claim-agent")
+		gotAgent, err := s.SetClaimedByAgent(ctx, orgID, taskAgent, agentID)
+		if err != nil {
+			t.Fatalf("Tasks.SetClaimedByAgent: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByAgent", gotAgent, bareRead(taskAgent))
+		if gotAgent.ClaimedByAgentID != agentID {
+			t.Errorf("SetClaimedByAgent returned claimed_by_agent_id=%q, want %q", gotAgent.ClaimedByAgentID, agentID)
+		}
+
+		// SetClaimedByUser.
+		_, _, taskUser := seed(t, "rr-claim-user")
+		gotUser, err := s.SetClaimedByUser(ctx, orgID, taskUser, userID)
+		if err != nil {
+			t.Fatalf("Tasks.SetClaimedByUser: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Tasks.SetClaimedByUser", gotUser, bareRead(taskUser))
+		if gotUser.ClaimedByUserID != userID {
+			t.Errorf("SetClaimedByUser returned claimed_by_user_id=%q, want %q", gotUser.ClaimedByUserID, userID)
+		}
+
+		if seedTeam == nil {
+			t.Skip("backend factory did not provide a TeamSeeder; SetOwnerTeam subtests skipped")
+		}
+		otherTeam := seedTeam(t, "rr-owner")
+
+		// SetOwnerTeam / SetOwnerTeamSystem.
+		for _, sys := range []bool{false, true} {
+			_, _, taskID := seed(t, fmt.Sprintf("rr-owner-%v", sys))
+			what, got, err := "Tasks.SetOwnerTeam", domain.Task{}, error(nil)
+			if sys {
+				what = "Tasks.SetOwnerTeamSystem"
+				got, err = s.SetOwnerTeamSystem(ctx, orgID, taskID, otherTeam)
+			} else {
+				got, err = s.SetOwnerTeam(ctx, orgID, taskID, otherTeam)
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			AssertWriteReturnedStoredRow(t, what, got, bareRead(taskID))
+			if got.TeamID == nil || *got.TeamID != otherTeam {
+				t.Errorf("%s returned team_id=%v, want %q", what, got.TeamID, otherTeam)
+			}
+		}
+
+		// SetOwnerTeam("") is a no-op on the column but still requires the id
+		// to name a row — the write runs, just to a COALESCE that keeps the
+		// stored value.
+		_, _, taskNoop := seed(t, "rr-owner-noop")
+		before, err := s.Get(ctx, orgID, taskNoop)
+		if err != nil || before == nil {
+			t.Fatalf("Get before no-op SetOwnerTeam: (%v, %v)", before, err)
+		}
+		noop, err := s.SetOwnerTeam(ctx, orgID, taskNoop, "")
+		if err != nil {
+			t.Fatalf("SetOwnerTeam (empty teamID): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Tasks.SetOwnerTeam (empty teamID)", noop, bareRead(taskNoop))
+		if noop.TeamID == nil || before.TeamID == nil || *noop.TeamID != *before.TeamID {
+			t.Errorf("SetOwnerTeam(\"\") changed team_id: before=%v after=%v", before.TeamID, noop.TeamID)
+		}
+
+		// Miss semantics: an id-keyed write against a task that never
+		// existed reports it rather than succeeding silently.
+		missingID := "00000000-0000-0000-0000-0000000000ba"
+		misses := []struct {
+			name string
+			call func() error
+		}{
+			{"Tasks.Bump", func() error { _, e := s.Bump(ctx, orgID, missingID, "x"); return e }},
+			{"Tasks.Close", func() error { _, e := s.Close(ctx, orgID, missingID, "x", ""); return e }},
+			{"Tasks.SetStatus", func() error { _, e := s.SetStatus(ctx, orgID, missingID, "queued"); return e }},
+			{"Tasks.SetClaimedByAgent", func() error { _, e := s.SetClaimedByAgent(ctx, orgID, missingID, agentID); return e }},
+			{"Tasks.SetClaimedByUser", func() error { _, e := s.SetClaimedByUser(ctx, orgID, missingID, userID); return e }},
+			{"Tasks.SetOwnerTeam", func() error { _, e := s.SetOwnerTeam(ctx, orgID, missingID, otherTeam); return e }},
+		}
+		for _, m := range misses {
+			if err := m.call(); !errors.Is(err, db.ErrNoSuchTask) {
+				t.Errorf("%s(missing id) = %v, want db.ErrNoSuchTask", m.name, err)
+			}
 		}
 	})
 }
@@ -1058,10 +1233,10 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		_, _, liveID := seed(t, "tail-live")
 		_, _, snoozedID := seed(t, "tail-snoozed")
 		_, _, doneID := seed(t, "tail-done")
-		if err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
+		if _, err := s.SetStatus(ctx, orgID, snoozedID, "snoozed"); err != nil {
 			t.Fatalf("SetStatus snoozed: %v", err)
 		}
-		if err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 
@@ -1081,7 +1256,7 @@ func runTaskListConformance(ctx context.Context, t *testing.T, mk TaskStoreFacto
 		s, orgID, _, _, _, seed, _ := mk(t)
 		_, _, liveID := seed(t, "cs-live")
 		_, _, doneID := seed(t, "cs-done")
-		if err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
+		if _, err := s.Close(ctx, orgID, doneID, "test", ""); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
 

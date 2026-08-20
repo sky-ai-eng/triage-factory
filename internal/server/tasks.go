@@ -470,9 +470,20 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Serve the resource in the shape the reads serve it — not a status stub,
-	// and not the request body echoed back. The lifecycle stores answer with
-	// the new status rather than the row, so the row comes from a point read.
+	s.writeTaskResource(w, r, orgID, userID, id)
+}
+
+// writeTaskResource serves a task's current row in the shape the reads serve
+// it — not a status stub, and not the request body (or a caller-computed
+// guess) echoed back. A task write hands back at most the tasks row's own
+// columns (see the returned-row shape note on db.TaskStore), never the
+// entity-joined display fields this resource carries, so every
+// write-then-respond handler goes through this point read instead — under
+// the requester's RLS, so the response also respects their visibility.
+// Writes the JSON body and returns true on success; writes its own error
+// response and returns false on a store error or a task that vanished
+// between the write and this read.
+func (s *Server) writeTaskResource(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
 	var updated *domain.Task
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -480,13 +491,42 @@ func (s *Server) handleTaskPatch(w http.ResponseWriter, r *http.Request) {
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return
+		return false
 	}
 	if updated == nil {
 		notFound(w, "task")
-		return
+		return false
 	}
 	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+	return true
+}
+
+// writeTaskResourceSystem is writeTaskResource on the ADMIN pool
+// (Tasks.GetSystem), for the one write whose success can remove the row
+// from the actor's own sight: a reassign handoff consolidates team_id to
+// the target's team, which an overriding admin need not be a member of, so
+// the RLS-scoped read would answer 404 for a mutation that landed. The read
+// carries the same authority the mutation it reports on already used —
+// reassign's permission arms are decided in Go and the write runs on the
+// admin pool for exactly this reason (see reassignClaim) — and it discloses
+// nothing new: reassignClaim's entry read proved the actor could see this
+// task under their own RLS within this same request.
+func (s *Server) writeTaskResourceSystem(w http.ResponseWriter, r *http.Request, orgID, userID, id string) bool {
+	var updated *domain.Task
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		updated, e = tx.Tasks.GetSystem(r.Context(), orgID, id)
+		return e
+	}); err != nil {
+		internalError(w, "tasks", err)
+		return false
+	}
+	if updated == nil {
+		notFound(w, "task")
+		return false
+	}
+	writeJSON(w, http.StatusOK, taskToJSON(*updated))
+	return true
 }
 
 // patchableTaskStatuses is the set PATCH accepts. 'queued' isn't among them:
@@ -721,7 +761,7 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
+	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
 // handleRequeue is the state-driven counterpart to handleUndo: same
@@ -782,7 +822,7 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 
 	s.finalizeRequeue(r, orgID, userID, id, task)
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": taskStatusQueued})
+	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
 // discardOutcome describes how the task ended up after the user

@@ -207,7 +207,7 @@ func TestReDeriveAfterScoring_BotClaimed_Skips(t *testing.T) {
 	}
 	// Stamp the bot claim — task stays status='queued' but the
 	// responsibility axis is committed.
-	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp agent claim: %v", err)
 	}
 

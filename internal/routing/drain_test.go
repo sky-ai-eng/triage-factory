@@ -153,7 +153,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 	); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
-	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp claim: %v", err)
 	}
 
@@ -185,7 +185,7 @@ func TestDrainTask_ClosedTask(t *testing.T) {
 
 	// Close the task between enqueue and drain — simulates an inline close
 	// check or entity cascade resolving the task while a firing waits.
-	if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, taskID, "test_close", ""); err != nil {
+	if _, err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, taskID, "test_close", ""); err != nil {
 		t.Fatalf("close task: %v", err)
 	}
 
@@ -226,7 +226,7 @@ func TestRevertTaskStatus_PreservesClaim(t *testing.T) {
 	// we're testing revert independently of the caller path, so set
 	// status to something visibly distinct so the assertion catches
 	// a regression where SetStatus isn't called either.)
-	if err := testTaskStore(database).SetStatus(t.Context(), runmode.LocalDefaultOrgID, taskID, "snoozed"); err != nil {
+	if _, err := testTaskStore(database).SetStatus(t.Context(), runmode.LocalDefaultOrgID, taskID, "snoozed"); err != nil {
 		t.Fatalf("pre-stage status: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestDrainTask_SnoozedTask(t *testing.T) {
 
 	// Bot-claim the task (drain would otherwise short-circuit on
 	// claim_changed before the lifecycle check) AND snooze it.
-	if err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
+	if _, err := testTaskStore(database).SetClaimedByAgent(t.Context(), runmode.LocalDefaultOrgID, taskID, runmode.LocalDefaultAgentID); err != nil {
 		t.Fatalf("stamp claim: %v", err)
 	}
 	if _, err := database.Exec(
@@ -358,7 +358,7 @@ func TestDrainTask_MultipleStaleFirings(t *testing.T) {
 	}
 
 	// Close the task so all three drain as task_closed.
-	if err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, taskID, "test_close", ""); err != nil {
+	if _, err := testTaskStore(database).Close(t.Context(), runmode.LocalDefaultOrgID, taskID, "test_close", ""); err != nil {
 		t.Fatalf("close task: %v", err)
 	}
 

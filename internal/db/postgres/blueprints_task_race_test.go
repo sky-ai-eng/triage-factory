@@ -276,7 +276,7 @@ func TestBlueprintStore_Postgres_FencedInsertCarriesTaskClaim(t *testing.T) {
 		taskID := fx.newTask(t)
 		// The user claims the task in the window before the insert: they win
 		// the claim, and the run must still commit.
-		if err := stores.Tasks.SetClaimedByUser(ctx, fx.orgID, taskID, fx.userID); err != nil {
+		if _, err := stores.Tasks.SetClaimedByUser(ctx, fx.orgID, taskID, fx.userID); err != nil {
 			t.Fatalf("SetClaimedByUser: %v", err)
 		}
 		br := fx.firing(t, taskID)

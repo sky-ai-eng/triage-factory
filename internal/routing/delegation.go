@@ -230,10 +230,10 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 	// claim. Skipped when the acting team already is the owner (the common
 	// path, and same-team multi-prompt where an active conversation may exist).
 	if actingTeamID != "" && actingTeamID != teamIDValue(task) {
-		if err := r.tasks.SetOwnerTeamSystem(ctx, orgID, task.ID, actingTeamID); err != nil {
+		if updated, err := r.tasks.SetOwnerTeamSystem(ctx, orgID, task.ID, actingTeamID); err != nil {
 			routerLog.Error("failed to consolidate owner team before fire", "task_id", task.ID, "error", err)
 		} else {
-			task.TeamID = teamIDPtr(actingTeamID)
+			task.TeamID = updated.TeamID
 		}
 	}
 	// The claim rides the fenced blueprint-run insert's transaction (see
@@ -953,7 +953,7 @@ var errDrainTaskBusy = errors.New("routing: task busy at drain fire; firing rele
 // completion, swipe-undo) clear the claim cols on their own — they
 // don't go through this helper.
 func (r *Router) revertTaskStatus(ctx context.Context, orgID, taskID, status string) {
-	if err := r.tasks.SetStatusSystem(ctx, orgID, taskID, status); err != nil {
+	if _, err := r.tasks.SetStatusSystem(ctx, orgID, taskID, status); err != nil {
 		routerLog.Error("failed to revert task status", "task_id", taskID, "status", status, "error", err)
 		return
 	}

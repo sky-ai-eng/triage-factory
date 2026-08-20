@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -447,6 +448,22 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 		r.s.handleTaskClaim(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("cross-team admin override: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		// The response is the post-write task resource, served through the
+		// admin pool: consolidation to teamB moved the row out of the acting
+		// admin's OWN RLS visibility, so an RLS-scoped response read would
+		// have answered 404 for a write that landed.
+		var got struct {
+			ID              string `json:"id"`
+			ClaimedByUserID string `json:"claimed_by_user_id"`
+			TeamID          string `json:"team_id"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+		}
+		if got.ID != taskID || got.ClaimedByUserID != crossTarget || got.TeamID != teamB {
+			t.Errorf("response = {id:%q claimed_by_user_id:%q team_id:%q}, want {%q %q %q}",
+				got.ID, got.ClaimedByUserID, got.TeamID, taskID, crossTarget, teamB)
 		}
 		var claimed, gotTeam sql.NullString
 		if err := r.h.AdminDB.QueryRow(

@@ -142,12 +142,17 @@ func (s *Spawner) terminateBlueprint(
 			var closeErr error
 			if triggerType == "manual" {
 				closeErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-					return ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
+					_, err := ts.Tasks.Close(bgCtx, orgID, taskID, "run_completed", "")
+					return err
 				})
 			} else {
-				closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
+				_, closeErr = s.tasks.CloseSystem(bgCtx, orgID, taskID, "run_completed", "")
 			}
-			if closeErr != nil {
+			// ErrNoSuchTask here means a concurrent close already landed —
+			// harmless (Close's WHERE clause is state-guarded, so this branch
+			// only reaches a task that's still non-terminal or missing); any
+			// other error is worth a warning.
+			if closeErr != nil && !errors.Is(closeErr, db.ErrNoSuchTask) {
 				blueprintLog.Warn("close task failed", "task", taskID, "error", closeErr)
 			}
 		}

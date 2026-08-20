@@ -2,12 +2,21 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 //go:generate go run github.com/vektra/mockery/v2 --name=TaskStore --output=./mocks --case=underscore --with-expecter
+
+// ErrNoSuchTask means an id-keyed write matched no row: the id names nothing,
+// or names a row whose current state refused the guard a write's WHERE
+// clause carries (Close on an already-terminal task, for instance). Both
+// collapse to the same sentinel — the same answer a rows-affected probe gave
+// either way, since RETURNING can't itself distinguish "missing" from "guard
+// didn't match" — so a caller that needs the distinction re-reads.
+var ErrNoSuchTask = errors.New("no task with that id")
 
 // AgentClaimStamp is the guarded task-claim write that rides *inside*
 // another store method's transaction — the bot taking responsibility for a
@@ -127,14 +136,16 @@ type TaskListFilter struct {
 //     three-state HandoffResult so callers can distinguish no-op
 //     from refused.
 //
-// TODO(TFAC-860): these single-row writes still return a bare error rather
-// than the row they persisted — Bump, BumpSystem, Close, CloseSystem,
-// RecordEvent, RecordEventSystem, SetClaimedByAgent, SetClaimedByUser,
-// SetOwnerTeam, SetOwnerTeamSystem, SetStatus, SetStatusSystem. Converging
-// them needs a shape decision first: the point read projects a task joined to
-// its entity, which SQLite's RETURNING cannot produce, so the ticket picks
-// between splitting the row from its annotation and reading the annotation
-// alongside.
+// Returned-row shape (TFAC-860): Get's point read projects a task joined to
+// its entity (title, url, source fields, the open-subtask and Slack-message
+// counts) — a join a single UPDATE ... RETURNING cannot reproduce, and
+// SQLite has no data-modifying CTE to fake it with. Every write below that
+// returns a row therefore returns tasks' OWN columns only, via the same bare
+// projection on both dialects: the "Join-populated display fields" on
+// domain.Task (see its doc comment) stay at their zero value on a write's
+// return. This is TeamsStore.Role's shape (PR #935) applied here — the
+// entity fields are the read's join, not the row's, and a write has no view
+// on them. A caller that needs them calls Get.
 type TaskStore interface {
 	// --- Lookup ---
 
@@ -248,25 +259,30 @@ type TaskStore interface {
 	// even when the creation-time owner team was skipped (e.g. it had auto-
 	// delegation disabled while a lower-priority team fires). The Postgres
 	// impl resolves the LocalDefaultTeamID sentinel to the org's canonical
-	// team. Empty teamID is a no-op.
-	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) error
+	// team. Empty teamID is a no-op on the column (the stored team_id is
+	// unchanged) but still requires taskID to name a row: a miss is
+	// ErrNoSuchTask, same as every other write here.
+	SetOwnerTeam(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
 
 	// Bump records a new matching event on an existing task — if
 	// the task is snoozed, un-snoozes it (wake-on-bump). Does NOT
 	// update primary_event_id; subsequent events are tracked via
 	// the task_events junction (see RecordEvent).
-	Bump(ctx context.Context, orgID, taskID, eventID string) error
+	Bump(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
 
 	// Close sets a task to done with the given close reason.
 	// closeEventType may be empty (only set when close_reason is
-	// "auto_closed_by_event"). No-op on terminal rows.
-	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+	// "auto_closed_by_event"). The WHERE clause is state-guarded (status NOT
+	// IN ('done', 'dismissed')), so an already-terminal task and a missing
+	// id answer the same way: ErrNoSuchTask. A caller that needs to tell
+	// them apart re-reads.
+	Close(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
 	// SetStatus updates the lifecycle status only — claim cols are
 	// unaffected. The only production caller is
 	// revertTaskStatus in DrainTask's mark-fired-failure rollback;
 	// every other lifecycle write routes through a guarded helper.
-	SetStatus(ctx context.Context, orgID, taskID, status string) error
+	SetStatus(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
 
 	// AdvanceStatusForUser flips a user-claimed task's lifecycle
 	// status forward (board manual transitions). Guards:
@@ -283,6 +299,13 @@ type TaskStore interface {
 
 	// RecordEvent inserts into the task_events junction (task_id,
 	// event_id, kind). Idempotent on (task_id, event_id).
+	//
+	// Exempt from the returned-row rule, by decision rather than by shape:
+	// the insert is ON CONFLICT DO NOTHING (a replay re-recording the same
+	// (task, event) pair), the row is an append-only audit trail with no
+	// display surface, and no caller — the router's dispatch bookkeeping,
+	// the factory's spawn marker — does anything with it beyond checking the
+	// error. Same call as OperatorStore.Add.
 	RecordEvent(ctx context.Context, orgID, taskID, eventID, kind string) error
 
 	// --- Claim mutations ---
@@ -292,11 +315,11 @@ type TaskStore interface {
 	// (auto-trigger) or HandoffAgentClaim (user-initiated) instead;
 	// this primitive survives for test fixtures and migration
 	// backfills only.
-	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) error
+	SetClaimedByAgent(ctx context.Context, orgID, taskID, agentID string) (domain.Task, error)
 
 	// SetClaimedByUser is the symmetric unconditional user-claim
 	// stamp. Same scope-warning as SetClaimedByAgent.
-	SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) error
+	SetClaimedByUser(ctx context.Context, orgID, taskID, userID string) (domain.Task, error)
 
 	// StampAgentClaimIfUnclaimed is the race-safe agent-claim stamp
 	// for the auto-trigger path. Guards on (a) no user claim,
@@ -447,9 +470,9 @@ type TaskStore interface {
 	// SetVisibilityTeams.
 	SetVisibilityTeamsSystem(ctx context.Context, orgID, taskID string, teamIDs []string) error
 	VisibilityTeamsSystem(ctx context.Context, orgID, taskID string) ([]string, error)
-	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) error
-	BumpSystem(ctx context.Context, orgID, taskID, eventID string) error
-	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) error
+	SetOwnerTeamSystem(ctx context.Context, orgID, taskID, teamID string) (domain.Task, error)
+	BumpSystem(ctx context.Context, orgID, taskID, eventID string) (domain.Task, error)
+	CloseSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType string) (domain.Task, error)
 
 	// CloseWithConversationCancelIntentSystem is the close the router performs: the
 	// task's terminal flip, its task_events audit row, and the durable STOP
@@ -487,7 +510,10 @@ type TaskStore interface {
 	// for — not rejected here, but no caller does it.
 	CloseWithConversationCancelIntentSystem(ctx context.Context, orgID, taskID, closeReason, closeEventType, closingEventID string) (closed bool, activeConversationIDs []string, err error)
 
-	SetStatusSystem(ctx context.Context, orgID, taskID, status string) error
+	SetStatusSystem(ctx context.Context, orgID, taskID, status string) (domain.Task, error)
+
+	// RecordEventSystem mirrors RecordEvent's exemption — see its doc
+	// comment.
 	RecordEventSystem(ctx context.Context, orgID, taskID, eventID, kind string) error
 
 	// MarkEventInjectedSystem flips the (task_id, event_id) timeline row's

@@ -852,14 +852,18 @@ func (ah *artifactsHandler) closeTaskIfTerminalAndResolved(ctx context.Context, 
 		return
 	}
 
-	// Close in its own tx. Tasks.Close is idempotent (UPDATE ... WHERE status NOT IN
+	// Close in its own tx. Tasks.Close's WHERE is state-guarded (status NOT IN
 	// ('done','dismissed')), so two concurrent resolves that both pass the gate
-	// above race harmlessly — the second close is a 0-row no-op (worst case a
-	// duplicate task_updated broadcast), not an error.
+	// above race harmlessly: the second close matches nothing and answers
+	// db.ErrNoSuchTask, which this treats as "already closed by the other
+	// racer" rather than a real failure.
 	if err := ah.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		return tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+		_, err := tx.Tasks.Close(ctx, orgID, taskID, "run_completed", "")
+		return err
 	}); err != nil {
-		artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "conversation", conversationID, "error", err)
+		if !errors.Is(err, db.ErrNoSuchTask) {
+			artifactsLog.Warn("terminal-on-last task close failed", "task", taskID, "conversation", conversationID, "error", err)
+		}
 		return
 	}
 	// Move the card to Done on peer boards without a refetch.

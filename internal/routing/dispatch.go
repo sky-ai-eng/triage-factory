@@ -650,7 +650,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		}
 		routerLog.Info("created task", "task_id", task.ID, "event_type", evt.EventType, "entity_id", entityID, "owner_team", routing.ownerTeam, "visible_teams", len(routing.visibleTeams))
 	} else {
-		if err := r.tasks.BumpSystem(ctx, orgID, task.ID, evt.ID); err != nil {
+		if _, err := r.tasks.BumpSystem(ctx, orgID, task.ID, evt.ID); err != nil {
 			routerLog.Error("failed to bump task", "task_id", task.ID, "error", err)
 		}
 		if err := r.tasks.RecordEventSystem(ctx, orgID, task.ID, evt.ID, "bumped"); err != nil {
