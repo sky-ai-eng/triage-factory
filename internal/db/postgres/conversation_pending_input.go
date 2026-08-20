@@ -41,9 +41,9 @@ func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, convers
 		return "", "", false, err
 	}
 	defer rows.Close()
-	var queued []pendingRow
+	var queued []db.PendingRow
 	for rows.Next() {
-		var r pendingRow
+		var r db.PendingRow
 		if err := rows.Scan(&r.Content, &r.UserID); err != nil {
 			return "", "", false, err
 		}
@@ -52,10 +52,10 @@ func (s *conversationPendingInputStore) Peek(ctx context.Context, orgID, convers
 	if err := rows.Err(); err != nil {
 		return "", "", false, err
 	}
-	message, userID, ok := joinPendingRows(queued)
+	message, userID, ok := db.JoinPendingRows(queued)
 	return message, userID, ok, nil
 }
 
 func (s *conversationPendingInputStore) Consume(ctx context.Context, orgID, conversationID string) (string, string, bool, error) {
-	return consumePendingInput(ctx, s.admin, orgID, conversationID)
+	return db.ConsumePendingInput(flushPendingInput(ctx, s.admin, orgID, conversationID, ""))
 }
