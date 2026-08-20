@@ -17,20 +17,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot is the incident, pinned.
+// TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot is the incident, pinned:
+// a stop of a run whose process is on THIS pod used to leave the whole park to
+// the dying goroutine, which snapshotted before it flipped, so the run kept
+// reporting WORKING for as long as the capture took and a follow-up in that
+// window was refused for a row that was not parked yet.
 //
-// A stop of a run whose process is on THIS pod used to hand the whole park to
-// the dying goroutine, which snapshotted before it flipped — so the run kept
-// reporting WORKING for as long as the capture took, and a follow-up sent in
-// that window was refused because the row was not parked yet. The verb now
-// takes the same fast half a cross-pod stop takes: kill, park, release, drain.
-//
-// The persist is held open at its upload for the whole assertion, so "the row
-// is parked before the snapshot completes" is a fact about ordering rather
-// than a race the test might win. The follow-up is sent in exactly that
-// window, under the SDK runtime, which is what makes the pending state record
-// load-bearing: without it the wake gate has no warm tree and no blob and can
-// only answer 410.
+// The persist is held open at its upload for the whole assertion, so the
+// ordering is a fact rather than a race the test might win. The follow-up goes
+// out in exactly that window under the SDK runtime, which is what makes the
+// pending record load-bearing: without it the gate has no tree and no blob and
+// can only answer 410.
 func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
@@ -44,9 +41,9 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	markEngaged(t, database, conversationID)
 	namespace := blueprintRunIDForConversation(t, database, conversationID)
 
-	// The engagement: a real worktree with uncommitted work in it, and a
-	// cancel handle registered exactly as a live run's is, so the stop verb
-	// finds a local process to kill.
+	// The engagement: a real worktree with uncommitted work, and a cancel
+	// handle registered as a live run's is, so the stop verb finds a local
+	// process to kill.
 	wt := t.TempDir()
 	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "half-finished work")
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -111,15 +108,13 @@ func TestStop_LiveLocalEngagement_ParksBeforeTheSnapshot(t *testing.T) {
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-killed")
 }
 
-// TestParkConversationOpen_FlipsBeforeTheSnapshot pins the ordering for the
-// park a user never asked for — the idle / turn-end one, whose "shows WORKING
-// for a second or two after the agent finishes" tail is the same serialization
-// the stop verb had.
+// TestParkConversationOpen_FlipsBeforeTheSnapshot pins the same ordering for
+// the park a user never asked for — the idle / turn-end one, whose "still
+// WORKING a second after the agent finishes" tail was the same serialization.
 //
-// The record is asserted from inside the upload, which is the only place the
-// invariant is visible: by the time the park returns, pending has already
-// become written and a test reading afterwards could not tell whether the
-// record ever preceded the flip.
+// Asserted from inside the upload, the only place the invariant is visible: by
+// the time the park returns, pending has become written and a test reading
+// afterwards could not tell whether the record ever preceded the flip.
 func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
@@ -161,6 +156,69 @@ func TestParkConversationOpen_FlipsBeforeTheSnapshot(t *testing.T) {
 	}
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-idle")
 	assertSnapshotPresent(t, s, namespace, true)
+}
+
+// TestParkConversationOpen_RetriesALostLifecycleOpen: the pre-flip open is
+// best-effort — a store hiccup must not hold up a stop — but it must not leave
+// the persist untracked either. Untracked is the one shape a resume cannot
+// read: no pending to wait on, no written to trust, and an SDK conversation
+// reading permanently expired until the blob lands. So the persist re-opens
+// what the park could not.
+func TestParkConversationOpen_RetriesALostLifecycleOpen(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s, database, conversationID, taskID := setupAdvanceFixture(t, "park-lost-open")
+	wireBlobStore(t, s)
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
+	flaky := &flakyBeginSnapshotStore{WorkspaceSnapshotStore: s.workspaceSnapshots, failFirst: true}
+	s.workspaceSnapshots = flaky
+
+	wt := t.TempDir()
+	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work the record almost lost track of")
+
+	if fenced := s.parkConversationOpen(context.Background(), liveParkContext{
+		orgID:          runmode.LocalDefaultOrgID,
+		conversationID: conversationID,
+		taskID:         taskID,
+		namespace:      namespace,
+		claudeCwd:      wt,
+		triggerType:    "event",
+		claimID:        "claim-flaky",
+		reason:         db.ParkIdle(),
+	}, ""); fenced {
+		t.Fatal("parkConversationOpen reported a fence trip on an unfenced store")
+	}
+
+	if flaky.begins < 2 {
+		t.Errorf("BeginSnapshotSystem called %d time(s); the persist must retry an open the park lost", flaky.begins)
+	}
+	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-flaky")
+	assertSnapshotPresent(t, s, namespace, true)
+}
+
+// TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded: the upload finishes
+// before the record's completing CAS and before a dying writer stops
+// answering, so every condition that ends the wait is a moment the blob may
+// already be there. Giving up on the writer without looking would discard a
+// snapshot sitting in the store — a fresh workspace for a native conversation,
+// a 410 for an SDK one, both for nothing.
+func TestAwaitSnapshotBlob_TakesABlobThatAlreadyLanded(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	s, database, conversationID, _ := setupAdvanceFixture(t, "wait-already-landed")
+	wireBlobStore(t, s)
+	s.snapshotWaitPollInterval = 5 * time.Millisecond
+	namespace := blueprintRunIDForConversation(t, database, conversationID)
+
+	// The state the crash leaves behind: pending forever, its writer gone
+	// (no claim row at all, so the liveness read answers "not coming"), and
+	// the blob nonetheless present.
+	stageSnapshotState(t, s, namespace, "claim-vanished", domain.WorkspaceSnapshotPending)
+	putTestSnapshot(t, s, namespace)
+
+	appeared, _ := s.awaitSnapshotBlob(context.Background(), runmode.LocalDefaultOrgID, namespace)
+	if !appeared {
+		t.Error("the wait reported no snapshot while one was in the store; a resume would rebuild over work that survived")
+	}
 }
 
 // TestWorkspaceRecoverable_LadderBelowTheBlob covers the three answers the wake
@@ -245,8 +303,8 @@ func TestWorkspaceRecoverable_LadderBelowTheBlob(t *testing.T) {
 
 // TestEnsureWorkspace_WaitsOutAnInFlightPersist is the claim-time half of the
 // pending rung: the wake let the follow-up through because a persist was in
-// flight, and the claim that lands on another executor has to actually wait
-// for it rather than declare the workspace gone.
+// flight, so the claim has to actually wait for it rather than declare the
+// workspace gone.
 func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
@@ -267,9 +325,8 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 	stageClaim(t, database, conversationID, writerClaim, "exec-writer")
 	stageInstance(t, database, "exec-writer", time.Now())
 
-	// The persist lands a beat into the wait, and it is a real one: the resume
-	// proceeds on the actual snapshot rather than on a fallback, so the blob it
-	// rehydrates from has to be a blob a park would really have written.
+	// The persist lands a beat into the wait, and it is a real one — the blob
+	// this rehydrates from has to be a blob a park would really have written.
 	writerTree := t.TempDir()
 	writeFile(t, filepath.Join(writerTree, "_tfac", "notes.txt"), "the work the writer was still storing")
 	persisted := make(chan error, 1)
@@ -301,10 +358,10 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 }
 
 // TestEnsureWorkspace_FallsBackWhenTheWriterIsGone is the other end of the
-// wait. The engagement that owed the snapshot died without writing it, and the
-// two runtimes part company: native gets a workspace built from nothing and an
-// honest provenance to tell the agent about it, SDK gets the expired answer
-// because the session file it would resume from was inside the blob.
+// wait: the engagement that owed the snapshot died without writing it, and the
+// runtimes part company — native gets a workspace built from nothing plus an
+// honest provenance, SDK gets the expired answer because the session file it
+// would resume from was inside the blob.
 func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 	for _, runtime := range []string{"native", "sdk"} {
 		t.Run(runtime, func(t *testing.T) {
@@ -372,9 +429,9 @@ func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 }
 
 // TestEnsureWorkspace_HonorsTheWaitCap covers the writer that neither finishes
-// nor dies. Its executor keeps heartbeating and its record stays pending
-// forever, so the only thing that can end the wait is the bound — which is
-// what TF_SNAPSHOT_WAIT_SEC configures and why it exists.
+// nor dies: its executor keeps heartbeating and its record stays pending, so
+// the bound is the only thing left to end the wait — which is what
+// TF_SNAPSHOT_WAIT_SEC configures and why it exists.
 func TestEnsureWorkspace_HonorsTheWaitCap(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	setupGitTestEnv(t)
@@ -435,6 +492,24 @@ func TestParseSnapshotWaitTimeout(t *testing.T) {
 
 // --- fixtures ---
 
+// flakyBeginSnapshotStore fails the first attempt to open a key's lifecycle
+// record and counts every attempt, so a test can drive the park's
+// best-effort open into the persist's retry.
+type flakyBeginSnapshotStore struct {
+	db.WorkspaceSnapshotStore
+	failFirst bool
+	begins    int
+}
+
+func (f *flakyBeginSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, blueprintRunID, claimID string) error {
+	f.begins++
+	if f.failFirst {
+		f.failFirst = false
+		return errors.New("workspace_snapshots write failed")
+	}
+	return f.WorkspaceSnapshotStore.BeginSnapshotSystem(ctx, orgID, blueprintRunID, claimID)
+}
+
 // heldPutStorage blocks inside Put until released, so a test can hold a
 // persist open and assert what the rest of the system reads while it runs.
 type heldPutStorage struct {
@@ -474,9 +549,9 @@ func failingFreshBuilder(t *testing.T) freshWorkspaceBuilder {
 	}
 }
 
-// stageSnapshotState writes a lifecycle record in the requested state under
-// the requested writer, going through the store's own begin/finish so the
-// staged row is one the production writers could have produced.
+// stageSnapshotState writes a lifecycle record in the requested state through
+// the store's own begin/finish, so the staged row is one a production writer
+// could have produced.
 func stageSnapshotState(t *testing.T, s *Spawner, keyID, claimID, state string) {
 	t.Helper()
 	ctx := context.Background()
@@ -492,8 +567,8 @@ func stageSnapshotState(t *testing.T, s *Spawner, keyID, claimID, state string) 
 	}
 }
 
-// stageClaim mints a released claim with a chosen id and executor — the shape
-// a snapshot's writer has by the time anyone waits on its blob.
+// stageClaim mints a released claim — the shape a snapshot's writer has by the
+// time anyone waits on its blob.
 func stageClaim(t *testing.T, database *sql.DB, conversationID, claimID, executorID string) {
 	t.Helper()
 	if _, err := database.Exec(`
@@ -504,8 +579,8 @@ func stageClaim(t *testing.T, database *sql.DB, conversationID, claimID, executo
 	}
 }
 
-// stageInstance registers an executor with a chosen last heartbeat, which is
-// the only input to "is that writer still going".
+// stageInstance registers an executor with a chosen last heartbeat, the only
+// input to "is that writer still going".
 func stageInstance(t *testing.T, database *sql.DB, executorID string, lastBeat time.Time) {
 	t.Helper()
 	if _, err := database.Exec(`

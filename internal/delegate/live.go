@@ -461,47 +461,43 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 // likely to want back. A stop is a park with a reason attached.
 func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
 	// The flip does not wait on the capture, and the durable state record is
-	// what makes that safe. It is opened FIRST — before the flip, never after
-	// — so no observer can ever see a row that says resumable with neither a
-	// blob nor an account of one: the record names a persist in flight and the
-	// engagement that owes it, and the wake gate reads it as recoverable (see
-	// workspaceRecoverable). Reversed, the window between the flip and the
-	// record would answer "expired" for a workspace that is being written.
+	// what makes that safe. It is opened FIRST — before the flip, never after —
+	// so no observer can see a row that says resumable with neither a blob nor
+	// an account of one: the record names a persist in flight and who owes it,
+	// which the wake gate reads as recoverable (see workspaceRecoverable).
+	// Reversed, the window between flip and record would answer "expired" for a
+	// workspace that is being written.
 	//
-	// Everything the snapshot itself costs — a git capture, a tar, a blob PUT
-	// — therefore falls after the status a person is watching. It is
-	// best-effort as ever; the kept warm worktree is the fast path. Skipped
-	// entirely when there is no workspace yet (a cancel during setup), which
-	// the persist would reject anyway.
+	// Everything the snapshot costs — a git capture, a tar, a blob PUT —
+	// therefore falls after the status a person is watching. Best-effort as
+	// ever, and skipped entirely with no workspace to capture (a cancel during
+	// setup), which the persist would reject anyway. A record that could not be
+	// opened does not hold up the park either: the flip goes ahead and the
+	// persist below retries the open on its own way through.
 	snapCtx := context.WithoutCancel(ctx)
 	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
-	lease := snapshotLease{}
-	if willSnapshot {
-		lease = snapshotLease{begun: true, owned: s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)}
-	}
+	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
 
 	fenced = s.markConversationOpen(ctx, park)
-	if fenced && lease.owned && park.reason.Deliberate {
+	if fenced && leaseHeld && park.reason.Deliberate {
 		// The one refusal whose `open` is real: control parked this row on the
-		// user's behalf and released the claim, seconds before this teardown
-		// arrived (see Spawner.stop). Control announced that park before any
-		// persist was owed, so a watcher that read the run then saw no
-		// workspace anywhere and disabled its composer. The record opened
-		// above is what changes that answer, so this is the moment to say so —
-		// rather than when the blob lands, which is later and by then says
-		// nothing a watcher is still waiting on.
+		// user's behalf and released the claim before this teardown arrived
+		// (see Spawner.stop), announcing that park while no persist was yet
+		// owed — so a watcher reading the run then saw no workspace anywhere
+		// and disabled its composer. The record opened above is what changes
+		// that answer, so this is the moment to say so, not when the blob
+		// lands.
 		//
-		// Gated on the record having landed, because without it there is
-		// nothing making the row resumable to announce. And on a DELIBERATE
-		// park: the other refusal — a successor taking the conversation out
-		// from under a live engagement — leaves it running under someone else,
-		// and repeating a parked status there would be this teardown reporting
-		// a state that isn't the row's.
+		// Gated on the record having landed, without which there is nothing to
+		// announce. And on a DELIBERATE park: the other refusal — a successor
+		// taking the conversation out from under a live engagement — leaves it
+		// running under someone else, and repeating a parked status there would
+		// be this teardown reporting a state that isn't the row's.
 		s.broadcastConversationResumable(park.orgID, park.conversationID)
 	}
 
 	if willSnapshot {
-		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, lease); err != nil {
+		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {
 			delegateLog.Warn("snapshot workspace after parking open failed", "conversation", park.conversationID, "error", err)
 		}
 	}

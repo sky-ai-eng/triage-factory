@@ -204,12 +204,11 @@ type ConversationQueueStore interface {
 	// something still names its id.
 	//
 	// It exists for the resume ladder's liveness question. A workspace-snapshot
-	// state row names its writer by CLAIM, not by executor, and deliberately so
-	// — the write belongs to one engagement, not to whichever process happens
-	// to hold the conversation now. Answering "is that persist still coming"
-	// therefore needs this hop before the instance registry can be asked, and
-	// the writing claim is usually released by then, so no live-claim read
-	// reaches it.
+	// state row names its writer by CLAIM, deliberately — the write belongs to
+	// one engagement, not to whichever process holds the conversation now — so
+	// "is that persist still coming" needs this hop before the instance
+	// registry can be asked, and the writing claim is usually released by then,
+	// out of reach of any live-claim read.
 	//
 	// Org-scoped rather than cross-org: the caller is an executor resolving its
 	// own conversation's history, not an operator surface.

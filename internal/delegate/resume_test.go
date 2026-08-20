@@ -123,27 +123,23 @@ func TestFollowUp_TerminalRefused(t *testing.T) {
 // look identically resumable from the conversation alone, so the whole
 // distinction lives in what is true around them:
 //
-//   - workspace reaped by the retention TTL → 410 Gone, for an SDK
+//   - workspace reaped by the retention TTL → 410 Gone for an SDK
 //     conversation. A native one is NOT refused: its continuity is the
-//     transcript in `messages`, so the claim builds it a fresh workspace and
-//     tells it what that cost.
+//     transcript in `messages`, so the claim builds it a fresh workspace.
 //   - workspace intact, blueprint cancelled → 409 concluded. A blueprint that
 //     merely FINISHED is not in this set — that is the follow-up case and it
 //     succeeds; called off is the one that still refuses.
 //   - both → whichever refusal is real for that runtime. Under the SDK the
 //     workspace answer wins, because telling someone their sequence was
-//     cancelled implies there is something left to cancel back into and there
-//     isn't; a native row has no workspace refusal to raise, so the blueprint's
-//     answer is the one left standing.
+//     cancelled implies something left to cancel back into and there isn't; a
+//     native row has no workspace refusal, so the blueprint's answer stands.
 //
 // The third case is not hypothetical: it is every run stopped by an older
-// build. The old cancel path discarded the snapshot AND cancelled the
-// blueprint, so a migrated row has both conditions.
+// build, whose cancel path discarded the snapshot AND cancelled the blueprint.
 //
-// Every case runs under BOTH runtimes. Most of the ladder is shared and answers
-// identically whatever drives the row; the workspace rung is where the two
-// engines genuinely differ, and running both is how that difference stays a
-// stated contract rather than a surprise.
+// Every case runs under BOTH runtimes. Most of the ladder is shared; the
+// workspace rung is where the engines genuinely differ, and running both keeps
+// that a stated contract rather than a surprise.
 func TestFollowUp_RefusalTaxonomy(t *testing.T) {
 	park := func(t *testing.T, database *sql.DB, id, runtime, blueprintStatus string, keepWorkspace bool) *Spawner {
 		t.Helper()

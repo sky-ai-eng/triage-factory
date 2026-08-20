@@ -231,14 +231,14 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// verb) or finalizes it off the signal raised above (the lifecycle
 	// teardown).
 	//
-	// Hastening only. Whether the process is on this pod or another one, the
-	// kill is a signal and the park below is the record — so this call's
-	// answer changes nothing about what happens next, and is deliberately not
-	// branched on. Returning here on a local handle would hand the park to the
-	// dying goroutine and serialize the user-visible status flip behind that
-	// goroutine's workspace capture: the run would keep reporting WORKING for
-	// as long as the capture took, and a follow-up sent inside that window
-	// would be refused for a row that is not parked yet.
+	// Hastening only. Whether the process is on this pod or another, the kill
+	// is a signal and the park below is the record, so this call's answer
+	// changes nothing about what happens next and is deliberately not branched
+	// on. Returning here on a local handle would hand the park to the dying
+	// goroutine and serialize the user-visible flip behind that goroutine's
+	// workspace capture — the run reporting WORKING for as long as the capture
+	// took, and a follow-up inside that window refused for a row that is not
+	// parked yet.
 	if !s.getController().Cancel(conversationID) {
 		// No local handle. Per the reply-leg contract, the kill is fire-and-
 		// forget cross-pod: the DB-only write below is already the source of
@@ -253,18 +253,15 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// is also a defensive catch for any other "row not terminal" edge case —
 	// including a run already parked `open` with no subprocess to kill.
 	//
-	// We also have to drain the task's firing queue ourselves. The killed
-	// goroutine drains from its own defer (Delegate's defer / the resume
-	// claim's defer) and this verb now drains alongside it, which is safe:
+	// We also have to drain the task's firing queue ourselves: a stop that
+	// finds no goroutine — a run parked `open`, or one owned by another pod —
+	// has no defer to piggy-back on, and an auto-fired run stopped in that
+	// state would leave the queue stuck until some other run on that task
+	// terminated. Draining alongside a killed goroutine's own defer is safe:
 	// DrainTask serializes per task and every pop is a guarded status
-	// transition, so whichever runs first fires the queued intent and the
-	// other finds nothing to pop. The drain has to be here regardless,
-	// because a stop that finds no goroutine at all — a run parked `open`,
-	// or one owned by another pod — has no defer to piggy-back on, and an
-	// auto-fired run stopped in that state would leave the task's firing
-	// queue stuck until some other run on that task terminated. The preflight
-	// above already loaded the run, so both the trigger type and the task the
-	// drain is keyed on are already in hand.
+	// transition, so whichever runs first fires the queued intent and the other
+	// finds nothing to pop. The preflight above already loaded the run, so the
+	// trigger type and the task the drain is keyed on are in hand.
 	triggerType := conv.TriggerType
 
 	// User-initiated stop: write under the stopping user's
@@ -285,21 +282,17 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	// No snapshot is taken here, and that is a sequencing contract rather than
 	// an absence. The verb's whole job is the fast half: park the row and
 	// release the claim at once, so the user gets a composer the moment they
-	// ask for one. It could not do the other half anyway on the ordinary
-	// cross-pod stop — the process registry consulted above is per-pod and
-	// control never holds the worktree — and on a same-pod stop it must not,
-	// because a capture's duration is exactly what the user should never wait
-	// on.
+	// ask for one. It could not do the other half on a cross-pod stop anyway —
+	// the process registry consulted above is per-pod and control never holds
+	// the worktree — and on a same-pod stop it must not, a capture's duration
+	// being exactly what the user should never wait on.
 	//
 	// The other half is the killed engagement's own teardown, arriving after:
-	// it records that a persist is owed, finds its status flip refused by the
-	// claim fence this release just tripped, and writes the snapshot anyway
-	// (see parkConversationOpen, which owns that ordering).
-	//
-	// A follow-up sent between the two is accepted rather than refused as
-	// expired: the pending state record names the persist in flight and its
-	// writer, so the wake gate can tell "coming" from "gone" — which is what
-	// makes parking before the blob exists safe at all.
+	// it records that a persist is owed, finds its flip refused by the claim
+	// fence this release just tripped, and writes the snapshot anyway (see
+	// parkConversationOpen). A follow-up sent between the two is accepted
+	// rather than refused as expired — the pending record names the persist and
+	// its writer, which is what makes parking before the blob exists safe.
 	var (
 		flipped bool
 		err     error

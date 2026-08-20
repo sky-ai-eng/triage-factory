@@ -49,9 +49,8 @@ func withEmptyBlobStore(t *testing.T, s *Server) *delegate.Spawner {
 // message that answers 410.
 //
 // SDK, because that is the runtime the answer belongs to: its session
-// transcript lived inside the snapshot, so a lost workspace ends the
-// conversation. A native row in the same state is NOT expired — it resumes
-// into a workspace built from nothing — and the case below covers it.
+// transcript lived inside the snapshot. A native row in the same state is NOT
+// expired — the case below covers it.
 func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)
@@ -72,10 +71,9 @@ func TestHandleAgentStatus_ResumableWorkspaceExpired(t *testing.T) {
 }
 
 // TestHandleAgentStatus_ResumableNativeWithoutAWorkspace is the other half of
-// the split, on the same fixture: a native conversation whose workspace is
-// equally gone reads resumable, because the transcript this read is attached
-// to is the resume state and the claim builds a fresh tree around it. The
-// composer stays live, and the send it accepts is one that works.
+// the split on the same fixture: an equally gone workspace reads resumable,
+// because the transcript IS the resume state and the claim builds a fresh tree
+// around it. The composer stays live and the send it accepts works.
 func TestHandleAgentStatus_ResumableNativeWithoutAWorkspace(t *testing.T) {
 	s := newTestServer(t)
 	withEmptyBlobStore(t, s)

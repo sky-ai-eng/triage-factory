@@ -72,13 +72,11 @@ var ErrConversationConcluded = errors.New("resume: this conversation can no long
 var ErrStepHandedOff = errors.New("resume: this step just handed off to the next one — follow up on the blueprint's latest step")
 
 // ErrWorkspaceExpired is returned when a resumable conversation's workspace is
-// gone for good: its warm worktree was swept, its durable snapshot is not
-// there and no persist is coming, and its runtime cannot continue without one.
-// That last clause is the whole of the difference between the two engines — an
-// SDK conversation's continuity lived in the session transcript the blob
-// carried, while a native one's lives in `messages` and survives a workspace
-// built from nothing — so this is an SDK answer, and a native conversation
-// falls back to a fresh workspace instead of reaching here.
+// gone for good: its warm worktree was swept, no snapshot is there or coming,
+// and its runtime cannot continue without one. That last clause is an SDK
+// answer — its continuity lived in the session transcript the blob carried,
+// while a native conversation's lives in `messages` and survives a workspace
+// built from nothing, so a native one falls back instead of reaching here.
 //
 // The conversation's status is left unchanged (no flip), so the user gets a
 // clear "this workspace has expired" signal rather than seeing the run
@@ -184,20 +182,16 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // workspaceRecoverable reports whether a parked run can still be resumed. Four
 // rungs, most-certain-first, and only the last is a judgement call:
 //
-//   - the warm worktree survives on disk — nothing else needs asking;
+//   - the warm worktree survives on disk;
 //   - the durable snapshot blob is present to cold-rehydrate from;
-//   - neither, but the key's lifecycle record says a persist is in flight. That
-//     is the gap a park deliberately opens: the status flips before the capture
-//     runs, so "no blob yet" is the expected reading for the seconds it takes,
-//     and the claim path's own wait is what resolves it (see ensureWorkspace);
-//   - neither, and no persist is coming — the record says failed, or names a
-//     write that never finished, or there is no record at all. Here the answer
-//     splits on the runtime, because the two engines keep their continuity in
-//     different places. A native conversation's context is its `messages`
-//     rows, so it can be picked up in a workspace built from nothing; an SDK
-//     conversation's lived in the session transcript the blob carried, and
-//     without it `claude --resume` has nothing to reconnect to. So native wakes
-//     and SDK is expired.
+//   - neither, but the record says a persist is in flight. That is the gap a
+//     park deliberately opens — the status flips before the capture runs — and
+//     the claim path's own wait resolves it (see ensureWorkspace);
+//   - neither, and no persist is coming (the record says failed, names a write
+//     that never finished, or does not exist). The answer splits on the
+//     runtime here, because the engines keep their continuity in different
+//     places: native wakes into a workspace built from nothing, SDK is expired
+//     without the session transcript the blob carried.
 //
 // A check we can't complete (no storage wired, a blob hiccup) counts as
 // recoverable — a transient inability to verify must never strand a resumable
@@ -229,9 +223,8 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 	}
 	state, sErr := s.snapshotStateFor(ctx, orgID, keyID)
 	if sErr != nil {
-		// Inconclusive, so recoverable: this rung exists to distinguish a
-		// persist in flight from a workspace that is gone, and a store that
-		// cannot answer is not evidence of either.
+		// Inconclusive, so recoverable: a store that cannot answer is not
+		// evidence either way.
 		delegateLog.Warn("resume: workspace snapshot state read failed; treating as recoverable", "conversation", conv.ID, "error", sErr)
 		return true
 	}

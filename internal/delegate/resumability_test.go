@@ -26,10 +26,10 @@ import (
 // both answers have to flip together; a `resumable: true` beside an
 // ErrWorkspaceExpired is exactly the drift that would put the dead input back.
 //
-// Both runtimes, because that agreement is what the read is FOR — and the two
-// engines do not answer every rung the same way, so a case whose answer turns
-// on the runtime names it (sdkOnly below) rather than being asserted for one
-// engine and assumed for the other.
+// Both runtimes, because that agreement is what the read is FOR — and the
+// engines do not answer every rung alike, so a case whose answer turns on the
+// runtime names it (sdkOnly below) rather than being asserted for one engine
+// and assumed for the other.
 func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -39,10 +39,9 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 		wantOK          bool
 		wantReason      string
 		wantErr         error
-		// sdkOnly marks a refusal only the SDK raises. A native conversation
-		// carries its context in `messages`, so a workspace that is gone costs
-		// it uncommitted work rather than the run — and it wakes where the SDK,
-		// whose session file lived in the snapshot, cannot.
+		// sdkOnly marks a refusal only the SDK raises: a native conversation
+		// carries its context in `messages`, so a lost workspace costs it
+		// uncommitted work rather than the run.
 		sdkOnly bool
 	}{
 		{
@@ -83,9 +82,8 @@ func TestResumabilityFor_AnswersWithSendMessage(t *testing.T) {
 		t.Run(runtime, func(t *testing.T) {
 			for _, tc := range cases {
 				if tc.sdkOnly && runtime == "native" {
-					// Same fixture, opposite answer: the composer stays live
-					// and the send is accepted, which the taxonomy test pins
-					// end to end.
+					// Same fixture, opposite answer: composer live, send
+					// accepted.
 					tc.wantOK, tc.wantReason, tc.wantErr = true, "", nil
 				}
 				t.Run(tc.name, func(t *testing.T) {
@@ -212,9 +210,9 @@ func TestParkConversationOpen_FencedSnapshotAnnouncesResumable(t *testing.T) {
 	if !fenced {
 		t.Fatal("the teardown did not report the fence trip")
 	}
-	// The record is what makes the announcement true, and the blob follows it
-	// — both are asserted, because an announcement with neither behind it
-	// would enable a composer over a workspace nobody is producing.
+	// The record is what makes the announcement true and the blob follows it;
+	// both are asserted, because an announcement with neither behind it would
+	// enable a composer over a workspace nobody is producing.
 	assertSnapshotState(t, s, namespace, domain.WorkspaceSnapshotWritten, "claim-1")
 	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, namespace))
 	if err != nil {

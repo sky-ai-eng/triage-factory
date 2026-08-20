@@ -842,9 +842,8 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// The SDK path's resume carries its context in the session file rather than
 	// in rows, so it has no claim-time notice to make honest — the provenance
 	// is dropped here rather than threaded on to nothing. No fresh-workspace
-	// builder either, and for the same reason: that session file lived in the
-	// snapshot, so a tree built without one has nothing for `claude --resume`
-	// to reconnect to. This path takes the expired answer instead.
+	// builder either, for the same reason: that session file lived in the
+	// snapshot, so a tree built without one has nothing to reconnect to.
 	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar, localGit), nil)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
@@ -1207,23 +1206,19 @@ func (s *Spawner) enqueueBlueprintStep(ctx context.Context, orgID, blueprintRunI
 	})
 }
 
-// freshStepWorkspace rebuilds a step's run tree from nothing, by running the
-// same source setup its blueprint's FIRST claim ran. It is the ensureWorkspace
-// ladder's last resort: the warm tree is gone, no snapshot is coming, and a
-// native conversation can still be continued in a tree that holds only what
-// reached the remote.
+// freshStepWorkspace rebuilds a step's run tree from nothing by running the
+// same source setup its blueprint's FIRST claim ran — the ensureWorkspace
+// ladder's last resort, when the warm tree is gone and no snapshot is coming.
 //
-// Re-running the setup, rather than assembling a checkout here, is what keeps
-// "fresh" one thing. Each shape's construction is specific — a GitHub PR run
-// fetches its pull request and lands a worktree on its head ref, a Jira or
-// Slack run lands a bare run root the agent populates itself — and a second
-// implementation of any of them would be a second definition of what a first
-// launch produces. The setups key by br.ID, so the tree is rebuilt at exactly
-// the path the blueprint's steps share.
+// Re-running the setup, rather than assembling a checkout here, keeps "fresh"
+// one thing: each shape's construction is specific (a GitHub PR run fetches
+// its pull request and lands on its head ref; a Jira or Slack run lands a bare
+// run root the agent populates itself), and a second implementation would be a
+// second definition of what a first launch produces. The setups key by br.ID,
+// so the tree lands at the path the blueprint's steps share.
 //
-// Only the path is taken from the result: the caller has already reconstructed
-// the rest of the step's config from the task, and the setup's own copy of it
-// would be the same fields resolved twice.
+// Only the path is taken from the result — the caller has already
+// reconstructed the rest of the step's config from the task.
 func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *domain.BlueprintRun, task domain.Task, conv domain.Conversation, gh *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (string, error) {
 	var (
 		cfg runConfig

@@ -398,12 +398,10 @@ type Spawner struct {
 	// SetSnapshotRetentionTTL. Read through snapshotRetention().
 	snapshotRetentionTTL time.Duration
 	// snapshotWaitTimeout bounds how long a cold resume waits on a workspace
-	// snapshot whose lifecycle record says a persist is in flight. It is the
-	// hung-writer backstop, not the expected duration — the wait ends the
-	// moment the blob appears, the record turns terminal, or the writing
-	// executor stops heartbeating — so it is deliberately generous. Zero means
-	// use DefaultSnapshotWait; set once at startup via SetSnapshotWaitTimeout
-	// (TF_SNAPSHOT_WAIT_SEC) and read through snapshotWait().
+	// snapshot whose record says a persist is in flight — the hung-writer
+	// backstop, not the expected duration. Zero means DefaultSnapshotWait; set
+	// once at startup via SetSnapshotWaitTimeout (TF_SNAPSHOT_WAIT_SEC) and
+	// read through snapshotWait().
 	snapshotWaitTimeout time.Duration
 	// snapshotWaitPollInterval is how often that wait re-reads the record and
 	// the blob store. Zero means snapshotWaitPoll; tests shrink it so a wait
@@ -1386,17 +1384,15 @@ func (s *Spawner) broadcastConversationUpdate(orgID, conversationID, status stri
 // one thing that changed — this conversation's workspace is accounted for, so
 // a follow-up can land now.
 //
-// It closes a window nothing else can, and only that window. A cross-pod stop
-// parks the row and announces `open` from control, before the executor that
-// holds the workspace has recorded that it owes a persist for it; between
-// those two moments the run read honestly answers "not resumable", and
-// without this the browser would keep that answer until someone reloaded the
-// page. The executor's teardown fires this the instant its record lands —
-// which is when the answer changes, not when the blob finally appears.
-//
-// Every other park needs nothing of the sort: an engagement parking its own
-// run opens the record before its own status flip, so the `open` that flip
-// broadcasts is already resumable when it reaches a client.
+// It closes one window and only that one. A cross-pod stop parks the row and
+// announces `open` from control, before the executor holding the workspace has
+// recorded that it owes a persist for it; between those moments the run read
+// honestly answers "not resumable", and the browser would keep that answer
+// until someone reloaded. The executor's teardown fires this the instant its
+// record lands — when the answer changes, not when the blob appears. Every
+// other park needs nothing of the sort: an engagement parking its own run
+// opens the record before its own flip, so that flip's `open` is already
+// resumable when it reaches a client.
 //
 // The status rides along rather than a new event type because resumability is
 // an attribute of the already-announced park, not a new situation — the same

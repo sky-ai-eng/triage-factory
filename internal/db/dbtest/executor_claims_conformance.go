@@ -267,7 +267,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 			ReleasedAt: &released, Outcome: "parked",
 		})
 
-		// A RELEASED claim, deliberately: the resume ladder asks this about the
+		// Released, deliberately: the resume ladder asks this about the
 		// engagement that owed a snapshot, which has let the conversation go by
 		// the time anyone waits on its blob.
 		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, claimID)
@@ -284,9 +284,9 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 		_ = seed.Conversation(t, "open", "")
 		// A well-formed id naming nothing is a miss. A malformed one is NOT
 		// folded into that: the dialects disagree on it (Postgres refuses the
-		// uuid cast, SQLite compares it as text), and the caller reads an error
-		// as "cannot tell whether the writer is alive" — which is the answer it
-		// should get for an id it had no business holding.
+		// uuid cast, SQLite compares it as text), and an error reads to the
+		// caller as "cannot tell whether the writer is alive", which is the
+		// right answer for an id it had no business holding.
 		got, ok, err := store.ClaimExecutorSystem(ctx, seed.OrgID, "33333333-3333-4333-8333-333333333333")
 		if err != nil {
 			t.Errorf("ClaimExecutorSystem(unknown) errored: %v", err)

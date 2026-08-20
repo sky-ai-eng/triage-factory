@@ -1,12 +1,11 @@
 // The resume side of the park-first contract: what a claim does when it lands
 // on a conversation whose workspace snapshot has not appeared yet.
 //
-// A park flips the conversation's status before it writes the blob, so "no
-// blob" is a legitimate reading of a perfectly healthy resumable run for as
-// long as the capture takes. The lifecycle record (workspace_snapshots) is
-// what tells the two apart, and this file is the reader: it waits out a
-// persist that is in flight and gives up on one that is not, on evidence
-// rather than on a timer alone.
+// A park flips the status before it writes the blob, so "no blob" is a
+// legitimate reading of a healthy resumable run for as long as the capture
+// takes. The lifecycle record (workspace_snapshots) tells the two apart, and
+// this file is its reader: wait out a persist that is in flight, give up on
+// one that is not, on evidence rather than on a timer alone.
 
 package delegate
 
@@ -21,18 +20,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 )
 
-// DefaultSnapshotWait bounds a cold resume's wait on an in-flight persist. It
-// is a backstop for a writer that hangs without dying, not an expected
-// duration: change-scoped capture and streamed compression put a real persist
-// in the seconds, and every other exit from the wait — the blob appearing, the
-// record turning terminal, the writing executor going silent — fires long
-// before this does. Generous on purpose, because the thing it protects is the
-// only copy of an agent's uncommitted work.
+// DefaultSnapshotWait bounds a cold resume's wait on an in-flight persist: a
+// backstop for a writer that hangs without dying, not an expected duration.
+// Every other exit — the blob appearing, the record turning terminal, the
+// writing executor going silent — fires long before this does, and it is
+// generous on purpose because what it protects is the only copy of an agent's
+// uncommitted work.
 const DefaultSnapshotWait = 60 * time.Second
 
 // snapshotWaitPoll is how often the wait re-reads the record and the blob
-// store. Fast enough that a persist landing is followed within a second and
-// cheap enough that the whole wait is a handful of indexed reads.
+// store: fast enough to follow a landing persist within a second, cheap enough
+// that the whole wait is a handful of indexed reads.
 const snapshotWaitPoll = time.Second
 
 // ParseSnapshotWaitTimeout interprets the TF_SNAPSHOT_WAIT_SEC env value.
@@ -54,10 +52,9 @@ func ParseSnapshotWaitTimeout(raw string) (time.Duration, error) {
 	return time.Duration(n) * time.Second, nil
 }
 
-// SetSnapshotWaitTimeout overrides how long a cold resume waits on an
-// in-flight workspace persist. Call once at startup (internal/app resolves
-// TF_SNAPSHOT_WAIT_SEC); tests inject a short value. A non-positive value is
-// ignored, for the same reason the parser has no disable arm.
+// SetSnapshotWaitTimeout overrides that bound. Call once at startup
+// (internal/app resolves TF_SNAPSHOT_WAIT_SEC); tests inject a short value. A
+// non-positive value is ignored, for the parser's reason above.
 func (s *Spawner) SetSnapshotWaitTimeout(d time.Duration) {
 	if d <= 0 {
 		return
@@ -88,27 +85,20 @@ func (s *Spawner) snapshotPoll() time.Duration {
 	return snapshotWaitPoll
 }
 
-// awaitSnapshotBlob waits for a key's snapshot blob to appear while the
-// evidence says one is still coming, and reports whether it did along with how
-// long the wait took (which the caller puts on its span — a resume that spent
-// 40 seconds here looks identical to a fast one from the provenance alone).
+// awaitSnapshotBlob waits for a key's snapshot blob while the evidence says
+// one is still coming, reporting whether it appeared and how long that took
+// (the caller puts the duration on its span).
 //
-// It returns immediately, false, when nothing is owed: no lifecycle record at
-// all, or one that is already terminal. Otherwise it polls until any of four
-// things happens — the blob appears (true), the record leaves `pending`, the
-// engagement that owes the write stops heartbeating, or the bound elapses.
+// The blob is the authority and the record only decides whether to keep
+// waiting for one, so every pass looks at the blob FIRST and every give-up
+// looks once more on its way out. That ordering is load-bearing: the upload
+// lands before the record's completing CAS and before a dying writer stops
+// answering, so each condition that ends the wait is a moment the blob may
+// just have arrived.
 //
-// Liveness is read through the writing CLAIM, because that is what the record
-// names: the claim resolves to the executor that took it, and the instance
-// registry says whether that executor is still beating. Both reads fail OPEN —
-// an unresolvable claim or an unreadable registry leaves the writer presumed
-// live — because being unable to check is not evidence the persist died, and
-// giving up on it discards the agent's uncommitted work. The bound is what
-// keeps that safe: a genuinely dead writer costs the full wait rather than
-// forever.
+// Returns immediately when nothing is owed — no record, or a terminal one.
 func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (appeared bool, waited time.Duration) {
-	blobs := s.Storage()
-	if blobs == nil {
+	if s.Storage() == nil {
 		return false, 0
 	}
 	state, err := s.snapshotStateFor(ctx, orgID, keyID)
@@ -121,10 +111,9 @@ func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (a
 		return false, 0
 	}
 
-	// The writer is read once and held. A re-read that FAILS must not be
-	// allowed to erase who we are waiting on — the liveness check at the top
-	// of every iteration needs a claim id, and an unreadable record is exactly
-	// the moment there is none to be had.
+	// The writer is held across iterations: a re-read that fails must not
+	// erase who we are waiting on, and an unreadable record is exactly when
+	// there is no fresh answer to be had.
 	writerClaimID := state.WriterClaimID
 	bound := s.snapshotWait()
 	started := time.Now()
@@ -135,67 +124,73 @@ func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (a
 	tick := time.NewTicker(s.snapshotPoll())
 	defer tick.Stop()
 	for {
-		if !s.snapshotWriterAlive(ctx, orgID, writerClaimID) {
-			delegateLog.Info("resume: the engagement that owed this snapshot is gone; giving up on the wait",
-				"org", orgID, "key_id", keyID, "writer_claim_id", writerClaimID, "waited", time.Since(started))
+		if s.snapshotBlobExists(ctx, orgID, keyID) {
+			return true, time.Since(started)
+		}
+
+		giveUp := ""
+		switch cur, sErr := s.snapshotStateFor(ctx, orgID, keyID); {
+		case sErr != nil:
+			// Unreadable is not terminal; the bound still applies.
+			delegateLog.Warn("resume: workspace snapshot state re-read during the wait failed",
+				"org", orgID, "key_id", keyID, "error", sErr)
+		case cur == nil || cur.State != domain.WorkspaceSnapshotPending:
+			giveUp = "the persist is no longer pending"
+		default:
+			// A successor may have taken the key over mid-wait. Follow it: the
+			// blob this resume needs is that engagement's to produce now.
+			writerClaimID = cur.WriterClaimID
+		}
+		if giveUp == "" && !s.snapshotWriterAlive(ctx, orgID, writerClaimID) {
+			giveUp = "the engagement that owed it is gone"
+		}
+		if giveUp == "" && !time.Now().Before(deadline) {
+			giveUp = "the wait bound elapsed"
+		}
+		if giveUp != "" {
+			if s.snapshotBlobExists(ctx, orgID, keyID) {
+				return true, time.Since(started)
+			}
+			delegateLog.Warn("resume: stopped waiting for a workspace snapshot that never landed",
+				"org", orgID, "key_id", keyID, "writer_claim_id", writerClaimID,
+				"reason", giveUp, "bound", bound, "waited", time.Since(started))
 			return false, time.Since(started)
 		}
+
 		select {
 		case <-ctx.Done():
 			return false, time.Since(started)
 		case <-tick.C:
 		}
-
-		if ok, eErr := blobs.Exists(ctx, snapshotKey(orgID, keyID)); eErr != nil {
-			// A blob store hiccup is not an answer either way; keep waiting
-			// and let the bound decide. The record is re-read below regardless,
-			// so a persist that finished during the hiccup still ends the wait.
-			delegateLog.Warn("resume: snapshot existence check during the wait failed",
-				"org", orgID, "key_id", keyID, "error", eErr)
-		} else if ok {
-			return true, time.Since(started)
-		}
-
-		switch cur, sErr := s.snapshotStateFor(ctx, orgID, keyID); {
-		case sErr != nil:
-			// Same reasoning as the blob hiccup: unreadable is not terminal.
-			delegateLog.Warn("resume: workspace snapshot state re-read during the wait failed",
-				"org", orgID, "key_id", keyID, "error", sErr)
-		case cur == nil || cur.State != domain.WorkspaceSnapshotPending:
-			// A `failed` record — or one a successor's discard removed — is
-			// the durable answer this wait exists to receive. Whether the
-			// key turned `written` between the blob check above and this read
-			// is not worth a second Exists: the caller's own Get is next.
-			return false, time.Since(started)
-		default:
-			// A successor may have taken the key over mid-wait. Follow it:
-			// the blob this resume needs is now that engagement's to produce,
-			// so its liveness is the one worth watching.
-			writerClaimID = cur.WriterClaimID
-		}
-
-		if !time.Now().Before(deadline) {
-			delegateLog.Warn("resume: gave up waiting for a workspace snapshot that never landed",
-				"org", orgID, "key_id", keyID, "writer_claim_id", writerClaimID, "bound", bound,
-				"env", "TF_SNAPSHOT_WAIT_SEC")
-			return false, time.Since(started)
-		}
 	}
 }
 
-// snapshotWriterAlive reports whether the engagement named on a pending
-// lifecycle record still has a process behind it: the claim resolves to an
-// executor, and that executor's instance-registry heartbeat is inside the
-// placement liveness window.
+// snapshotBlobExists is the wait's one real question. A store error answers
+// "not yet": it is not evidence the blob is missing, and the wait's bound is
+// what keeps that from being unbounded.
+func (s *Spawner) snapshotBlobExists(ctx context.Context, orgID, keyID string) bool {
+	blobs := s.Storage()
+	if blobs == nil {
+		return false
+	}
+	ok, err := blobs.Exists(ctx, snapshotKey(orgID, keyID))
+	if err != nil {
+		delegateLog.Warn("resume: snapshot existence check during the wait failed",
+			"org", orgID, "key_id", keyID, "error", err)
+		return false
+	}
+	return ok
+}
+
+// snapshotWriterAlive reports whether the engagement named on a pending record
+// still has a process behind it: its claim resolves to an executor, and that
+// executor's heartbeat is inside the placement liveness window. Placement's
+// own window, deliberately — two different answers to "is that executor alive"
+// would let a resume wait on a writer the claim layer had already written off.
 //
-// The window is placement's own, deliberately — the same staleness the claim
-// uses to decide a stamped preferred executor is dead. Two different answers
-// to "is that executor alive" would mean a resume could wait on a writer the
-// claim layer had already written off. Placement is disabled at N=1, where its
-// configured window is zero, so the package default stands in.
-//
-// Fails open at every step: an unwired store, an unresolvable claim, or a
-// failed read all answer "alive". See awaitSnapshotBlob for why.
+// Fails open at every step: an unwired store or a failed read answers "alive",
+// because being unable to check is not evidence the persist died, and the
+// bound is what keeps that from being unbounded.
 func (s *Spawner) snapshotWriterAlive(ctx context.Context, orgID, writerClaimID string) bool {
 	if s.conversationQueue == nil || s.instances == nil || writerClaimID == "" {
 		return true
@@ -223,9 +218,9 @@ func (s *Spawner) snapshotWriterAlive(ctx context.Context, orgID, writerClaimID 
 	return time.Since(inst.LastHeartbeatAt) <= s.snapshotWriterLiveness()
 }
 
-// snapshotWriterLiveness is the heartbeat-staleness window the wait treats as
-// "still writing" — placement's configured one, or its default when placement
-// is off (local N=1) and the config carries no value.
+// snapshotWriterLiveness is the staleness window the wait treats as "still
+// writing": placement's configured one, or its default when placement is off
+// (local N=1) and the config carries no value.
 func (s *Spawner) snapshotWriterLiveness() time.Duration {
 	if live := s.claimPlacement().Liveness; live > 0 {
 		return live
