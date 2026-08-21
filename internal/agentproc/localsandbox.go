@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -17,10 +18,10 @@ import (
 // local sandbox existed and what TF_LOCAL_SANDBOX=off keeps.
 //
 // With one it returns the bubblewrap invocation with the same command after
-// it, and node is named by its ABSOLUTE path rather than left to a PATH
-// lookup: the plan masks the operator's home, an nvm-installed node lives
-// there, and a lookup inside the namespace would find nothing. Resolving it
-// here is also what lets the resolved path be bound back through the mask.
+// it, and node is named by an absolute path rather than left to a PATH lookup:
+// the plan masks the operator's home, an nvm-installed node lives there, and a
+// lookup inside the namespace would find nothing. Resolving it here is also
+// what lets the resolved path be bound back through the mask.
 func directArgv(opts RunOptions, nodeArgs []string) ([]string, error) {
 	if opts.LocalSandbox == nil {
 		return append([]string{"node"}, nodeArgs...), nil
@@ -29,6 +30,19 @@ func directArgv(opts RunOptions, nodeArgs []string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("local sandbox: resolve node: %w", err)
 	}
+	// LookPath joins the matching PATH entry with the name, so a relative entry
+	// (PATH=bin:$PATH) yields a relative path. It normally reports ErrDot for
+	// that too — caught above, and the unsandboxed spawn refuses the same shape
+	// — but GODEBUG=execerrdot=0 suppresses the error and hands the relative
+	// path back regardless. Resolve it against this process's cwd, which is the
+	// directory the lookup was relative TO: the namespace chdirs to the run
+	// root, where the same relative path names something else entirely, and the
+	// mount plan has no real location to bind without this.
+	nodeAbs, err := filepath.Abs(nodePath)
+	if err != nil {
+		return nil, fmt.Errorf("local sandbox: resolve node path %q: %w", nodePath, err)
+	}
+	nodePath = nodeAbs
 	host, err := sandboxHostLayout(opts.Cwd)
 	if err != nil {
 		return nil, err

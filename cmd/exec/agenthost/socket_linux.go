@@ -161,19 +161,52 @@ func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*Host
 	if sockPath == "" {
 		return nil, fmt.Errorf("agenthost: socket path required")
 	}
+	if err := ensureOwnerOnlyDir(filepath.Dir(sockPath)); err != nil {
+		return nil, err
+	}
 	return listenAndServe(NewServer(stores, info, nil), sockPath, grantSocketToOwnerOnly)
 }
 
+// ensureOwnerOnlyDir pins the LOCAL socket root to 0700, creating it if it is
+// not there yet. The chmod is the point: MkdirAll's mode applies only to a
+// directory it actually creates, so on the second and every later run of a
+// given install the mode is whatever the first run's umask left — and an
+// operator with a permissive umask would get a socket root other accounts on
+// the machine could list.
+//
+// Local-only, deliberately. The jail's root is root-owned and shared with
+// every run's sidecar (01731, see listenAndServe); a chmod there would strip
+// the group bits the sidecar needs, and would fail with EPERM first anyway.
+func ensureOwnerOnlyDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("agenthost: mkdir %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("agenthost: chmod %s: %w", dir, err)
+	}
+	return nil
+}
+
 // listenAndServe is the shared socket lifecycle both entry points above run:
-// create the parent dir owner-only, clear a stale file, listen, grant, serve.
-// grant is what distinguishes them — see StartLocal.
+// ensure the parent dir, clear a stale file, listen, grant, serve. grant is
+// what distinguishes them — see StartLocal.
 //
 // Property B / fs-permissions invariant (load-bearing):
 //
-//  1. Parent dir mkdir 0700 — any race window between socket-create
-//     and the grant is unreachable from a second tenant (the dir is
-//     owner-only). Without this, an attacker on the host could
-//     enumerate /run for sockets that haven't been chmod'd yet.
+//  1. The parent directory is closed to non-owners before the socket exists,
+//     so the window between net.Listen and the grant is unreachable — without
+//     it, another uid on the host could enumerate the socket root and dial a
+//     run's socket in the moment before it is narrowed. WHICH directory mode
+//     delivers that differs by who creates the root, and the MkdirAll below
+//     pins neither: it is a no-op on an existing directory, and every
+//     directory here exists before this runs.
+//
+//     For the jail's root the cap-broker owns it, at root:WorktreeGID mode
+//     01731 (cmd/capbroker's listen): group wx with no r, so a sidecar can
+//     create its own socket but no non-owner can readdir to enumerate live
+//     runs, and sticky so no run's sidecar can unlink another's entry. For
+//     the local root StartLocal owns it, at 0700 — one uid, nothing to share
+//     — enforced by ensureOwnerOnlyDir rather than by this MkdirAll.
 //
 //  2. net.Listen("unix", ...) — creates the socket file with the
 //     process umask applied (typically 0666 or 0755); either is too
@@ -183,6 +216,10 @@ func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*Host
 //  3. The grant callback narrows it to exactly the identity that must
 //     connect.
 func listenAndServe(server *Server, sockPath string, grant func(string) error) (*HostDaemon, error) {
+	// Creates the root only when nothing has yet — the dev/bare-metal jail
+	// path where this process runs as root and no broker ran first. Where a
+	// root already exists this is a no-op by design, leaving its owner and
+	// mode to whoever pinned them (step 1 above).
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(sockPath), err)
 	}

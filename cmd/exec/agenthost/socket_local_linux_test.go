@@ -79,6 +79,35 @@ func TestStartLocal_ServesOnTheGivenPathOwnerOnly(t *testing.T) {
 	}
 }
 
+// TestStartLocal_TightensAnExistingSocketRoot pins the half MkdirAll cannot
+// do: its mode applies only to a directory it actually creates, so from the
+// second run of an install onward the socket root's mode is whatever the
+// first run's umask left. An operator with a permissive umask would otherwise
+// end up with a root other accounts on the machine can list.
+func TestStartLocal_TightensAnExistingSocketRoot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "agenthost")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil { // defeat the umask
+		t.Fatal(err)
+	}
+
+	hd, err := StartLocal(db.Stores{}, ConversationInfo{ConversationID: "conv"}, filepath.Join(dir, "conv.sock"))
+	if err != nil {
+		t.Fatalf("StartLocal: %v", err)
+	}
+	defer func() { _ = hd.Close() }()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Errorf("pre-existing socket root left at %04o, want 0700", perm)
+	}
+}
+
 // TestStartLocal_RemovesTheSocketOnClose pins that a run leaves nothing
 // behind: a stale socket file in the state root would make the next
 // engagement's dial land on a dead inode instead of failing to find one.

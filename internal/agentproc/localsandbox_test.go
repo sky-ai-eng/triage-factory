@@ -240,6 +240,58 @@ func TestDirectArgv_SandboxFailsRatherThanDegrades(t *testing.T) {
 	}
 }
 
+// TestDirectArgv_ResolvesNodeAbsolutely pins the fix for a relative PATH
+// entry. exec.LookPath joins the matching entry with the name, so PATH=bin:…
+// yields a relative path; the plan has no real location to bind for one, and
+// the namespace chdirs to the run root where it would name something else.
+// Go normally reports ErrDot for that shape, but GODEBUG=execerrdot=0
+// suppresses it — so the absolutization, not the error check, is what holds
+// here.
+func TestDirectArgv_ResolvesNodeAbsolutely(t *testing.T) {
+	root := t.TempDir()
+	paths.SetForTest(t, root)
+	runRoot := filepath.Join(root, "run")
+	relBin := filepath.Join(root, "relbin")
+	for _, d := range []string{runRoot, relBin} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stub `node` reachable only through a RELATIVE PATH entry, with the
+	// process cwd set so the entry resolves.
+	if err := os.WriteFile(filepath.Join(relBin, "node"), []byte("#!/bin/sh"+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	t.Setenv("PATH", "relbin")
+	t.Setenv("GODEBUG", "execerrdot=0")
+
+	argv, err := directArgv(RunOptions{
+		Cwd:          runRoot,
+		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+	}, []string{"wrapper.mjs"})
+	if err != nil {
+		// A Go build that ignores the GODEBUG still refuses the relative
+		// lookup outright, which is the same fail-closed answer the
+		// unsandboxed spawn gives — nothing to assert beyond "not a
+		// relative path in the argv".
+		if strings.Contains(err.Error(), "relative to current directory") {
+			t.Skip("this toolchain refuses the relative lookup before absolutization can apply")
+		}
+		t.Fatalf("directArgv: %v", err)
+	}
+	sep := slices.Index(argv, "--")
+	if sep < 0 || sep+1 >= len(argv) {
+		t.Fatalf("argv has no command after the bwrap terminator: %v", argv)
+	}
+	if got := argv[sep+1]; !filepath.IsAbs(got) {
+		t.Errorf("sandboxed command is %q, want an absolute node path", got)
+	}
+	if !hasBind(argv, "--ro-bind-try", filepath.Join(root, "relbin", "node")) {
+		t.Errorf("argv does not bind the resolved node path back through the masks: %v", argv)
+	}
+}
+
 func hasBind(args []string, flag, target string) bool {
 	for i := 0; i+2 < len(args); i++ {
 		if args[i] == flag && args[i+1] == target && args[i+2] == target {
