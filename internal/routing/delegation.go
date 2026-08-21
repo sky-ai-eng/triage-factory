@@ -362,13 +362,15 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body, delegate.AdditiveFiringRef{
-		EntityID:          entityID,
-		TaskID:            task.ID,
-		TriggerID:         trigger.ID,
-		TriggeringEventID: triggeringEventID,
-		TaskClaim:         claim,
-	})
+	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
+		domain.NoteProvenance{EventID: triggeringEventID, EventType: trigger.EventType},
+		delegate.AdditiveFiringRef{
+			EntityID:          entityID,
+			TaskID:            task.ID,
+			TriggerID:         trigger.ID,
+			TriggeringEventID: triggeringEventID,
+			TaskClaim:         claim,
+		})
 	switch outcome {
 	case delegate.InjectNotDelivered:
 		return false

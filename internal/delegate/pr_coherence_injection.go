@@ -195,7 +195,8 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		if !live && !injectionWillFlush(target.Status, target.Outcome) {
 			continue
 		}
-		s.StageOrDeliverInformationalEvent(ctx, evt.OrgID, target.ConversationID, domain.StagedInjectionProducerPRCoherence, body)
+		s.StageOrDeliverInformationalEvent(ctx, evt.OrgID, target.ConversationID, domain.StagedInjectionProducerPRCoherence, body,
+			domain.NoteProvenance{EventID: original.ID, EventType: original.EventType})
 	}
 }
 

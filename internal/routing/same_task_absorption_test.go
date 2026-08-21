@@ -103,7 +103,7 @@ func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, 
 	return nil
 }
 
-func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome
 }

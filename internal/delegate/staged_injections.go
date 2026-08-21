@@ -1,18 +1,17 @@
-// Generic staged-injection queue (TFAC-501). The producer-agnostic "deliver live or
-// stage for next resume" seam, generalized from the artifact-change feedback
-// TFAC-493 shipped:
+// Generic staged-injection queue. The producer-agnostic "deliver live or stage
+// for the next resume" seam, generalized from the artifact-change feedback:
 //
-//   - Live run (a warm, steerable process): StageOrDeliverInjection steers a single
-//     <system-note> into it immediately, fire-and-forget (deliverInjectionLive).
+//   - Live run (a warm, steerable process): the note is wrapped and steered in
+//     immediately, fire-and-forget (deliverInjectionLive).
 //   - Terminal / paused run: the bare injection is persisted to the durable
 //     staged-injection queue (db.StagedInjectionStore, backed by undelivered
 //     messages rows) and flushed — bundled into one <system-note> ahead of the
 //     user's message — on the next resume (stagedInjectionsForResume, wired
 //     into SendMessage).
 //
-// Unlike the artifact-change ledger (which DERIVES its terminal injections from the
-// artifact rows, so it needs no queue), a producer here has no durable row of its
-// own to re-derive from — the new-commits notifier is the first such producer.
+// Unlike the artifact-change ledger (which DERIVES its terminal injections from
+// the artifact rows, so it needs no queue), a producer here has no durable row
+// of its own to re-derive from — the PR coherence feed is such a producer.
 // That's why this half is a real durable queue, not a derivation.
 
 package delegate
@@ -23,66 +22,41 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// StageOrDeliverInjection routes one agent-facing injection for a run by its live state —
-// the generic producer entry every staged-injection source calls:
+// stageOrDeliverInjection routes one agent-facing note for a conversation by
+// its live state. It is the local-arm primitive StageOrDeliverAdditiveEvent is
+// built on:
 //
-//   - live (a warm process): the injection is wrapped and steered in immediately,
-//     fire-and-forget (deliverInjectionLive); returns delivered=true.
+//   - live (a warm process): the note is wrapped and steered in immediately,
+//     fire-and-forget; delivered=true.
 //   - not live (parked / terminal-resumable / terminal): the bare body is
-//     appended to the durable queue for the next resume to flush; returns
-//     delivered=false.
+//     appended to the durable queue for the next resume to flush; staged=true.
 //
-// producer tags the queued row for audit (domain.StagedInjectionProducer*); body is
-// the bare, already-rendered injection line (the live path wraps one, the flush
-// bundles + wraps the block). A blank body is a no-op (delivered=false). Never
-// flips run status or wakes a terminal run — this is an async sidecar
-// (TFAC-379 #2): an injection for a terminal-but-resumable run waits in the queue until
-// the user's next follow-up, and an injection for a truly terminal run that can never
-// resume simply never reaches the agent (the caller gates that — see
-// HandlePRNewCommits, which only stages for live-or-resumable runs).
+// producer tags the row for audit (domain.StagedInjectionProducer*), prov
+// records the event the note was composed from, and body is the bare,
+// already-rendered line — the live path wraps one note, the flush bundles and
+// wraps the block. A blank body is a no-op.
 //
-// A false return is not necessarily a staged injection: the live gate may have raced a
-// closing process, or (when the caller chose to stage) the append may have failed.
-// Callers that need the durable guarantee check the store error; HandlePRNewCommits
-// tolerates a drop because its news is self-renewing — the next head advance is a
-// fresh transition carrying a fresh injection. Nothing re-delivers THIS one, so a
-// producer whose news does not recur must not copy that posture.
-func (s *Spawner) StageOrDeliverInjection(orgID, conversationID, producer, body string) (delivered bool) {
-	delivered, _, _ = s.stageOrDeliverInjection(orgID, conversationID, producer, body)
-	return delivered
-}
-
-// StageOrDeliverInjectionResult is StageOrDeliverInjection with a
-// disambiguated return, added for TFAC-594's additive-injection gate: a
-// bare bool can't tell "durably staged for the next resume" (staged=true)
-// apart from "dropped" (both false — no live process, AND the durable
-// append itself failed: the store isn't wired, or AppendSystem errored).
-// HandlePRNewCommits and any other bare-bool producer keep calling
-// StageOrDeliverInjection unchanged and tolerate a drop as permanent for
-// that injection — acceptable for HandlePRNewCommits because its news is
-// self-renewing (see the doc above), not because a drop is retried; a
-// producer whose news doesn't recur must not copy that posture. The
-// additive gate can't tolerate one either way — a dropped additive
-// event has no durable row to fall back on, so it must fall through to
-// pending_firings instead. Same side effects and body/producer semantics
-// as StageOrDeliverInjection; the two share stageOrDeliverInjection.
-func (s *Spawner) StageOrDeliverInjectionResult(orgID, conversationID, producer, body string) (delivered, staged bool) {
-	delivered, staged, _ = s.stageOrDeliverInjection(orgID, conversationID, producer, body)
-	return delivered, staged
-}
-
-// stageOrDeliverInjection is the shared primitive above. stagedID is the
-// durable row's id when staged=true (empty otherwise) — the additive-
-// injection gate (StageOrDeliverAdditiveEvent) needs it to delete the row
-// if its post-stage resumability recheck decides against delivery, since
-// every other caller here tolerates a staged-but-never-flushed row as
-// business as usual.
-func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body string) (delivered, staged bool, stagedID string) {
+// Never flips conversation status or wakes a terminal run: this is an async
+// sidecar, so a note for a terminal-but-resumable conversation waits in the
+// queue until the user's next follow-up, and one for a conversation that can
+// never resume simply never reaches the agent. The caller gates that — see
+// HandlePRCoherence, which only stages for live-or-resumable conversations.
+//
+// stagedID is the durable row's id when staged=true (empty otherwise), which
+// the additive gate needs in order to delete the row when its post-stage
+// resumability recheck decides against delivery.
+//
+// delivered=false with staged=false is a drop: the live gate raced a closing
+// process and the durable append then failed (no store wired, or AppendSystem
+// errored). Nothing re-delivers it, so a producer whose news does not recur
+// must not treat a drop as tolerable — the coherence feed can, because its
+// next transition carries a fresh note.
+func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body string, prov domain.NoteProvenance) (delivered, staged bool, stagedID string) {
 	if body == "" {
 		return false, false, ""
 	}
 	if s.getProc(conversationID) != nil {
-		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body))
+		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
 		return true, false, ""
 	}
 	if s.stagedInjections == nil {
@@ -93,6 +67,7 @@ func (s *Spawner) stageOrDeliverInjection(orgID, conversationID, producer, body 
 		ConversationID: conversationID,
 		Producer:       producer,
 		Body:           body,
+		Provenance:     prov,
 	})
 	if err != nil {
 		delegateLog.Warn("stage injection: append failed (dropped for good; only a later transition from a self-renewing producer might stage fresh news)", "conversation", conversationID, "producer", producer, "error", err)

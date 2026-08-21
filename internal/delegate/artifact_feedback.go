@@ -54,7 +54,7 @@ func (s *Spawner) InjectArtifactNote(orgID, conversationID string, a domain.Arti
 	if s.getProc(conversationID) == nil {
 		return false
 	}
-	s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(note))
+	s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(note), domain.NoteProducerArtifactResolved, domain.NoteProvenance{})
 	return true
 }
 
@@ -71,9 +71,9 @@ func (s *Spawner) InjectArtifactNote(orgID, conversationID string, a domain.Arti
 // steer, and a steer that races the process closing is tolerated — the artifact
 // note re-derives via the ledger on resume, the staged injection re-fires on the next
 // head change.
-func (s *Spawner) deliverInjectionLive(orgID, conversationID, wrapped string) {
+func (s *Spawner) deliverInjectionLive(orgID, conversationID, wrapped, producer string, prov domain.NoteProvenance) {
 	go func() {
-		s.recordInjectedNote(orgID, conversationID, wrapped)
+		s.recordInjectedNote(orgID, conversationID, wrapped, producer, prov)
 		if err := s.Steer(context.Background(), conversationID, wrapped); err != nil {
 			delegateLog.Warn("deliver injection live: steer failed", "conversation", conversationID, "error", err)
 		}
@@ -99,11 +99,16 @@ func (s *Spawner) deliverInjectionLive(orgID, conversationID, wrapped string) {
 // outside the human set renders as a system marker instead of an operator
 // line — so the tag is what keeps this from being attributed to whoever is
 // reading the screen.
-func (s *Spawner) recordInjectedNote(orgID, conversationID, content string) {
+func (s *Spawner) recordInjectedNote(orgID, conversationID, content, producer string, prov domain.NoteProvenance) {
 	if s.conversations == nil {
 		return
 	}
-	msg := &domain.Message{ConversationID: conversationID, Role: "user", Subtype: "system_note", Content: content}
+	// The same metadata the staged path writes, so a reader does not have to
+	// know which way the note reached the agent to learn where it came from.
+	msg := &domain.Message{
+		ConversationID: conversationID, Role: "user", Subtype: "system_note", Content: content,
+		Metadata: domain.NoteMetadata(producer, prov),
+	}
 	id, err := s.conversations.InsertMessageSystem(context.Background(), orgID, msg)
 	if err != nil {
 		delegateLog.Warn("record injected artifact note failed", "conversation", conversationID, "error", err)

@@ -190,8 +190,14 @@ type permissionPayload struct {
 // pending_firing enqueue if the run turns out dead by apply time (the
 // "gone" ack path) — the intent must never be dropped.
 type injectPayload struct {
-	Producer          string `json:"producer"`
-	Body              string `json:"body"`
+	Producer string `json:"producer"`
+	Body     string `json:"body"`
+	// EventID / EventType are the note's provenance, carried so the owning
+	// pod records the same metadata on the transcript row that a local
+	// delivery would have. They are the payload's only fields the owner
+	// writes verbatim rather than acting on.
+	EventID           string `json:"event_id,omitempty"`
+	EventType         string `json:"event_type,omitempty"`
 	EntityID          string `json:"entity_id"`
 	TaskID            string `json:"task_id"`
 	TriggerID         string `json:"trigger_id"`
@@ -479,12 +485,12 @@ type AdditiveFiringRef struct {
 // path) → a live remote owner (insert an `inject` conversation_signals row,
 // fire-and-forget — never waited on, per the reply-leg contract) → the
 // existing staged/resumable fallback.
-func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing AdditiveFiringRef) InjectOutcome {
+func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing AdditiveFiringRef) InjectOutcome {
 	if body == "" {
 		return InjectNotDelivered
 	}
 	if s.getProc(conversationID) != nil {
-		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body))
+		s.deliverInjectionLive(orgID, conversationID, domain.WrapSystemNote(body), producer, prov)
 		return InjectDeliveredLocal
 	}
 	s.mu.Lock()
@@ -494,6 +500,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		if executorID, ok := s.resolveLiveOwner(ctx, orgID, conversationID); ok {
 			payload, merr := json.Marshal(injectPayload{
 				Producer: producer, Body: body,
+				EventID: prov.EventID, EventType: prov.EventType,
 				EntityID: firing.EntityID, TaskID: firing.TaskID,
 				TriggerID: firing.TriggerID, TriggeringEventID: firing.TriggeringEventID,
 				ClaimAgentID: firing.TaskClaim.AgentID, ClaimActingTeamID: firing.TaskClaim.ActingTeamID,
@@ -510,7 +517,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 			}
 		}
 	}
-	delivered, staged, stagedID := s.stageOrDeliverInjection(orgID, conversationID, producer, body)
+	delivered, staged, stagedID := s.stageOrDeliverInjection(orgID, conversationID, producer, body, prov)
 	if delivered {
 		return InjectDeliveredLocal // race: getProc missed above, live by the time stageOrDeliverInjection ran
 	}
@@ -542,8 +549,8 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 // The empty firing reference is load-bearing: an owner that receives the
 // cross-pod signal delivers the note but neither marks task_events nor
 // compensates with a pending firing if the conversation disappeared.
-func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string) InjectOutcome {
-	return s.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, producer, body, AdditiveFiringRef{})
+func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance) InjectOutcome {
+	return s.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, producer, body, prov, AdditiveFiringRef{})
 }
 
 // --- Owner-side signal-apply loop ---
@@ -732,7 +739,7 @@ func (s *Spawner) deliverInjectSignal(ctx context.Context, sig domain.Conversati
 		}
 		return domain.ConversationSignalAckGone
 	}
-	s.deliverInjectionLive(sig.OrgID, sig.ConversationID, domain.WrapSystemNote(p.Body))
+	s.deliverInjectionLive(sig.OrgID, sig.ConversationID, domain.WrapSystemNote(p.Body), p.Producer, domain.NoteProvenance{EventID: p.EventID, EventType: p.EventType})
 	if s.tasks != nil && p.TaskID != "" && p.TriggeringEventID != "" {
 		if _, err := s.tasks.MarkEventInjectedSystem(ctx, sig.OrgID, p.TaskID, p.TriggeringEventID, claim); err != nil {
 			delegateLog.Error("mark injected task_event for cross-pod inject failed", "task_id", p.TaskID, "conversation", sig.ConversationID, "error", err)

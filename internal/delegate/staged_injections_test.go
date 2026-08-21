@@ -12,9 +12,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestStageOrDeliverInjection_LiveSteers: a warm process gets the injection steered in,
+// stageOne drives the stage-or-deliver primitive with no provenance, which is
+// what these tests are about — the live/parked routing itself, not what the
+// note was composed from.
+func stageOne(t *testing.T, s *Spawner, orgID, conversationID, producer, body string) (delivered bool) {
+	t.Helper()
+	delivered, _, _ = s.stageOrDeliverInjection(orgID, conversationID, producer, body, domain.NoteProvenance{})
+	return delivered
+}
+
+// TestStageOrDeliverInjectionPrimitive_LiveSteers: a warm process gets the injection steered in,
 // wrapped, fire-and-forget; delivered=true and nothing is persisted.
-func TestStageOrDeliverInjection_LiveSteers(t *testing.T) {
+func TestStageOrDeliverInjectionPrimitive_LiveSteers(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-live", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -22,7 +31,7 @@ func TestStageOrDeliverInjection_LiveSteers(t *testing.T) {
 	s.controller = fc
 	s.registerProc(runmode.LocalDefaultOrgID, "run-live", &agentproc.LiveRun{})
 
-	delivered := s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-live", domain.StagedInjectionProducerPRNewCommits, "the body")
+	delivered := stageOne(t, s, runmode.LocalDefaultOrgID, "run-live", domain.StagedInjectionProducerPRNewCommits, "the body")
 	if !delivered {
 		t.Fatal("expected delivered=true for a live run")
 	}
@@ -42,16 +51,16 @@ func TestStageOrDeliverInjection_LiveSteers(t *testing.T) {
 	}
 }
 
-// TestStageOrDeliverInjection_ParkedStages: with no warm process the bare body is
+// TestStageOrDeliverInjectionPrimitive_ParkedStages: with no warm process the bare body is
 // persisted to the durable queue; delivered=false and nothing is steered.
-func TestStageOrDeliverInjection_ParkedStages(t *testing.T) {
+func TestStageOrDeliverInjectionPrimitive_ParkedStages(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-parked", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	fc := &fakeController{}
 	s.controller = fc
 
-	delivered := s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-parked", domain.StagedInjectionProducerPRNewCommits, "staged body")
+	delivered := stageOne(t, s, runmode.LocalDefaultOrgID, "run-parked", domain.StagedInjectionProducerPRNewCommits, "staged body")
 	if delivered {
 		t.Error("expected delivered=false for a run with no live process")
 	}
@@ -69,13 +78,13 @@ func TestStageOrDeliverInjection_ParkedStages(t *testing.T) {
 	}
 }
 
-// TestStageOrDeliverInjection_BlankBodyNoOp: an empty body neither steers nor stages.
-func TestStageOrDeliverInjection_BlankBodyNoOp(t *testing.T) {
+// TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp: an empty body neither steers nor stages.
+func TestStageOrDeliverInjectionPrimitive_BlankBodyNoOp(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "run-blank", "sess", "/tmp/wt")
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
-	if s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-blank", "p", "") {
+	if stageOne(t, s, runmode.LocalDefaultOrgID, "run-blank", "p", "") {
 		t.Error("blank body must return delivered=false")
 	}
 	injections, _ := s.stagedInjections.FlushPendingSystem(context.Background(), runmode.LocalDefaultOrgID, "run-blank")
@@ -93,8 +102,8 @@ func TestStagedInjectionsForResume_FlushesAndDrains(t *testing.T) {
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 	ctx := context.Background()
 
-	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-resume", "p", "injection one")
-	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "run-resume", "p", "injection two")
+	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection one")
+	stageOne(t, s, runmode.LocalDefaultOrgID, "run-resume", "p", "injection two")
 
 	block := s.stagedInjectionsForResume(ctx, runmode.LocalDefaultOrgID, "run-resume")
 	if !strings.HasPrefix(block, "<system-note>") || !strings.HasSuffix(block, "</system-note>") {
@@ -128,7 +137,7 @@ func TestResumeSystemPrepends_OrdersInjectionsThenLedger(t *testing.T) {
 	seedResolvedArtifact(t, s, "r-compose", approvedPR)
 
 	// Staged injection on the same run.
-	s.StageOrDeliverInjection(runmode.LocalDefaultOrgID, "r-compose",
+	stageOne(t, s, runmode.LocalDefaultOrgID, "r-compose",
 		domain.StagedInjectionProducerPRNewCommits, "the staged injection body")
 
 	conv, err := s.conversations.GetSystem(ctx, runmode.LocalDefaultOrgID, "r-compose")

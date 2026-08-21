@@ -2,9 +2,11 @@ package delegate
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -357,4 +359,70 @@ func TestHandlePRCoherence_MissingQualifiersDropTheirClause(t *testing.T) {
 			t.Errorf("new-commits note rendered a blank from clause: %q", got[0].Body)
 		}
 	})
+}
+
+// TestHandlePRCoherence_RecordsProvenance: the note's message row names the
+// event it was composed from, on both the staged and the live path, so a
+// later reader can resolve a note back to its cause without parsing the body.
+func TestHandlePRCoherence_RecordsProvenance(t *testing.T) {
+	t.Run("Staged", func(t *testing.T) {
+		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
+		})
+		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+		got := flushOne(t, s, conversationID)
+		if len(got) != 1 {
+			t.Fatalf("note not staged: %+v", got)
+		}
+		if got[0].Provenance.EventID != source.ID || got[0].Provenance.EventType != domain.EventGitHubPRConflicts {
+			t.Errorf("staged provenance = %+v, want event %s / %s",
+				got[0].Provenance, source.ID, domain.EventGitHubPRConflicts)
+		}
+		if got[0].Producer != domain.StagedInjectionProducerPRCoherence {
+			t.Errorf("staged producer = %q", got[0].Producer)
+		}
+	})
+
+	t.Run("Live", func(t *testing.T) {
+		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
+		})
+		s.controller = &fakeController{}
+		s.registerProc(runmode.LocalDefaultOrgID, conversationID, &agentproc.LiveRun{})
+
+		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+		waitSteerCalls(t, s.controller.(*fakeController), 1)
+
+		metadata := waitForNoteMetadata(t, s, conversationID)
+		if metadata["event_id"] != source.ID || metadata["event_type"] != domain.EventGitHubPRConflicts {
+			t.Errorf("live provenance = %+v, want event %s / %s", metadata, source.ID, domain.EventGitHubPRConflicts)
+		}
+		if metadata["producer"] != domain.StagedInjectionProducerPRCoherence {
+			t.Errorf("live producer = %v", metadata["producer"])
+		}
+	})
+}
+
+// waitForNoteMetadata reads back the metadata of the live-injected system_note
+// row. The live path records it from a goroutine, so this polls rather than
+// assuming the write has landed.
+func waitForNoteMetadata(t *testing.T, s *Spawner, conversationID string) map[string]any {
+	t.Helper()
+	for range 100 {
+		var raw sql.NullString
+		err := s.database.QueryRow(`
+			SELECT metadata FROM messages
+			WHERE conversation_id = ? AND subtype = 'system_note'
+			ORDER BY id DESC LIMIT 1
+		`, conversationID).Scan(&raw)
+		if err == nil && raw.String != "" {
+			var out map[string]any
+			if json.Unmarshal([]byte(raw.String), &out) == nil {
+				return out
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("live system_note metadata never landed")
+	return nil
 }

@@ -131,7 +131,7 @@ func (s *stubDelegator) stoppedCopy() []string {
 	return out
 }
 
-func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *stubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	return delegate.InjectNotDelivered
 }
 
