@@ -27,6 +27,13 @@ export interface EventSourceAvailability {
 const cache = new Map<string, EventSourceAvailability[]>()
 const inFlight = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
+// Orgs whose cached answer is known stale and not yet refetched. Invalidation
+// marks rather than deletes, because deleting takes `loaded` back to false and
+// every consumer collapses to its loading state — the whole settings section
+// flashing on a toggle, the event picker emptying on a websocket ping. The
+// stale answer is a better thing to show for the length of one refetch than a
+// spinner: it is what was true a moment ago, and it converges.
+const staleOrgs = new Set<string>()
 // Bumped PER ORG whenever that org's cached answer is dropped. A read captures
 // its org's generation at dispatch and discards its answer if an invalidation
 // has since bumped it, so a request already in flight when a credential
@@ -39,6 +46,16 @@ const generations = new Map<string, number>()
 
 function generationOf(orgId: string): number {
   return generations.get(orgId) ?? 0
+}
+
+// ensureFresh starts a read when this org has no answer or a stale one, and
+// nothing is already fetching it. Both entry points go through it: an org can
+// be invalidated while nothing is mounted, and a component mounting afterwards
+// would otherwise find a populated cache and render the stale answer forever.
+function ensureFresh(orgId: string): void {
+  if (inFlight.has(orgId)) return
+  if (cache.has(orgId) && !staleOrgs.has(orgId)) return
+  void load(orgId)
 }
 
 function notify() {
@@ -55,6 +72,7 @@ function load(orgId: string): Promise<void> {
     .then((data) => {
       if (gen !== generationOf(orgId)) return // superseded — a newer invalidation won
       cache.set(orgId, data.sources ?? [])
+      staleOrgs.delete(orgId)
       notify()
     })
     .catch(() => {
@@ -74,7 +92,9 @@ function load(orgId: string): Promise<void> {
   return tracked
 }
 
-/** Drop the cached availability and refetch for any mounted subscriber. Call
+/** Mark the cached availability stale and refetch for any mounted subscriber.
+ *  The previous answer keeps rendering until the new one lands — see staleOrgs.
+ *  Call
  *  after a change that can move a source — binding or unbinding a credential,
  *  connecting a workspace, an org admin pausing or resuming one. Pass an orgId
  *  to invalidate just that org; omit it to invalidate every org this page has
@@ -86,12 +106,12 @@ function load(orgId: string): Promise<void> {
 export function invalidateEventSources(orgId?: string): void {
   const targets = orgId ? [orgId] : [...cache.keys(), ...inFlight.keys()]
   for (const id of new Set(targets)) {
-    // Bump before dropping: a read still in flight for this org has captured
-    // the old generation and must not write its pre-change answer into the
-    // cache we are about to empty.
+    // Bump first: a read still in flight for this org has captured the old
+    // generation and must not write its pre-change answer over the refetch this
+    // is about to start.
     generations.set(id, generationOf(id) + 1)
     inFlight.delete(id)
-    cache.delete(id)
+    staleOrgs.add(id)
   }
   // Mounted consumers refetch from their own subscription (below) rather than
   // this function knowing which orgs are on screen.
@@ -141,13 +161,13 @@ export function useEventSources(): UseEventSources {
 
   useEffect(() => {
     const cb = () => {
-      // An invalidation drops the cache and notifies; a mounted consumer
+      // An invalidation marks the cache stale and notifies; a mounted consumer
       // refills it. That keeps the refetch with whoever is actually rendering.
-      if (orgId && !cache.has(orgId) && !inFlight.has(orgId)) void load(orgId)
+      if (orgId) ensureFresh(orgId)
       forceRender((n) => n + 1)
     }
     listeners.add(cb)
-    if (orgId && !cache.has(orgId)) void load(orgId)
+    if (orgId) ensureFresh(orgId)
     return () => {
       listeners.delete(cb)
     }
@@ -176,5 +196,6 @@ export function resetEventSourcesForTest(): void {
   cache.clear()
   inFlight.clear()
   generations.clear()
+  staleOrgs.clear()
   listeners.clear()
 }

@@ -34,6 +34,15 @@ type sourceGate struct {
 
 	mu    sync.Mutex
 	byOrg map[string]sourceGateEntry
+	// gen counts invalidations per org. A read captures it before dispatching
+	// and drops its answer on the way back if it moved, so a read already in
+	// flight when an admin flipped the switch cannot install the answer from
+	// before the flip. Without it, invalidate() is a no-op against a read that
+	// has not written yet, and the stale answer lands AFTER the invalidation
+	// with a fresh timestamp — a full TTL of events routed as though the
+	// switch had never been thrown. Same guard, same reasoning, as the
+	// frontend's own per-org generation on this read.
+	gen map[string]uint64
 	// now is the clock, injectable so a test can age an entry past the TTL
 	// without sleeping. nil means time.Now.
 	now func() time.Time
@@ -45,7 +54,7 @@ type sourceGateEntry struct {
 }
 
 func newSourceGate(store dbpkg.OrgEventSourceStore) *sourceGate {
-	return &sourceGate{store: store, byOrg: map[string]sourceGateEntry{}}
+	return &sourceGate{store: store, byOrg: map[string]sourceGateEntry{}, gen: map[string]uint64{}}
 }
 
 func (g *sourceGate) clock() time.Time {
@@ -73,10 +82,16 @@ func (g *sourceGate) disabled(ctx context.Context, orgID, kind string) (bool, er
 	g.mu.Lock()
 	entry, ok := g.byOrg[orgID]
 	fresh := ok && g.clock().Sub(entry.readAt) < sourceGateTTL
+	gen := g.gen[orgID]
 	g.mu.Unlock()
 	if fresh {
 		return entry.paused[kind], nil
 	}
+
+	// Stamp the age from when the read was DISPATCHED, not when it landed. The
+	// TTL bounds how long a stale answer may be served, and a read that took a
+	// second to come back was already a second stale when it did.
+	startedAt := g.clock()
 
 	// Read outside the lock: a slow read must not block every other org's
 	// events. Two goroutines racing the same org both read and both store the
@@ -93,15 +108,29 @@ func (g *sourceGate) disabled(ctx context.Context, orgID, kind string) (bool, er
 	}
 
 	g.mu.Lock()
-	g.byOrg[orgID] = sourceGateEntry{paused: paused, readAt: g.clock()}
+	// Only cache an answer no invalidation has overtaken. The generation moves
+	// on both directions of the switch, so a mismatch is not evidence the
+	// source is off and this read is not re-run: THIS event is answered from
+	// what the read found, which is inherent — an event crossing the router
+	// while an admin commits the write is a race with no total order, and the
+	// switch is forward-only either way. What must not happen is that one
+	// racing answer becoming every subsequent event's answer for a TTL.
+	if g.gen[orgID] == gen {
+		g.byOrg[orgID] = sourceGateEntry{paused: paused, readAt: startedAt}
+	}
 	g.mu.Unlock()
 	return paused[kind], nil
 }
 
 // invalidate drops one org's cached answer so the next event re-reads it. Its
 // caller is the admin write, in process or relayed over tf_ctl.
+//
+// Bumping the generation is the half that matters when nothing is cached yet:
+// deleting an absent entry is a no-op, and the read that is mid-flight right
+// now is exactly the one holding the pre-write answer.
 func (g *sourceGate) invalidate(orgID string) {
 	g.mu.Lock()
+	g.gen[orgID]++
 	delete(g.byOrg, orgID)
 	g.mu.Unlock()
 }

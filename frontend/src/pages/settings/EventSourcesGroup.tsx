@@ -71,11 +71,23 @@ export default function EventSourcesGroup({
   canEdit: boolean
 }) {
   const { sources, loaded } = useEventSources()
-  const [pending, setPending] = useState<string | null>(null)
+  // Keyed per source, not a single kind. Every source a deployment REGISTERS is
+  // disableable — required is a core-only property — so an ee build already
+  // renders more than one switch, and a shared value would re-enable source A's
+  // control the moment B was clicked, letting a second PATCH go out on A while
+  // its first was still open.
+  const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set())
+  const mark = (kind: string, busy: boolean) =>
+    setPending((prev) => {
+      const next = new Set(prev)
+      if (busy) next.add(kind)
+      else next.delete(kind)
+      return next
+    })
 
   async function setDisabled(kind: string, disabled: boolean) {
     if (!orgId) return
-    setPending(kind)
+    mark(kind, true)
     try {
       await apiJSON(`/api/orgs/${encodeURIComponent(orgId)}/sources/${encodeURIComponent(kind)}`, {
         method: 'PATCH',
@@ -90,7 +102,7 @@ export default function EventSourcesGroup({
         httpErrorMessage(err, `Could not turn ${sourceLabel(kind)} ${disabled ? 'off' : 'on'}.`),
       )
     } finally {
-      setPending(null)
+      mark(kind, false)
     }
   }
 
@@ -121,7 +133,7 @@ export default function EventSourcesGroup({
                 role="switch"
                 aria-label={sourceLabel(src.kind)}
                 aria-checked={!off}
-                disabled={pending === src.kind}
+                disabled={pending.has(src.kind)}
                 onClick={() => void setDisabled(src.kind, !off)}
                 className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors disabled:opacity-50 ${
                   off ? 'bg-black/[0.08]' : 'bg-accent'

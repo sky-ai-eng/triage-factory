@@ -623,3 +623,62 @@ func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 		},
 	}
 }
+
+// TestEntityStore_Postgres_ClearSnapshotsForSourceIsOrgScoped pins the
+// isolation the shared conformance suite structurally cannot: SQLite is N=1 and
+// asserts a single sentinel org, so the only place cross-tenant scoping can be
+// checked is here.
+//
+// It matters more than most cross-org reads because this one is a WRITE, and it
+// runs on the admin pool with RLS bypassed — the WHERE clause is the entire
+// boundary. A missing org_id predicate would blank every tenant's snapshots the
+// moment one org admin turned a source off, and the damage is silent: the next
+// cycle re-seeds quietly by design, so nobody gets an error, they just lose the
+// diff baseline for a source they never touched.
+func TestEntityStore_Postgres_ClearSnapshotsForSourceIsOrgScoped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgA, _ := seedPgEntityOrg(t, h)
+	orgB, _ := seedPgEntityOrg(t, h)
+
+	entA, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "owner/repo#clr-a", "pr", "A", "")
+	if err != nil {
+		t.Fatalf("seed orgA entity: %v", err)
+	}
+	entB, _, err := stores.Entities.FindOrCreate(ctx, orgB, "github", "owner/repo#clr-b", "pr", "B", "")
+	if err != nil {
+		t.Fatalf("seed orgB entity: %v", err)
+	}
+	for org, id := range map[string]string{orgA: entA.ID, orgB: entB.ID} {
+		if _, err := stores.Entities.UpdateSnapshot(ctx, org, id, `{"number":7}`); err != nil {
+			t.Fatalf("seed snapshot: %v", err)
+		}
+	}
+	beforeB, err := stores.Entities.Get(ctx, orgB, entB.ID)
+	if err != nil || beforeB == nil {
+		t.Fatalf("read orgB entity: %v", err)
+	}
+
+	cleared, err := stores.Entities.ClearSnapshotsForSourceSystem(ctx, orgA, "github")
+	if err != nil {
+		t.Fatalf("ClearSnapshotsForSourceSystem: %v", err)
+	}
+	if cleared != 1 {
+		t.Errorf("cleared %d rows, want 1 — only orgA's", cleared)
+	}
+
+	gotB, err := stores.Entities.Get(ctx, orgB, entB.ID)
+	if err != nil || gotB == nil {
+		t.Fatalf("re-read orgB entity: %v", err)
+	}
+	if gotB.SnapshotJSON == "" {
+		t.Error("orgA turning a source off cleared orgB's snapshot")
+	}
+	if gotB.PollSeq != beforeB.PollSeq {
+		t.Errorf("orgB poll_seq moved %d → %d; an untouched tenant's rows must not be written at all",
+			beforeB.PollSeq, gotB.PollSeq)
+	}
+}

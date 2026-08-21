@@ -294,3 +294,94 @@ func TestSourceGate_InvalidateDropsTheCachedAnswer(t *testing.T) {
 		t.Errorf("after invalidate: disabled=%v err=%v, want true without waiting out the TTL", off, err)
 	}
 }
+
+// invalidatingStore fires a hook mid-read, which is how the invalidate-races-a-
+// read window is reproduced without goroutines or sleeps: the hook runs at
+// exactly the moment a real read is open and an admin's write commits behind
+// it. Each call answers from the head of results, so the fake can return the
+// pre-write answer first and the post-write answer after.
+type invalidatingStore struct {
+	dbpkg.OrgEventSourceStore
+	onRead  func()
+	results [][]string
+	reads   int
+}
+
+func (s *invalidatingStore) ListDisabledSystem(context.Context, string) ([]string, error) {
+	if s.onRead != nil {
+		s.onRead()
+		s.onRead = nil
+	}
+	out := s.results[min(s.reads, len(s.results)-1)]
+	s.reads++
+	return out, nil
+}
+
+// TestSourceGate_InvalidateDuringAReadIsNotOverwritten is the race the TTL
+// bound depends on. An admin pauses a source while a gate read is already in
+// flight: the read returns the pre-pause answer, and invalidate() has nothing
+// cached to delete, so a gate that cached unconditionally would install "not
+// turned off" — timestamped AFTER the pause — and serve it to every event for a
+// full TTL. The switch would look like it had not been thrown.
+//
+// The answer this read returns is allowed to be the pre-pause one; an event
+// crossing the router while the write commits is a race with no total order,
+// and the switch is forward-only regardless. What must not survive is the
+// CACHE entry.
+func TestSourceGate_InvalidateDuringAReadIsNotOverwritten(t *testing.T) {
+	store := &invalidatingStore{
+		// First read (racing the write) sees nothing turned off; every read
+		// after the write sees jira off.
+		results: [][]string{{}, {eventsource.KindJira}},
+	}
+	gate := newSourceGate(store)
+	store.onRead = func() { gate.invalidate(runmode.LocalDefaultOrgID) }
+	ctx := context.Background()
+
+	if off, err := gate.disabled(ctx, runmode.LocalDefaultOrgID, eventsource.KindJira); err != nil || off {
+		t.Fatalf("the racing read = %v, %v; want the pre-write false it actually saw", off, err)
+	}
+	// The next event must re-read rather than be answered from what that read
+	// installed. No clock movement: the whole point is that the TTL has not
+	// expired.
+	off, err := gate.disabled(ctx, runmode.LocalDefaultOrgID, eventsource.KindJira)
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if !off {
+		t.Error("a read that raced an invalidate was cached anyway; every event for a full TTL would route as though the admin had not turned the source off")
+	}
+	if store.reads != 2 {
+		t.Errorf("store reads = %d, want 2 — the second call must not have been served from the raced answer", store.reads)
+	}
+}
+
+// TestSourceGate_AgeIsMeasuredFromDispatch: the TTL bounds how long a stale
+// answer may be served, so a read that took time to come back is already that
+// much stale when it lands. Stamping on arrival instead would silently extend
+// every window by the read's own latency — and the slower the database, the
+// longer a turned-off source would keep routing.
+func TestSourceGate_AgeIsMeasuredFromDispatch(t *testing.T) {
+	now := time.Now()
+	store := &invalidatingStore{results: [][]string{{}, {eventsource.KindJira}}}
+	gate := newSourceGate(store)
+	gate.now = func() time.Time { return now }
+	// The first read takes most of a TTL to come back.
+	store.onRead = func() { now = now.Add(sourceGateTTL * 9 / 10) }
+	ctx := context.Background()
+
+	if off, err := gate.disabled(ctx, runmode.LocalDefaultOrgID, eventsource.KindJira); err != nil || off {
+		t.Fatalf("first read = %v, %v; want false, nil", off, err)
+	}
+	// Past the TTL as measured from dispatch (0.9 + 0.2), but well inside it as
+	// measured from arrival (0.2) — so this asserts which stamp was used.
+	now = now.Add(sourceGateTTL * 2 / 10)
+
+	off, err := gate.disabled(ctx, runmode.LocalDefaultOrgID, eventsource.KindJira)
+	if err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if !off || store.reads != 2 {
+		t.Errorf("disabled=%v reads=%d; want a re-read — a slow read's latency must not extend the window it is cached for", off, store.reads)
+	}
+}

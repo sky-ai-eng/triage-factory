@@ -192,6 +192,64 @@ describe('useEventSources', () => {
     expect(result.current.canProduce('github')).toBe(true)
   })
 
+  it('keeps the previous answer rendered while a refetch is in flight', async () => {
+    // Invalidation marks stale rather than deleting. Deleting takes `loaded`
+    // back to false, and every consumer collapses to its loading state — the
+    // settings section flashing on its own toggle, the event picker emptying on
+    // a websocket ping meant for somebody else's change.
+    const opened: Array<(value: EventSourceAvailability[]) => void> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown) => {
+        if (String(input).split('?')[0] !== sourcesPath) {
+          return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
+        }
+        const body = new Promise<{ sources: EventSourceAvailability[] }>((resolve) => {
+          opened.push((sources) => resolve({ sources }))
+        })
+        return Promise.resolve({ ok: true, ...jsonBody(body) })
+      }),
+    )
+    const { result } = renderHook(() => useEventSources())
+    await waitFor(() => expect(opened).toHaveLength(1))
+    opened[0](configured)
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+
+    invalidateEventSources()
+    await waitFor(() => expect(opened).toHaveLength(2))
+
+    // Still resolved, still the old answer, while the new read is open.
+    expect(result.current.loaded).toBe(true)
+    expect(result.current.stateOf('jira')).toBe('unconfigured')
+
+    opened[1]([
+      { kind: 'github', state: 'available', disableable: false },
+      { kind: 'jira', state: 'available', disableable: true },
+    ])
+    await waitFor(() => expect(result.current.stateOf('jira')).toBe('available'))
+  })
+
+  it('refetches an org invalidated while nothing was mounted', async () => {
+    // The stale mark has to survive an unmount, or a component mounting after
+    // the invalidation finds a populated cache and renders the old answer with
+    // nothing left to correct it.
+    let answer = configured
+    const fetchMock = stubSources(() => answer)
+    const first = renderHook(() => useEventSources())
+    await waitFor(() => expect(first.result.current.loaded).toBe(true))
+    first.unmount()
+
+    answer = [
+      { kind: 'github', state: 'available', disableable: false },
+      { kind: 'jira', state: 'available', disableable: true },
+    ]
+    invalidateEventSources()
+
+    const second = renderHook(() => useEventSources())
+    await waitFor(() => expect(second.result.current.stateOf('jira')).toBe('available'))
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('picks up a source that just became available', async () => {
     let answer = configured
     const fetchMock = stubSources(() => answer)

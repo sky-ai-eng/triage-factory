@@ -36,6 +36,15 @@ function stub(sources: EventSourceAvailability[]) {
 beforeEach(() => resetEventSourcesForTest())
 afterEach(() => vi.unstubAllGlobals())
 
+// Two sources an org can actually turn off. Every REGISTERED source is
+// disableable — required is a core-only property — so an ee build renders more
+// than one switch today.
+const twoDisableable: EventSourceAvailability[] = [
+  { kind: 'github', state: 'available', disableable: false },
+  { kind: 'jira', state: 'available', disableable: true },
+  { kind: 'slack', state: 'available', disableable: true },
+]
+
 describe('EventSourcesGroup', () => {
   it('offers a switch only where there is something to turn off', async () => {
     stub(everyState)
@@ -72,6 +81,7 @@ describe('EventSourcesGroup', () => {
     // tasks" would not learn that the agents lost their access too, which is
     // the thing they most need to know before flipping it.
     expect(screen.getByText(/not polled/)).toBeTruthy()
+    expect(screen.getByText(/creating no tasks/)).toBeTruthy()
     expect(screen.getByText(/agents cannot reach it/)).toBeTruthy()
     // And it is still a pause, not a disconnect — otherwise the switch reads
     // as the destructive action it exists to replace.
@@ -100,5 +110,60 @@ describe('EventSourcesGroup', () => {
         expect.objectContaining({ method: 'PATCH', body: JSON.stringify({ disabled: false }) }),
       ),
     )
+  })
+
+  it('disables only the switch whose PATCH is in flight', async () => {
+    // A single shared `pending` would re-enable Jira's control the moment
+    // Slack was clicked, letting a second PATCH go out on Jira while its first
+    // was still open.
+    const settle: Array<() => void> = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: unknown, init?: { method?: string }) => {
+        const path = String(input).split('?')[0]
+        if (path === sourcesPath) {
+          return Promise.resolve({ ok: true, ...jsonBody({ sources: twoDisableable }) })
+        }
+        if (init?.method === 'PATCH') {
+          // Park the write open so both rows are observable mid-flight.
+          return new Promise((resolve) => {
+            settle.push(() =>
+              resolve({ ok: true, ...jsonBody({ kind: 'jira', state: 'disabled' }) }),
+            )
+          })
+        }
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
+      }),
+    )
+    render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
+
+    await waitFor(() => expect(screen.getByLabelText('Jira')).toBeTruthy())
+    await userEvent.click(screen.getByLabelText('Jira'))
+    await waitFor(() => expect(settle).toHaveLength(1))
+
+    // Jira is busy; Slack is untouched and still clickable.
+    expect(screen.getByLabelText('Jira').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByLabelText('Slack').hasAttribute('disabled')).toBe(false)
+
+    await userEvent.click(screen.getByLabelText('Slack'))
+    await waitFor(() => expect(settle).toHaveLength(2))
+
+    // Slack going busy must not have released Jira.
+    expect(screen.getByLabelText('Jira').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByLabelText('Slack').hasAttribute('disabled')).toBe(true)
+    settle.forEach((fn) => fn())
+  })
+
+  it('keeps the section rendered while the refetch after a toggle is in flight', async () => {
+    // The toggle invalidates; if that dropped the cache the whole section would
+    // collapse to "Loading event sources…" on every flip.
+    stub(everyState)
+    render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
+
+    await waitFor(() => expect(screen.getByLabelText('Jira')).toBeTruthy())
+    await userEvent.click(screen.getByLabelText('Jira'))
+
+    expect(screen.queryByText(/Loading event sources/)).toBeNull()
+    expect(screen.getByLabelText('Jira')).toBeTruthy()
   })
 })
