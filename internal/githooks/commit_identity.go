@@ -71,3 +71,31 @@ func IdentityConfigPairs(name, email string) [][2]string {
 		{"user.email", email},
 	}
 }
+
+// FallbackIdentityName / FallbackIdentityEmail are the neutral author and
+// committer a SANDBOXED local run commits under when the org has configured
+// no GitHub identity of its own.
+//
+// Outside the sandbox, an unset org identity correctly leaves git ambient: the
+// operator's ~/.gitconfig answers "who are you", and fabricating an identity
+// over theirs would be worse than useless. Inside it, that file is masked on
+// purpose — it carries their credential helpers and url rewrites, which must
+// not leak into an agent's git — so ambient resolves to nothing and every
+// commit fails with "please tell me who you are". A neutral fallback is what
+// keeps that masking from turning an unconfigured org into a run that cannot
+// commit.
+//
+// The address uses the reserved .invalid TLD (RFC 2606), which is guaranteed
+// never to resolve: this identity is a placeholder standing in for an
+// unanswered question, and it should not be able to look like a real mailbox.
+const (
+	FallbackIdentityName  = "Triage Factory Agent"
+	FallbackIdentityEmail = "agent@triagefactory.invalid"
+)
+
+// FallbackIdentityConfigPairs returns the neutral identity as git config
+// pairs, in the same shape IdentityConfigPairs produces so both feed the one
+// GIT_CONFIG_* block a spawn assembles.
+func FallbackIdentityConfigPairs() [][2]string {
+	return IdentityConfigPairs(FallbackIdentityName, FallbackIdentityEmail)
+}

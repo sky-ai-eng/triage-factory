@@ -7,7 +7,11 @@ import (
 // BuildAllowedTools returns the --allowedTools argument value passed to the
 // headless `claude -p` process. We can't rely on an OS sandbox (Claude Code's
 // /sandbox is interactive-only, and `-p` has no kernel isolation), so the
-// allowlist IS the security boundary.
+// allowlist IS the security boundary. A local run's bubblewrap mount namespace
+// (internal/agentproc/localsandbox) does not change that: it runs as the same
+// uid on the same network and is courtesy isolation by construction, so it
+// narrows what an ACCIDENT reaches and nothing about what an allowlisted
+// command may deliberately do.
 //
 // Shared across runtimes — both delegate (per-task agents running in git
 // worktrees) and curator (per-project chat sessions running from
@@ -28,7 +32,10 @@ import (
 //     allowed. We block bash/sh/python/node/ruby/etc. as commands.
 //
 // Pre-existing channels we can't close without an OS sandbox:
-//   - Reading secrets via cat/Read (agent has our uid).
+//   - Reading secrets via cat/Read (agent has our uid). The local mount
+//     namespace puts the obvious ones — TF's own state, the operator's home,
+//     a sibling run's tree — out of casual reach, but the agent still holds
+//     the uid that could go get them.
 //   - Committing secrets into a PR branch (git push is allowed).
 //
 // Closing the network-exfil path matters most because it's stealthy; the

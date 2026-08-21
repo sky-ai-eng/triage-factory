@@ -312,6 +312,26 @@ func GHChannelDir(conversationID string) string {
 	return filepath.Join(StateRoot(), "gh-channel", sanitizePathSegment(conversationID))
 }
 
+// AgentHostSocketDir is the directory holding the per-conversation agenthost
+// sockets a LOCAL sandboxed run's exec verbs dial: <StateRoot>/agenthost.
+//
+// Multi mode has its own root for these (/run/tf, created by the cap-broker
+// and validated by it as the only legitimate mount source), which an
+// unprivileged local process cannot write. So local gets its own home under
+// the state root it already owns — well inside the 108-byte sun_path limit a
+// unix socket address is capped at, which is the real constraint on where
+// these may live.
+func AgentHostSocketDir() string {
+	return filepath.Join(StateRoot(), "agenthost")
+}
+
+// AgentHostSocketPath is one conversation's local agenthost socket:
+// <StateRoot>/agenthost/<conversationID>.sock. Created when the run's
+// sandbox comes up and removed when the daemon closes.
+func AgentHostSocketPath(conversationID string) string {
+	return filepath.Join(AgentHostSocketDir(), sanitizePathSegment(conversationID)+".sock")
+}
+
 // sanitizePathSegment reduces an id to a filesystem-safe single segment.
 // Conversation ids are UUIDs in every production caller, so this is defense in
 // depth against a future caller with a less constrained shape — never a path

@@ -279,6 +279,16 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 			return nil, err
 		}
 
+		// Local agent-run isolation (TF_LOCAL_SANDBOX). runmode resolved the
+		// posture at the top of main; this is where "is it actually usable on
+		// this host" gets asked, and a no refuses the boot rather than
+		// degrading to unsandboxed runs. It lives in the server path only —
+		// an operator running `triagefactory uninstall` on a host without
+		// bubblewrap should not be blocked by an agent-run concern.
+		if err = a.checkLocalSandbox(); err != nil {
+			return nil, err
+		}
+
 		// Resolve (and, for the headless encrypted-file backend, construct +
 		// validate) the local secret backend up front, so a missing
 		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the

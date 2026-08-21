@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // CreateForPR sets up a worktree on the PR's head branch.
@@ -51,10 +49,11 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 	if err != nil {
 		return "", err
 	}
-	// Multi mode sandboxes the run, so it needs a self-contained clone whose
-	// .git doesn't point back into the (unmounted) bare; local mode runs on-host
-	// where the bare is reachable and keeps the zero-copy linked worktree.
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
+	// A sandboxed run needs a self-contained clone whose .git doesn't point
+	// back into the (masked, in local; unmounted, in multi) bare; an
+	// unsandboxed run reaches the bare on-host and keeps the zero-copy linked
+	// worktree.
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
 }
 
 // CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
@@ -64,9 +63,9 @@ func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneUR
 // lets two PRs in one repo coexist (TFAC-502). The eager one-repo GitHub PR
 // delegation uses the run-dir CreateForPR instead. Other than the path,
 // behavior is identical: same fork / own-repo / deleted-fork handling, same
-// per-run push-tracking config, same runmode split (local → zero-copy linked
-// worktree; multi → self-contained clone, since the sandbox the run root is
-// mounted into can't see the shared bare). The run-root must already exist
+// per-run push-tracking config, same sandbox split (unsandboxed → zero-copy
+// linked worktree; sandboxed → self-contained clone, since a sandbox holding
+// the run root can't see the shared bare). The run-root must already exist
 // (created by MakeRunRoot in the spawner); the owner/repo subdirs are created
 // here.
 //
@@ -82,14 +81,14 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, runmode.Current() == runmode.ModeMulti)
+	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
 }
 
 // createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
 // bare-clone setup, refs/pull/<n>/head fetch, base-branch refresh, and the fork
 // / own-repo / deleted-fork push-tracking config. The run root is materialized
 // either as a linked `git worktree` (selfContained=false) or, for a sandboxed
-// multi-mode run, as a self-contained clone (selfContained=true — see
+// run in either mode, as a self-contained clone (selfContained=true — see
 // finishSelfContainedPRClone). The public callers differ in where wtDir lives on
 // disk, whether a host clone credential is threaded, and that selfContained
 // choice; wtDir's parent is created by the caller.
@@ -240,11 +239,12 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 }
 
 // finishSelfContainedPRClone materializes the PR run root as a STANDALONE clone
-// of the bare instead of a linked worktree. Multi-mode delegation bind-mounts
-// the run root into a sandbox that can't see the bare, so a worktree's .git
-// pointer (gitdir: <bare>/worktrees/...) dangles there and every git command
-// fails. A standalone clone carries its own .git, so the run root is fully
-// self-contained once mounted. Caller holds the per-repo lock and has already
+// of the bare instead of a linked worktree. A sandboxed run sees the run root
+// and not the bare — multi bind-mounts one tree, local masks the state root the
+// bares live under — so a worktree's .git pointer (gitdir: <bare>/worktrees/...)
+// dangles inside and every git command fails. A standalone clone carries its
+// own .git, so the run root is fully self-contained once it is the only tree
+// there. Caller holds the per-repo lock and has already
 // fetched refs/heads/<localBranch> into the bare.
 //
 // Two things differ from the worktree path, both forced by self-containment:

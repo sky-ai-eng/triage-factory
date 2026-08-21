@@ -118,33 +118,98 @@ func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbo
 	if conversationID == "" {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: ConversationID required")
 	}
-	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
+	hd, err := listenAndServe(server, SocketPathFor(conversationID), grantSocketToSandbox)
+	if err != nil {
+		return nil, sandbox.Mount{}, err
 	}
-	sockPath := filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+".sock")
+	mount := sandbox.Mount{
+		Source:      hd.sockPath,
+		Destination: DefaultSocketPath,
+		// rw is the default; the sandbox needs to both connect (read
+		// the daemon's response) and send requests (write to the
+		// socket). No `ro` here.
+	}
+	return hd, mount, nil
+}
+
+// StartLocal starts the per-run daemon for a LOCAL sandboxed run: a
+// bubblewrap mount namespace rather than a gVisor jail, on a socket under the
+// state root rather than under /run/tf.
+//
+// Two things differ from the jail's socket, and both follow from there being
+// only one identity here. The path differs because /run/tf is created and
+// owned by the cap-broker, which a local unprivileged process has no
+// counterpart to — paths.AgentHostSocketPath puts it in the state root this
+// process already owns. The grant differs because the agent inside the local
+// namespace runs as THIS uid, so there is no second identity to hand the
+// socket to: owner-only 0600 is both the tightest and the only correct mode,
+// where a chown to the sandbox uid would fail and a group grant would widen
+// access to no one who needs it.
+//
+// Everything downstream of the socket is identical to the jail's: the agent's
+// exec verbs dial it as a pure RPC client, hold no database handle and no
+// credential, and resolve their identity from the daemon's own
+// LookupConversation.
+//
+// The caller supplies the path (from internal/paths) rather than this package
+// deriving it, so the ".triagefactory" literal stays where the lint guard
+// keeps it. Caller MUST invoke .Close() exactly once, as with Start.
+func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*HostDaemon, error) {
+	if info.ConversationID == "" {
+		return nil, fmt.Errorf("agenthost: ConversationInfo.ConversationID required")
+	}
+	if sockPath == "" {
+		return nil, fmt.Errorf("agenthost: socket path required")
+	}
+	return listenAndServe(NewServer(stores, info, nil), sockPath, grantSocketToOwnerOnly)
+}
+
+// listenAndServe is the shared socket lifecycle both entry points above run:
+// create the parent dir owner-only, clear a stale file, listen, grant, serve.
+// grant is what distinguishes them — see StartLocal.
+//
+// Property B / fs-permissions invariant (load-bearing):
+//
+//  1. Parent dir mkdir 0700 — any race window between socket-create
+//     and the grant is unreachable from a second tenant (the dir is
+//     owner-only). Without this, an attacker on the host could
+//     enumerate /run for sockets that haven't been chmod'd yet.
+//
+//  2. net.Listen("unix", ...) — creates the socket file with the
+//     process umask applied (typically 0666 or 0755); either is too
+//     permissive on its own, but step 1 locks the parent so nobody
+//     can reach it yet.
+//
+//  3. The grant callback narrows it to exactly the identity that must
+//     connect.
+func listenAndServe(server *Server, sockPath string, grant func(string) error) (*HostDaemon, error) {
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(sockPath), err)
+	}
 
 	// Remove any stale socket file from a previous crash. net.Listen
 	// would otherwise EADDRINUSE on a path that's actually unused.
-	// Stale files in /run/tf/ are by definition from a previous TF
+	// Stale files in the socket root are by definition from a previous TF
 	// process — the only writer is this codepath — so removal is safe.
 	//
 	// Safe, but not always PERMITTED, and the difference decides nothing
-	// here only because someone else has already handled it: the socket root
-	// is sticky, so a stale file owned by a previous engagement's sidecar uid
-	// is refused to this one with EPERM. The orchestrator clears a
+	// here only because someone else has already handled it: the jail's
+	// socket root is sticky, so a stale file owned by a previous engagement's
+	// sidecar uid is refused to this one with EPERM. The orchestrator clears a
 	// predecessor's per-run files at cell bring-up, before this process is
 	// launched (sandbox.ClearRunCellFiles) — that, not this line, is what
-	// makes a successor engagement of the same conversation come up.
+	// makes a successor engagement of the same conversation come up. The
+	// local root has one owner, so there the removal always succeeds.
 	_ = os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: listen %s: %w", sockPath, err)
+		return nil, fmt.Errorf("agenthost: listen %s: %w", sockPath, err)
 	}
-	if err := grantSocketToSandbox(sockPath); err != nil {
+	if err := grant(sockPath); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(sockPath)
-		return nil, sandbox.Mount{}, err
+		return nil, err
 	}
 
 	hd := &HostDaemon{
@@ -162,15 +227,19 @@ func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbo
 			agenthostLog.Error("daemon serve failed", "error", err)
 		}
 	}()
+	return hd, nil
+}
 
-	mount := sandbox.Mount{
-		Source:      sockPath,
-		Destination: DefaultSocketPath,
-		// rw is the default; the sandbox needs to both connect (read
-		// the daemon's response) and send requests (write to the
-		// socket). No `ro` here.
+// grantSocketToOwnerOnly narrows a freshly-listened socket to this uid alone.
+// It is the whole grant for a local sandboxed run, whose agent shares this
+// uid: no chown (there is nobody to give it to), no group bit (no group would
+// name only the right process), just the umask-independent 0600 that keeps
+// every OTHER user on the machine out.
+func grantSocketToOwnerOnly(sockPath string) error {
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		return fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
 	}
-	return hd, mount, nil
+	return nil
 }
 
 // grantSocketToSandbox makes the freshly-listened socket connectable by

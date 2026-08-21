@@ -22,6 +22,13 @@ func Start(_ db.Stores, _ ConversationInfo, _ *ProxyCredentials) (*HostDaemon, s
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 
+// StartLocal always returns an "unsupported platform" error off Linux. The
+// local sandbox is a Linux mount namespace, so nothing off Linux ever asks
+// for its socket (runmode resolves the posture to off there).
+func StartLocal(_ db.Stores, _ ConversationInfo, _ string) (*HostDaemon, error) {
+	return nil, errors.New("agenthost: HostDaemon not supported on this platform")
+}
+
 // StartWithServer always returns an "unsupported platform" error off Linux.
 func StartWithServer(_ *Server, _ string) (*HostDaemon, sandbox.Mount, error) {
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
