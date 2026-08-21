@@ -469,7 +469,9 @@ export default function JiraProjectRulesGroup({
                 <span className="ml-2 text-ui text-ink-3 truncate">{row.name}</span>
               )}
               {!row.inCatalog && (
-                <span className="ml-2 text-reported text-ink-2">not visible to this credential</span>
+                <span className="ml-2 text-reported text-ink-2">
+                  not visible to this credential
+                </span>
               )}
             </div>
             <button
