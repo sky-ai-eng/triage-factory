@@ -295,17 +295,17 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// With no in-review rule mapped, the board's in_review move is aimed at the
-// SAME InProgress canonical by mirrorJiraBoardMove's downgrade, so the second
-// mirror pass finds the ticket already there and makes no distinct Jira move.
-func TestRunJiraMirror_UnmappedReviewRule_SecondPassMakesNoDistinctMove(t *testing.T) {
+// Two in-progress passes over one ticket make one Jira move: the first assigns
+// and transitions, the second finds the ticket already in the bucket and does
+// nothing. That is what a board bounce costs a project with no in-review rule,
+// since both of its columns resolve to this target — the resolution itself is
+// mirrorJiraBoardMove's, and covered at the board hook.
+func TestRunJiraMirror_InProgress_RepeatedPassMakesNoSecondMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	// First in-progress (board in_progress) — assign + transition.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
-	// Board bounces to in_review; with the rule unmapped that is InProgress too.
 	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
 
 	assigns, transitions := fake.snapshot()
@@ -313,7 +313,7 @@ func TestRunJiraMirror_UnmappedReviewRule_SecondPassMakesNoDistinctMove(t *testi
 		t.Errorf("assigns = %d, want 1 (assigned once; the second pass re-assign is a no-op)", assigns)
 	}
 	if len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want exactly one In Progress move (no distinct in_review move)", transitions)
+		t.Errorf("transitions = %v, want exactly one In Progress move", transitions)
 	}
 }
 
@@ -442,8 +442,14 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetInProgress) }()
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetDone) }()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetInProgress)
+	}()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetDone)
+	}()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
