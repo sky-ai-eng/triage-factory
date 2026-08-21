@@ -120,7 +120,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			return e
 		}
 		members, total, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID,
-			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "org-members", err)

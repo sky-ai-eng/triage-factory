@@ -103,7 +103,7 @@ func (bh *blueprintsHandler) handleBlueprintsList(w http.ResponseWriter, r *http
 	)
 	if err := bh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		blueprints, total, e = tx.Blueprints.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
@@ -499,7 +499,7 @@ func (bh *blueprintsHandler) handleBlueprintStepsAll(w http.ResponseWriter, r *h
 		var e error
 		steps, total, e = tx.Blueprints.ListAllSteps(r.Context(), orgID,
 			db.BlueprintStepListFilter{TeamID: req.TeamID, BlueprintIDs: blueprintIDs},
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)
@@ -563,7 +563,7 @@ func (bh *blueprintsHandler) handleBlueprintRunsList(w http.ResponseWriter, r *h
 		var e error
 		runs, total, e = tx.Blueprints.ListRuns(r.Context(), orgID,
 			db.BlueprintRunListFilter{BlueprintID: req.BlueprintID, Statuses: statuses},
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "blueprints", err)

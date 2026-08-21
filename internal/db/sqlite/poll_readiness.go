@@ -89,3 +89,24 @@ func (s *pollReadinessStore) SetAnnouncePending(ctx context.Context, orgID, sour
 	`, orgID, source)
 	return err
 }
+
+func (s *pollReadinessStore) LastPollTimes(ctx context.Context, orgID string) (map[string]time.Time, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT source, last_poll_at FROM poll_readiness
+		WHERE org_id = ? AND last_poll_at IS NOT NULL
+	`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var source string
+		var at time.Time
+		if err := rows.Scan(&source, &at); err != nil {
+			return nil, err
+		}
+		out[source] = at.UTC()
+	}
+	return out, rows.Err()
+}

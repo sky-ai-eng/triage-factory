@@ -255,6 +255,9 @@ func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, op
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.FailedEvent{}, total, nil
+	}
 
 	// id DESC is enqueue order reversed: the most recently dropped work is
 	// what an operator is looking for, and id is monotonic per insert so the

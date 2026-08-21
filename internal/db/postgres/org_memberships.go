@@ -53,6 +53,9 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count org members: %w", err)
 	}
+	if opts.CountOnly {
+		return []domain.OrgMember{}, total, nil
+	}
 	query := `
 		SELECT om.user_id::text, COALESCE(u.display_name, ''), om.role::text
 		FROM org_memberships om

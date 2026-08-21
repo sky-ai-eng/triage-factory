@@ -161,6 +161,19 @@ func sqliteTaskListWhere(f db.TaskListFilter) (string, []any) {
 		clauses = append(clauses, "(t.status NOT IN ('done', 'dismissed') OR (t.closed_at IS NOT NULL AND datetime(t.closed_at) >= datetime(?)))")
 		args = append(args, f.ClosedSince.UTC().Format("2006-01-02 15:04:05"))
 	}
+	if f.CreatedSince != nil {
+		// datetime() on both sides for the same two-shapes reason as
+		// ClosedSince above.
+		clauses = append(clauses, "datetime(t.created_at) >= datetime(?)")
+		args = append(args, f.CreatedSince.UTC().Format("2006-01-02 15:04:05"))
+	}
+	if len(f.Sources) > 0 {
+		ph := strings.TrimRight(strings.Repeat("?, ", len(f.Sources)), ", ")
+		clauses = append(clauses, fmt.Sprintf("e.source IN (%s)", ph))
+		for _, src := range f.Sources {
+			args = append(args, src)
+		}
+	}
 	teamClause, args := sqliteTaskTeamFilter(f.TeamIDs, args)
 	// sqliteTaskTeamFilter renders as " AND (...)" for direct concatenation
 	// onto a WHERE body; it is always last, so its args stay in placeholder
@@ -187,6 +200,9 @@ func (s *taskStore) List(ctx context.Context, orgID string, f db.TaskListFilter,
 		JOIN entities e ON t.entity_id = e.id
 		WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.Task{}, total, nil
 	}
 
 	query := `

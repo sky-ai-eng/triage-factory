@@ -18,6 +18,9 @@ func resolveFaults(t *testing.T, req PageRequest, fingerprint string, max int) (
 	return page, v.items
 }
 
+// psize spells an explicit page_size the way a decoded body carries one.
+func psize(n int) *int { return &n }
+
 // TestResolvePage_Defaults pins the absent-means-default half of the
 // contract: an empty paging block is the first page at the default size.
 func TestResolvePage_Defaults(t *testing.T) {
@@ -50,7 +53,7 @@ func TestResolvePage_SizeIsValidatedNotClamped(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			page, faults := resolveFaults(t, PageRequest{PageSize: tc.size}, "fp", tc.max)
+			page, faults := resolveFaults(t, PageRequest{PageSize: psize(tc.size)}, "fp", tc.max)
 			if tc.wantFault {
 				if len(faults) != 1 || faults[0].Reason != ReasonOutOfRange || faults[0].Field != "page_size" {
 					t.Fatalf("faults = %+v, want one OUT_OF_RANGE on page_size", faults)
@@ -70,7 +73,7 @@ func TestResolvePage_SizeIsValidatedNotClamped(t *testing.T) {
 // TestResolvePage_TokenRoundTrip walks the token the way a client does: the
 // token WriteList minted for one page resolves to the next page's offset.
 func TestResolvePage_TokenRoundTrip(t *testing.T) {
-	page, _ := resolveFaults(t, PageRequest{PageSize: 2}, "fp", 0)
+	page, _ := resolveFaults(t, PageRequest{PageSize: psize(2)}, "fp", 0)
 	rec := httptest.NewRecorder()
 	WriteList(rec, page, []string{"a", "b"}, 5)
 
@@ -89,7 +92,7 @@ func TestResolvePage_TokenRoundTrip(t *testing.T) {
 		t.Fatal("no next_page_token minted for a partial page")
 	}
 
-	next, faults := resolveFaults(t, PageRequest{PageSize: 2, PageToken: body.NextPageToken}, "fp", 0)
+	next, faults := resolveFaults(t, PageRequest{PageSize: psize(2), PageToken: body.NextPageToken}, "fp", 0)
 	if len(faults) != 0 {
 		t.Fatalf("round-tripped token rejected: %+v", faults)
 	}
@@ -102,7 +105,7 @@ func TestResolvePage_TokenRoundTrip(t *testing.T) {
 // the result set carries no token, and an empty page serializes items as []
 // rather than null.
 func TestWriteList_LastPageAndEmpty(t *testing.T) {
-	page, _ := resolveFaults(t, PageRequest{PageSize: 3}, "fp", 0)
+	page, _ := resolveFaults(t, PageRequest{PageSize: psize(3)}, "fp", 0)
 
 	rec := httptest.NewRecorder()
 	WriteList(rec, page, []string{"a", "b", "c"}, 3)
@@ -172,5 +175,39 @@ func TestFilterFingerprint_DistinguishesFilterSets(t *testing.T) {
 		if got := FilterFingerprint(other); got == a {
 			t.Errorf("%+v fingerprinted the same as the reference set (%q)", other, got)
 		}
+	}
+}
+
+// TestResolvePage_CountOnly pins the stat()-vs-read() half of the paging
+// contract: an explicit page_size of 0 is a count request, distinguishable
+// from an absent field only because PageSize decodes through a pointer.
+func TestResolvePage_CountOnly(t *testing.T) {
+	page, faults := resolveFaults(t, PageRequest{PageSize: psize(0)}, "fp", 0)
+	if len(faults) != 0 {
+		t.Fatalf("explicit zero faulted: %+v", faults)
+	}
+	if !page.CountOnly || page.Limit != 0 {
+		t.Fatalf("page = %+v, want CountOnly with limit 0", page)
+	}
+
+	// The absent field stays the default window — the pointer is what keeps
+	// these two requests from collapsing into one.
+	page, _ = resolveFaults(t, PageRequest{}, "fp", 0)
+	if page.CountOnly || page.Limit != DefaultPageSize {
+		t.Fatalf("absent page_size = %+v, want default window without CountOnly", page)
+	}
+}
+
+// TestWriteList_CountOnlyEnvelope: a count-only page is the ordinary envelope
+// with no items — same shape, no token (nothing to resume), real total.
+func TestWriteList_CountOnlyEnvelope(t *testing.T) {
+	page, _ := resolveFaults(t, PageRequest{PageSize: psize(0)}, "fp", 0)
+	rec := httptest.NewRecorder()
+	WriteList[string](rec, page, nil, 42)
+	if got := rec.Body.String(); !strings.Contains(got, `"items":[]`) || !strings.Contains(got, `"total_count":42`) {
+		t.Errorf("count-only envelope = %s, want empty items with total 42", got)
+	}
+	if got := rec.Body.String(); strings.Contains(got, "next_page_token") {
+		t.Errorf("count-only envelope minted a token: %s", got)
 	}
 }

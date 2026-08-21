@@ -155,7 +155,7 @@ func (h *usageHandler) handleUsageTeamArtifacts(w http.ResponseWriter, r *http.R
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	opts.Limit, opts.Offset = page.Limit, page.Offset
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		arts  []domain.Artifact
@@ -201,7 +201,7 @@ func (h *usageHandler) handleUsageOrgArtifacts(w http.ResponseWriter, r *http.Re
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	opts.Limit, opts.Offset = page.Limit, page.Offset
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		arts      []domain.Artifact
@@ -457,7 +457,7 @@ func (h *usageHandler) handleUsageTeamActions(w http.ResponseWriter, r *http.Req
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	opts.Limit, opts.Offset = page.Limit, page.Offset
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		actions    []domain.ExternalAction
@@ -509,7 +509,7 @@ func (h *usageHandler) handleUsageOrgActions(w http.ResponseWriter, r *http.Requ
 	if v.Flush(w, http.StatusBadRequest) {
 		return
 	}
-	opts.Limit, opts.Offset = page.Limit, page.Offset
+	opts.Limit, opts.Offset, opts.CountOnly = page.Limit, page.Offset, page.CountOnly
 
 	var (
 		actions    []domain.ExternalAction

@@ -261,6 +261,9 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID str
 		`SELECT COUNT(*) FROM reachable_repositories r`+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count reachable repositories: %w", err)
 	}
+	if opts.CountOnly {
+		return []domain.ReachableRepository{}, total, nil
+	}
 
 	query := `SELECT ` + reachableColumns + ` FROM reachable_repositories r` + where +
 		` ORDER BY lower(r.owner), lower(r.repo)`

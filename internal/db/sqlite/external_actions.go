@@ -85,6 +85,9 @@ func (s *externalActionStore) ListByOrgSystem(ctx context.Context, orgID string,
 	if err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
+	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID}, opts)
 	rows, err := s.q.QueryContext(ctx, query, args...)
@@ -102,6 +105,9 @@ func (s *externalActionStore) ListByTeam(ctx context.Context, orgID, teamID stri
 	total, err := s.countExternalActions(ctx, `org_id = ? AND team_id = ?`, []any{orgID, teamID}, opts)
 	if err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
 	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND team_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, teamID}, opts)
@@ -124,6 +130,9 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	total, err := s.countExternalActions(ctx, `org_id = ? AND conversation_id = ?`, []any{orgID, conversationID}, opts)
 	if err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ExternalAction{}, total, nil
 	}
 	query := `SELECT ` + externalActionColumns + ` FROM external_actions WHERE org_id = ? AND conversation_id = ?`
 	query, args := appendExternalActionFilters(query, []any{orgID, conversationID}, opts)

@@ -136,7 +136,7 @@ func (th *teamsHandler) handleTeamsList(w http.ResponseWriter, r *http.Request) 
 	)
 	if err := th.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		teams, total, e = tx.Teams.ListForUser(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		teams, total, e = tx.Teams.ListForUser(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}

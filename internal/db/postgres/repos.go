@@ -291,6 +291,9 @@ func listRepositories(ctx context.Context, q queryer, orgID string, opts db.List
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Repository{}, total, nil
+	}
 	query := `
 		SELECT ` + repoProfileFullColumns + `
 		FROM repositories
@@ -348,6 +351,9 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.Li
 		  AND `+repoProfileTrackedByViewerTeams+`
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.Repository{}, total, nil
 	}
 	query := `
 		SELECT ` + repoProfileFullColumnsAliased + `

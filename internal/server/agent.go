@@ -402,7 +402,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 			return nil
 		}
 		actions, total, e = tx.ExternalActions.ListByConversation(r.Context(), orgID, conversationID,
-			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset})
+			domain.ExternalActionListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -1158,7 +1158,7 @@ func (ag *agentHandler) handleConversations(w http.ResponseWriter, r *http.Reque
 	}
 	if err := ag.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		convs, total, e := tx.Conversations.ListForTasks(r.Context(), orgID, taskIDs,
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}

@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // EventType defines a specific kind of triage event that can occur.
 // Maps to the read-only `events_catalog` table (see
@@ -219,4 +222,21 @@ func AllEventTypes() []EventType {
 		{ID: EventSystemConversationResumed, Source: "system", Category: "delegation", Label: "Conversation Resumed", Description: "A user sent a follow-up to a parked or concluded conversation"},
 		{ID: EventSystemRoutingDisposition, Source: "system", Category: "routing", Label: "Routing Disposition", Description: "The router finished handling an event (frozen, taskless, task created/bumped, or error)"},
 	}
+}
+
+// EventSources returns the catalog's distinct source vocabulary ("github",
+// "jira", "slack", "system"), sorted. It is the validation set for the
+// source filters on list reads — derived from AllEventTypes so a new source
+// joins it by existing in the catalog rather than by a parallel list.
+func EventSources() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, et := range AllEventTypes() {
+		if !seen[et.Source] {
+			seen[et.Source] = true
+			out = append(out, et.Source)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

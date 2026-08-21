@@ -260,6 +260,9 @@ func (s *eventQueueStore) ListFailedEvents(ctx context.Context, orgID string, op
 	`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.FailedEvent{}, total, nil
+	}
 
 	// id DESC is enqueue order reversed — most recently dropped work first —
 	// and it is a total order, so offset paging can neither drop nor repeat a

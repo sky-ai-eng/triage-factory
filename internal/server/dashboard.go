@@ -175,7 +175,7 @@ func (dh *dashboardHandler) handleDashboardPRs(w http.ResponseWriter, r *http.Re
 			return nil
 		}
 		var e error
-		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID, username, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		prs, total, e = tx.Dashboard.PRs(r.Context(), orgID, username, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "dashboard", err)

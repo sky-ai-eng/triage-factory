@@ -85,7 +85,7 @@ func (pe *projectEntitiesHandler) handleProjectEntities(w http.ResponseWriter, r
 			return nil
 		}
 		entities, total, e = tx.Entities.ListProjectPanel(r.Context(), orgID, projectID,
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "entities", fmt.Errorf("load entities for project %s: %w", projectID, err))

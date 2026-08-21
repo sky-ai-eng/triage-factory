@@ -124,7 +124,7 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	)
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		handlers, total, e = tx.EventHandlers.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		handlers, total, e = tx.EventHandlers.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)

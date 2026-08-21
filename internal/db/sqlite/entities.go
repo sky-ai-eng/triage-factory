@@ -179,6 +179,9 @@ func (s *entityStore) ListBackfillCandidates(ctx context.Context, orgID string, 
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Entity{}, total, nil
+	}
 
 	query := `SELECT ` + entitySelectCols + ` FROM entities` + where +
 		` ORDER BY source ASC, last_polled_at ASC NULLS LAST, id`
@@ -250,6 +253,9 @@ func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID str
 		SELECT COUNT(*) FROM entities WHERE project_id = ? AND state = 'active'
 	`, projectID).Scan(&total); err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.ProjectPanelEntity{}, total, nil
 	}
 	query := `
 		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
