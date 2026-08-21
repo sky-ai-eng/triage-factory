@@ -77,6 +77,6 @@ func StagedInjectionBlock(injections []StagedInjection) string {
 	}
 	body := "While you were not running, these updates landed on work you have open:\n\n" +
 		strings.Join(lines, "\n") +
-		"\n\nThese are informational — act on them as you resume."
+		"\n\nThese are informational — act only if they affect your work."
 	return WrapSystemNote(body)
 }
