@@ -1,17 +1,13 @@
 -- +goose Up
--- jira_project_status_rules gains a fourth rule: in_review.
+-- jira_project_status_rules gains a fourth rule: in_review — the status a team
+-- names for work that is awaiting human review.
 --
--- The board→Jira mirror had two write targets, so a task whose agent had
--- opened its PR and was waiting on a human still aimed the in-progress
--- canonical — to anyone reading the Jira board, a ticket that sits "In
--- Progress" for days while its PR awaits review. Teams whose workflow has a
--- review status expect the ticket to sit in it while the PR is up.
---
--- The rule is an OPTIONAL mirror write target and nothing else. It is never a
--- classification: no Jira status is read back into TF's in_review board
--- column, which is a fact about a run rather than about a ticket. It does not
--- reach the discovery JQL either, so it is not part of what arms a project — a
--- team that leaves it empty keeps the mirror aiming in-progress.
+-- It is OPTIONAL, and it is the one rule here that feeds nothing TF polls or
+-- classifies on. It is never a classification in particular: no Jira status is
+-- read back into TF's in_review board column, which is a fact about a run
+-- rather than about a ticket. It does not reach the discovery JQL either, so
+-- it is not part of what arms a project, and a team that leaves it empty is
+-- completely configured.
 --
 -- Its CHECK matches the two the other write targets carry: members and
 -- canonical together, or neither. That is cross-column, and SQLite cannot add

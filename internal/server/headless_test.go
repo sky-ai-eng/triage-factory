@@ -107,8 +107,7 @@ func TestHeadlessJiraRules(t *testing.T) {
 			t.Errorf("rule[%d] done = %+v/%v", i, r.DoneCanonical, r.DoneMembers)
 		}
 		// The in-review status is optional and unset here, so both of its
-		// columns stay empty — which is what the CHECK constraint wants and
-		// what leaves the mirror aiming in-progress.
+		// columns stay empty — which is what the CHECK constraint wants.
 		if len(r.InReviewMembers) != 0 || !r.InReviewCanonical.IsZero() {
 			t.Errorf("rule[%d] in-review = %+v/%v, want an unmapped rule", i, r.InReviewCanonical, r.InReviewMembers)
 		}
@@ -135,8 +134,8 @@ func TestHeadlessJiraRules_InReviewStatus(t *testing.T) {
 	if !reflect.DeepEqual(domain.JiraStatusNames(r.InReviewMembers), []string{"Code Review"}) {
 		t.Errorf("in-review members = %v, want [Code Review]", r.InReviewMembers)
 	}
-	// It is a mirror write target, not a polling input, so it must not change
-	// whether the project is armed.
+	// It is not a polling input, so it must not change whether the project is
+	// armed.
 	if !r.Armed() {
 		t.Error("a complete seed should be armed with the in-review rule mapped")
 	}

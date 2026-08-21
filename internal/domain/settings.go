@@ -604,16 +604,16 @@ type JiraProjectStatusRules struct {
 	// ref anyway so a caller performing a transition has the id and the name in
 	// hand without a lookup.
 	//
-	// InReview is an optional mirror write target and nothing else. No Jira
-	// status is ever classified back into TF's in_review board column — that
-	// column is a fact about a RUN (agent work awaiting a human), so a ticket
-	// somebody moved to "Code Review" by hand belongs on no TF board at all.
-	// Its members have exactly three readers: the in-review mirror's
-	// idempotency skip, the in-progress mirror's forward-only guard, and the
-	// canonical-is-a-member check. They reach neither the discovery JQL nor
-	// the stock deck's buckets, which is why a status may sit in BOTH
-	// InProgressMembers and InReviewMembers — "counts as actively worked on"
-	// is true of a ticket under review.
+	// InReview names the status a ticket sits in while the work it tracks
+	// awaits human review. It is optional, and it is the one rule here that
+	// feeds nothing TF polls or classifies on. In particular no Jira status is
+	// ever read back into TF's in_review board column: that column is a fact
+	// about a RUN (agent work awaiting a human) rather than about a ticket, so
+	// a ticket somebody moved to "Code Review" by hand belongs on no TF board
+	// at all. Its members reach neither the discovery JQL nor the stock deck's
+	// buckets, which is why a status may sit in BOTH InProgressMembers and
+	// InReviewMembers — "counts as actively worked on" is true of a ticket
+	// under review.
 	PickupMembers       []JiraStatusRef
 	InProgressMembers   []JiraStatusRef
 	InProgressCanonical JiraStatusRef
@@ -782,10 +782,9 @@ func NormalizeGitHubTeamSlugs(slugs []string) []string {
 // and left there until someone maps its workflow's statuses — and it
 // contributes nothing to the discovery JQL, so the poller skips it.
 //
-// InReview is deliberately excluded: it gates nothing the poller asks. A team
-// that never maps it keeps the mirror aiming the in-progress canonical, which
-// is a complete configuration, so requiring it here would un-arm every project
-// already armed.
+// InReview is deliberately excluded: it gates nothing the poller asks, and a
+// project that leaves it unmapped is completely configured, so requiring it
+// here would un-arm every project already armed.
 func (r JiraProjectStatusRules) Armed() bool {
 	return len(r.PickupMembers) > 0 &&
 		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&
@@ -808,9 +807,9 @@ func (r JiraProjectStatusRules) InProgressContains(status JiraStatusRef) bool {
 	return containsStatus(r.InProgressMembers, status)
 }
 
-// InReviewContains reports whether status is a member of the InReview rule. An
-// unmapped rule has no members, so this is false everywhere — which is what
-// makes the guards that consult it inert for a project that never mapped it.
+// InReviewContains reports whether status is a member of the InReview rule.
+// The rule is optional, and an unmapped one has no members, so this is false
+// everywhere for a project that never mapped it.
 func (r JiraProjectStatusRules) InReviewContains(status JiraStatusRef) bool {
 	return containsStatus(r.InReviewMembers, status)
 }

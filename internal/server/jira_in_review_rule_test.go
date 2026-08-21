@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// The optional in-review rule, from the write side. It is a mirror write
-// target and nothing else — it arms no polling and classifies nothing — so
-// what these pin is that it validates exactly like its write-target siblings,
-// that it round-trips, and that mapping it alone asks the poller nothing.
+// The optional in-review rule, from the write side. It arms no polling and
+// classifies nothing, so what these pin is that it validates exactly like its
+// write-target siblings, that it round-trips, and that mapping it alone asks
+// the poller nothing.
 
 func validInReview() map[string]any {
 	return map[string]any{"member_ids": []string{statusInReviewID}, "canonical_id": statusInReviewID}
@@ -48,8 +48,8 @@ func TestTeamJiraProjectsPut_InReviewStoredAndEchoed(t *testing.T) {
 	}
 }
 
-// Leaving it unmapped is a complete configuration — the mirror simply keeps
-// aiming in-progress — so the rule must be storable empty and echo as null.
+// Leaving it unmapped is a complete configuration, so the rule must be
+// storable empty and echo as null.
 func TestTeamJiraProjectsPut_InReviewOptional(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
@@ -63,8 +63,8 @@ func TestTeamJiraProjectsPut_InReviewOptional(t *testing.T) {
 	}
 }
 
-// Optional does not mean unchecked: members with no write target is a rule the
-// mirror could never execute, so it is refused exactly as in_progress is.
+// Optional does not mean unchecked: members with no write target is half a
+// rule, so it is refused exactly as in_progress is.
 func TestTeamJiraProjectsPut_InReviewMembersWithoutCanonicalRejected(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 

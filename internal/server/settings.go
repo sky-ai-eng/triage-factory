@@ -89,9 +89,9 @@ func normalizeJiraProjectKey(s string) string {
 //   - InProgress / InReview / Done: members and canonical together, or neither.
 //     The canonical is the status TF transitions a ticket INTO, so members
 //     without one is a rule that cannot be executed — rejected. InReview is
-//     checked identically even though it arms nothing: a half-filled rule is
-//     just as unexecutable there, and it is the mirror that would silently do
-//     nothing.
+//     checked identically even though it arms nothing: half a rule is no more
+//     executable there than anywhere else, and a stored half is what a later
+//     reader would have to guess at.
 //
 // The jpsr_*_complete_or_empty CHECK constraints are the DB-level mirror of
 // the pairing; this is the user-facing gate that surfaces a readable error
@@ -181,9 +181,9 @@ func cloneJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectS
 //
 // InReview is deliberately absent from the comparison. This function exists to
 // answer one question — did anything the Jira poller asks change? — and the
-// in-review rule is a mirror write target that reaches neither the discovery
-// JQL nor any classification. Mapping or clearing it alone must therefore not
-// re-due a poll, which would re-ask Jira for exactly what it just answered.
+// in-review rule reaches neither the discovery JQL nor any classification.
+// Mapping or clearing it alone must therefore not re-due a poll, which would
+// re-ask Jira for exactly what it just answered.
 func jiraProjectsEqual(a, b []domain.JiraProjectStatusRules) bool {
 	if len(a) != len(b) {
 		return false

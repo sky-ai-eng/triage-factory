@@ -425,7 +425,7 @@ export default function JiraProjectRulesGroup({
                     />
                     <JiraStatusRule
                       label="In review"
-                      description="Optional — where TF moves a ticket when agent work awaits human review. Leave empty to keep tickets In Progress during review."
+                      description="Optional — the status that means work awaits human review."
                       allStatuses={statuses}
                       value={project.in_review}
                       onChange={(v) => updateProject(key, { in_review: v })}

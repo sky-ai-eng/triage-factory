@@ -24,9 +24,9 @@ export interface JiraProjectConfig {
   key: string
   pickup: JiraStatusRuleValue
   in_progress: JiraStatusRuleValue
-  // Optional: where TF moves a ticket while the agent's PR awaits a human. It
-  // is a mirror write target only — no Jira status is ever read back into TF's
-  // in-review board column — so an empty rule is a complete configuration.
+  // Optional: the status naming work that awaits human review. No Jira status
+  // is ever read back into TF's in-review board column, so this is a write
+  // target only and an empty rule is a complete configuration.
   in_review: JiraStatusRuleValue
   done: JiraStatusRuleValue
 }

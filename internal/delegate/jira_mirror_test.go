@@ -53,7 +53,7 @@ type recordingJiraServer struct {
 
 // jiraFakeIDToStatus maps the transition ids the fake serves back to their target
 // status, so a POST can record (and apply) which bucket the ticket moved to.
-var jiraFakeIDToStatus = map[string]string{"31": "In Progress", "51": "In Review", "41": "Done"}
+var jiraFakeIDToStatus = map[string]string{"31": "In Progress", "41": "Done"}
 
 // newRecordingJiraServer starts a fake Jira at the given initial status +
 // assignee ("" = unassigned). myselfName is the authenticated service account
@@ -84,7 +84,6 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 		// so the seeded rules and this workflow describe one instance.
 		_, _ = io.WriteString(w, `{"transitions":[`+
 			`{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`+
-			`{"id":"51","name":"Review","to":{"id":"st-In Review","name":"In Review"}},`+
 			`{"id":"41","name":"Finish","to":{"id":"st-Done","name":"Done"}}]}`)
 	case req.Method == http.MethodPost && strings.HasSuffix(path, "/transitions"):
 		var body struct {
@@ -160,11 +159,8 @@ func (r *recordingJiraServer) currentStatus() string {
 	return r.status
 }
 
-// mirrorRule is the SKY rule the direct runJiraMirror tests act on: To Do
-// (pickup) / In Progress / Done, with NO in-review rule. That is the shape a
-// team without a review status in its workflow stores, so every test built on
-// it is also the proof that such a team's mirror behaves exactly as it did
-// before in_review existed.
+// mirrorRule is the SKY rule the direct runJiraMirror tests act on:
+// To Do (pickup) / In Progress / Done.
 func mirrorRule() domain.JiraProjectStatusRules {
 	return domain.JiraProjectStatusRules{
 		TeamID:              runmode.LocalDefaultTeamID,
@@ -175,15 +171,6 @@ func mirrorRule() domain.JiraProjectStatusRules {
 		DoneMembers:         jiraRefs("Done"),
 		DoneCanonical:       jiraRef("Done"),
 	}
-}
-
-// reviewMirrorRule is mirrorRule for a team that DID map the optional rule: the
-// same workflow plus In Review between the two write targets.
-func reviewMirrorRule() domain.JiraProjectStatusRules {
-	rule := mirrorRule()
-	rule.InReviewMembers = jiraRefs("In Review")
-	rule.InReviewCanonical = jiraRef("In Review")
-	return rule
 }
 
 // waitTransition blocks until the fake has serviced one transition POST, or
@@ -250,7 +237,7 @@ func TestRunJiraMirror_InProgress_AssignsAndTransitions(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
@@ -268,7 +255,7 @@ func TestRunJiraMirror_Done_TransitionsOnly_NoAssign(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetDone)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), true)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 {
@@ -287,7 +274,7 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 0 || len(transitions) != 0 {
@@ -295,110 +282,25 @@ func TestRunJiraMirror_Idempotent_AlreadyInBucket_NoWrites(t *testing.T) {
 	}
 }
 
-// Two in-progress passes over one ticket make one Jira move: the first assigns
-// and transitions, the second finds the ticket already in the bucket and does
-// nothing. That is what a board bounce costs a project with no in-review rule,
-// since both of its columns resolve to this target — the resolution itself is
-// mirrorJiraBoardMove's, and covered at the board hook.
-func TestRunJiraMirror_InProgress_RepeatedPassMakesNoSecondMove(t *testing.T) {
+// in_review collapses into In Progress: a bot that parks a run (board →
+// in_review) re-targets the SAME InProgress canonical, so the second mirror
+// pass finds the ticket already there and makes no distinct Jira move.
+func TestRunJiraMirror_InReviewCollapsesToInProgress_NoDistinctMove(t *testing.T) {
 	fake := newRecordingJiraServer(t, "To Do", "")
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	// First in-progress (board in_progress) — assign + transition.
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
+	// Board bounces to in_review, which also maps to InProgressCanonical.
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	assigns, transitions := fake.snapshot()
 	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (assigned once; the second pass re-assign is a no-op)", assigns)
+		t.Errorf("assigns = %d, want 1 (assigned once; in_review re-assign is a no-op)", assigns)
 	}
 	if len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want exactly one In Progress move", transitions)
-	}
-}
-
-// With the rule mapped, the in-review mirror does what the in-progress one does
-// one bucket along: assign the service account and transition into the InReview
-// canonical.
-func TestRunJiraMirror_InReview_AssignsAndTransitions(t *testing.T) {
-	fake := newRecordingJiraServer(t, "To Do", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
-
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", reviewMirrorRule(), targetInReview)
-
-	assigns, transitions := fake.snapshot()
-	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (service account assigned)", assigns)
-	}
-	if len(transitions) != 1 || transitions[0] != "In Review" {
-		t.Errorf("transitions = %v, want [In Review]", transitions)
-	}
-}
-
-// A ticket already in the in-review bucket is not re-transitioned — the same
-// membership-based idempotency the in-progress path has, so bouncing the board
-// across human-interaction points makes at most one real Jira move.
-func TestRunJiraMirror_InReview_AlreadyInBucket_NoWrites(t *testing.T) {
-	fake := newRecordingJiraServer(t, "In Review", "bot")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
-
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", reviewMirrorRule(), targetInReview)
-
-	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
-		t.Errorf("assigns=%d transitions=%v, want no writes (already in the review bucket + assigned)", assigns, transitions)
-	}
-}
-
-// Forward-only reaches the in-review mirror too: a ticket a human or the merge
-// mirror already moved to Done is never pulled back into review.
-func TestRunJiraMirror_InReview_SkipsWhenAlreadyDone(t *testing.T) {
-	fake := newRecordingJiraServer(t, "Done", "")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
-
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", reviewMirrorRule(), targetInReview)
-
-	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
-		t.Errorf("assigns=%d transitions=%v, want no writes (forward-only: a Done ticket is never moved back)", assigns, transitions)
-	}
-	if got := fake.currentStatus(); got != "Done" {
-		t.Errorf("final status = %q, want Done (unchanged)", got)
-	}
-}
-
-// The other half of the ordering: an agent that resumes work after review
-// comments re-fires the in-progress mirror, and it must NOT drag the ticket out
-// of the review bucket — the PR is still open, which is where a human would
-// leave it too.
-func TestRunJiraMirror_InProgress_SkipsWhenInReviewBucket(t *testing.T) {
-	fake := newRecordingJiraServer(t, "In Review", "bot")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
-
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", reviewMirrorRule(), targetInProgress)
-
-	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
-		t.Errorf("assigns=%d transitions=%v, want no writes (a review-bucket ticket is never dragged back)", assigns, transitions)
-	}
-	if got := fake.currentStatus(); got != "In Review" {
-		t.Errorf("final status = %q, want In Review (unchanged)", got)
-	}
-}
-
-// The guard above is membership-based, so it is inert for a project that never
-// mapped the rule: with no in-review members, a ticket sitting in some status
-// TF does not know is still moved to In Progress exactly as it always was.
-func TestRunJiraMirror_InProgress_UnmappedReviewRule_StillMovesForward(t *testing.T) {
-	fake := newRecordingJiraServer(t, "In Review", "bot")
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
-
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
-
-	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want [In Progress] (an unmapped review rule guards nothing)", transitions)
+		t.Errorf("transitions = %v, want exactly one In Progress move (no distinct in_review move)", transitions)
 	}
 }
 
@@ -407,7 +309,7 @@ func TestRunJiraMirror_InProgress_UnmappedReviewRule_StillMovesForward(t *testin
 func TestRunJiraMirror_NoResolver_NoOp(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	// No SetJiraResolver → getJiraResolver returns nil.
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 	// Reaching here without a panic / outbound call is the assertion.
 }
 
@@ -420,7 +322,7 @@ func TestRunJiraMirror_InProgress_SkipsWhenAlreadyDone(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (forward-only: a Done ticket is never moved back)", assigns, transitions)
@@ -442,14 +344,8 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetInProgress)
-	}()
-	go func() {
-		defer wg.Done()
-		s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, targetDone)
-	}()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, false) }()
+	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", rule, true) }()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
@@ -489,7 +385,7 @@ func TestRunJiraMirror_InProgress_SkipsOnUnreadableState(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if assigns, transitions := fake.snapshot(); assigns != 0 || len(transitions) != 0 {
 		t.Errorf("assigns=%d transitions=%v, want no writes (unreadable state must not regress a possibly-Done ticket)", assigns, transitions)
@@ -507,7 +403,7 @@ func TestRunJiraMirror_Done_ProceedsWhenStateUnreadable(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetDone)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), true)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "Done" {
 		t.Errorf("transitions = %v, want [Done] (unreadable state must not prevent the done transition)", transitions)
@@ -523,7 +419,7 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
 
-	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), targetInProgress)
+	s.runJiraMirror(runmode.LocalDefaultOrgID, "SKY-1", "", mirrorRule(), false)
 
 	if _, transitions := fake.snapshot(); len(transitions) != 0 {
 		t.Errorf("transitions = %v, want none (a failed assign must skip the transition)", transitions)
@@ -544,22 +440,6 @@ func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 		runmode.LocalDefaultTeamID,
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
-	}
-}
-
-// mapInReviewRule arms the seeded SKY row's optional in-review rule, the way a
-// team that has a review status in its workflow would have saved it. Written as
-// an UPDATE so every fixture built on seedJiraMirrorRule can opt in.
-func mapInReviewRule(t *testing.T, database *sql.DB) {
-	t.Helper()
-	if _, err := database.Exec(
-		`UPDATE jira_project_status_rules
-		    SET in_review_members = '[{"id":"st-In Review","name":"In Review"}]',
-		        in_review_canonical = '{"id":"st-In Review","name":"In Review"}'
-		  WHERE team_id = ? AND project_key = 'SKY'`,
-		runmode.LocalDefaultTeamID,
-	); err != nil {
-		t.Fatalf("map in-review rule: %v", err)
 	}
 }
 
@@ -676,51 +556,6 @@ func TestRecomputeBoard_JiraTask_MirrorsInProgress(t *testing.T) {
 	}
 }
 
-// Board → in_review with the rule mapped: the ticket moves to the InReview
-// canonical, not the InProgress one.
-func TestRecomputeBoard_JiraTask_InReviewColumn_MirrorsInReview(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "review", "To Do", "")
-	mapInReviewRule(t, database)
-	stampBotClaim(t, database, taskID)
-	// A parked-open conversation is what puts the board in its in_review column.
-	setConversationStatus(t, database, conversationID, "open")
-
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("board status = %q, want in_review", got)
-	}
-	fake.waitTransition(t)
-	if n := res.systemCalls(); n != 1 {
-		t.Errorf("ForSystem calls = %d, want 1", n)
-	}
-	assigns, transitions := fake.snapshot()
-	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1", assigns)
-	}
-	if len(transitions) != 1 || transitions[0] != "In Review" {
-		t.Errorf("transitions = %v, want [In Review]", transitions)
-	}
-}
-
-// The same board move for a team that never mapped the rule aims InProgress —
-// the behavior every project had before the rule existed.
-func TestRecomputeBoard_JiraTask_InReviewColumn_UnmappedRule_MirrorsInProgress(t *testing.T) {
-	s, database, conversationID, taskID, fake, _ := setupJiraMirrorFixture(t, "review-unmapped", "To Do", "")
-	stampBotClaim(t, database, taskID)
-	setConversationStatus(t, database, conversationID, "open")
-
-	s.recomputeTaskBoardColumn(runmode.LocalDefaultOrgID, taskID)
-
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("board status = %q, want in_review", got)
-	}
-	fake.waitTransition(t)
-	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "In Progress" {
-		t.Errorf("transitions = %v, want [In Progress] (no in-review rule to aim at)", transitions)
-	}
-}
-
 // A user takeover flips the claim off the agent; recomputeTaskBoardColumn
 // early-returns, so the bot never mirrors (no ForSystem, no Jira write).
 func TestRecomputeBoard_UserClaimedJiraTask_NoMirror(t *testing.T) {
@@ -786,58 +621,6 @@ func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
 	}
 	if len(transitions) != 1 || transitions[0] != "In Progress" {
 		t.Errorf("transitions = %v, want [In Progress] (completion must not move the ticket to Done)", transitions)
-	}
-}
-
-// With the rule mapped, that same clean completion lands the ticket in the
-// review bucket — and the TF card CLOSES while it does. That divergence is the
-// behavior worth pinning: TF's done column means the work was submitted, the
-// Jira ticket's Done means the change shipped, and a PR that just went up is
-// only the first of those.
-func TestTerminateBlueprint_CompletedJiraTask_MappedReview_ClosedCardStillMirrorsInReview(t *testing.T) {
-	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "complete-review", "To Do", "")
-	mapInReviewRule(t, database)
-	stampBotClaim(t, database, taskID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Fatalf("task status = %q, want done (no unresolved artifact, so the card closes)", got)
-	}
-	fake.waitTransition(t)
-	if n := res.systemCalls(); n != 1 {
-		t.Errorf("ForSystem calls = %d, want 1", n)
-	}
-	assigns, transitions := fake.snapshot()
-	if assigns != 1 {
-		t.Errorf("assigns = %d, want 1 (completion assigns the bot + moves to In Review)", assigns)
-	}
-	if len(transitions) != 1 || transitions[0] != "In Review" {
-		t.Errorf("transitions = %v, want [In Review] (completion must not move the ticket to Done)", transitions)
-	}
-}
-
-// The completed branch's other outcome — an unresolved draft PR parks the card
-// in the board's in_review column instead of closing it — owes the Jira watcher
-// exactly the same thing, so the mirror does not branch on which one happened.
-func TestTerminateBlueprint_CompletedJiraTask_MappedReview_ParkedCardMirrorsInReview(t *testing.T) {
-	s, database, conversationID, taskID, fake, _ := setupJiraMirrorFixture(t, "complete-review-parked", "To Do", "")
-	mapInReviewRule(t, database)
-	stampBotClaim(t, database, taskID)
-	seedDraftPRArtifact(t, s, conversationID)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
-		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if got := readTaskStatus(t, database, taskID); got != "in_review" {
-		t.Fatalf("task status = %q, want in_review (an unresolved artifact keeps the card open)", got)
-	}
-	fake.waitTransition(t)
-	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "In Review" {
-		t.Errorf("transitions = %v, want [In Review]", transitions)
 	}
 }
 

@@ -799,13 +799,12 @@ CREATE TABLE public.jira_project_status_rules (
     pickup_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_canonical jsonb,
-    -- in_review is an OPTIONAL mirror write target and nothing else: where a
-    -- ticket goes while the agent's PR awaits a human. No Jira status is ever
-    -- read back into TF's in_review board column (that column is a fact about
-    -- a run, not about a ticket), and these members reach neither the
-    -- discovery JQL nor the stock deck — so an empty rule is a complete
-    -- configuration, and a status may legitimately appear in both
-    -- in_progress_members and in_review_members.
+    -- in_review is the OPTIONAL fourth rule: the status a team names for work
+    -- awaiting human review. No Jira status is ever read back into TF's
+    -- in_review board column (that column is a fact about a run, not about a
+    -- ticket), and these members reach neither the discovery JQL nor the stock
+    -- deck — so an empty rule is a complete configuration, and a status may
+    -- legitimately appear in both in_progress_members and in_review_members.
     in_review_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_review_canonical jsonb,
     done_members jsonb DEFAULT '[]'::jsonb NOT NULL,

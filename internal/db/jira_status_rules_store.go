@@ -32,8 +32,8 @@ import (
 // PK's first column) so the poller's per-project merge and the router's
 // team↔project gate can attribute each row to its team.
 //
-// The in_review rule is optional and, unlike the other three, is read by
-// nothing that decides what TF polls or how a ticket is classified — see
+// The in_review rule is optional and, unlike the other three, feeds nothing
+// that decides what TF polls or how a ticket is classified — see
 // domain.JiraProjectStatusRules. A row whose in_review columns are empty is a
 // complete configuration, which is why every read here can hand one back.
 type JiraStatusRulesStore interface {

@@ -43,10 +43,9 @@ const (
 	envJiraProjects         = "TRIAGE_FACTORY_JIRA_PROJECTS"
 	envJiraPickupStatuses   = "TRIAGE_FACTORY_JIRA_PICKUP_STATUSES"
 	envJiraInProgressStatus = "TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS"
-	// Optional: the status a ticket sits in while the agent's PR awaits a
-	// human. Unset means the mirror leaves such a ticket in the in-progress
-	// status, which is a complete configuration — so this is deliberately not
-	// part of jiraComplete.
+	// Optional: the status that names work awaiting human review. A deployment
+	// that leaves it unset is completely configured — the rule arms nothing —
+	// so this is deliberately not part of jiraComplete.
 	envJiraInReviewStatus = "TRIAGE_FACTORY_JIRA_INREVIEW_STATUS"
 	envJiraDoneStatus     = "TRIAGE_FACTORY_JIRA_DONE_STATUS"
 	envCloneProtocol      = "TRIAGE_FACTORY_CLONE_PROTOCOL"
@@ -108,8 +107,8 @@ func (c headlessConfig) jiraIntent() bool {
 // jiraComplete reports whether every field the Jira status model requires is
 // present (projects + a non-empty pickup set + in-progress + done). The bot
 // URL/PAT presence is checked separately by the caller. The in-review status is
-// optional and absent here on purpose: it is a mirror write target only, so a
-// deployment that never sets it is fully configured.
+// optional and absent here on purpose: it arms nothing, so a deployment that
+// never sets it is fully configured.
 func (c headlessConfig) jiraComplete() bool {
 	return len(c.jiraProjects) > 0 && len(c.jiraPickupStatuses) > 0 &&
 		c.jiraInProgressStatus != "" && c.jiraDoneStatus != ""

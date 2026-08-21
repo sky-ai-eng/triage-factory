@@ -49,8 +49,8 @@ type jiraPickupRuleWrite struct {
 // jiraStatusRuleWrite is a write-target rule's shape: the statuses that count
 // as being in this state, and the one TF transitions a ticket into. Both are
 // status IDS. An empty pair clears the rule, which for in_progress and done is
-// a project watched but not armed, and for in_review is simply a team that does
-// not use a review status.
+// a project watched but not armed, and for in_review — which arms nothing — is
+// simply a team that does not name a review status.
 type jiraStatusRuleWrite struct {
 	MemberIDs   []string `json:"member_ids"`
 	CanonicalID string   `json:"canonical_id"`
@@ -188,9 +188,9 @@ func (s *Server) handleTeamJiraProjectsPut(w http.ResponseWriter, r *http.Reques
 	// the re-profile trigger — and so is watching a project without mapping it,
 	// because an unarmed project contributes nothing to the discovery JQL and a
 	// restart would re-due a poll with nothing new to ask. Mapping in_review is
-	// the same nothing for the same reason: it is a mirror write target only,
-	// reaching neither the discovery JQL nor any classification, so
-	// jiraProjectsEqual deliberately does not compare it.
+	// the same nothing for the same reason: it reaches neither the discovery
+	// JQL nor any classification, so jiraProjectsEqual deliberately does not
+	// compare it.
 	if !jiraProjectsEqual(armedJiraProjects(next), armedJiraProjects(prev)) && s.onJiraChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
