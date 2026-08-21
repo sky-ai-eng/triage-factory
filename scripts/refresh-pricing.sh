@@ -30,11 +30,12 @@
 #      carries both base prices (and a cache-read price if it claims caching),
 #      and its litellm_provider maps to a bifrost provider in the TF-owned
 #      internal/inference/provider_map.json (never written by this script).
-#      Eligibility is a computed annotation — nothing is dropped from the
-#      datasheet over it. The refresh REFUSES (no PR) when an eligible-gated
-#      entry's provider has no map entry at all, so a new upstream provider is
-#      a deliberate PR decision, never a silent gap; a provider already mapped
-#      to "unsupported" is fine and silent.
+#      Eligibility is computed fresh each run, never written anywhere —
+#      nothing is dropped from (or added to) the datasheet over it. The
+#      refresh REFUSES (no PR) when a GATED entry (mode+tools+window, a looser
+#      bar than eligible) has a provider with no map entry at all, so a new
+#      upstream provider is a deliberate PR decision, never a silent gap; a
+#      provider already mapped to "unsupported" is fine and silent.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -143,10 +144,13 @@ for entry in out.values():
             seen.add(field)
 drift = sorted(seen - ACKNOWLEDGED_COST_FIELDS)
 
-# Pricing-eligibility gate. Eligibility is a computed ANNOTATION over the
-# datasheet, never an exclusion from it — the datasheet above stays the broad,
-# unfiltered-beyond-mode mirror it has always been. A model is eligible for
-# TF's model picker iff every rule holds:
+# Pricing-eligibility gate. Eligibility is computed here purely to drive the
+# refusal check and the report below — it is never written anywhere, and
+# pricing_datasheet.json above is untouched by it: still the broad,
+# unfiltered-beyond-mode mirror it has always been. (A future consumer, e.g.
+# the model catalog, is expected to persist eligibility as an annotation
+# alongside a model; this script computes it fresh, on the fly, every run.) A
+# model is eligible for TF's model picker iff every rule holds:
 #   - mode == "chat" and supports_function_calling
 #   - max_input_tokens >= 64000, read verbatim (no max_tokens fallback);
 #     absent fails closed
@@ -198,7 +202,7 @@ if unmapped:
     ]
     for provider in sorted(unmapped, key=lambda p: (p is None, p)):
         models = unmapped[provider]
-        lines.append(f"  {provider!r}: {len(models)} eligible-gated model(s), e.g. {models[0]!r}")
+        lines.append(f"  {provider!r}: {len(models)} gated model(s) (mode+tools+window), e.g. {models[0]!r}")
     lines.append('Add a mapping (a bifrost provider constant, or "unsupported") before refreshing.')
     sys.exit("\n".join(lines))
 
