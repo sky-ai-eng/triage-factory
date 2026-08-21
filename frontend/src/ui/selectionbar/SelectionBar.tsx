@@ -427,7 +427,11 @@ export function SelectionBar({
   const body = (
     <>
       <span className="selbar-count">{label || count + ' selected'}</span>
-      <span className="selbar-sep" />
+      {/* The rule divides the count from the controls, so it is drawn only when
+          there are controls to divide it from. A selection every verb declined
+          leaves the count alone rather than framed by hairlines around nothing,
+          which reads as a bar that lost its buttons. */}
+      {picker || verbs.length ? <span className="selbar-sep" /> : null}
       {picker ? (
         <Picker
           label={picker.label}

@@ -404,23 +404,24 @@ export default function TeamSettings() {
   }, [members, filter, usage, spendByUser])
 
   // A team keeps at least one admin, and the database is what enforces it — so
-  // a selection that would empty the seat is offered no verb and told why,
-  // rather than sent and refused. Counted over the whole roster, never `rows`:
-  // the filter box narrows what is on screen, and an admin scrolled out of view
-  // still holds the seat.
-  //
-  // The reason is spelled out rather than the control quietly withdrawn. A verb
-  // vanishing in silence is right for one the reader may never use; this is one
-  // they can have back by promoting someone, and a rule you can satisfy has to
-  // say so.
+  // a gesture that would empty the seat is never offered, rather than sent and
+  // refused. Counted over the whole roster, never `rows`: the filter box
+  // narrows what is on screen, and an admin scrolled out of view still holds
+  // the seat.
   const adminCount = useMemo(() => members.filter((m) => m.role === 'admin').length, [members])
   const strands = useCallback(
     (sel: TableRow[]) => adminCount - sel.filter((r) => r.role === 'admin').length < 1,
     [adminCount],
   )
-  const rosterNote = useCallback(
+  // Promotion is always safe — it can only add to the seat — so the picker
+  // narrows to that one choice rather than closing, and the way out of the
+  // refusal stays in the reader's hand.
+  const roleOptions = useCallback(
     (sel: TableRow[]) =>
-      strands(sel) ? 'That would leave the team without an admin — promote someone first' : null,
+      TEAM_ROLES.filter((r) => r === 'admin' || !strands(sel)).map((r) => ({
+        id: r,
+        name: ROLE_LABELS[r],
+      })),
     [strands],
   )
 
@@ -642,21 +643,12 @@ export default function TeamSettings() {
                   bar={
                     isAdmin
                       ? {
-                          note: rosterNote,
                           picker: {
                             label: 'Role',
-                            options: TEAM_ROLES.map((r) => ({ id: r, name: ROLE_LABELS[r] })),
+                            options: roleOptions,
                             action: {
                               id: 'role',
                               label: 'role',
-                              // Deliberately conservative: the gate is asked
-                              // about the rows, not about the role they are
-                              // headed for, so a selection holding every admin
-                              // gives up the picker even though promoting is
-                              // the one pick that would have been safe.
-                              // Promoting from an unfiltered selection is the
-                              // way through, and it is what the note says.
-                              enabledFor: (sel) => !strands(sel),
                               message: (n, o) =>
                                 n + (n === 1 ? ' member is' : ' members are') + ' now ' + o?.name,
                             },

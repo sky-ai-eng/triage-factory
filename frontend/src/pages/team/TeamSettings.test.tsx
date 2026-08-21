@@ -310,25 +310,32 @@ describe('the last admin', () => {
 
   const bar = () => document.querySelector<HTMLElement>('.selbar-count')
 
-  it('offers no verb for a selection that would strand the team, and says why', async () => {
+  /** The roles the open picker is offering. */
+  function roleChoices(): string[] {
+    fireEvent.click(screen.getByLabelText('Change role'))
+    return Array.from(document.querySelectorAll('[role="option"]')).map((o) =>
+      (o.textContent || '').trim(),
+    )
+  }
+
+  it('narrows the picker to promotion and withdraws remove when the seat is at stake', async () => {
     renderPage()
     await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBeGreaterThan(0))
 
     // robin is the roster's only admin.
     selectRow('robin')
+    await waitFor(() => expect(bar()).not.toBeNull())
 
-    await waitFor(() =>
-      expect(bar()?.textContent).toBe(
-        'That would leave the team without an admin — promote someone first',
-      ),
-    )
-    // Both verbs, not just the destructive one: demoting the last admin is the
-    // same write to the same trigger.
+    // Removing them empties the seat, so the verb is not offered.
     expect(screen.queryByText('Hold to remove')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('Change role')).not.toBeInTheDocument()
+    // Demoting them empties it too — but promoting cannot, so the picker
+    // narrows to that rather than closing, and the way out stays in reach.
+    expect(roleChoices()).toEqual(['Team admin'])
+    // And the bar stays a bar: a count, not a paragraph.
+    expect(bar()?.textContent).toBe('1 selected')
   })
 
-  it('keeps the verbs when an admin is left behind', async () => {
+  it('keeps every choice when an admin is left behind', async () => {
     renderPage()
     await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBeGreaterThan(0))
 
@@ -336,6 +343,33 @@ describe('the last admin', () => {
 
     await waitFor(() => expect(bar()?.textContent).toBe('1 selected'))
     expect(screen.getByText('Hold to remove')).toBeInTheDocument()
+    expect(roleChoices()).toEqual(['Team admin', 'Member', 'Viewer — read only'])
+  })
+
+  it('promotes a selection that holds every admin, since that cannot empty the seat', async () => {
+    api.apiJSON.mockImplementation((path: string) => {
+      if (path.endsWith('/members/list'))
+        return Promise.resolve({
+          items: [MEMBERS.members[0], { ...MEMBERS.members[1], role: 'admin' }],
+          total_count: 2,
+        })
+      if (path.endsWith('/github-repos')) return Promise.resolve({ repos: [] })
+      if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
+      if (path.includes('/usage?')) return Promise.resolve(USAGE)
+      return Promise.reject(new Error('no route: ' + path))
+    })
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(2))
+
+    selectRow('robin')
+    selectRow('dana')
+    await waitFor(() => expect(bar()?.textContent).toBe('2 selected'))
+
+    // Both admins are selected, so demotion is gone — but promotion is still
+    // offered, and taking it is a legal write the server accepts.
+    expect(roleChoices()).toEqual(['Team admin'])
+    fireEvent.click(screen.getByRole('option', { name: 'Team admin' }))
+    expect(screen.queryByText('Hold to remove')).not.toBeInTheDocument()
   })
 
   it('counts admins over the whole roster, not the rows the filter left showing', async () => {

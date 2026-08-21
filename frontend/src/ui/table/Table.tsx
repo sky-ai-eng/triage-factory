@@ -113,17 +113,18 @@ export type TableProps = {
   pageSize?: number | 'auto'
   /** Selection verbs, in the floating bar the rest of the system uses.
    *
-   *  Every verb here — including the picker and the hold — is gated by its
-   *  action's `enabledFor`, so a selection a verb cannot apply to is a
-   *  selection that is not offered it. `note` is what the bar says instead of
-   *  "<n> selected" when that happens: a verb can vanish silently only when the
-   *  reader could never have used it, and a rule they can satisfy by changing
-   *  the selection has to say so. */
+   *  Every verb here is gated by its action's `enabledFor`, so a selection a
+   *  verb cannot apply to is a selection that is not offered it. A picker is
+   *  gated one choice at a time instead: give `options` a function and it is
+   *  resolved against the selected rows, so a choice that would not apply
+   *  cleanly is not drawn while the ones that would still are. */
   bar?: {
     actions?: TableAction[]
-    picker?: NonNullable<SelectionBarProps['picker']> & { action?: TableAction }
+    picker?: Omit<NonNullable<SelectionBarProps['picker']>, 'options'> & {
+      action?: TableAction
+      options?: PickerOption[] | ((rows: TableRow[]) => PickerOption[])
+    }
     danger?: NonNullable<SelectionBarProps['danger']> & { action?: TableAction }
-    note?: (rows: TableRow[]) => ReactNode | null
   } | null
   /** 'absolute' pins the bar in the nearest positioned ancestor; 'fixed' to the viewport. */
   barPosition?: 'fixed' | 'absolute' | 'inline'
@@ -727,10 +728,17 @@ export function Table({
   // asks the same question of the same rows.
   const selectedRows = working.filter((r) => selIds.indexOf(String(r.id)) >= 0)
   const offers = (a?: TableAction) => !a?.enabledFor || a.enabledFor(selectedRows)
+  // A picker narrows rather than vanishes: the choices that still apply to this
+  // selection are drawn, and it is only absent once none of them do.
+  const pickerOptions =
+    typeof barPicker?.options === 'function'
+      ? barPicker.options(selectedRows)
+      : (barPicker?.options ?? [])
   const pickerProp =
-    barPicker && offers(barPicker.action)
+    barPicker && offers(barPicker.action) && pickerOptions.length
       ? {
           ...barPicker,
+          options: pickerOptions,
           onPick: (o: PickerOption) => {
             barPicker.onPick?.(o)
             if (barPicker.action) run(barPicker.action, o)
@@ -752,7 +760,6 @@ export function Table({
     <span className="tb-bar-inner">
       <SelectionBar
         count={n}
-        label={bar.note?.(selectedRows) ?? undefined}
         actions={(bar.actions || actions)
           // A verb that cannot apply to every selected row is not offered
           // at all: a disabled entry in a floating bar reads as a bug.
