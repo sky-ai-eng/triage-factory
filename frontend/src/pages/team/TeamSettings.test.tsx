@@ -33,6 +33,15 @@ const toasts = vi.hoisted(() => ({
 }))
 vi.mock('../../components/Toast/toastStore', () => toasts)
 
+// Run mode, mutable per test. The page reads it the way every other surface
+// does — an absent auth context IS local — so a test that wants the multi-mode
+// roster has to say so, and the local case is a test rather than an accident.
+const session = vi.hoisted(() => ({ present: true }))
+vi.mock('../../contexts/AuthContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../contexts/AuthContext')>()
+  return { ...actual, useOptionalAuth: () => (session.present ? ({} as never) : null) }
+})
+
 // The two roles this page splits on, mutable per test: team admin gates the
 // roster's verbs, org admin gates the archive.
 const roles = vi.hoisted(() => ({ team: 'admin', org: true }))
@@ -100,6 +109,7 @@ const USAGE = {
 }
 
 beforeEach(() => {
+  session.present = true
   roles.team = 'admin'
   roles.org = true
   api.apiJSON.mockImplementation((path: string) => {
@@ -281,5 +291,99 @@ describe('the figures', () => {
     // refusal. The gate is the hook's enabled flag, so the call never leaves.
     expect(api.apiJSON.mock.calls.some((c) => String(c[0]).includes('/usage?'))).toBe(false)
     expect(figureValue('spent · 14 days')).toBeNull()
+  })
+})
+
+// The roster's verbs against the one invariant the database enforces: a team
+// keeps an admin. The point of testing it here rather than trusting the 409 is
+// that the refusal has to be legible BEFORE the gesture, and a control that
+// merely looks live is exactly what a screenshot cannot catch.
+describe('the last admin', () => {
+  /** Select the roster row whose name cell reads `name`. */
+  function selectRow(name: string) {
+    const row = Array.from(document.querySelectorAll<HTMLElement>('.tb-row')).find((r) =>
+      r.textContent?.includes(name),
+    )
+    if (!row) throw new Error('no roster row for ' + name)
+    fireEvent.click(row)
+  }
+
+  const bar = () => document.querySelector<HTMLElement>('.selbar-count')
+
+  it('offers no verb for a selection that would strand the team, and says why', async () => {
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBeGreaterThan(0))
+
+    // robin is the roster's only admin.
+    selectRow('robin')
+
+    await waitFor(() =>
+      expect(bar()?.textContent).toBe(
+        'That would leave the team without an admin — promote someone first',
+      ),
+    )
+    // Both verbs, not just the destructive one: demoting the last admin is the
+    // same write to the same trigger.
+    expect(screen.queryByText('Hold to remove')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Change role')).not.toBeInTheDocument()
+  })
+
+  it('keeps the verbs when an admin is left behind', async () => {
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBeGreaterThan(0))
+
+    selectRow('dana')
+
+    await waitFor(() => expect(bar()?.textContent).toBe('1 selected'))
+    expect(screen.getByText('Hold to remove')).toBeInTheDocument()
+  })
+
+  it('counts admins over the whole roster, not the rows the filter left showing', async () => {
+    api.apiJSON.mockImplementation((path: string) => {
+      if (path.endsWith('/members/list'))
+        return Promise.resolve({
+          items: [
+            { ...MEMBERS.members[0] },
+            { ...MEMBERS.members[1], role: 'admin' },
+            {
+              user_id: 'u3',
+              display_name: 'sam',
+              github_username: 'sam',
+              jira_account_id: null,
+              role: 'member',
+              is_current_user: false,
+            },
+          ],
+          total_count: 3,
+        })
+      if (path.endsWith('/github-repos')) return Promise.resolve({ repos: [] })
+      if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
+      if (path.includes('/usage?')) return Promise.resolve(USAGE)
+      return Promise.reject(new Error('no route: ' + path))
+    })
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(3))
+
+    // Hide the second admin behind the filter, then act on the first. The seat
+    // is held by the roster, not by what is on screen — counting the visible
+    // rows here would refuse a removal that is perfectly legal.
+    fireEvent.change(screen.getByLabelText('Filter members'), { target: { value: 'robin' } })
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBe(1))
+    selectRow('robin')
+
+    await waitFor(() => expect(bar()?.textContent).toBe('1 selected'))
+    expect(screen.getByText('Hold to remove')).toBeInTheDocument()
+  })
+
+  it('draws no roster verbs at all in local mode', async () => {
+    session.present = false
+    renderPage()
+    await waitFor(() => expect(document.querySelectorAll('.tb-row').length).toBeGreaterThan(0))
+
+    // Every team-member route 404s in local, so the verbs are absent rather
+    // than drawn over an endpoint that cannot serve them. No selection to make,
+    // and nobody to add.
+    expect(document.querySelector('.tb-row')?.getAttribute('data-selectable')).toBeNull()
+    expect(screen.queryByText('add teammate')).not.toBeInTheDocument()
   })
 })

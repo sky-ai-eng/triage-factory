@@ -15,6 +15,7 @@ import { useOrgHref } from '../../hooks/useOrgHref'
 import { useOrgRole } from '../../hooks/useOrgRole'
 import { useTeams } from '../../hooks/useTeams'
 import { useTeamRole } from '../../hooks/useTeamRole'
+import { useOptionalAuth } from '../../contexts/AuthContext'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
 import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
@@ -164,7 +165,11 @@ export default function TeamSettings() {
   const team = loaded ? (teams.find((t) => t.id === lastActingTeamId) ?? teams[0] ?? null) : null
   const teamId = team?.id ?? ''
   const { roleForTeam } = useTeamRole()
-  const isAdmin = roleForTeam(teamId) === 'admin'
+  // Membership is a multi-mode idea. Local is one person who is everything, and
+  // every team-member route answers 404 there — so the verbs are absent rather
+  // than drawn over an endpoint that cannot serve them.
+  const isLocal = useOptionalAuth() === null
+  const isAdmin = !isLocal && roleForTeam(teamId) === 'admin'
   // Archiving is the org's verb, not the team's: the endpoint is org-admin only
   // and 404s for everyone else, so a team admin is shown no card rather than a
   // card whose one button cannot work.
@@ -398,6 +403,27 @@ export default function TeamSettings() {
       .filter((r) => !q || r.name.toLowerCase().includes(q) || r.github.toLowerCase().includes(q))
   }, [members, filter, usage, spendByUser])
 
+  // A team keeps at least one admin, and the database is what enforces it — so
+  // a selection that would empty the seat is offered no verb and told why,
+  // rather than sent and refused. Counted over the whole roster, never `rows`:
+  // the filter box narrows what is on screen, and an admin scrolled out of view
+  // still holds the seat.
+  //
+  // The reason is spelled out rather than the control quietly withdrawn. A verb
+  // vanishing in silence is right for one the reader may never use; this is one
+  // they can have back by promoting someone, and a rule you can satisfy has to
+  // say so.
+  const adminCount = useMemo(() => members.filter((m) => m.role === 'admin').length, [members])
+  const strands = useCallback(
+    (sel: TableRow[]) => adminCount - sel.filter((r) => r.role === 'admin').length < 1,
+    [adminCount],
+  )
+  const rosterNote = useCallback(
+    (sel: TableRow[]) =>
+      strands(sel) ? 'That would leave the team without an admin — promote someone first' : null,
+    [strands],
+  )
+
   if (!team) {
     return <p className="ts-empty">{loaded ? 'No team resolved for this org.' : 'Loading…'}</p>
   }
@@ -616,12 +642,21 @@ export default function TeamSettings() {
                   bar={
                     isAdmin
                       ? {
+                          note: rosterNote,
                           picker: {
                             label: 'Role',
                             options: TEAM_ROLES.map((r) => ({ id: r, name: ROLE_LABELS[r] })),
                             action: {
                               id: 'role',
                               label: 'role',
+                              // Deliberately conservative: the gate is asked
+                              // about the rows, not about the role they are
+                              // headed for, so a selection holding every admin
+                              // gives up the picker even though promoting is
+                              // the one pick that would have been safe.
+                              // Promoting from an unfiltered selection is the
+                              // way through, and it is what the note says.
+                              enabledFor: (sel) => !strands(sel),
                               message: (n, o) =>
                                 n + (n === 1 ? ' member is' : ' members are') + ' now ' + o?.name,
                             },
@@ -631,6 +666,7 @@ export default function TeamSettings() {
                             action: {
                               id: 'remove',
                               label: 'remove',
+                              enabledFor: (sel) => !strands(sel),
                               message: (n) =>
                                 n + (n === 1 ? ' member' : ' members') + ' removed from the team',
                             },

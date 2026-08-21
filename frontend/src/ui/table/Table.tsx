@@ -111,11 +111,19 @@ export type TableProps = {
    * fit — the same fixed frame, sized by the window instead of by hand.
    */
   pageSize?: number | 'auto'
-  /** Selection verbs, in the floating bar the rest of the system uses. */
+  /** Selection verbs, in the floating bar the rest of the system uses.
+   *
+   *  Every verb here — including the picker and the hold — is gated by its
+   *  action's `enabledFor`, so a selection a verb cannot apply to is a
+   *  selection that is not offered it. `note` is what the bar says instead of
+   *  "<n> selected" when that happens: a verb can vanish silently only when the
+   *  reader could never have used it, and a rule they can satisfy by changing
+   *  the selection has to say so. */
   bar?: {
     actions?: TableAction[]
     picker?: NonNullable<SelectionBarProps['picker']> & { action?: TableAction }
     danger?: NonNullable<SelectionBarProps['danger']> & { action?: TableAction }
+    note?: (rows: TableRow[]) => ReactNode | null
   } | null
   /** 'absolute' pins the bar in the nearest positioned ancestor; 'fixed' to the viewport. */
   barPosition?: 'fixed' | 'absolute' | 'inline'
@@ -715,37 +723,40 @@ export function Table({
   // labelled verb in the bar.
   const barPicker = bar?.picker
   const barDanger = bar?.danger
-  const pickerProp = barPicker
-    ? {
-        ...barPicker,
-        onPick: (o: PickerOption) => {
-          barPicker.onPick?.(o)
-          if (barPicker.action) run(barPicker.action, o)
-        },
-      }
-    : undefined
-  const dangerProp = barDanger
-    ? {
-        ...barDanger,
-        onConfirm: () => {
-          barDanger.onConfirm?.()
-          if (barDanger.action) run(barDanger.action)
-        },
-      }
-    : undefined
+  // What the verbs are being asked to apply to, resolved once: every gate below
+  // asks the same question of the same rows.
+  const selectedRows = working.filter((r) => selIds.indexOf(String(r.id)) >= 0)
+  const offers = (a?: TableAction) => !a?.enabledFor || a.enabledFor(selectedRows)
+  const pickerProp =
+    barPicker && offers(barPicker.action)
+      ? {
+          ...barPicker,
+          onPick: (o: PickerOption) => {
+            barPicker.onPick?.(o)
+            if (barPicker.action) run(barPicker.action, o)
+          },
+        }
+      : undefined
+  const dangerProp =
+    barDanger && offers(barDanger.action)
+      ? {
+          ...barDanger,
+          onConfirm: () => {
+            barDanger.onConfirm?.()
+            if (barDanger.action) run(barDanger.action)
+          },
+        }
+      : undefined
 
   const selBar = bar ? (
     <span className="tb-bar-inner">
       <SelectionBar
         count={n}
+        label={bar.note?.(selectedRows) ?? undefined}
         actions={(bar.actions || actions)
           // A verb that cannot apply to every selected row is not offered
           // at all: a disabled entry in a floating bar reads as a bug.
-          .filter(
-            (a) =>
-              !a.enabledFor ||
-              a.enabledFor(working.filter((r) => selIds.indexOf(String(r.id)) >= 0)),
-          )
+          .filter((a) => offers(a))
           .map((a) => ({
             label: a.label,
             tone: a.tone === 'bad' ? 'alarm' : 'default',
