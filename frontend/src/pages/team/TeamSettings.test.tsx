@@ -82,6 +82,23 @@ const MEMBERS = {
   ],
 }
 
+// The flow node and the spend slice the figures read. Slack's null count is
+// the shape's point: an undefined measurement renders as a dash, not a zero.
+const ACTIVITY = {
+  team_id: 't1',
+  by_day: [{ date: '2026-08-20', events: 8, tasks: 4 }],
+  by_day_source: [{ date: '2026-08-20', source: 'github', events: 5, tasks: 2 }],
+  by_source: [
+    { source: 'github', events: 5, tasks: 2, runs: 1, last_poll_at: '2026-08-20T00:00:00Z' },
+    { source: 'jira', events: 3, tasks: 1, runs: 0, last_poll_at: null },
+    { source: 'slack', events: null, tasks: 1, runs: 0, last_poll_at: null },
+  ],
+}
+const USAGE = {
+  total_cost_usd: 12.4,
+  by_user: [{ user_id: 'u1', display_name: 'robin', cost: 9.152 }],
+}
+
 beforeEach(() => {
   roles.team = 'admin'
   roles.org = true
@@ -90,6 +107,8 @@ beforeEach(() => {
       return Promise.resolve({ items: MEMBERS.members, total_count: MEMBERS.members.length })
     if (path.endsWith('/github-repos'))
       return Promise.resolve({ repos: ['sky/planner', 'sky/runner'] })
+    if (path.includes('/activity?')) return Promise.resolve(ACTIVITY)
+    if (path.includes('/usage?')) return Promise.resolve(USAGE)
     return Promise.reject(new Error('no route: ' + path))
   })
   // The org directory behind `+ add teammate`. Empty is the honest default
@@ -217,5 +236,50 @@ describe('archiving the team', () => {
     // Absent, not disabled: the endpoint is the org's, and 404s for them.
     expect(screen.queryByText('Archive this team')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+  })
+})
+
+describe('the figures', () => {
+  const figureValue = (label: string) => {
+    const l = Array.from(document.querySelectorAll('.ts-fig-l')).find(
+      (e) => e.textContent === label,
+    )
+    return l?.closest('.ts-fig')?.querySelector('.ts-fig-v')?.textContent ?? null
+  }
+
+  it('fills the header, the band, and the roster from the two reads', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByText('$12.40')).toBeInTheDocument())
+
+    // tasks · 7 days is the by-source tasks summed; every flow figure on the
+    // page derives from the one node read, so they agree by construction.
+    expect(figureValue('tasks · 7 days')).toBe('4')
+
+    // The band: total events in the head, per-source values in the rows —
+    // slack's undefined count stays a dash — and the two stream stats.
+    expect(document.querySelector('.ts-panel-right .ts-panel-n')?.textContent).toBe('8 events')
+    const rowValues = Array.from(document.querySelectorAll('.ts-flow-row-v')).map(
+      (e) => e.textContent,
+    )
+    expect(rowValues).toEqual(['5', '3', '—'])
+    const stats = Array.from(document.querySelectorAll('.ts-stat-v')).map((e) => e.textContent)
+    expect(stats).toEqual(['8', '4'])
+
+    // The roster's spend column: a member in by_user shows their cost, a
+    // member absent from it genuinely spent nothing once the read answered.
+    expect(screen.getByText('$9.15')).toBeInTheDocument()
+    expect(screen.getByText('$0.00')).toBeInTheDocument()
+  })
+
+  it('never fires the spend read for a member, and still fills the flow', async () => {
+    roles.team = 'member'
+    roles.org = false
+    renderPage()
+    await waitFor(() => expect(figureValue('tasks · 7 days')).toBe('4'))
+
+    // The endpoint is admin-gated; a member firing it would just collect a
+    // refusal. The gate is the hook's enabled flag, so the call never leaves.
+    expect(api.apiJSON.mock.calls.some((c) => String(c[0]).includes('/usage?'))).toBe(false)
+    expect(figureValue('spent · 14 days')).toBeNull()
   })
 })

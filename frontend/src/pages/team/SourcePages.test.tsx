@@ -9,8 +9,10 @@ import SlackSource from './SlackSource'
 // What is worth pinning is the honesty rule, because it is the thing a
 // screenshot cannot check and the thing most likely to be "fixed" later by
 // somebody filling a dash with a zero: EVERY FIGURE IS EITHER REAL OR AN EM
-// DASH. A zero would be a claim about a team's week, and several of these
-// figures need aggregations the API does not have yet.
+// DASH. A figure is a dash until the team activity node answers, and stays
+// one where the node cannot define the measurement at all — Slack's mention
+// count has no tracked set to scope it. A zero would be a claim about a
+// team's week.
 //
 // The rest is the wiring a member must never see, and the set-replace each
 // verb resolves to.
@@ -20,6 +22,32 @@ const BODY = {
   teamName: 'platform',
   isAdmin: true,
   onBack: () => {},
+}
+
+/** A UTC calendar day `n` days back, in the node's own date grammar. */
+const day = (n: number) => new Date(Date.now() - n * 86400_000).toISOString().slice(0, 10)
+
+// The team activity node's answer, where a test wants the figures filled.
+// Slack's null events is the payload's point: the count is undefined (no
+// tracked set), which must render as a dash and an unanswered chart.
+const ACTIVITY = {
+  team_id: 't1',
+  by_day: [{ date: day(1), events: 6, tasks: 2 }],
+  by_day_source: [
+    { date: day(1), source: 'github', events: 6, tasks: 2 },
+    { date: day(3), source: 'slack', events: 0, tasks: 1 },
+  ],
+  by_source: [
+    {
+      source: 'github',
+      events: 6,
+      tasks: 2,
+      runs: 3,
+      last_poll_at: new Date(Date.now() - 40_000).toISOString(),
+    },
+    { source: 'jira', events: 0, tasks: 0, runs: 0, last_poll_at: null },
+    { source: 'slack', events: null, tasks: 1, runs: 0, last_poll_at: null },
+  ],
 }
 
 function stub(payloads: Record<string, unknown>) {
@@ -111,7 +139,7 @@ describe('GitHub source page', () => {
     expect(reading(row('tracked of 3 visible'))).toBe('2')
   })
 
-  it('draws a dash, never a zero, for every figure nothing counts yet', async () => {
+  it('draws a dash, never a zero, while the node has not answered', async () => {
     stub(REPOS)
     render(<GitHubSource {...BODY} />)
     await waitFor(() => expect(screen.getByText('tracked of 3 visible')).toBeInTheDocument())
@@ -128,6 +156,26 @@ describe('GitHub source page', () => {
     // The band's three, for the same reason.
     expect(screen.getByText('events · 7 days').parentElement?.textContent).toContain('—')
     expect(screen.getByText('since last poll').parentElement?.textContent).toContain('—')
+  })
+
+  it('fills the figures and the chart once the node answers', async () => {
+    stub({ ...REPOS, '/api/teams/t1/activity': ACTIVITY })
+    render(<GitHubSource {...BODY} />)
+
+    await waitFor(() => expect(reading(row('events in 7 days'))).toBe('6'))
+    expect(row('became tasks').textContent).toContain('2')
+    expect(reading(row('runs against these repositories'))).toBe('3')
+    // Elapsed time keeps elapsing, so the reading is shape-checked: a small
+    // number of seconds, not a dash.
+    expect(row('since the last poll').textContent).toMatch(/\d+s/)
+
+    // The frame's own three, from the same answer.
+    expect(screen.getByText('events · 7 days').parentElement?.textContent).toContain('6')
+    expect(screen.getByText('since last poll').parentElement?.textContent).toMatch(/\d+s/)
+
+    // The fortnight drew: legend keys exist and the empty label is gone.
+    expect(screen.queryByText('no daily series yet')).not.toBeInTheDocument()
+    expect(screen.getByText('EVENTS')).toBeInTheDocument()
   })
 
   it('lists a tracked repository the picker can no longer see', async () => {
@@ -285,9 +333,25 @@ describe('Slack source page', () => {
     stub(CHANNELS)
     render(<SlackSource {...BODY} />)
 
-    // The registry carries a timestamp; nothing counts mentions in a window.
+    // The registry carries a timestamp; the node has not answered here, so
+    // the windowed count holds its dash.
     await waitFor(() => expect(screen.getByText('4m')).toBeInTheDocument())
     expect(row('mentions in 7 days').textContent).toContain('—')
+  })
+
+  it('keeps the dash where the node answers that the count is undefined', async () => {
+    stub({ ...CHANNELS, '/api/teams/t1/activity': ACTIVITY })
+    render(<SlackSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('watched of 3 visible')).toBeInTheDocument())
+
+    // The node answered — became-tasks is real — but the mention count is
+    // null: undefined for a source with no tracked set, so the figure and
+    // the chart whose outer line it is both stay unanswered.
+    expect(screen.getByText('became tasks · 7 days').parentElement?.textContent).toContain('1')
+    expect(row('mentions in 7 days').textContent).toContain('—')
+    expect(screen.getByText('no daily series yet')).toBeInTheDocument()
+    // No poller behind Slack: the dash is by construction, not a gap.
+    expect(row('since the last poll').textContent).toContain('—')
   })
 
   it('marks the primary channels and only those', async () => {

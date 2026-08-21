@@ -8,6 +8,13 @@ import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
 import { figureAt, labelAt } from './schedule'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiFetch, apiJSON } from '../../lib/apiClient'
+import {
+  useTeamActivity,
+  activitySource,
+  activitySeries,
+  sinceParts,
+  sinceLabel,
+} from '../../hooks/useTeamActivity'
 import type { SlackChannelsResponse, SlackChannelView } from '../../types'
 
 // Slack, as this team's event source.
@@ -23,9 +30,13 @@ import type { SlackChannelsResponse, SlackChannelView } from '../../types'
 // is not a member of delivers nothing and shows a dash in both columns rather
 // than a zero.
 //
-// MENTIONS · 7D reads `—` everywhere: the registry carries `last_mention_at`,
-// a timestamp, and nothing counts them in a window (backend-needs 16). So do
-// events, became tasks, and the time since the last poll.
+// The flow figures come from the team activity node, and Slack is the source
+// it cannot always count: a team's events are defined by its tracked set,
+// which Slack does not have, so under multi mode the mention count — and the
+// chart, whose outer series it is — reads `—` rather than a zero. Local mode
+// is N=1, where the org-wide count is the team's and both render. Became
+// tasks is task-scoped and always real. Nothing polls Slack (push), so
+// `since last poll` is a dash by construction, not by omission.
 
 const PROSE =
   'A mention of the factory in a watched channel becomes a task for whichever team is primary there. ' +
@@ -70,6 +81,14 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
   const [channels, setChannels] = useState<SlackChannelView[] | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
+
+  // Two windows of the same node: figures read seven days, the chart a
+  // fortnight. See the header comment for which of Slack's figures can
+  // answer at all.
+  const activity7 = useTeamActivity(teamId, 7)
+  const activity14 = useTeamActivity(teamId, 14)
+  const flow = activitySource(activity7, 'slack')
+  const poll = sinceParts(flow?.last_poll_at ?? null)
 
   // What the next set-replace is computed from, so two verbs inside one undo
   // window do not each write from the same stale set.
@@ -236,9 +255,9 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
       name="Slack"
       teamName={teamName}
       onBack={onBack}
-      events={null}
-      tasks={null}
-      sincePoll={null}
+      events={flow?.events ?? null}
+      tasks={flow ? flow.tasks : null}
+      sincePoll={sinceLabel(flow?.last_poll_at ?? null)}
     >
       <div className="sp-cols">
         <div className="sp-left">
@@ -257,13 +276,22 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
               <Odometer value={primaryHere} at={figureAt(1)} label={`${primaryHere ?? 0}`} />
             </FigureRow>
             <FigureRow label="mentions in 7 days" at={labelAt(2)}>
-              <Odometer value={null} at={figureAt(2)} />
+              <Odometer
+                value={flow ? flow.events : null}
+                at={figureAt(2)}
+                label={`${flow?.events ?? 0}`}
+              />
             </FigureRow>
             <FigureRow label="with no primary team" at={labelAt(3)} tone="alarm">
               <Odometer value={orphaned} at={figureAt(3)} label={`${orphaned ?? 0}`} />
             </FigureRow>
             <FigureRow label="since the last poll" at={labelAt(4)} tone="faint">
-              <Odometer value={null} at={figureAt(4)} />
+              <Odometer
+                value={poll ? poll.value : null}
+                suffix={poll?.unit}
+                at={figureAt(4)}
+                label={poll ? `${poll.value}${poll.unit}` : undefined}
+              />
             </FigureRow>
           </div>
 
@@ -272,11 +300,14 @@ export default function SlackSource({ teamId, teamName, isAdmin, onBack }: Sourc
             in those channels.
           </span>
 
+          {/* The outer series is the mention count, so where that count is
+              undefined the chart stays unanswered too — a zeroed outer line
+              would claim silence the node never measured. */}
           <SourceChart
             title="WHAT THE CHANNELS SENT"
             keys={['MENTIONS', 'TASKS']}
             units={['mentions', 'tasks']}
-            series={null}
+            series={flow && flow.events !== null ? activitySeries(activity14, 'slack', 14) : null}
           />
         </div>
 

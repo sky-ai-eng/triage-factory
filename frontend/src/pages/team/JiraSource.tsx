@@ -6,6 +6,7 @@ import type { StatusMap } from '../../ui/statusrules/StatusRules'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiJSON } from '../../lib/apiClient'
+import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
 import { fetchTeamSettings, saveTeamJiraProjects } from '../settings/teamConfig'
 import type { JiraProjectConfig } from '../settings/teamConfig'
 
@@ -54,6 +55,10 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [fetched, setFetched] = useState<string[] | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
+
+  // The frame's three figures, from the team activity node at the window
+  // their labels name.
+  const flow = activitySource(useTeamActivity(teamId, 7), 'jira')
 
   useEffect(() => {
     if (!teamId) return
@@ -174,9 +179,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       name="Jira"
       teamName={teamName}
       onBack={onBack}
-      events={null}
-      tasks={null}
-      sincePoll={null}
+      events={flow?.events ?? null}
+      tasks={flow ? flow.tasks : null}
+      sincePoll={sinceLabel(flow?.last_poll_at ?? null)}
     >
       <div className="sp-cols" data-split="even">
         {/* What the page is for, and the map that answers it: the description

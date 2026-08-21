@@ -17,6 +17,8 @@ import { useTeams } from '../../hooks/useTeams'
 import { useTeamRole } from '../../hooks/useTeamRole'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
+import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
+import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
 import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
 import type { ArchivePreview } from '../../lib/teamLifecycle'
 import { toast } from '../../components/Toast/toastStore'
@@ -167,6 +169,19 @@ export default function TeamSettings() {
   // and 404s for everyone else, so a team admin is shown no card rather than a
   // card whose one button cannot work.
   const { isAdmin: isOrgAdmin } = useOrgRole()
+
+  // One 7-day node read feeds every flow figure — the header's task count,
+  // the sources band, its meters and its stats — so they all agree by
+  // construction. Spend is its own read over the fortnight its label names,
+  // fired only for an admin because the endpoint refuses everyone else.
+  const activity = useTeamActivity(teamId, 7)
+  const usage = useTeamUsage(teamId, 14, isAdmin || isOrgAdmin)
+  const flowEvents = activity ? activity.by_source.reduce((n, r) => n + (r.events ?? 0), 0) : null
+  const flowTasks = activity ? activity.by_source.reduce((n, r) => n + r.tasks, 0) : null
+  const spendByUser = useMemo(
+    () => new Map((usage?.by_user ?? []).map((u) => [u.user_id, u.cost])),
+    [usage],
+  )
 
   // The three writes this page makes, defined once. `keepalive` keeps the
   // request alive past the document on the unload path; sendBeacon is not an
@@ -372,14 +387,16 @@ export default function TeamSettings() {
         name: displayNameFor(m),
         github: m.githubUsername ?? '—',
         role: m.role,
-        // Every measurement below needs an aggregation the API does not have.
+        // repos / tasks / seen still need per-member aggregations the API
+        // does not have. Spend answers once the admin-gated usage read does:
+        // a member absent from by_user then genuinely spent nothing.
         repos: '—',
         tasks: '—',
-        spend: '—',
+        spend: usage ? fmtSpendUSD(spendByUser.get(m.userId) ?? 0) : '—',
         seen: '—',
       }))
       .filter((r) => !q || r.name.toLowerCase().includes(q) || r.github.toLowerCase().includes(q))
-  }, [members, filter])
+  }, [members, filter, usage, spendByUser])
 
   if (!team) {
     return <p className="ts-empty">{loaded ? 'No team resolved for this org.' : 'Loading…'}</p>
@@ -408,14 +425,14 @@ export default function TeamSettings() {
               <>
                 <span className="ts-div" />
                 <Figure
-                  value={null}
+                  value={usage ? fmtSpendUSD(usage.total_cost_usd) : null}
                   label="spent · 14 days"
                   onClick={() => navigate(orgHref('/usage'))}
                 />
               </>
             ) : null}
             <span className="ts-div" />
-            <Figure value={null} label="tasks · 7 days" tone="warm" />
+            <Figure value={flowTasks} label="tasks · 7 days" tone="warm" />
           </div>
         </div>
 
@@ -476,7 +493,7 @@ export default function TeamSettings() {
             >
               <span className="ts-panel-t">EVENT SOURCES</span>
               <span className="ts-lead" />
-              <span className="ts-panel-n">— events</span>
+              <span className="ts-panel-n">{flowEvents ?? '—'} events</span>
               <i className="ts-chev" aria-hidden="true" />
             </button>
             <div className="ts-flow">
@@ -484,24 +501,31 @@ export default function TeamSettings() {
                 {/* Naming a source is how you get to it: the band works as
                     navigation between the three, not only as a way into the
                     panel that lists them. */}
-                {SOURCES.map((s) => (
-                  <button
-                    type="button"
-                    className="ts-flow-row"
-                    key={s}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      openSource(s)
-                    }}
-                  >
-                    <span className="ts-flow-row-line">
-                      <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
-                      <span className="ts-lead-flex" />
-                      <span className="ts-flow-row-v">—</span>
-                    </span>
-                    <Meter frac={null} thin />
-                  </button>
-                ))}
+                {SOURCES.map((s) => {
+                  // A null count is undefined for the source (Slack has no
+                  // tracked set), so its row keeps the dash and draws no
+                  // share — a zero would claim a quiet week.
+                  const events = activitySource(activity, s)?.events ?? null
+                  const frac = events !== null && flowEvents ? events / flowEvents : null
+                  return (
+                    <button
+                      type="button"
+                      className="ts-flow-row"
+                      key={s}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        openSource(s)
+                      }}
+                    >
+                      <span className="ts-flow-row-line">
+                        <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
+                        <span className="ts-lead-flex" />
+                        <span className="ts-flow-row-v">{events ?? '—'}</span>
+                      </span>
+                      <Meter frac={frac} thin />
+                    </button>
+                  )
+                })}
               </div>
               {/* Three sources converging on one stream. Structural rather than
                   plotted — there is no series behind it yet. */}
@@ -517,12 +541,12 @@ export default function TeamSettings() {
               </svg>
               <div className="ts-flow-stats">
                 <div className="ts-stat">
-                  <span className="ts-stat-v">—</span>
+                  <span className="ts-stat-v">{flowEvents ?? '—'}</span>
                   <span className="ts-stat-l">events</span>
                 </div>
                 <div className="ts-stat">
                   <span className="ts-stat-v" data-tone="warm">
-                    —
+                    {flowTasks ?? '—'}
                   </span>
                   <span className="ts-stat-l">became tasks</span>
                 </div>

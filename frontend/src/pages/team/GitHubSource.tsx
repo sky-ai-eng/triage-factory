@@ -7,6 +7,13 @@ import { SourceFrame, FigureRow, FilterField } from './SourceFrame'
 import { figureAt, labelAt } from './schedule'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiListAll } from '../../lib/apiClient'
+import {
+  useTeamActivity,
+  activitySource,
+  activitySeries,
+  sinceParts,
+  sinceLabel,
+} from '../../hooks/useTeamActivity'
 import { fetchTeamRepos, saveTeamRepos } from '../settings/teamConfig'
 import type { GitHubRepo } from '../../lib/githubRepos'
 
@@ -16,11 +23,13 @@ import type { GitHubRepo } from '../../lib/githubRepos'
 // (left) and which repositories are watched (right). The verbs live on the
 // table, because tracking is a property of a repository and not of the page.
 //
-// FIGURES THE API DOES NOT ANSWER READ `—`. Events in seven days, what became
-// of them, runs against these repositories and the time since the last poll
-// all need aggregations that do not exist yet (backend-needs 17, 18). A zero
-// would be a claim about a team's week. The tracked count and the visible
-// count are real, and so is watching and unwatching.
+// The page's own figures — events, what became of them, runs, the time since
+// the last poll, and the fortnight chart — come from the team activity node,
+// fetched at the two windows the surface reads (seven days for figures, a
+// fortnight for the chart). FIGURES THE API DOES NOT ANSWER READ `—`: the
+// per-repository columns (runs, last event) still need a per-repo cut that
+// does not exist, and a zero there would be a claim about a repository's
+// week.
 
 const PROSE =
   'Tracked repositories spawn events this team can automate, like PRs in need of review or CI failing. ' +
@@ -59,6 +68,14 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
   const [visible, setVisible] = useState<string[] | null>(null)
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
+
+  // Two windows of the same node: the figures read seven days, the chart a
+  // fortnight. The node is windowed by the caller, so each is asked for
+  // rather than derived from the other.
+  const activity7 = useTeamActivity(teamId, 7)
+  const activity14 = useTeamActivity(teamId, 14)
+  const flow = activitySource(activity7, 'github')
+  const poll = sinceParts(flow?.last_poll_at ?? null)
 
   // The authoritative tracked set, so a second verb inside one undo window
   // computes from what the last one wrote rather than from what the screen
@@ -189,9 +206,9 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
       name="GitHub"
       teamName={teamName}
       onBack={onBack}
-      events={null}
-      tasks={null}
-      sincePoll={null}
+      events={flow?.events ?? null}
+      tasks={flow ? flow.tasks : null}
+      sincePoll={sinceLabel(flow?.last_poll_at ?? null)}
     >
       <div className="sp-cols">
         <div className="sp-left">
@@ -207,16 +224,29 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
               <Odometer value={trackedCount} at={figureAt(0)} label={`${trackedCount ?? 0}`} />
             </FigureRow>
             <FigureRow label="events in 7 days" at={labelAt(1)}>
-              <Odometer value={null} at={figureAt(1)} />
+              <Odometer
+                value={flow?.events ?? null}
+                at={figureAt(1)}
+                label={`${flow?.events ?? 0}`}
+              />
             </FigureRow>
             <FigureRow label="became tasks" at={labelAt(2)} tone="warm">
-              <Ticker value={null} variant="row" />
+              <Ticker value={flow ? flow.tasks : null} variant="row" />
             </FigureRow>
             <FigureRow label="runs against these repositories" at={labelAt(3)}>
-              <Odometer value={null} at={figureAt(3)} />
+              <Odometer
+                value={flow ? flow.runs : null}
+                at={figureAt(3)}
+                label={`${flow?.runs ?? 0}`}
+              />
             </FigureRow>
             <FigureRow label="since the last poll" at={labelAt(4)} tone="faint">
-              <Odometer value={null} at={figureAt(4)} />
+              <Odometer
+                value={poll ? poll.value : null}
+                suffix={poll?.unit}
+                at={figureAt(4)}
+                label={poll ? `${poll.value}${poll.unit}` : undefined}
+              />
             </FigureRow>
           </div>
 
@@ -224,7 +254,7 @@ export default function GitHubSource({ teamId, teamName, isAdmin, onBack }: Sour
             title="WHAT THE REPOSITORIES SENT"
             keys={['EVENTS', 'TASKS']}
             units={['events', 'tasks']}
-            series={null}
+            series={activitySeries(activity14, 'github', 14)}
           />
         </div>
 
