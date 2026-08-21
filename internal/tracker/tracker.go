@@ -1614,8 +1614,14 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		trace.WithAttributes(telemetry.Count(len(projects))))
 	defer span.End()
 
+	// build renders the JQL from a status set, so a query that Jira rejects can
+	// be rendered again from a narrower one. members is the set the live jql
+	// was built from; the pair is what makes the salvage below possible.
 	type queryWithDone struct {
+		projectKey            string
 		jql                   string
+		build                 func([]domain.JiraStatusRef) string
+		members               []domain.JiraStatusRef
 		doneMembers           []domain.JiraStatusRef // for subtask classification on issues returned by this query
 		assignedToCurrentUser bool                   // this query's arrival is itself an assignment signal
 	}
@@ -1628,11 +1634,19 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			continue
 		}
 
-		if pickup := jiraStatusTerms(p.PickupMembers); pickup != "" {
+		// An empty pickup set yields no query at all rather than an unfiltered
+		// one: "no statuses to pick up from" must never widen into "every
+		// unassigned ticket in the project".
+		pickupJQL := func(members []domain.JiraStatusRef) string {
+			terms := jiraStatusTerms(members)
+			if terms == "" {
+				return ""
+			}
+			return fmt.Sprintf(`project = %q AND status IN (%s) AND assignee IS EMPTY`, p.Key, terms)
+		}
+		if jql := pickupJQL(p.PickupMembers); jql != "" {
 			queries = append(queries, queryWithDone{
-				jql: fmt.Sprintf(
-					`project = %q AND status IN (%s) AND assignee IS EMPTY`,
-					p.Key, pickup),
+				projectKey: p.Key, jql: jql, build: pickupJQL, members: p.PickupMembers,
 				doneMembers: allDone,
 			})
 		}
@@ -1643,12 +1657,16 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// hit this in practice), the NOT IN clause is dropped entirely
 		// rather than falling back to a hardcoded list that would
 		// contradict the user's workflow.
-		assignedJQL := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
-		if done := jiraStatusTerms(p.DoneMembers); done != "" {
-			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, done)
+		assignedJQL := func(members []domain.JiraStatusRef) string {
+			jql := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
+			if done := jiraStatusTerms(members); done != "" {
+				jql += fmt.Sprintf(` AND status NOT IN (%s)`, done)
+			}
+			return jql
 		}
 		queries = append(queries, queryWithDone{
-			jql: assignedJQL, doneMembers: allDone, assignedToCurrentUser: true,
+			projectKey: p.Key, jql: assignedJQL(p.DoneMembers), build: assignedJQL, members: p.DoneMembers,
+			doneMembers: allDone, assignedToCurrentUser: true,
 		})
 	}
 
@@ -1662,15 +1680,30 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// DefaultSearchFields.
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
-	failed := 0
+	// Live workflows, fetched only when a query has already failed and cached
+	// for the rest of the cycle so two failed queries on one project cost one
+	// call. Steady state never touches this.
+	liveStatuses := map[string][]domain.JiraStatusRef{}
+
+	failed, salvaged := 0, 0
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
+		if err != nil {
+			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectKey, q.members, q.build, liveStatuses); jql != "" {
+				trackerLog.WarnContext(ctx, "jira discovery query rebuilt without statuses the workflow no longer has",
+					"project", q.projectKey, "dropped", domain.JiraStatusNames(dropped), "error", err)
+				issues, err = client.SearchIssues(ctx, jql, fields, 100)
+				if err == nil {
+					salvaged++
+				}
+			}
+		}
 		if err != nil {
 			// One project's query failing must not sink the others, so
 			// this continues — which means the caller gets a short result
 			// with no indication why. The outcome below is that indication.
 			failed++
-			trackerLog.ErrorContext(ctx, "jira discovery query failed", "error", err)
+			trackerLog.ErrorContext(ctx, "jira discovery query failed", "project", q.projectKey, "error", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1682,16 +1715,69 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 		}
 	}
-	if failed > 0 {
+	if failed > 0 || salvaged > 0 {
 		// TODO(TFAC-878): a log line and this span attribute are the only trace.
-		// A project whose JQL is permanently invalid — a rule naming a status
-		// Jira no longer has — fails here every cycle and silently stops
-		// producing work, and nothing tells the team. Surfacing a condition
-		// nobody is watching needs the durable notification channel.
-		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed))
+		// A salvaged query keeps the project producing work, but its rules still
+		// name a status Jira does not have, and the settings board is the only
+		// place that says so — nobody who is not looking at it ever learns.
+		// Surfacing a condition nobody is watching needs the durable
+		// notification channel.
+		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed+salvaged))
 	}
 
 	return all, nil
+}
+
+// salvageJiraQuery rebuilds a discovery query that Jira rejected, without the
+// statuses the project's workflow no longer has.
+//
+// This is the rare path and it is deliberately not a pre-check: JQL validates
+// status terms against Jira's global list, so a status merely retired from
+// this project's workflow still makes a valid query, and only one deleted
+// outright makes an invalid one. Fetching every project's workflow on every
+// cycle to guard against that would be a call per project per poll for a
+// condition that almost never holds — so the workflow is read only once a
+// query has already failed, and cached in live for the rest of the cycle.
+//
+// Returns an empty jql when nothing can be salvaged: the workflow is
+// unreachable, every member is still live (so the failure is something else
+// entirely and rerunning the same query would only repeat it), or nothing
+// survives the filter and the narrowed query would widen its result set.
+// The stored rule is never edited — a status that vanished upstream is the
+// team's to remove, and the settings board is where they are told.
+func (t *Tracker) salvageJiraQuery(
+	ctx context.Context, client *jiraclient.Client,
+	projectKey string, members []domain.JiraStatusRef,
+	build func([]domain.JiraStatusRef) string,
+	live map[string][]domain.JiraStatusRef,
+) (jql string, dropped []domain.JiraStatusRef) {
+	known, cached := live[projectKey]
+	if !cached {
+		statuses, err := client.ProjectStatuses(ctx, projectKey)
+		if err != nil {
+			trackerLog.WarnContext(ctx, "jira workflow read failed; cannot tell whether the query names a dead status",
+				"project", projectKey, "error", err)
+			return "", nil
+		}
+		known = make([]domain.JiraStatusRef, 0, len(statuses))
+		for _, st := range statuses {
+			known = append(known, domain.JiraStatusRef{ID: st.ID, Name: st.Name})
+		}
+		live[projectKey] = known
+	}
+
+	surviving := make([]domain.JiraStatusRef, 0, len(members))
+	for _, m := range members {
+		if domain.ContainsStatus(known, m) {
+			surviving = append(surviving, m)
+		} else {
+			dropped = append(dropped, m)
+		}
+	}
+	if len(dropped) == 0 {
+		return "", nil
+	}
+	return build(surviving), dropped
 }
 
 // batchFetchJira fetches current state for tracked Jira issues. Description
