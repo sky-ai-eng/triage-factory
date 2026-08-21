@@ -636,7 +636,17 @@ can price it*, and both are mechanical.
 
 The name is written once; the "(via Bedrock)" parenthetical is derived
 from which key matched instead of hand-written per spelling; file order is
-display order. The `keys` grouping is the editorial identity mapping §2.1
+display order. The word "Bedrock" itself comes from a TF-authored display
+name per supported *access-path* provider — the provider map's value
+vocabulary, which is also the registry's `keys` vocabulary — never from
+upstream's labels, which split one path into several spellings
+(`bedrock`/`bedrock_converse`; three `vertex_ai-*` labels are one
+"Vertex AI") and whose casing is not derivable (xAI, DeepSeek, OpenAI).
+It is a hand-written table of ~a dozen entries, kept beside the provider
+map rather than inside it (the refresh script reads that file expecting
+string values), with a completeness check — every provider the map
+supports must be named — so enabling a provider forces the naming
+decision the way the refresh gate forces the mapping decision. The `keys` grouping is the editorial identity mapping §2.1
 promised and is **load-bearing, not decoration**: the derived universe
 contains alias-and-pin duplicates (`claude-sonnet-5` *and* its dated
 spelling, plus prior generations) that nothing in the strings relates, and
