@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, Search, Trash2 } from 'lucide-react'
+import { AlertTriangle, ChevronDown, ChevronRight, Search, Trash2 } from 'lucide-react'
 import { Section } from './primitives'
 import JiraStatusRule from '../../components/JiraStatusRule'
-import { emptyProject, projectIsArmed, type JiraProjectConfig } from './teamConfig'
+import {
+  dropStatus,
+  emptyProject,
+  projectIsArmed,
+  unresolvableStatuses,
+  type JiraProjectConfig,
+} from './teamConfig'
 import type { JiraStatusRef } from '../../components/JiraStatusRule'
 import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
@@ -188,6 +194,14 @@ export default function JiraProjectRulesGroup({
     onChange(value.map((p) => (normKey(p.key) === key ? { ...p, ...patch } : p)))
   }
 
+  // Removing a vanished status is an edit like any other — it lands in the
+  // form and takes effect on save, so the team sees what changed before it is
+  // written. Clearing a canonical this way leaves the rule incomplete on
+  // purpose: the replacement write target is theirs to pick.
+  const dropUnresolvable = (key: string, status: JiraStatusRef) => {
+    onChange(value.map((p) => (normKey(p.key) === key ? dropStatus(p, status) : p)))
+  }
+
   const watch = (key: string) => {
     if (watchedKeys.has(key)) return
     onChange([...value, emptyProject(key)])
@@ -259,6 +273,7 @@ export default function JiraProjectRulesGroup({
       {watchedProjects.map((project) => {
         const key = normKey(project.key)
         const statuses = statusesByProject[key] || []
+        const missing = unresolvableStatuses(project, statuses)
         const armed = projectIsArmed(project)
         const isOpen = expanded[key] === true
         const sources = isOpen && !armed ? copySourcesFor(key) : []
@@ -287,10 +302,18 @@ export default function JiraProjectRulesGroup({
                 type="button"
                 onClick={() => toggleExpanded(key)}
                 className={`text-[10px] uppercase tracking-wide ${
-                  armed ? 'text-claim' : 'text-snooze hover:text-snooze/80'
+                  missing.length > 0
+                    ? 'text-dismiss hover:text-dismiss/80'
+                    : armed
+                      ? 'text-claim'
+                      : 'text-snooze hover:text-snooze/80'
                 }`}
               >
-                {armed ? 'Ready' : 'Statuses not mapped'}
+                {missing.length > 0
+                  ? `${missing.length} status${missing.length === 1 ? '' : 'es'} missing`
+                  : armed
+                    ? 'Ready'
+                    : 'Statuses not mapped'}
               </button>
               <button
                 type="button"
@@ -343,6 +366,33 @@ export default function JiraProjectRulesGroup({
                         Copy {normKey(source.key)}&rsquo;s mapping
                       </button>
                     ))}
+                  </div>
+                )}
+
+                {missing.length > 0 && (
+                  <div className="rounded-xl border border-dismiss/30 bg-dismiss/5 px-3 py-2.5 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle size={13} className="mt-0.5 shrink-0 text-dismiss" />
+                      <p className="text-[11px] text-text-secondary">
+                        These statuses are in {key}&rsquo;s rules but not in its Jira workflow any
+                        more. Polling skips them, and a rule whose write target is gone cannot
+                        transition a ticket. Remove them, then pick replacements below.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 pl-[21px]">
+                      {missing.map((status) => (
+                        <button
+                          key={status.id || status.name}
+                          type="button"
+                          onClick={() => dropUnresolvable(key, status)}
+                          className="group inline-flex items-center gap-1.5 rounded-xl border border-dismiss/30 px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-dismiss hover:text-dismiss"
+                          aria-label={`Remove ${status.name || status.id} from ${key}`}
+                        >
+                          {status.name || status.id}
+                          <Trash2 size={11} className="opacity-60 group-hover:opacity-100" />
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 

@@ -180,6 +180,56 @@ export const projectRulesValid = (p: JiraProjectConfig): boolean =>
         )),
   )
 
+/** sameStatus compares two refs the way the server does: ids decide when both
+ *  carry one, names otherwise. */
+const sameStatus = (a: JiraStatusRef, b: JiraStatusRef): boolean =>
+  a.id && b.id ? a.id === b.id : !!a.name && a.name === b.name
+
+/** unresolvableStatuses returns the statuses this project's rules name that
+ *  its live workflow no longer has — a status deleted or retired in Jira since
+ *  the rule was armed.
+ *
+ *  Nothing repairs these automatically. A stored rule is the team's, and a
+ *  status vanishing upstream is a decision someone made in Jira that TF has no
+ *  standing to reinterpret: dropping the member silently would change what
+ *  work the team sees, and re-pointing it at a same-named status would rewrite
+ *  their configuration on a string match. So they are reported here and
+ *  removed by hand.
+ *
+ *  Returns [] when the workflow has not been fetched, since "no statuses
+ *  loaded" is not evidence that any of them are gone. */
+export function unresolvableStatuses(
+  p: JiraProjectConfig,
+  allStatuses: JiraStatusRef[],
+): JiraStatusRef[] {
+  if (allStatuses.length === 0) return []
+  const out: JiraStatusRef[] = []
+  const seen = new Set<string>()
+  for (const rule of [p.pickup, p.in_progress, p.done]) {
+    for (const ref of [...rule.members, ...(rule.canonical ? [rule.canonical] : [])]) {
+      const dedup = ref.id || ref.name
+      if (!dedup || seen.has(dedup)) continue
+      if (!allStatuses.some((s) => sameStatus(s, ref))) {
+        seen.add(dedup)
+        out.push(ref)
+      }
+    }
+  }
+  return out
+}
+
+/** dropStatus removes one status from every rule of a project, clearing a
+ *  canonical that pointed at it. Clearing the canonical leaves the rule
+ *  incomplete on purpose — a write target is a decision, and picking a
+ *  replacement is the team's, not a default this can guess. */
+export function dropStatus(p: JiraProjectConfig, status: JiraStatusRef): JiraProjectConfig {
+  const strip = (r: JiraStatusRuleValue): JiraStatusRuleValue => ({
+    members: r.members.filter((m) => !sameStatus(m, status)),
+    canonical: r.canonical && sameStatus(r.canonical, status) ? null : r.canonical,
+  })
+  return { ...p, pickup: strip(p.pickup), in_progress: strip(p.in_progress), done: strip(p.done) }
+}
+
 // teamProjectsBlocked reports whether the team's Jira project rules should
 // block a save. Zero tracked projects is a valid choice — a Jira-connected
 // org can still have a team that tracks no Jira project — and so is a watched

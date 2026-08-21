@@ -168,3 +168,75 @@ describe('JiraProjectRulesGroup · arming', () => {
     expect(screen.getByText('Ready')).toBeInTheDocument()
   })
 })
+
+describe('JiraProjectRulesGroup · statuses that vanished upstream', () => {
+  // A project armed against a status that Jira has since deleted. Everything
+  // downstream degrades quietly — polling skips the term, transitions to a
+  // dead canonical fail — so this board is the only place a human is told.
+  const withRetiredStatus = (): JiraProjectConfig => ({
+    ...emptyProject('SKY'),
+    pickup: {
+      members: [
+        { id: '10000', name: 'To Do' },
+        { id: '99999', name: 'Retired' },
+      ],
+    },
+    in_progress: {
+      members: [{ id: '10001', name: 'In Progress' }],
+      canonical: { id: '10001', name: 'In Progress' },
+    },
+    done: {
+      members: [{ id: '10002', name: 'Done' }],
+      canonical: { id: '10002', name: 'Done' },
+    },
+  })
+
+  it('says nothing until the workflow has actually been read', async () => {
+    render(<Harness seed={[withRetiredStatus()]} />)
+    await screen.findByText('Sky Platform')
+    // Collapsed, so no statuses fetched: an unread workflow is not evidence
+    // that anything is missing, and claiming otherwise would cry wolf on
+    // every board that has not been opened.
+    expect(screen.queryByText(/status(es)? missing/i)).not.toBeInTheDocument()
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+  })
+
+  it('flags the status once the workflow is read, over the armed state', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[withRetiredStatus()]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+
+    expect(await screen.findByText('1 status missing')).toBeInTheDocument()
+    expect(screen.getByText(/not in its Jira workflow any more/)).toBeInTheDocument()
+    // "Ready" would be a lie: the rules name something Jira does not have.
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument()
+  })
+
+  it('removes the vanished status from the rules on click, and nothing else', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[withRetiredStatus()]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+    await screen.findByText('1 status missing')
+
+    await user.click(screen.getByRole('button', { name: 'Remove Retired from SKY' }))
+
+    await waitFor(() => expect(screen.queryByText('1 status missing')).not.toBeInTheDocument())
+    // The surviving statuses are untouched, so the project is armed again.
+    expect(screen.getByTestId('armed')).toHaveTextContent('SKY')
+    expect(screen.getByText('Ready')).toBeInTheDocument()
+  })
+
+  it('does not flag a status that was merely renamed, since the id still resolves', async () => {
+    const user = userEvent.setup()
+    const renamed: JiraProjectConfig = {
+      ...withRetiredStatus(),
+      // Same id as the live "To Do"; only the stored spelling is stale.
+      pickup: { members: [{ id: '10000', name: 'Backlog' }] },
+    }
+    render(<Harness seed={[renamed]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+
+    expect(await screen.findByText('Ready')).toBeInTheDocument()
+    expect(screen.queryByText(/status(es)? missing/i)).not.toBeInTheDocument()
+  })
+})

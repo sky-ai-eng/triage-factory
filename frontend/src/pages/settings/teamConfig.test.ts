@@ -4,14 +4,17 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 
 import {
+  dropStatus,
   emptyProject,
   projectIsArmed,
   projectRulesValid,
   ruleIsIdentified,
   saveTeamJiraProjects,
   teamProjectsBlocked,
+  unresolvableStatuses,
   type JiraProjectConfig,
 } from './teamConfig'
+import type { JiraStatusRef } from '../../components/JiraStatusRule'
 import { jsonBody } from '../../test/apiResponse'
 
 const toDo = { id: '10000', name: 'To Do' }
@@ -130,5 +133,96 @@ describe('project rule predicates', () => {
     expect(projectIsArmed(legacy('OLD'))).toBe(true)
     expect(ruleIsIdentified(legacy('OLD').pickup)).toBe(false)
     expect(ruleIsIdentified(armed('SKY').pickup)).toBe(true)
+  })
+})
+
+describe('unresolvableStatuses', () => {
+  const workflow: JiraStatusRef[] = [
+    { id: '10001', name: 'To Do' },
+    { id: '10002', name: 'In Progress' },
+    { id: '10003', name: 'Done' },
+  ]
+
+  const project = (over: Partial<JiraProjectConfig> = {}): JiraProjectConfig => ({
+    ...emptyProject('SKY'),
+    ...over,
+  })
+
+  it('reports a member whose status is gone from the workflow', () => {
+    const p = project({
+      pickup: {
+        members: [
+          { id: '10001', name: 'To Do' },
+          { id: '99999', name: 'Retired' },
+        ],
+      },
+    })
+    expect(unresolvableStatuses(p, workflow)).toEqual([{ id: '99999', name: 'Retired' }])
+  })
+
+  it('reports a canonical whose status is gone, not just members', () => {
+    const p = project({
+      done: {
+        members: [{ id: '10003', name: 'Done' }],
+        canonical: { id: '88888', name: 'Archived' },
+      },
+    })
+    expect(unresolvableStatuses(p, workflow)).toEqual([{ id: '88888', name: 'Archived' }])
+  })
+
+  it('resolves a renamed status by id, so a rename is not a missing status', () => {
+    const p = project({ pickup: { members: [{ id: '10001', name: 'Backlog' }] } })
+    expect(unresolvableStatuses(p, workflow)).toEqual([])
+  })
+
+  it('resolves a name-only member against the workflow, for rules with no ids', () => {
+    const p = project({ pickup: { members: [{ id: '', name: 'To Do' }] } })
+    expect(unresolvableStatuses(p, workflow)).toEqual([])
+  })
+
+  it('reports nothing when the workflow has not been fetched', () => {
+    const p = project({ pickup: { members: [{ id: '99999', name: 'Retired' }] } })
+    expect(unresolvableStatuses(p, [])).toEqual([])
+  })
+
+  it('reports one status once even when several rules name it', () => {
+    const gone = { id: '99999', name: 'Retired' }
+    const p = project({
+      pickup: { members: [gone] },
+      done: { members: [gone], canonical: gone },
+    })
+    expect(unresolvableStatuses(p, workflow)).toEqual([gone])
+  })
+})
+
+describe('dropStatus', () => {
+  const gone = { id: '99999', name: 'Retired' }
+
+  it('removes the status from every rule that names it', () => {
+    const p: JiraProjectConfig = {
+      ...emptyProject('SKY'),
+      pickup: {
+        members: [{ id: '10001', name: 'To Do' }, gone],
+      },
+      done: {
+        members: [gone, { id: '10003', name: 'Done' }],
+        canonical: { id: '10003', name: 'Done' },
+      },
+    }
+    const next = dropStatus(p, gone)
+    expect(next.pickup.members).toEqual([{ id: '10001', name: 'To Do' }])
+    expect(next.done.members).toEqual([{ id: '10003', name: 'Done' }])
+    expect(next.done.canonical).toEqual({ id: '10003', name: 'Done' })
+  })
+
+  it('clears a canonical that pointed at the dropped status, leaving the rule incomplete', () => {
+    const p: JiraProjectConfig = {
+      ...emptyProject('SKY'),
+      in_progress: { members: [gone], canonical: gone },
+    }
+    const next = dropStatus(p, gone)
+    expect(next.in_progress.members).toEqual([])
+    expect(next.in_progress.canonical).toBeNull()
+    expect(projectIsArmed(next)).toBe(false)
   })
 })
