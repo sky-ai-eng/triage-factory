@@ -53,11 +53,12 @@ func PricingProvenance() (source, commit, fetched string) {
 // modeled — the native loop never requests them.
 const tokenTierAbove200K = 200000
 
-// modelPrice is the subset of the datasheet's per-model pricing the text-cost
-// path reads. Field names/json tags mirror the upstream datasheet (LiteLLM /
-// bifrost TableModelPricing) so the snapshot unmarshals directly; unread fields
-// (audio, image, video, search, supports_* flags, the fast/flex/priority tiers)
-// are ignored on decode.
+// modelPrice is the subset of the datasheet's per-model row this package reads —
+// the text-cost path's rates, plus the few descriptive fields ModelInfo and the
+// window/max-output accessors project. Field names/json tags mirror the upstream
+// datasheet (LiteLLM / bifrost TableModelPricing) so the snapshot unmarshals
+// directly; unread fields (audio, image, video, search, the remaining supports_*
+// flags, the fast/flex/priority tiers) are ignored on decode.
 type modelPrice struct {
 	// Mode is the model's modality ("chat" | "responses" | "completion" for the
 	// text models this snapshot carries). CostForUsage prices only these — a
@@ -73,6 +74,18 @@ type modelPrice struct {
 	// fails the WHOLE datasheet unmarshal — which would silently zero every
 	// price, not just this accessor.
 	MaxInputTokens *float64 `json:"max_input_tokens"`
+
+	// LiteLLMProvider is the upstream vendor label the snapshot carries
+	// (its litellm_provider field), read by ModelInfo. It rides this struct
+	// for the same reason the two window fields do: the datasheet is the
+	// vendored source of per-model facts, and a second table would drift.
+	LiteLLMProvider string `json:"litellm_provider"`
+
+	// SupportsPromptCaching is the row's capability flag, read by ModelInfo
+	// so a picker can warn that a model buys nothing from TF's cacheable
+	// prefix. Nothing in the cost formula reads it — a model that caches is
+	// priced by the cache rates it publishes, not by this flag.
+	SupportsPromptCaching bool `json:"supports_prompt_caching"`
 
 	// MaxOutputTokens is the model's maximum completion length, read by
 	// ModelMaxOutput for the same reason MaxInputTokens is read by
