@@ -68,6 +68,7 @@ var identicalHelperRatchet = []string{
 	"scanMessageRow",
 	"scanMessageRows",
 	"scanOneExecutorClaim",
+	"scanOrgEventSourceRow",
 	"scanReachableRepos",
 	"scanSpendRow",
 	"scanTaskBareRow",

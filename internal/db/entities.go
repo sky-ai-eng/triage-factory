@@ -369,6 +369,34 @@ type EntityStore interface {
 	// re-reads the row on the next cycle either way.
 	UpdateSnapshotCASSystem(ctx context.Context, orgID, id, snapshotJSON string, expectedPollSeq int64) (ok bool, err error)
 
+	// ClearSnapshotsForSourceSystem blanks snapshot_json for every ACTIVE
+	// entity of one source in one org, bumping poll_seq on each row, and
+	// returns how many it cleared.
+	//
+	// It exists for the event-source pause. The tracker's snapshot-diff is the
+	// sole re-emit guard, so a source paused for a sprint would otherwise leave
+	// every known entity holding a sprint-old snapshot and the first cycle
+	// after re-enabling would diff stale->now: every CI result, every review,
+	// every status move, all at once, minting tasks for a period the org had
+	// deliberately turned off. Cleared, those rows take the tracker's existing
+	// quiet-seed path instead — the same one a snapshot-less stub takes — which
+	// writes the fresh snapshot and emits nothing, terminal states included.
+	// Pausing and re-enabling is then the same shape as untracking and
+	// re-tracking, which is what the forward-only rule already specifies.
+	//
+	// ACTIVE only, deliberately: a closed entity is never diffed again, so
+	// clearing it would buy nothing and would blank the snapshot the personal
+	// dashboard renders its merged PRs from.
+	//
+	// The poll_seq bump is what makes this safe against a cycle already in
+	// flight: that cycle diffed against the snapshot being cleared, and its
+	// write is a CAS on the poll_seq it read, so it now misses and drops its
+	// transitions rather than restoring a stale snapshot behind the clear.
+	//
+	// Exempt from the returned-row rule: a bulk write. The count is for the
+	// caller's log line; no row is read back.
+	ClearSnapshotsForSourceSystem(ctx context.Context, orgID, source string) (int, error)
+
 	// MarkPolledSystem stamps last_polled_at without touching the
 	// snapshot or poll_seq — the row was read from the source, but
 	// nothing about it was diffed. Distinct from UpdateSnapshot* (which

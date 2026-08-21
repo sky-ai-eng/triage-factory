@@ -622,6 +622,11 @@ func (a *App) buildRouting() {
 	// leader gating is the poller's own, which is the same brain lease every
 	// other timer-driven pass sits behind.
 	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
+	// Skip a cycle for a source an org admin turned off. This is what makes
+	// "a turned-off source makes zero API calls" true, which is a promise
+	// measurable from the other end; the router's drop beside it is what makes
+	// "no tasks" true for every producer at once.
+	a.pollerMgr.EventSources = a.stores.OrgEventSources
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant
 		// doesn't suppress a fresh failure on another. Process-level errors
@@ -655,6 +660,12 @@ func (a *App) buildRouting() {
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
 	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
+	// The event-source pause. This is the single funnel every source's events
+	// cross, so it is where a paused source stops minting tasks — poll-driven
+	// and push-driven alike. Not optional in production, unlike the poller
+	// skip beside it: the answer is cached per org behind a short TTL and
+	// invalidated by the admin write (in process, or over the tf_ctl relay).
+	a.router.SetEventSourceGate(a.stores.OrgEventSources)
 	// The post-scoring re-derive discharges tasks.rederive_owed through the
 	// score store — the clear half of the mark UpdateTaskScores raises with
 	// every scores write.

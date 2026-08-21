@@ -483,6 +483,7 @@ func (a *App) wire() {
 	if a.plan.serveHTTP {
 		a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
 		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
+		a.srv.SetOnSourcesChanged(a.sourcesChanged)
 	}
 }
 

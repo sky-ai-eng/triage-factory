@@ -224,10 +224,16 @@ type SystemRoutingDispositionMetadata struct {
 const (
 	DispositionFrozen             = "frozen"
 	DispositionTasklessUnroutable = "taskless_unroutable" // system event / closed entity
-	DispositionTasklessNoHandler  = "taskless_no_handler"
-	DispositionTasklessNoOwner    = "taskless_no_owner"
-	DispositionTaskCreated        = "task_created"
-	DispositionTaskBumped         = "task_bumped"
+	// DispositionSourceDisabled means an org admin has paused the event's
+	// source. The event stays recorded — the append-only log is an honest
+	// record of what happened while a source was off — and everything
+	// downstream is skipped. Distinct from frozen, which is a licence fault:
+	// this one an org admin chose and can undo.
+	DispositionSourceDisabled    = "source_disabled"
+	DispositionTasklessNoHandler = "taskless_no_handler"
+	DispositionTasklessNoOwner   = "taskless_no_owner"
+	DispositionTaskCreated       = "task_created"
+	DispositionTaskBumped        = "task_bumped"
 	// DispositionError means the pipeline hit an internal failure (a store
 	// query it depends on errored) rather than reaching a legitimate
 	// outcome — kept distinct from the taskless_* values so a consumer

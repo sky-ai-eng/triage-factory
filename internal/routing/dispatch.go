@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -141,6 +142,36 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	if !entitlements.EventTypeAllowed(orgID, evt.EventType) {
 		disp.Disposition = events.DispositionFrozen
 		return nil
+	}
+
+	// An org admin turned this source off without unbinding its credential.
+	// The drop is HERE, after the event is recorded and before anything
+	// ephemeral is derived from it, because this is the single funnel every
+	// source's events cross: poll-driven, push-driven, and any future emitter
+	// alike. The poll-cycle skip beside it guarantees something different — no
+	// API calls, not no tasks — so an event reaching this point from a producer
+	// that never went through a poll cycle is still stopped here.
+	//
+	// The append-only log stays complete, so an admin can still see what
+	// happened while the source was paused; only the ephemeral layer is
+	// suppressed, which is exactly the split the data model already draws.
+	// Existing tasks are untouched — a pause is forward-only, like every other
+	// tracking change.
+	//
+	// An error fails the event rather than letting it through: the caller
+	// requeues an errored event, so a transient read costs a retry, while
+	// answering "not paused" on a failed read would mint the tasks the pause
+	// exists to prevent.
+	if r.sourceGate != nil {
+		paused, err := r.sourceGate.disabled(ctx, orgID, eventsource.KindOf(evt.EventType))
+		if err != nil {
+			disp.Disposition = events.DispositionError
+			return fmt.Errorf("resolve event source policy: %w", err)
+		}
+		if paused {
+			disp.Disposition = events.DispositionSourceDisabled
+			return nil
+		}
 	}
 
 	// Entity-lifecycle gate — system events and already-closed entities create

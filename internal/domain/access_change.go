@@ -57,6 +57,13 @@ const (
 	AccessActionInviteRevoked           = "invite_revoked"
 	AccessActionCredentialSet           = "credential_set"
 	AccessActionCredentialRemoved       = "credential_removed"
+	// The event-source pause and its undo. Beside the credential pair
+	// deliberately: an admin reaching for one of these is often deciding
+	// between them, and the log has to make plain which one they picked —
+	// unbinding a credential also cuts the agent's access to the source, while
+	// a pause leaves it alone and only stops events.
+	AccessActionEventSourceDisabled = "event_source_disabled"
+	AccessActionEventSourceEnabled  = "event_source_enabled"
 )
 
 // SSO policy action discriminators. Declared here, in core, even though every
@@ -143,12 +150,16 @@ type AccessChangeListOpts struct {
 // log to membership/role/ownership changes vs credential binds/rotations vs
 // org-wide access policy.
 //
-// Policy is the bucket for changes that gate access without naming a member or
-// storing a secret — today the SSO connection lifecycle, its enforcement
-// switch, the verified domains that decide who auto-provisions, and the
-// break-glass exemptions from enforcement. Break-glass names a target user but
-// grants no membership: it exempts an existing member from the SSO requirement,
-// which is a property of the policy, not of their standing in the org.
+// Policy is the bucket for org-wide switches that name no member and store no
+// secret — the SSO connection lifecycle, its enforcement switch, the verified
+// domains that decide who auto-provisions, the break-glass exemptions from
+// enforcement, and the per-source event pause. Break-glass names a target user
+// but grants no membership: it exempts an existing member from the SSO
+// requirement, which is a property of the policy, not of their standing in the
+// org. The event-source pause names no principal at all — it decides what the
+// org ingests, not who gets in — and lands here for the same reason: it is a
+// deliberate org-wide setting an admin flipped, and an admin auditing "what
+// changed about how this org behaves" is looking for exactly that.
 const (
 	AccessCategoryMembership = "membership"
 	AccessCategoryCredential = "credential"
@@ -190,6 +201,8 @@ func AccessActionsInCategory(category string) []string {
 			AccessActionSSODomainRemoved,
 			AccessActionSSOBreakGlassAdded,
 			AccessActionSSOBreakGlassRemoved,
+			AccessActionEventSourceDisabled,
+			AccessActionEventSourceEnabled,
 		}
 	default:
 		return nil
@@ -215,6 +228,17 @@ func AccessDetailCredential(kind, host, name string) string {
 		Host string `json:"host,omitempty"`
 		Name string `json:"name,omitempty"`
 	}{Kind: kind, Host: host, Name: name})
+	return string(b)
+}
+
+// AccessDetailEventSource builds the payload for an event-source pause or its
+// undo: the source kind, and nothing else. Which direction it went is the
+// action discriminator's job, not a field's — a boolean here would let a row
+// say "enabled" and "disabled" at once.
+func AccessDetailEventSource(kind string) string {
+	b, _ := json.Marshal(struct {
+		Kind string `json:"kind"`
+	}{Kind: kind})
 	return string(b)
 }
 

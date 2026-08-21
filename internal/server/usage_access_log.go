@@ -282,6 +282,10 @@ func accessChangeLabel(e domain.AccessChange, targetName, teamName string) strin
 		return credentialActionLabel("set the ", d)
 	case domain.AccessActionCredentialRemoved:
 		return credentialActionLabel("removed the ", d)
+	case domain.AccessActionEventSourceDisabled:
+		return "turned off " + eventSourcePhrase(d) + " for this org"
+	case domain.AccessActionEventSourceEnabled:
+		return "turned " + eventSourcePhrase(d) + " back on for this org"
 	case domain.AccessActionSSOConnectionCreated:
 		return "registered an SSO connection"
 	case domain.AccessActionSSOConnectionEnabled:
@@ -329,6 +333,17 @@ func ssoDomainPhrase(d accessDetail) string {
 		return "a domain"
 	}
 	return "the domain " + d.Domain
+}
+
+// eventSourcePhrase names the source an event_source_* row is about, degrading
+// to a bare noun when the detail didn't survive. A whole phrase rather than a
+// fallback word, for ssoDomainPhrase's reason: the generic case still has to
+// read as English.
+func eventSourcePhrase(d accessDetail) string {
+	if d.Kind == "" {
+		return "an event source"
+	}
+	return d.Kind + " events"
 }
 
 // credentialActionLabel renders a credential_set / credential_removed predicate

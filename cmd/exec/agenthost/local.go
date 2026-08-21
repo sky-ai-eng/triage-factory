@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -826,6 +827,30 @@ func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact
 
 // --- jira ---
 //
+// requireSourceEnabled refuses a credentialed call to a source an org admin has
+// turned off. It sits at the source's credential funnel — today jiraSystemClient,
+// the single point every Jira verb resolves through — rather than on each of the
+// verbs, because a verb that forgot it would be a hole in the switch that
+// nothing else closes, and because being turned off is a fact about the
+// credential rather than about what the caller meant to do with it.
+//
+// GitHub has no such funnel here and needs none: it cannot be turned off
+// (eventsource.Disableable), because every core surface is built on it.
+//
+// A failed policy read refuses too. Reading an unanswerable policy as
+// permission would reopen the source exactly while the database is unhealthy;
+// the cost of the other mistake is one verb the agent sees fail.
+func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) error {
+	off, err := c.rt.SourceDisabled(ctx, kind)
+	if err != nil {
+		return fmt.Errorf("check whether %s is turned off for this organization: %w", eventsource.Label(kind), err)
+	}
+	if off {
+		return eventsource.DisabledError(kind)
+	}
+	return nil
+}
+
 // jiraSystemClient builds the org's bot-attributed Jira client. In multi
 // mode the daemon lives in the run's credential sidecar and proxyCreds is
 // always set, so every Jira verb routes through the sidecar's REST proxy —
@@ -841,6 +866,9 @@ func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact
 // as "absent". Over IPC the message crosses as the response Error string,
 // so the agent reads the identical text across every mode/role.
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
+	if err := c.requireSourceEnabled(ctx, eventsource.KindJira); err != nil {
+		return nil, err
+	}
 	if c.proxyCreds != nil {
 		return proxyJiraClient(c.proxyCreds)
 	}

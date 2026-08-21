@@ -176,6 +176,9 @@ func New(conn *sql.DB) db.Stores {
 		// browser permission round-trip is reached only by an unsandboxed
 		// local SDK run.
 		Permissions: newPermissionStore(conn),
+		// OrgEventSources is split-pool in Postgres; SQLite collapses to the
+		// one connection (N=1, no RLS) and asserts the local org instead.
+		OrgEventSources: newOrgEventSourceStore(conn),
 		// PollReadiness is admin-pool only in Postgres; SQLite collapses to
 		// the one connection (N=1, no RLS). Org-scoped readiness gate for
 		// /api/jira/stock + the one-shot "config took effect" announce

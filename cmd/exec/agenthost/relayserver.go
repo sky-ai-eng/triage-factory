@@ -404,6 +404,20 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		}
 		return json.Marshal(checkEntitlementResult{Allowed: allowed})
 
+	case opSourceDisabled:
+		var a sourceDisabledArgs
+		if err := json.Unmarshal(args, &a); err != nil {
+			return nil, err
+		}
+		// The orchestrator holds the policy row; the sidecar relays for it on
+		// every credentialed GitHub/Jira call so an admin's switch lands on a
+		// run that is already in flight.
+		off, err := s.rt.SourceDisabled(ctx, a.Kind)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(sourceDisabledResult{Disabled: off})
+
 	case opMemoryLoad:
 		var a memoryLoadArgs
 		if err := json.Unmarshal(args, &a); err != nil {

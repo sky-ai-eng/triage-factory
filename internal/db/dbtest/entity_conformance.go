@@ -918,6 +918,49 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
+	t.Run("ClearSnapshotsForSourceSystem_blanks_active_rows_of_one_source", func(t *testing.T) {
+		// The event-source pause's half of the re-enable story. Clearing puts
+		// each active row back on the tracker's quiet-seed path, so the first
+		// cycle after a pause seeds instead of diffing a sprint-old snapshot
+		// into a burst of transitions.
+		s, orgID, _ := mk(t)
+
+		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-gh", "pr", "GH", "")
+		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-clr-1", "issue", "JI", "")
+		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-closed", "pr", "GC", "")
+		for _, e := range []string{gh.ID, ji.ID, closed.ID} {
+			if _, err := s.UpdateSnapshot(ctx, orgID, e, `{"number":7}`); err != nil {
+				t.Fatalf("seed snapshot: %v", err)
+			}
+		}
+		if _, err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		before := mustEntity(t, s, ctx, orgID, "github", "owner/repo#clr-gh")
+
+		cleared, err := s.ClearSnapshotsForSourceSystem(ctx, orgID, "github")
+		if err != nil {
+			t.Fatalf("ClearSnapshotsForSourceSystem: %v", err)
+		}
+		if cleared != 1 {
+			t.Errorf("cleared %d rows, want 1 — only the ACTIVE github entity", cleared)
+		}
+
+		if got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#clr-gh"); got.SnapshotJSON != "" {
+			t.Errorf("active github snapshot = %q, want empty", got.SnapshotJSON)
+		} else if got.PollSeq != before.PollSeq+1 {
+			// The bump is what makes an in-flight cycle's CAS miss instead of
+			// restoring the snapshot behind the clear.
+			t.Errorf("poll_seq = %d, want %d (one past the pre-clear value)", got.PollSeq, before.PollSeq+1)
+		}
+		if got := mustEntity(t, s, ctx, orgID, "jira", "SKY-clr-1"); got.SnapshotJSON == "" {
+			t.Error("jira snapshot cleared, want untouched — a pause names one source")
+		}
+		if got := mustEntity(t, s, ctx, orgID, "github", "owner/repo#clr-closed"); got.SnapshotJSON == "" {
+			t.Error("closed entity's snapshot cleared, want untouched — it is never diffed again, and the dashboard renders it")
+		}
+	})
+
 	t.Run("ListActiveTerminalCandidatesSystem_selects_terminal_snapshots_only", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 

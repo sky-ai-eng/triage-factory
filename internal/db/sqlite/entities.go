@@ -807,3 +807,22 @@ func scanEntityFromRows(rows *sql.Rows) (*domain.Entity, error) {
 	}
 	return &e, nil
 }
+
+func (s *entityStore) ClearSnapshotsForSourceSystem(ctx context.Context, orgID, source string) (int, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return 0, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE entities
+		SET snapshot_json = NULL, poll_seq = poll_seq + 1
+		WHERE source = ? AND state = 'active'
+	`, source)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
