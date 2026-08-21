@@ -19,10 +19,14 @@
 // no tasks, and resolves no credential for an agent. Those gates live with the
 // machinery they guard and share one check (Disabled, policy.go) — this package
 // derives the STATE, and a state that meant "off for some purposes" would be a
-// permission for every gate to pick its own reading. What survives a pause is
-// the stored configuration: the bound credential, the tracked repos, the
-// authored handlers. That is the whole distinction between this and a
-// disconnect, and it is what makes resuming one switch instead of re-onboarding.
+// permission for every gate to pick its own reading. What survives is the
+// stored configuration: the bound credential, the tracked repos, the authored
+// handlers. That is the whole distinction between this and a disconnect, and it
+// is what makes turning a source back on one switch instead of re-onboarding.
+//
+// Not every source has that switch. GitHub is REQUIRED — see Disableable — so
+// the vocabulary of things an org can turn off is a strict subset of the
+// vocabulary it can read a state for.
 //
 // Its readers want different slices of the same derivation: the org
 // availability read hands the whole vocabulary to the UI, an event-handler
@@ -111,6 +115,17 @@ const (
 type Source struct {
 	Kind  string `json:"kind"`
 	State State  `json:"state"`
+	// Disableable carries the vocabulary rule to the client, so a caller can
+	// know which sources have an off switch without holding a copy of the list
+	// that decides. A UI that hardcoded the answer would offer a control the
+	// PATCH refuses the moment a second source becomes required.
+	Disableable bool `json:"disableable"`
+}
+
+// NewSource builds one source's answer with the vocabulary-derived fields
+// filled in, so a caller that resolved a state cannot forget one of them.
+func NewSource(kind string, state State) Source {
+	return Source{Kind: kind, State: state, Disableable: Disableable(kind)}
 }
 
 // Availability is one org's whole resolved vocabulary, in wire order.
@@ -172,13 +187,18 @@ type declaration struct {
 	// probe is nil for a source TF has declared but not built: its state is
 	// the constant StateWIP and nothing is read.
 	probe probeFn
+	// required marks a source the product is built on, which therefore has no
+	// off switch. It is not a registration option and never will be: a source
+	// declared from outside core is by construction one this deployment works
+	// without, or core could not ship without it.
+	required bool
 }
 
 // builtins are the sources core ships or has declared. github and jira resolve
 // through this package's own probes; linear and schedule are declared and not
 // built, which is a fact the UI needs to render rather than an omission.
 var builtins = []declaration{
-	{kind: KindGitHub, probe: githubState},
+	{kind: KindGitHub, probe: githubState, required: true},
 	{kind: KindJira, probe: jiraState},
 	{kind: KindLinear},
 	{kind: KindSchedule},
@@ -257,7 +277,7 @@ func Resolve(ctx context.Context, tx db.TxStores, orgID string) (Availability, e
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Source{Kind: d.kind, State: st})
+		out = append(out, Source{Kind: d.kind, State: st, Disableable: !d.required})
 	}
 	return out, nil
 }
@@ -289,6 +309,25 @@ func StateFor(ctx context.Context, tx db.TxStores, orgID, kind string) (State, b
 // does not carry is a 404, not a silently stored row.
 func Declared(kind string) bool {
 	return slices.ContainsFunc(declarations(), func(d declaration) bool { return d.kind == kind })
+}
+
+// Disableable reports whether kind is a source an org may turn off.
+//
+// GitHub is not, and that is a product fact rather than a caution: repositories,
+// pull requests, the git channel a delegated run pushes through, and every
+// artifact a run produces are GitHub. An org with GitHub turned off is an org
+// where nothing works, so the switch would only ever be a way to break a
+// deployment silently — an admin who wants that outcome is looking for uninstall.
+//
+// A kind outside this deployment's vocabulary is not disableable either, for the
+// same reason it is not addressable: there is nothing to turn off.
+//
+// This is the whole of the rule, and every gate inherits it through Disabled,
+// so a stored row naming a required source is inert rather than dangerous.
+func Disableable(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && !decls[i].required
 }
 
 // resolver carries one pass's shared reads. The github and jira answers are
@@ -325,7 +364,7 @@ func (r *resolver) state(ctx context.Context, d declaration) (State, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
 	}
-	if st == StateUnlicensed {
+	if st == StateUnlicensed || d.required {
 		return st, nil
 	}
 	paused, err := r.pausedKinds(ctx)

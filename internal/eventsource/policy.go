@@ -28,7 +28,9 @@ func DisabledError(kind string) error {
 	return fmt.Errorf("%s is turned off for this organization: an org admin paused it, which stops polling, new tasks and agent access alike until it is turned back on in Settings → Event sources: %w", Label(kind), ErrDisabled)
 }
 
-// Disabled reports whether an org admin has turned kind off for orgID.
+// Disabled reports whether an org admin has turned kind off for orgID. A source
+// the product is built on has no off switch and always answers false — see
+// Disableable, which this consults first.
 //
 // This is the whole of the policy check, and it deliberately reads the row
 // directly rather than resolving a State: the callers are the machinery — the
@@ -42,6 +44,15 @@ func DisabledError(kind string) error {
 // construction: a poll cycle, a background sealer, and a daemon acting for a
 // run rather than for a signed-in reader.
 func Disabled(ctx context.Context, store db.OrgEventSourceStore, orgID, kind string) (bool, error) {
+	// A source with no off switch is never off, whatever a row says. Answering
+	// from the vocabulary rather than the table is what makes that structural:
+	// the row is unconstrained by design (kind is FK-free, since the vocabulary
+	// is a runtime registry), so a hand-written one naming GitHub is inert here
+	// instead of quietly disabling the product. It also spares every gate a
+	// read for the kinds that can never answer yes — which is most events.
+	if !Disableable(kind) {
+		return false, nil
+	}
 	kinds, err := store.ListDisabledSystem(ctx, orgID)
 	if err != nil {
 		return false, fmt.Errorf("read event source policy for org %s: %w", orgID, err)

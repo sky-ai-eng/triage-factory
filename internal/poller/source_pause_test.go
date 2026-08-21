@@ -60,23 +60,20 @@ func spanOutcome(t *testing.T, recorder *tracetest.SpanRecorder, name string) st
 	return ""
 }
 
-// pauseSource records an org admin's disable for kind, the way the PATCH route
-// does.
-func pauseSource(t *testing.T, database *sql.DB, kind string) {
+// turnOffSource records an org admin's off switch for kind, the way the PATCH
+// route does.
+func turnOffSource(t *testing.T, database *sql.DB, kind string) {
 	t.Helper()
 	if _, err := sqlitestore.New(database).OrgEventSources.SetDisabled(
 		context.Background(), runmode.LocalDefaultOrgID, kind, true, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("pause %s: %v", kind, err)
+		t.Fatalf("turn off %s: %v", kind, err)
 	}
 }
 
-// TestRunGitHubCycleForOrg_SkipsPausedSource: an org admin turned GitHub off,
-// so the cycle makes no GitHub calls at all. This is the enforcement point for
-// API load — a promise measurable from the other end, by an operator watching
-// their own instance — which is why the assertions are that nothing was
-// reached, not merely that nothing was routed.
-func TestRunGitHubCycleForOrg_SkipsPausedSource(t *testing.T) {
-	recorder := recordSpans(t)
+// TestRunGitHubCycleForOrg_TurningJiraOffDoesNotSkipGitHub is the negative
+// control, and the guard on the GitHub cycle having no switch at all: turning
+// Jira off must leave the one source the product cannot run without polling.
+func TestRunGitHubCycleForOrg_TurningJiraOffDoesNotSkipGitHub(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	srv := pollerTestServer(t)
 	ctx := context.Background()
@@ -84,45 +81,7 @@ func TestRunGitHubCycleForOrg_SkipsPausedSource(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	trackRepos(t, stores, org, []string{"octo/repo"})
-	pauseSource(t, database, "github")
-
-	reconciled := 0
-	m := &Manager{
-		database: database, pub: busPublisher{bus: newTestBus(t)},
-		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos,
-		orgs: stores.Orgs, users: stores.Users,
-		apps: &fakeInstallsStore{}, resolver: &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
-		EventSources:   stores.OrgEventSources,
-		ReconcileGrant: func(context.Context, string) error { reconciled++; return nil },
-	}
-	m.runGitHubCycleForOrg(ctx, org)
-
-	if got := spanOutcome(t, recorder, "poll.github.org"); got != "disabled" {
-		t.Errorf("span outcome = %q, want %q", got, "disabled")
-	}
-	if reconciled != 0 {
-		t.Errorf("grant reconcile ran %d times on a paused source, want 0 — the skip is ahead of every call", reconciled)
-	}
-	ents, err := stores.Entities.ListActiveSystem(ctx, org, "github")
-	if err != nil {
-		t.Fatalf("ListActiveSystem: %v", err)
-	}
-	if len(ents) != 0 {
-		t.Errorf("paused cycle discovered %d entities, want 0", len(ents))
-	}
-}
-
-// TestRunGitHubCycleForOrg_PausingJiraDoesNotSkipGitHub is the negative
-// control: the pause names one source, and each cycle reads only its own.
-func TestRunGitHubCycleForOrg_PausingJiraDoesNotSkipGitHub(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
-	srv := pollerTestServer(t)
-	ctx := context.Background()
-	database := newMigratedSQLiteForPoller(t)
-	stores := sqlitestore.New(database)
-	org := runmode.LocalDefaultOrgID
-	trackRepos(t, stores, org, []string{"octo/repo"})
-	pauseSource(t, database, "jira")
+	turnOffSource(t, database, "jira")
 
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},
@@ -138,20 +97,22 @@ func TestRunGitHubCycleForOrg_PausingJiraDoesNotSkipGitHub(t *testing.T) {
 		t.Fatalf("ListActiveSystem: %v", err)
 	}
 	if len(ents) != 1 {
-		t.Errorf("pausing jira cost the github cycle: got %d entities, want 1", len(ents))
+		t.Errorf("turning jira off cost the github cycle: got %d entities, want 1", len(ents))
 	}
 }
 
-// TestRunJiraCycleForOrg_SkipsPausedSource is the Jira twin. The resolver is
-// nil on purpose: reaching it at all would be the failure this pins, so the
+// TestRunJiraCycleForOrg_SkipsTurnedOffSource: an org admin turned Jira off, so
+// this org's cycle makes no Jira calls at all — the promise an operator
+// watching their own Data Center instance is entitled to measure. The resolver
+// is nil on purpose: reaching it at all would be the failure this pins, so the
 // skip is the only thing standing between this test and a nil dereference.
-func TestRunJiraCycleForOrg_SkipsPausedSource(t *testing.T) {
+func TestRunJiraCycleForOrg_SkipsTurnedOffSource(t *testing.T) {
 	recorder := recordSpans(t)
 	ctx := context.Background()
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	pauseSource(t, database, "jira")
+	turnOffSource(t, database, "jira")
 
 	m := &Manager{
 		database: database, pub: busPublisher{bus: newTestBus(t)},

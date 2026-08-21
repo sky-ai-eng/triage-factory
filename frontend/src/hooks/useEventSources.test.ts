@@ -33,9 +33,9 @@ function stubSources(read: () => EventSourceAvailability[] | 'fail') {
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 const configured: EventSourceAvailability[] = [
-  { kind: 'github', state: 'available' },
-  { kind: 'jira', state: 'unconfigured' },
-  { kind: 'linear', state: 'wip' },
+  { kind: 'github', state: 'available', disableable: false },
+  { kind: 'jira', state: 'unconfigured', disableable: true },
+  { kind: 'linear', state: 'wip', disableable: true },
 ]
 
 beforeEach(() => {
@@ -141,7 +141,7 @@ describe('useEventSources', () => {
     await flush()
     expect(fetchMock).toHaveBeenCalledTimes(2)
 
-    opened[1]([{ kind: 'jira', state: 'available' }])
+    opened[1]([{ kind: 'jira', state: 'available', disableable: true }])
     await waitFor(() => expect(first.result.current.stateOf('jira')).toBe('available'))
     expect(second.result.current.stateOf('jira')).toBe('available')
     expect(fetchMock).toHaveBeenCalledTimes(2)
@@ -181,8 +181,8 @@ describe('useEventSources', () => {
     // riding alongside as a second boolean precisely so a consumer keyed on
     // `available` cannot forget it.
     stubSources(() => [
-      { kind: 'github', state: 'available' },
-      { kind: 'jira', state: 'disabled' },
+      { kind: 'github', state: 'available', disableable: false },
+      { kind: 'jira', state: 'disabled', disableable: true },
     ])
     const { result } = renderHook(() => useEventSources())
 
@@ -201,8 +201,8 @@ describe('useEventSources', () => {
 
     // The credential was just bound — the settings surfaces invalidate.
     answer = [
-      { kind: 'github', state: 'available' },
-      { kind: 'jira', state: 'available' },
+      { kind: 'github', state: 'available', disableable: false },
+      { kind: 'jira', state: 'available', disableable: true },
     ]
     invalidateEventSources()
 

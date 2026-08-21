@@ -15,12 +15,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// An org admin turning a source off has to reach the agent, not just the poll
+// An org admin turning Jira off has to reach the agent, not just the poll
 // cycle: the whole reason the switch exists next to "unbind the credential" is
 // that unbinding was the only way to stop a tenant reaching Jira, and it took
 // the configuration with it. These tests pin that a turned-off source refuses
-// at the two credential funnels every verb goes through, in both placements —
+// at the credential funnel every Jira verb goes through, in both placements —
 // the in-process client and the sidecar's relayed one.
+//
+// GitHub has no counterpart here and needs none: it cannot be turned off
+// (eventsource.Disableable), which the routing and server suites pin.
 
 // fakeSourcePolicy answers the policy read with a fixed set, or a fixed error.
 type fakeSourcePolicy struct {
@@ -99,30 +102,18 @@ func TestJiraVerb_DifferentSourceTurnedOff_StillWorks(t *testing.T) {
 	}))
 	defer jira.Close()
 
-	policy := &fakeSourcePolicy{off: []string{eventsource.KindGitHub}}
+	// Another source entirely — github could not appear here, because it has
+	// no off switch to appear by.
+	policy := &fakeSourcePolicy{off: []string{"slack"}}
 	lc := NewLocal(withPolicy(jiraStores(jira.URL, "org-pat"), policy),
 		ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-on"})
 
 	issue, err := lc.JiraGetIssue(context.Background(), "PROJ-1")
 	if err != nil {
-		t.Fatalf("turning GitHub off cost a Jira verb: %v", err)
+		t.Fatalf("another source's switch cost a Jira verb: %v", err)
 	}
 	if issue.Key != "PROJ-1" {
 		t.Errorf("issue key = %q, want PROJ-1", issue.Key)
-	}
-}
-
-// TestGitHubVerb_SourceTurnedOff_RefusesBeforeCallingGitHub is the GitHub
-// twin. The resolver is wired and would answer — the gate is the only thing
-// between this verb and a live token.
-func TestGitHubVerb_SourceTurnedOff_RefusesBeforeCallingGitHub(t *testing.T) {
-	gh := unreachable(t, "github")
-	policy := &fakeSourcePolicy{off: []string{eventsource.KindGitHub}}
-	lc := NewLocal(withPolicy(emptyStores(), policy), ghInfo())
-	lc.SetGitHubResolver(fakeGitHubResolver{baseURL: gh.URL, token: "org-pat"})
-
-	if _, err := lc.GithubAddComment(context.Background(), "o", "r", 1, "hi"); !errors.Is(err, eventsource.ErrDisabled) {
-		t.Fatalf("GithubAddComment error = %v, want one wrapping eventsource.ErrDisabled", err)
 	}
 }
 

@@ -12,6 +12,11 @@ export type EventSourceState = 'available' | 'unconfigured' | 'disabled' | 'unli
 export interface EventSourceAvailability {
   kind: string
   state: EventSourceState
+  // Whether this source has an off switch at all. GitHub does not — every core
+  // surface is built on it — and the server answers this rather than the client
+  // holding its own copy of the list, so a control is never offered for a write
+  // the PATCH refuses.
+  disableable: boolean
 }
 
 // The read is one org-scoped singleton, and several surfaces need it at once

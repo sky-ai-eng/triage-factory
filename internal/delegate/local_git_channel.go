@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -64,24 +63,6 @@ func (c *localGitChannel) configPairs(gh *agentproc.GHChannelParams) [][2]string
 func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task domain.Task, info agenthost.ConversationInfo) (*localGitChannel, error) {
 	if runmode.Current() != runmode.ModeLocal {
 		return nil, nil
-	}
-	// An org admin turning GitHub off takes the managed Git path with it, for
-	// the same reason it takes the exec verbs: off has to mean off, or an
-	// admin reads "no new tasks" and does not learn the agents kept pushing.
-	// A GitHub task cannot proceed without it and says so; anything else runs
-	// with no managed Git identity, which is the same arm an org with no
-	// credential takes below.
-	if policyStores, ok := s.getStores(); ok && policyStores.OrgEventSources != nil {
-		off, err := eventsource.Disabled(ctx, policyStores.OrgEventSources, orgID, eventsource.KindGitHub)
-		if err != nil {
-			return nil, fmt.Errorf("resolve GitHub event-source policy for local Git: %w", err)
-		}
-		if off {
-			if task.EntitySource == "github" {
-				return nil, eventsource.DisabledError(eventsource.KindGitHub)
-			}
-			return nil, nil
-		}
 	}
 
 	s.mu.Lock()

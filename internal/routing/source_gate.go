@@ -6,6 +6,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 )
 
 // sourceGateTTL bounds how long a cached answer about an org's paused sources
@@ -54,11 +55,21 @@ func (g *sourceGate) clock() time.Time {
 	return time.Now()
 }
 
-// disabled reports whether orgID has paused kind. The error is the caller's to
-// propagate rather than swallow: answering "not paused" on a failed read is the
-// one wrong answer that lets events through after an admin turned them off, and
-// the router's caller retries an errored event rather than consuming it.
+// disabled reports whether orgID has turned kind off. The error is the caller's
+// to propagate rather than swallow: answering "not turned off" on a failed read
+// is the one wrong answer that lets events through after an admin turned them
+// off, and the router's caller retries an errored event rather than consuming
+// it.
 func (g *sourceGate) disabled(ctx context.Context, orgID, kind string) (bool, error) {
+	// A source with no off switch is never off — and this is the arm that
+	// matters most, because it is the one every GitHub event takes. It answers
+	// from the vocabulary rather than the cache so a stored row naming a
+	// required source cannot drop the events the whole product is built on;
+	// the column is FK-free by design, so nothing at the schema level says it
+	// cannot exist.
+	if !eventsource.Disableable(kind) {
+		return false, nil
+	}
 	g.mu.Lock()
 	entry, ok := g.byOrg[orgID]
 	fresh := ok && g.clock().Sub(entry.readAt) < sourceGateTTL
@@ -102,8 +113,8 @@ func (g *sourceGate) invalidate(orgID string) {
 // A router with no gate never drops, which is what the ~30 test constructions
 // that route events without one rely on. Production wiring is not optional —
 // internal/app calls this before the drain worker starts, because this is the
-// single funnel every source's events cross and the poller skips beside it are
-// only an API-budget optimization.
+// single funnel every source's events cross, and the poll-cycle skip beside it
+// guarantees something different (no API calls, not no tasks).
 func (r *Router) SetEventSourceGate(store dbpkg.OrgEventSourceStore) {
 	r.sourceGate = newSourceGate(store)
 }

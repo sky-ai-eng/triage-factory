@@ -81,6 +81,40 @@ func TestDisabledError_NamesTheSourceAndWhatIsCovered(t *testing.T) {
 	}
 }
 
+// TestDisableable_GitHubIsRequired is the rule itself: the vocabulary an org
+// can turn off is a strict subset of the one it can read a state for.
+func TestDisableable_GitHubIsRequired(t *testing.T) {
+	if Disableable(KindGitHub) {
+		t.Error("github is disableable; an org with github off is an org where nothing works")
+	}
+	if !Declared(KindGitHub) {
+		t.Error("github stopped being declared; it must still resolve a state and appear in the availability read")
+	}
+	if !Disableable(KindJira) {
+		t.Error("jira is not disableable; it is the source this whole switch exists for")
+	}
+	if Disableable("gerrit") {
+		t.Error("an undeclared kind is disableable; there is nothing there to turn off")
+	}
+}
+
+// TestDisabled_RequiredSourceAnswersFalseWithoutReading pins the short-circuit
+// that carries the rule to every gate. The store here would say github is off;
+// the point is that nobody asks it, so a hand-written row — the column is
+// FK-free by design, so nothing at the schema level forbids one — cannot take
+// the product down.
+func TestDisabled_RequiredSourceAnswersFalseWithoutReading(t *testing.T) {
+	store := &fakePolicyStore{off: []string{KindGitHub}}
+
+	off, err := Disabled(context.Background(), store, "org-1", KindGitHub)
+	if err != nil || off {
+		t.Fatalf("Disabled(github) = %v, %v; want false, nil", off, err)
+	}
+	if len(store.orgs) != 0 {
+		t.Errorf("read the store %d times for a source with no off switch, want 0", len(store.orgs))
+	}
+}
+
 func TestLabel(t *testing.T) {
 	for kind, want := range map[string]string{
 		KindGitHub: "GitHub",

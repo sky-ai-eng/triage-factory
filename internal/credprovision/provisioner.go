@@ -24,7 +24,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
@@ -249,26 +248,6 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	return nil
 }
 
-// sourceOff reports whether an org admin has turned kind off for the org.
-//
-// A turned-off source contributes nothing to the bundle, and absence is the
-// right shape rather than an error: a bundle without GitHub creds is already
-// what a Jira-only org gets, so the sidecar simply starts no proxy for it and
-// the jailed agent is handed no channel to that source at all. That closes the
-// one lane the agenthost gate cannot see — the real `gh` and `git` the agent
-// runs itself, which reach their credential injector directly.
-//
-// A read failure propagates. This runs on the control plane against a database
-// it has just used several times, so an error here means something broader is
-// wrong; sealing a credential on the assumption that nobody turned the source
-// off is the one outcome that cannot be walked back.
-func (m *Manager) sourceOff(ctx context.Context, orgID, kind string) (bool, error) {
-	if m.stores.OrgEventSources == nil {
-		return false, nil
-	}
-	return eventsource.Disabled(ctx, m.stores.OrgEventSources, orgID, kind)
-}
-
 // resolveGitHub resolves the conversation's GitHub credential: nil when the org has
 // no usable GitHub credential at all (a Jira-only org — no regression, its
 // conversations do no git). Otherwise mints a repo-scoped installation token (an
@@ -277,9 +256,6 @@ func (m *Manager) sourceOff(ctx context.Context, orgID, kind string) (bool, erro
 // conversation_worktrees intersection the git proxy's live authorize gate uses, see
 // gitAuthorizeDecision in internal/delegate/spawner.go).
 func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conversationID string) (*credbundle.GitHubCreds, error) {
-	if off, err := m.sourceOff(ctx, orgID, eventsource.KindGitHub); err != nil || off {
-		return nil, err
-	}
 	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
 	if !ok {
 		return nil, nil
@@ -507,9 +483,6 @@ func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID string) str
 // serializable fields — nil when the org has no Jira configured (not an
 // error: most orgs are GitHub-only).
 func (m *Manager) resolveJira(ctx context.Context, orgID string) (*credbundle.JiraCreds, error) {
-	if off, err := m.sourceOff(ctx, orgID, eventsource.KindJira); err != nil || off {
-		return nil, err
-	}
 	r, ok := m.jiraResolver.(jiraSystemResolver)
 	if !ok {
 		return nil, nil

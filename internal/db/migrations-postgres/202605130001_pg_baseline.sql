@@ -8383,6 +8383,10 @@ REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 -- admin has turned a source off: it is not polled, produces no events, mints no
 -- tasks, and resolves no credential for an agent. The credential itself is left
 -- bound, which is what makes this reversible where unbinding it is not.
+-- Whether a given source may be turned off at all is a vocabulary question the
+-- application answers (internal/eventsource.Disableable), not a constraint
+-- here: kind is FK-free on purpose, and a row naming a source that has no off
+-- switch is read as inert rather than obeyed.
 --
 -- Its own table, not a column on org_settings, for two reasons. The source
 -- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source

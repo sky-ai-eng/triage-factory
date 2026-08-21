@@ -11,6 +11,9 @@
 // tasks, in-flight runs and authored handlers are untouched. That is the
 // difference from the credential disconnect above, which keeps its own meaning.
 //
+// Not every source is switchable. GitHub is listed and explained but carries no
+// control, because it has none to carry — see hasSwitch.
+//
 // Admin-only, matching the route: an org admin can flip it, a member can only
 // read it. The read is what makes an inert handler explainable, which is why it
 // is member-gated on the server even though this control is not.
@@ -25,20 +28,30 @@ import {
 } from '../../hooks/useEventSources'
 import { toast } from '../../components/Toast/toastStore'
 
-// A source with no credential bound, no licence, or nothing shipped has nothing
-// to pause: the switch would be a control over a thing that is already off, and
-// flipping it would change nothing the reader can see. Those rows render their
-// state and no control.
-function isPausable(state: EventSourceAvailability['state']): boolean {
-  return state === 'available' || state === 'disabled'
+// Two reasons a row carries no switch, and they are different facts.
+//
+// `disableable` is the server's: a source the product is built on has no off
+// switch at all, so there is nothing to render and a PATCH naming it is a 422.
+//
+// The state test is this screen's: a source with no credential bound, no
+// licence, or nothing shipped is already off for a reason this control does not
+// govern, so flipping it would change nothing the reader can see.
+function hasSwitch(src: EventSourceAvailability): boolean {
+  return src.disableable && (src.state === 'available' || src.state === 'disabled')
 }
 
 // The word under each row: what this state means for the org, phrased from the
 // org's point of view rather than the reader's.
-function stateNote(kind: string, state: EventSourceAvailability['state']): string {
+function stateNote(src: EventSourceAvailability): string {
+  const { kind, state } = src
   switch (state) {
     case 'available':
-      return 'On — polled, creating tasks, and reachable by agents.'
+      // A required source is on because it cannot be anything else. Saying so
+      // is what stops the missing switch reading as a bug or a permission the
+      // reader lacks.
+      return src.disableable
+        ? 'On — polled, creating tasks, and reachable by agents.'
+        : 'Always on. Triage Factory is built on it, so it has no off switch.'
     case 'disabled':
       return 'Off — not polled, creating no tasks, and agents cannot reach it. The credential is still stored.'
     case 'unconfigured':
@@ -90,18 +103,17 @@ export default function EventSourcesGroup({
       <p className="text-[11px] text-text-tertiary">
         Turning a source off stops everything Triage Factory does with it: polling it, creating
         tasks from it, and giving agents access to it. It does not disconnect the integration, and
-        it does not close tasks or stop runs that already exist.
+        it does not close tasks or stop runs that already exist. Sources the product is built on
+        cannot be turned off.
       </p>
       {sources.map((src) => {
         const off = src.state === 'disabled'
-        const editable = canEdit && isPausable(src.state)
+        const editable = canEdit && hasSwitch(src)
         return (
           <div key={src.kind} className="flex items-center justify-between gap-4">
             <div className="min-w-0">
               <p className="text-[13px] text-text-primary">{sourceLabel(src.kind)}</p>
-              <p className="mt-0.5 text-[11px] text-text-tertiary">
-                {stateNote(src.kind, src.state)}
-              </p>
+              <p className="mt-0.5 text-[11px] text-text-tertiary">{stateNote(src)}</p>
             </div>
             {editable && (
               <button

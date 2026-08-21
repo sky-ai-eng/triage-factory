@@ -827,6 +827,30 @@ func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact
 
 // --- jira ---
 //
+// requireSourceEnabled refuses a credentialed call to a source an org admin has
+// turned off. It sits at the source's credential funnel — today jiraSystemClient,
+// the single point every Jira verb resolves through — rather than on each of the
+// verbs, because a verb that forgot it would be a hole in the switch that
+// nothing else closes, and because being turned off is a fact about the
+// credential rather than about what the caller meant to do with it.
+//
+// GitHub has no such funnel here and needs none: it cannot be turned off
+// (eventsource.Disableable), because every core surface is built on it.
+//
+// A failed policy read refuses too. Reading an unanswerable policy as
+// permission would reopen the source exactly while the database is unhealthy;
+// the cost of the other mistake is one verb the agent sees fail.
+func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) error {
+	off, err := c.rt.SourceDisabled(ctx, kind)
+	if err != nil {
+		return fmt.Errorf("check whether %s is turned off for this organization: %w", eventsource.Label(kind), err)
+	}
+	if off {
+		return eventsource.DisabledError(kind)
+	}
+	return nil
+}
+
 // jiraSystemClient builds the org's bot-attributed Jira client. In multi
 // mode the daemon lives in the run's credential sidecar and proxyCreds is
 // always set, so every Jira verb routes through the sidecar's REST proxy —
@@ -1262,27 +1286,6 @@ type repoClient struct {
 	identity ghclient.Identity
 }
 
-// requireSourceEnabled refuses a credentialed call to a source an org admin has
-// turned off. It sits at the credential funnels — resolveRepoClient below,
-// jiraSystemClient above, and the workspace clone — rather than on each of the
-// forty-odd verbs, because a verb that forgot it would be a hole in the switch
-// that nothing else closes, and because being turned off is a fact about the
-// credential rather than about what the caller meant to do with it.
-//
-// A failed policy read refuses too. Reading an unanswerable policy as
-// permission would reopen the source exactly while the database is unhealthy;
-// the cost of the other mistake is one verb the agent sees fail.
-func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) error {
-	off, err := c.rt.SourceDisabled(ctx, kind)
-	if err != nil {
-		return fmt.Errorf("check whether %s is turned off for this organization: %w", eventsource.Label(kind), err)
-	}
-	if off {
-		return eventsource.DisabledError(kind)
-	}
-	return nil
-}
-
 // githubClientForRepo resolves an authenticated client for owner/repo, gated +
 // down-scoped in multi mode (see resolveRepoClient).
 func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo string) (*ghclient.Client, error) {
@@ -1296,14 +1299,9 @@ func (c *LocalClient) githubClientForRepo(ctx context.Context, owner, repo strin
 // cloned task repo, recorded in conversation_worktrees, or a workspace-add'd one) and
 // resolves a per-repo DOWN-SCOPED client (the injected token is narrowed to
 // owner/repo), memoized per repo so several calls in one subcommand mint once.
-// In LOCAL mode (N=1, unscoped — mirroring the git proxy being nil locally)
-// there is no repo gate and no scoping. The source switch above applies in
-// both modes: it is about whether this org may reach GitHub at all, which is
-// not a question the per-run repo confinement is asking.
+// In LOCAL mode (N=1, unscoped — mirroring the git proxy being nil locally) it
+// is the prior behavior verbatim: no gate, no scoping.
 func (c *LocalClient) resolveRepoClient(ctx context.Context, owner, repo string) (*ghclient.Client, ghclient.Identity, error) {
-	if err := c.requireSourceEnabled(ctx, eventsource.KindGitHub); err != nil {
-		return nil, ghclient.IdentityUnknown, err
-	}
 	if runmode.Current() != runmode.ModeMulti {
 		client, identity, err := c.legacyRepoClient(ctx, owner, repo)
 		c.noteGitHubCredential(identity)

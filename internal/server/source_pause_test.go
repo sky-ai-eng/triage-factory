@@ -163,6 +163,12 @@ func TestOrgSource_RejectsBadRequests(t *testing.T) {
 		{"no field named", http.MethodPatch, "jira", map[string]any{}, http.StatusBadRequest},
 		{"disabled is not a boolean", http.MethodPatch, "jira", map[string]any{"disabled": "yes"}, http.StatusBadRequest},
 		{"unknown field", http.MethodPatch, "jira", map[string]any{"disabled": true, "reason": "sprint"}, http.StatusBadRequest},
+		// Declared, readable, and not disableable. 422 rather than 404 because
+		// the source is real and the GET below answers for it; a 404 would send
+		// the caller hunting for a spelling mistake.
+		{"github cannot be turned off", http.MethodPatch, "github", map[string]any{"disabled": true}, http.StatusUnprocessableEntity},
+		{"github cannot be turned on either", http.MethodPatch, "github", map[string]any{"disabled": false}, http.StatusUnprocessableEntity},
+		{"github is still readable", http.MethodGet, "github", nil, http.StatusOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -175,8 +181,12 @@ func TestOrgSource_RejectsBadRequests(t *testing.T) {
 
 	// A refused write stored nothing — the vocabulary check is what keeps an
 	// unresolvable row out of the table, not a later reader's tolerance of it.
-	if row, err := sqlitestore.New(s.db).OrgEventSources.Get(context.Background(), runmode.LocalDefaultOrgID, "gerrit"); err != nil || row != nil {
+	store := sqlitestore.New(s.db).OrgEventSources
+	if row, err := store.Get(context.Background(), runmode.LocalDefaultOrgID, "gerrit"); err != nil || row != nil {
 		t.Errorf("Get(gerrit) = %+v, err=%v; want no row", row, err)
+	}
+	if row, err := store.Get(context.Background(), runmode.LocalDefaultOrgID, eventsource.KindGitHub); err != nil || row != nil {
+		t.Errorf("Get(github) = %+v, err=%v; want no row — a required source is refused at the door, never stored and ignored", row, err)
 	}
 }
 

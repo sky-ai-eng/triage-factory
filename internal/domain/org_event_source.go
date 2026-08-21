@@ -16,6 +16,10 @@ import "time"
 // A source with no row is not disabled. Absence means "no per-source overrides
 // recorded" rather than "off" — which is why Disabled is a stored column and
 // not the row's own presence.
+//
+// Not every source can have a row that means anything: a source the product is
+// built on has no off switch, the write refuses one, and eventsource.Disableable
+// makes a hand-written one inert rather than catastrophic.
 type OrgEventSource struct {
 	OrgID string `json:"org_id"`
 	// Kind is the source's registry key ("github", "jira", "slack") — the

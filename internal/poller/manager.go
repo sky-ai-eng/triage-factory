@@ -167,6 +167,10 @@ func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 // go to nothing, and a cycle that polls anyway is a broken switch, not a
 // wasted call.
 //
+// The GitHub cycle does not call this, and it is not an omission: GitHub has no
+// off switch (eventsource.Disableable), so the answer there is a constant and a
+// check would read as a suppression that can happen.
+//
 // So an unreadable policy skips. The two mistakes are not symmetric: skipping
 // wrongly costs one cycle of latency on a source that is polled again at the
 // next tick, while polling wrongly puts load on somebody's instance precisely
@@ -513,17 +517,6 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	ctx, span := tracer.Start(ctx, "poll.github.org",
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
-
-	// An org admin turned GitHub off, so this org's cycle makes no GitHub
-	// calls at all. An anticipated outcome, not an error — the same posture as
-	// the no_repos skip below and the Jira twin's unconfigured one. This is
-	// where "no polling" is enforced; the router's drop is what separately
-	// guarantees no events, since an event can also arrive from a producer
-	// that never went through a poll cycle.
-	if skip, outcome := m.sourceDisabled(ctx, "github", orgID); skip {
-		span.SetAttributes(telemetry.Outcome(outcome))
-		return
-	}
 
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org

@@ -93,7 +93,7 @@ func (s *Server) handleOrgSource(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "source")
 		return
 	}
-	writeJSON(w, http.StatusOK, eventsource.Source{Kind: kind, State: state})
+	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
 }
 
 // orgSourcePatch is the PATCH body. json.RawMessage rather than *bool so an
@@ -128,14 +128,16 @@ type orgSourcePatch struct {
 // a team-admin gate here would be a way for a team admin to reach an org-admin
 // effect.
 //
+// Not every source is addressable here. GitHub has no off switch at all
+// (eventsource.Disableable) — an org with GitHub off is an org where nothing
+// works — so a PATCH naming it is a 422 rather than a stored row.
+//
 // Forward-only, like every other tracking change: existing tasks, in-flight
 // runs and authored handlers are untouched. A handler whose source went dark
 // renders inert and explained rather than being hidden or deleted, because a
-// task is durable work that may have an open PR and agent memory behind it.
-// The same reasoning bounds what this does to a run already in flight: its next
-// exec verb refuses, but the git and gh channels its sandbox was built around a
-// sealed bundle are not torn out from under work in progress — a half-pushed
-// branch is destroyed work, which is exactly what this route exists to avoid.
+// task is durable work that may have an open PR and agent memory behind it. A
+// run already in flight keeps the task it is working; what it loses is the
+// turned-off source's verbs, from its next call.
 //
 // PATCH /api/orgs/{org_id}/sources/{kind}
 func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
@@ -149,6 +151,20 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 	// store against it and no state to report for it.
 	if !eventsource.Declared(kind) {
 		notFound(w, "source")
+		return
+	}
+	// Declared but not disableable: a 422, not a 404. The source is real and
+	// the GET beside this answers for it — pretending it does not exist would
+	// send a caller looking for a spelling mistake. 422 is the same fault class
+	// the event-handler create gate uses for a source reference the caller
+	// could in principle fix, and it is deliberately not 403: no role reaches
+	// this, so it is not a permission the caller is missing.
+	if !eventsource.Disableable(kind) {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: eventsource.Label(kind) + " cannot be turned off: every core surface is built on it",
+			Field:   "disabled",
+		})
 		return
 	}
 
@@ -223,5 +239,5 @@ func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{Type: "sources_updated", OrgID: orgID, Data: map[string]any{}})
 	}
-	writeJSON(w, http.StatusOK, eventsource.Source{Kind: kind, State: state})
+	writeJSON(w, http.StatusOK, eventsource.NewSource(kind, state))
 }

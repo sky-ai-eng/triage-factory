@@ -2,6 +2,10 @@
 -- org_event_sources: declared per-(org, source) policy — today, whether an org
 -- admin has turned a source off: no polling, no events, no tasks, and no
 -- credential resolved for an agent, with the credential itself left bound.
+-- Whether a given source may be turned off at all is a vocabulary question the
+-- application answers (internal/eventsource.Disableable), not a constraint
+-- here: kind is FK-free on purpose, and a row naming a source that has no off
+-- switch is read as inert rather than obeyed.
 --
 -- Its own table rather than a column on org_settings, because the source
 -- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source

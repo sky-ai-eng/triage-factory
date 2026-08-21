@@ -369,11 +369,23 @@ func TestResolve_DisabledPrecedence(t *testing.T) {
 	}{
 		"disabled beats available": {
 			setup: func(t *testing.T, r *rig) {
+				r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"})
+				r.pause(t, eventsource.KindJira)
+			},
+			kind: eventsource.KindJira,
+			want: eventsource.StateDisabled,
+		},
+		// The one source that outranks its own row. Required beats everything,
+		// including a row somebody wrote by hand: the state feeds the UI and
+		// the handler gates, so reporting github disabled would explain away
+		// the whole product as an admin's deliberate choice.
+		"required beats disabled": {
+			setup: func(t *testing.T, r *rig) {
 				r.saveCreds(t, auth.Credentials{GitHubURL: "https://github.com", GitHubPAT: "ghp-x"})
 				r.pause(t, eventsource.KindGitHub)
 			},
 			kind: eventsource.KindGitHub,
-			want: eventsource.StateDisabled,
+			want: eventsource.StateAvailable,
 		},
 		"disabled beats unconfigured": {
 			setup: func(t *testing.T, r *rig) { r.pause(t, eventsource.KindJira) },

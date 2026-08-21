@@ -11,10 +11,10 @@ const sourcesPath = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}/sources`
 // Every source state at once, so one render covers which rows offer a control
 // and which only explain themselves.
 const everyState: EventSourceAvailability[] = [
-  { kind: 'github', state: 'available' },
-  { kind: 'jira', state: 'disabled' },
-  { kind: 'slack', state: 'unconfigured' },
-  { kind: 'linear', state: 'wip' },
+  { kind: 'github', state: 'available', disableable: false },
+  { kind: 'jira', state: 'disabled', disableable: true },
+  { kind: 'slack', state: 'unconfigured', disableable: true },
+  { kind: 'linear', state: 'wip', disableable: true },
 ]
 
 function stub(sources: EventSourceAvailability[]) {
@@ -22,7 +22,10 @@ function stub(sources: EventSourceAvailability[]) {
     const path = String(input).split('?')[0]
     if (path === sourcesPath) return Promise.resolve({ ok: true, ...jsonBody({ sources }) })
     if (path.startsWith(`${sourcesPath}/`) && init?.method === 'PATCH') {
-      return Promise.resolve({ ok: true, ...jsonBody({ kind: 'jira', state: 'available' }) })
+      return Promise.resolve({
+        ok: true,
+        ...jsonBody({ kind: 'jira', state: 'available', disableable: true }),
+      })
     }
     return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
   })
@@ -34,18 +37,30 @@ beforeEach(() => resetEventSourcesForTest())
 afterEach(() => vi.unstubAllGlobals())
 
 describe('EventSourcesGroup', () => {
-  it('offers a switch only where there is something to pause', async () => {
+  it('offers a switch only where there is something to turn off', async () => {
     stub(everyState)
     render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
 
-    await waitFor(() => expect(screen.getByLabelText('GitHub')).toBeTruthy())
-    // Available and disabled are the two states a pause moves between.
-    expect(screen.getByLabelText('GitHub').getAttribute('aria-checked')).toBe('true')
+    await waitFor(() => expect(screen.getByLabelText('Jira')).toBeTruthy())
+    // Available and disabled are the two states the switch moves between.
     expect(screen.getByLabelText('Jira').getAttribute('aria-checked')).toBe('false')
+    // GitHub is available and still has no control: the server says it is not
+    // disableable, so offering one would be offering a write the PATCH refuses.
+    expect(screen.queryByLabelText('GitHub')).toBeNull()
     // Unconfigured, unlicensed and wip are already off for reasons this switch
     // does not control — a toggle there would change nothing visible.
     expect(screen.queryByLabelText('Slack')).toBeNull()
     expect(screen.queryByLabelText('Linear')).toBeNull()
+  })
+
+  it('explains why the required source has no switch', async () => {
+    stub(everyState)
+    render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
+
+    // Without this the missing control reads as a bug, or as a permission the
+    // admin does not have — both wrong, and both lead somewhere unhelpful.
+    await waitFor(() => expect(screen.getByText(/Always on\./)).toBeTruthy())
+    expect(screen.getByText(/no off switch/)).toBeTruthy()
   })
 
   it('says a turned-off source is off for agents too, and still connected', async () => {
