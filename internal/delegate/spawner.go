@@ -1299,14 +1299,18 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 	}
 	s.broadcastTaskUpdate(orgID, taskID, target)
 
-	// TFAC-300: mirror the board move back onto the Jira ticket under the org's
-	// system/bot credential. Past the idempotency guard, so this fires only on a
-	// real column change — and both in_progress and in_review collapse to the
-	// same InProgress bucket, so bouncing across human-interaction points makes
-	// at most one real Jira move (the rest no-op in the mirror's own membership
-	// skip). task is bot-claimed here (guarded above), so the write is always
-	// bot-attributed by construction.
-	s.mirrorJiraInProgress(orgID, task)
+	// Mirror the board move back onto the Jira ticket under the org's system/bot
+	// credential, aiming the bucket the column that just landed names. Past the
+	// idempotency guard, so this fires only on a real column change — and the
+	// mirror's own membership skip plus its forward-only rule mean bouncing
+	// across human-interaction points settles the ticket at the review end
+	// rather than sawing it back and forth. task is bot-claimed here (guarded
+	// above), so the write is always bot-attributed by construction.
+	if target == "in_review" {
+		s.mirrorJiraInReview(orgID, task)
+	} else {
+		s.mirrorJiraInProgress(orgID, task)
+	}
 }
 
 // placeTaskInApprovalColumn lands a task in the derived approval column
@@ -1316,8 +1320,8 @@ func (s *Spawner) recomputeTaskBoardColumn(orgID, taskID string) {
 // terminal (no active run), so terminateBlueprint calls this instead to surface
 // the still-open task for approval rather than closing it. Same ownership guards
 // as recomputeTaskBoardColumn (bot-claimed, non-terminal, idempotent); the Jira
-// in-progress re-assert is left to the caller (terminateBlueprint already mirrors
-// it once for the completed terminal) so this never double-mirrors.
+// mirror is left to the caller (terminateBlueprint already mirrors the review
+// bucket once for the completed terminal) so this never double-mirrors.
 func (s *Spawner) placeTaskInApprovalColumn(ctx context.Context, orgID, taskID string) {
 	if s.tasks == nil {
 		return

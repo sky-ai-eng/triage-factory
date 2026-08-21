@@ -589,8 +589,8 @@ func JiraStatusDedupKey(r JiraStatusRef) string {
 //
 // A row is the team's commitment to WATCH the project. Whether it is ARMED —
 // see Armed — is a second, later state: the rules may be entirely empty, and
-// each of the three is independently complete-or-empty, which the table's
-// CHECK constraints mirror for the two write-target rules.
+// each of them is independently complete-or-empty, which the table's CHECK
+// constraints mirror for the three write-target rules.
 type JiraProjectStatusRules struct {
 	// TeamID is the owning team (the PK's first column). The List* store
 	// methods populate it; ReplaceForTeam ignores it (the team is a
@@ -599,13 +599,26 @@ type JiraProjectStatusRules struct {
 	// gate (to look up the handler's team).
 	TeamID     string
 	ProjectKey string
-	// The three rules. A canonical is always one of its rule's members, so it
+	// The four rules. A canonical is always one of its rule's members, so it
 	// carries no information its member entry doesn't — it is stored as a full
 	// ref anyway so a caller performing a transition has the id and the name in
 	// hand without a lookup.
+	//
+	// InReview is an optional mirror write target and nothing else. No Jira
+	// status is ever classified back into TF's in_review board column — that
+	// column is a fact about a RUN (agent work awaiting a human), so a ticket
+	// somebody moved to "Code Review" by hand belongs on no TF board at all.
+	// Its members have exactly three readers: the in-review mirror's
+	// idempotency skip, the in-progress mirror's forward-only guard, and the
+	// canonical-is-a-member check. They reach neither the discovery JQL nor
+	// the stock deck's buckets, which is why a status may sit in BOTH
+	// InProgressMembers and InReviewMembers — "counts as actively worked on"
+	// is true of a ticket under review.
 	PickupMembers       []JiraStatusRef
 	InProgressMembers   []JiraStatusRef
 	InProgressCanonical JiraStatusRef
+	InReviewMembers     []JiraStatusRef
+	InReviewCanonical   JiraStatusRef
 	DoneMembers         []JiraStatusRef
 	DoneCanonical       JiraStatusRef
 }
@@ -764,17 +777,22 @@ func NormalizeGitHubTeamSlugs(slugs []string) []string {
 
 // Armed reports whether this project's rules are complete enough for TF to act
 // on the project: pickup members to discover with, and members-plus-canonical
-// on both write-target rules. An unarmed project is WATCHED but not yet mapped
-// — a valid stored state, reached by adding it from the picker and left there
-// until someone maps its workflow's statuses — and it contributes nothing to
-// the discovery JQL, so the poller skips it.
+// on the in-progress and done write targets. An unarmed project is WATCHED but
+// not yet mapped — a valid stored state, reached by adding it from the picker
+// and left there until someone maps its workflow's statuses — and it
+// contributes nothing to the discovery JQL, so the poller skips it.
+//
+// InReview is deliberately excluded: it gates nothing the poller asks. A team
+// that never maps it keeps the mirror aiming the in-progress canonical, which
+// is a complete configuration, so requiring it here would un-arm every project
+// already armed.
 func (r JiraProjectStatusRules) Armed() bool {
 	return len(r.PickupMembers) > 0 &&
 		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&
 		len(r.DoneMembers) > 0 && !r.DoneCanonical.IsZero()
 }
 
-// The three membership tests take a full ref and compare through SameStatus,
+// The membership tests take a full ref and compare through SameStatus,
 // so the id decides whenever both sides carry one and a status renamed in Jira
 // keeps matching. The name is the fallback, and it is not a transitional one:
 // a rule seeded from the headless env vars is name-only by contract, and so is
@@ -788,6 +806,13 @@ func (r JiraProjectStatusRules) PickupContains(status JiraStatusRef) bool {
 // InProgressContains reports whether status is a member of the InProgress rule.
 func (r JiraProjectStatusRules) InProgressContains(status JiraStatusRef) bool {
 	return containsStatus(r.InProgressMembers, status)
+}
+
+// InReviewContains reports whether status is a member of the InReview rule. An
+// unmapped rule has no members, so this is false everywhere — which is what
+// makes the guards that consult it inert for a project that never mapped it.
+func (r JiraProjectStatusRules) InReviewContains(status JiraStatusRef) bool {
+	return containsStatus(r.InReviewMembers, status)
 }
 
 // DoneContains reports whether status is a member of the Done rule.

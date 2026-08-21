@@ -49,6 +49,8 @@ const jiraRuleCols = `team_id, project_key,
 	       pickup_members::text,
 	       in_progress_members::text,
 	       in_progress_canonical::text,
+	       in_review_members::text,
+	       in_review_canonical::text,
 	       done_members::text,
 	       done_canonical::text`
 
@@ -100,11 +102,14 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 	out := []domain.JiraProjectStatusRules{}
 	for rows.Next() {
 		var (
-			r                                    domain.JiraProjectStatusRules
-			pickupJSON, inProgressJSON, doneJSON string
-			inProgressCanon, doneCanon           sql.NullString
+			r                                                  domain.JiraProjectStatusRules
+			pickupJSON, inProgressJSON, inReviewJSON, doneJSON string
+			inProgressCanon, inReviewCanon, doneCanon          sql.NullString
 		)
-		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
+		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON,
+			&inProgressJSON, &inProgressCanon,
+			&inReviewJSON, &inReviewCanon,
+			&doneJSON, &doneCanon); err != nil {
 			return nil, fmt.Errorf("scan jira_project_status_rules: %w", err)
 		}
 		pickup, err := domain.UnmarshalJiraStatusRefs(pickupJSON)
@@ -115,6 +120,10 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal in_progress_members for %s: %w", r.ProjectKey, err)
 		}
+		inReview, err := domain.UnmarshalJiraStatusRefs(inReviewJSON)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal in_review_members for %s: %w", r.ProjectKey, err)
+		}
 		done, err := domain.UnmarshalJiraStatusRefs(doneJSON)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal done_members for %s: %w", r.ProjectKey, err)
@@ -123,6 +132,10 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal in_progress_canonical for %s: %w", r.ProjectKey, err)
 		}
+		inReviewCanonical, err := domain.UnmarshalJiraStatusRef(inReviewCanon.String)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal in_review_canonical for %s: %w", r.ProjectKey, err)
+		}
 		doneCanonical, err := domain.UnmarshalJiraStatusRef(doneCanon.String)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal done_canonical for %s: %w", r.ProjectKey, err)
@@ -130,6 +143,8 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		r.PickupMembers = pickup
 		r.InProgressMembers = inProgress
 		r.InProgressCanonical = inProgressCanonical
+		r.InReviewMembers = inReview
+		r.InReviewCanonical = inReviewCanonical
 		r.DoneMembers = done
 		r.DoneCanonical = doneCanonical
 		out = append(out, r)
@@ -151,7 +166,7 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 	}
 	return inTx(ctx, s.app, func(tx queryer) error {
 		for _, r := range rules {
-			pickupJSON, inProgressJSON, doneJSON, inProgressCanonJSON, doneCanonJSON, err := marshalJiraRule(r)
+			cols, err := marshalJiraRule(r)
 			if err != nil {
 				return err
 			}
@@ -159,20 +174,24 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 				INSERT INTO jira_project_status_rules (
 					team_id, project_key,
 					pickup_members, in_progress_members, in_progress_canonical,
+					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, now())
+				) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now())
 				ON CONFLICT (team_id, project_key) DO UPDATE SET
 					pickup_members = EXCLUDED.pickup_members,
 					in_progress_members = EXCLUDED.in_progress_members,
 					in_progress_canonical = EXCLUDED.in_progress_canonical,
+					in_review_members = EXCLUDED.in_review_members,
+					in_review_canonical = EXCLUDED.in_review_canonical,
 					done_members = EXCLUDED.done_members,
 					done_canonical = EXCLUDED.done_canonical,
 					updated_at = now()
 			`,
 				teamID, r.ProjectKey,
-				pickupJSON,
-				inProgressJSON, nullString(inProgressCanonJSON),
-				doneJSON, nullString(doneCanonJSON),
+				cols.pickup,
+				cols.inProgress, nullString(cols.inProgressCanonical),
+				cols.inReview, nullString(cols.inReviewCanonical),
+				cols.done, nullString(cols.doneCanonical),
 			); err != nil {
 				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.ProjectKey, err)
 			}
@@ -212,24 +231,46 @@ func projectKeys(rules []domain.JiraProjectStatusRules) []string {
 	return out
 }
 
-// marshalJiraRule renders one rule's five JSON columns. The canonicals come
-// back as "" when unset, which nullString turns into the SQL NULL the
-// complete-or-empty CHECK constraints expect.
-func marshalJiraRule(r domain.JiraProjectStatusRules) (pickup, inProgress, done, inProgressCanon, doneCanon string, err error) {
-	if pickup, err = domain.MarshalJiraStatusRefs(r.PickupMembers); err != nil {
-		return "", "", "", "", "", fmt.Errorf("marshal pickup_members for %s: %w", r.ProjectKey, err)
+// jiraRuleJSON is one rule rendered into the JSON the upsert binds, one field
+// per column. A canonical is "" when unset, which nullString turns into the SQL
+// NULL the complete-or-empty CHECK constraints expect.
+type jiraRuleJSON struct {
+	pickup              string
+	inProgress          string
+	inProgressCanonical string
+	inReview            string
+	inReviewCanonical   string
+	done                string
+	doneCanonical       string
+}
+
+// marshalJiraRule renders one rule's JSON columns, naming the column that
+// failed so a bad ref is traceable to the rule it came from.
+func marshalJiraRule(r domain.JiraProjectStatusRules) (jiraRuleJSON, error) {
+	var (
+		cols jiraRuleJSON
+		err  error
+	)
+	if cols.pickup, err = domain.MarshalJiraStatusRefs(r.PickupMembers); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal pickup_members for %s: %w", r.ProjectKey, err)
 	}
-	if inProgress, err = domain.MarshalJiraStatusRefs(r.InProgressMembers); err != nil {
-		return "", "", "", "", "", fmt.Errorf("marshal in_progress_members for %s: %w", r.ProjectKey, err)
+	if cols.inProgress, err = domain.MarshalJiraStatusRefs(r.InProgressMembers); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal in_progress_members for %s: %w", r.ProjectKey, err)
 	}
-	if done, err = domain.MarshalJiraStatusRefs(r.DoneMembers); err != nil {
-		return "", "", "", "", "", fmt.Errorf("marshal done_members for %s: %w", r.ProjectKey, err)
+	if cols.inProgressCanonical, err = domain.MarshalJiraStatusRef(r.InProgressCanonical); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal in_progress_canonical for %s: %w", r.ProjectKey, err)
 	}
-	if inProgressCanon, err = domain.MarshalJiraStatusRef(r.InProgressCanonical); err != nil {
-		return "", "", "", "", "", fmt.Errorf("marshal in_progress_canonical for %s: %w", r.ProjectKey, err)
+	if cols.inReview, err = domain.MarshalJiraStatusRefs(r.InReviewMembers); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal in_review_members for %s: %w", r.ProjectKey, err)
 	}
-	if doneCanon, err = domain.MarshalJiraStatusRef(r.DoneCanonical); err != nil {
-		return "", "", "", "", "", fmt.Errorf("marshal done_canonical for %s: %w", r.ProjectKey, err)
+	if cols.inReviewCanonical, err = domain.MarshalJiraStatusRef(r.InReviewCanonical); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal in_review_canonical for %s: %w", r.ProjectKey, err)
 	}
-	return pickup, inProgress, done, inProgressCanon, doneCanon, nil
+	if cols.done, err = domain.MarshalJiraStatusRefs(r.DoneMembers); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal done_members for %s: %w", r.ProjectKey, err)
+	}
+	if cols.doneCanonical, err = domain.MarshalJiraStatusRef(r.DoneCanonical); err != nil {
+		return jiraRuleJSON{}, fmt.Errorf("marshal done_canonical for %s: %w", r.ProjectKey, err)
+	}
+	return cols, nil
 }

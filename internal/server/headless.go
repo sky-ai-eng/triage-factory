@@ -43,8 +43,13 @@ const (
 	envJiraProjects         = "TRIAGE_FACTORY_JIRA_PROJECTS"
 	envJiraPickupStatuses   = "TRIAGE_FACTORY_JIRA_PICKUP_STATUSES"
 	envJiraInProgressStatus = "TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS"
-	envJiraDoneStatus       = "TRIAGE_FACTORY_JIRA_DONE_STATUS"
-	envCloneProtocol        = "TRIAGE_FACTORY_CLONE_PROTOCOL"
+	// Optional: the status a ticket sits in while the agent's PR awaits a
+	// human. Unset means the mirror leaves such a ticket in the in-progress
+	// status, which is a complete configuration — so this is deliberately not
+	// part of jiraComplete.
+	envJiraInReviewStatus = "TRIAGE_FACTORY_JIRA_INREVIEW_STATUS"
+	envJiraDoneStatus     = "TRIAGE_FACTORY_JIRA_DONE_STATUS"
+	envCloneProtocol      = "TRIAGE_FACTORY_CLONE_PROTOCOL"
 )
 
 // headlessSeedVars are the bootstrap-only env vars — read solely by the
@@ -52,8 +57,8 @@ const (
 // every secret read regardless of TF_HEADLESS, so they're never "orphaned".)
 var headlessSeedVars = []string{
 	envRepos, envGitHubUserPAT, envJiraUserPAT, envJiraProjects,
-	envJiraPickupStatuses, envJiraInProgressStatus, envJiraDoneStatus,
-	envCloneProtocol,
+	envJiraPickupStatuses, envJiraInProgressStatus, envJiraInReviewStatus,
+	envJiraDoneStatus, envCloneProtocol,
 }
 
 // HeadlessEnabled reports whether TF_HEADLESS requests the env-driven bootstrap.
@@ -87,6 +92,7 @@ type headlessConfig struct {
 	jiraProjects         []string
 	jiraPickupStatuses   []string
 	jiraInProgressStatus string
+	jiraInReviewStatus   string
 	jiraDoneStatus       string
 	cloneProtocol        string // "https" (default) or "ssh"
 }
@@ -95,12 +101,15 @@ type headlessConfig struct {
 // Jira (so an incomplete config is worth a WARN rather than a silent skip).
 func (c headlessConfig) jiraIntent() bool {
 	return len(c.jiraProjects) > 0 || len(c.jiraPickupStatuses) > 0 ||
-		c.jiraInProgressStatus != "" || c.jiraDoneStatus != "" || c.jiraUserPAT != ""
+		c.jiraInProgressStatus != "" || c.jiraInReviewStatus != "" ||
+		c.jiraDoneStatus != "" || c.jiraUserPAT != ""
 }
 
 // jiraComplete reports whether every field the Jira status model requires is
 // present (projects + a non-empty pickup set + in-progress + done). The bot
-// URL/PAT presence is checked separately by the caller.
+// URL/PAT presence is checked separately by the caller. The in-review status is
+// optional and absent here on purpose: it is a mirror write target only, so a
+// deployment that never sets it is fully configured.
 func (c headlessConfig) jiraComplete() bool {
 	return len(c.jiraProjects) > 0 && len(c.jiraPickupStatuses) > 0 &&
 		c.jiraInProgressStatus != "" && c.jiraDoneStatus != ""
@@ -114,6 +123,7 @@ func loadHeadlessConfig() headlessConfig {
 		jiraProjects:         parseCSV(os.Getenv(envJiraProjects)),
 		jiraPickupStatuses:   parseCSV(os.Getenv(envJiraPickupStatuses)),
 		jiraInProgressStatus: strings.TrimSpace(os.Getenv(envJiraInProgressStatus)),
+		jiraInReviewStatus:   strings.TrimSpace(os.Getenv(envJiraInReviewStatus)),
 		jiraDoneStatus:       strings.TrimSpace(os.Getenv(envJiraDoneStatus)),
 		cloneProtocol:        parseCloneProtocol(os.Getenv(envCloneProtocol)),
 	}
@@ -442,8 +452,9 @@ func (s *Server) validateJiraDCIdentity(ctx context.Context, host, pat string) *
 // headlessJiraRules expands the single global status mapping into one
 // JiraProjectStatusRules row per tracked project (the accepted v1
 // simplification vs. per-project parity). The table's CHECK constraints want
-// members and canonical together on the in-progress and done write targets —
-// single values satisfy them.
+// members and canonical together on each write target — single values satisfy
+// them, and an unset in-review status leaves both of its columns empty, which
+// satisfies the constraint the other way.
 //
 // The statuses come from the operator's environment as NAMES, so the rows land
 // name-only, with no status ids. That is a supported stored shape: the poller
@@ -458,6 +469,12 @@ func headlessJiraRules(cfg headlessConfig) []domain.JiraProjectStatusRules {
 		}
 		return refs
 	}
+	var inReviewMembers []domain.JiraStatusRef
+	var inReviewCanonical domain.JiraStatusRef
+	if cfg.jiraInReviewStatus != "" {
+		inReviewMembers = named(cfg.jiraInReviewStatus)
+		inReviewCanonical = domain.JiraStatusRef{Name: cfg.jiraInReviewStatus}
+	}
 	rules := make([]domain.JiraProjectStatusRules, 0, len(cfg.jiraProjects))
 	for _, key := range cfg.jiraProjects {
 		rules = append(rules, domain.JiraProjectStatusRules{
@@ -465,6 +482,8 @@ func headlessJiraRules(cfg headlessConfig) []domain.JiraProjectStatusRules {
 			PickupMembers:       named(cfg.jiraPickupStatuses...),
 			InProgressMembers:   named(cfg.jiraInProgressStatus),
 			InProgressCanonical: domain.JiraStatusRef{Name: cfg.jiraInProgressStatus},
+			InReviewMembers:     inReviewMembers,
+			InReviewCanonical:   inReviewCanonical,
 			DoneMembers:         named(cfg.jiraDoneStatus),
 			DoneCanonical:       domain.JiraStatusRef{Name: cfg.jiraDoneStatus},
 		})

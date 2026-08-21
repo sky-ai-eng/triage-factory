@@ -145,4 +145,21 @@ func TestJiraProjectStatusRules_Armed(t *testing.T) {
 	if unmapped.Armed() {
 		t.Error("a row with an unmapped done rule should not read as armed")
 	}
+	// The in-review rule gates nothing the poller asks, so it moves neither
+	// answer — which is what lets every already-armed project stay armed.
+	withReview := armed
+	withReview.InReviewMembers = []domain.JiraStatusRef{{Name: "Code Review"}}
+	withReview.InReviewCanonical = domain.JiraStatusRef{Name: "Code Review"}
+	if !withReview.Armed() {
+		t.Error("mapping the in-review rule should not change armed")
+	}
+	if !armed.Armed() {
+		t.Error("leaving the in-review rule unmapped should not change armed")
+	}
+	if !withReview.InReviewContains(domain.JiraStatusRef{Name: "Code Review"}) {
+		t.Error("in-review membership should match a name-only ref like its siblings")
+	}
+	if armed.InReviewContains(domain.JiraStatusRef{Name: "Code Review"}) {
+		t.Error("an unmapped in-review rule contains nothing")
+	}
 }

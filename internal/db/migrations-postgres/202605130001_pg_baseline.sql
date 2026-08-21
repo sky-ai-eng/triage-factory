@@ -799,17 +799,26 @@ CREATE TABLE public.jira_project_status_rules (
     pickup_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     in_progress_canonical jsonb,
+    -- in_review is an OPTIONAL mirror write target and nothing else: where a
+    -- ticket goes while the agent's PR awaits a human. No Jira status is ever
+    -- read back into TF's in_review board column (that column is a fact about
+    -- a run, not about a ticket), and these members reach neither the
+    -- discovery JQL nor the stock deck — so an empty rule is a complete
+    -- configuration, and a status may legitimately appear in both
+    -- in_progress_members and in_review_members.
+    in_review_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_review_canonical jsonb,
     done_members jsonb DEFAULT '[]'::jsonb NOT NULL,
     done_canonical jsonb,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     -- Mirror of the SQLite CHECKs: a persisted row is complete-or-empty
     -- per rule. The row is the team's commitment to WATCH the project;
-    -- whether it is ARMED (all three rules complete) is a separate
-    -- question it may answer "not yet" to, so an unmapped project is
-    -- storable and mapping it is the step after watching it. What stays
-    -- bound is members-and-canonical on the two write-target rules — the
-    -- canonical is the status TF transitions a ticket INTO, so members
-    -- without one is a rule that cannot be executed. Pickup has no
+    -- whether it is ARMED (pickup plus the in-progress and done rules) is
+    -- a separate question it may answer "not yet" to, so an unmapped
+    -- project is storable and mapping it is the step after watching it.
+    -- What stays bound is members-and-canonical on the three write-target
+    -- rules — the canonical is the status TF transitions a ticket INTO, so
+    -- members without one is a rule that cannot be executed. Pickup has no
     -- canonical column, so empty members is the whole of "unset" and it
     -- carries no constraint at all. The HTTP handler is the user-facing
     -- gate; these are defense-in-depth against any other write path
@@ -819,6 +828,10 @@ CREATE TABLE public.jira_project_status_rules (
     CONSTRAINT jpsr_in_progress_complete_or_empty CHECK (
         (jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL)
         OR (jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL)
+    ),
+    CONSTRAINT jpsr_in_review_complete_or_empty CHECK (
+        (jsonb_array_length(in_review_members) = 0 AND in_review_canonical IS NULL)
+        OR (jsonb_array_length(in_review_members) > 0 AND in_review_canonical IS NOT NULL)
     ),
     CONSTRAINT jpsr_done_complete_or_empty CHECK (
         (jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)

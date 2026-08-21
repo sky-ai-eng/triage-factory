@@ -157,17 +157,17 @@ func (s *Spawner) terminateBlueprint(
 			}
 		}
 
-		// TFAC-442: a clean completion means the agent opened its PR and the work is now
-		// awaiting human review + merge — "in progress" to a Jira watcher, NOT
-		// done. Re-assert the InProgress bucket (idempotent; usually a no-op
-		// since the dispatch-time mirror already moved the ticket) rather than
-		// transitioning to Done. PR-opened ≠ ticket-done: the ticket only reaches
-		// Done when its PR merges, via a separate entity-driven mirror.
-		// mirrorJiraInProgressForTask re-checks bot ownership, so a mid-run user
+		// A clean completion means the agent opened its PR and the work is now
+		// awaiting a human — the review moment to a Jira watcher, NOT done.
+		// Assert the review bucket (idempotent; usually a no-op since the board's
+		// own in_review move already mirrored it) rather than transitioning to
+		// Done. PR-opened ≠ ticket-done: the ticket only reaches Done when its PR
+		// merges, via a separate entity-driven mirror.
+		// mirrorJiraInReviewForTask re-checks bot ownership, so a mid-run user
 		// takeover (claim flipped to the user) leaves the terminal Jira write to
 		// the user path. Close above does not clear the claim, so the ownership
 		// re-read still sees the bot.
-		s.mirrorJiraInProgressForTask(bgCtx, orgID, taskID)
+		s.mirrorJiraInReviewForTask(bgCtx, orgID, taskID)
 	}
 	// Aborted / failed / cancelled blueprints intentionally do NOT mark
 	// the task done — leave it in the queue so a human can inspect the

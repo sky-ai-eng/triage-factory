@@ -69,6 +69,7 @@ only for the keychain-less file backend. The rest of the flow is identical.
 | `TRIAGE_FACTORY_JIRA_PROJECTS` | Comma-separated project keys (e.g. `SKY,TFAC`). |
 | `TRIAGE_FACTORY_JIRA_PICKUP_STATUSES` | Comma-separated statuses that mean "ready to pick up". |
 | `TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS` | The single in-progress status. |
+| `TRIAGE_FACTORY_JIRA_INREVIEW_STATUS` | The single in-review status — where a ticket goes while the agent's pull request awaits a human. Optional; unset leaves such a ticket in the in-progress status. |
 | `TRIAGE_FACTORY_JIRA_DONE_STATUS` | The single done status. |
 | `ANTHROPIC_API_KEY` | Claude credential — local mode inherits it from the environment for scoring and delegation. |
 
