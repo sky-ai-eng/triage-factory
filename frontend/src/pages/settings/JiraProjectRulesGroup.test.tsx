@@ -69,6 +69,7 @@ function Harness({ seed = [] as JiraProjectConfig[] }) {
       <output data-testid="pickup-sendable">
         {value[0] && ruleIsIdentified(value[0].pickup) ? 'yes' : 'no'}
       </output>
+      <output data-testid="review-canonical">{value[0]?.in_review.canonical?.id ?? ''}</output>
     </>
   )
 }
@@ -138,6 +139,7 @@ describe('JiraProjectRulesGroup · watching', () => {
 const RULE_DESCRIPTIONS: Record<string, RegExp> = {
   Pickup: /Poll for unassigned tickets/,
   'In progress': /Count as actively being worked on/,
+  'In review': /awaits human review/,
   Done: /Count as complete/,
 }
 
@@ -158,7 +160,7 @@ describe('JiraProjectRulesGroup · arming', () => {
     expect(await screen.findByText('3 statuses available')).toBeInTheDocument()
   })
 
-  it('arms the project by mapping all three rules', async () => {
+  it('arms the project by mapping pickup, in progress and done — in review is optional', async () => {
     const user = userEvent.setup()
     render(<Harness seed={[emptyProject('SKY')]} />)
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
@@ -177,8 +179,21 @@ describe('JiraProjectRulesGroup · arming', () => {
       await user.click(within(rule).getByRole('button', { name: status }))
     }
 
+    // In review is left unmapped, and the project is armed anyway.
+    expect(screen.getByTestId('review-canonical')).toHaveTextContent('')
     expect(screen.getByTestId('armed')).toHaveTextContent('SKY')
     expect(screen.getByText('Ready')).toBeInTheDocument()
+  })
+
+  it('maps the optional in-review rule, whose first member becomes its write target', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[emptyProject('SKY')]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+    await screen.findByText('3 statuses available')
+
+    await user.click(within(ruleBlock('In review')).getByRole('button', { name: 'In Progress' }))
+
+    expect(screen.getByTestId('review-canonical')).toHaveTextContent('10001')
   })
 })
 

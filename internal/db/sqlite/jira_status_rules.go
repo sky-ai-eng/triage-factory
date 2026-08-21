@@ -32,6 +32,15 @@ func (s *jiraStatusRulesStore) ListForTeamSystem(ctx context.Context, teamID str
 	return listJiraStatusRules(ctx, s.q, teamID)
 }
 
+// jiraRuleCols is the SELECT list every reader shares — team_id first so
+// TeamID is populated, then each rule's columns in the order the scanner binds
+// them.
+const jiraRuleCols = `team_id, project_key,
+	       pickup_members,
+	       in_progress_members, in_progress_canonical,
+	       in_review_members, in_review_canonical,
+	       done_members, done_canonical`
+
 func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.JiraProjectStatusRules, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -40,9 +49,7 @@ func (s *jiraStatusRulesStore) ListForOrgSystem(ctx context.Context, orgID strin
 	// row (no teams join needed) and is scanned into TeamID for the
 	// poller's per-project merge tie-break.
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT team_id, project_key,
-		       pickup_members, in_progress_members, in_progress_canonical,
-		       done_members, done_canonical
+		SELECT `+jiraRuleCols+`
 		FROM jira_project_status_rules
 		ORDER BY project_key ASC, team_id ASC
 	`)
@@ -67,9 +74,7 @@ func (s *jiraStatusRulesStore) TracksProjectSystem(ctx context.Context, teamID, 
 
 func listJiraStatusRules(ctx context.Context, q queryer, teamID string) ([]domain.JiraProjectStatusRules, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT team_id, project_key,
-		       pickup_members, in_progress_members, in_progress_canonical,
-		       done_members, done_canonical
+		SELECT `+jiraRuleCols+`
 		FROM jira_project_status_rules
 		WHERE team_id = ?
 		ORDER BY project_key ASC
@@ -85,11 +90,14 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 	out := []domain.JiraProjectStatusRules{}
 	for rows.Next() {
 		var (
-			r                                    domain.JiraProjectStatusRules
-			pickupJSON, inProgressJSON, doneJSON string
-			inProgressCanon, doneCanon           sql.NullString
+			r                                                  domain.JiraProjectStatusRules
+			pickupJSON, inProgressJSON, inReviewJSON, doneJSON string
+			inProgressCanon, inReviewCanon, doneCanon          sql.NullString
 		)
-		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
+		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON,
+			&inProgressJSON, &inProgressCanon,
+			&inReviewJSON, &inReviewCanon,
+			&doneJSON, &doneCanon); err != nil {
 			return nil, fmt.Errorf("scan jira_project_status_rules: %w", err)
 		}
 		pickup, err := domain.UnmarshalJiraStatusRefs(pickupJSON)
@@ -100,6 +108,10 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal in_progress_members for %s: %w", r.ProjectKey, err)
 		}
+		inReview, err := domain.UnmarshalJiraStatusRefs(inReviewJSON)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal in_review_members for %s: %w", r.ProjectKey, err)
+		}
 		done, err := domain.UnmarshalJiraStatusRefs(doneJSON)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal done_members for %s: %w", r.ProjectKey, err)
@@ -108,6 +120,10 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal in_progress_canonical for %s: %w", r.ProjectKey, err)
 		}
+		inReviewCanonical, err := domain.UnmarshalJiraStatusRef(inReviewCanon.String)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal in_review_canonical for %s: %w", r.ProjectKey, err)
+		}
 		doneCanonical, err := domain.UnmarshalJiraStatusRef(doneCanon.String)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal done_canonical for %s: %w", r.ProjectKey, err)
@@ -115,6 +131,8 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		r.PickupMembers = pickup
 		r.InProgressMembers = inProgress
 		r.InProgressCanonical = inProgressCanonical
+		r.InReviewMembers = inReview
+		r.InReviewCanonical = inReviewCanonical
 		r.DoneMembers = done
 		r.DoneCanonical = doneCanonical
 		out = append(out, r)
@@ -142,6 +160,10 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			if err != nil {
 				return fmt.Errorf("marshal in_progress_members for %s: %w", r.ProjectKey, err)
 			}
+			inReviewJSON, err := domain.MarshalJiraStatusRefs(r.InReviewMembers)
+			if err != nil {
+				return fmt.Errorf("marshal in_review_members for %s: %w", r.ProjectKey, err)
+			}
 			doneJSON, err := domain.MarshalJiraStatusRefs(r.DoneMembers)
 			if err != nil {
 				return fmt.Errorf("marshal done_members for %s: %w", r.ProjectKey, err)
@@ -149,6 +171,10 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			inProgressCanonJSON, err := domain.MarshalJiraStatusRef(r.InProgressCanonical)
 			if err != nil {
 				return fmt.Errorf("marshal in_progress_canonical for %s: %w", r.ProjectKey, err)
+			}
+			inReviewCanonJSON, err := domain.MarshalJiraStatusRef(r.InReviewCanonical)
+			if err != nil {
+				return fmt.Errorf("marshal in_review_canonical for %s: %w", r.ProjectKey, err)
 			}
 			doneCanonJSON, err := domain.MarshalJiraStatusRef(r.DoneCanonical)
 			if err != nil {
@@ -158,18 +184,23 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 				INSERT INTO jira_project_status_rules (
 					team_id, project_key,
 					pickup_members, in_progress_members, in_progress_canonical,
+					in_review_members, in_review_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 				ON CONFLICT(team_id, project_key) DO UPDATE SET
 					pickup_members = excluded.pickup_members,
 					in_progress_members = excluded.in_progress_members,
 					in_progress_canonical = excluded.in_progress_canonical,
+					in_review_members = excluded.in_review_members,
+					in_review_canonical = excluded.in_review_canonical,
 					done_members = excluded.done_members,
 					done_canonical = excluded.done_canonical,
 					updated_at = CURRENT_TIMESTAMP
 			`,
 				teamID, r.ProjectKey,
-				pickupJSON, inProgressJSON, nullStringValue(inProgressCanonJSON),
+				pickupJSON,
+				inProgressJSON, nullStringValue(inProgressCanonJSON),
+				inReviewJSON, nullStringValue(inReviewCanonJSON),
 				doneJSON, nullStringValue(doneCanonJSON),
 			); err != nil {
 				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.ProjectKey, err)

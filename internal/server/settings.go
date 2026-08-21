@@ -77,18 +77,21 @@ func normalizeJiraProjectKey(s string) string {
 
 // validateProjectRules enforces the per-project rule invariants.
 //
-// A stored project is the team's commitment to WATCH it. Being ARMED — all
-// three rules complete, which is what it takes to contribute anything to the
-// discovery JQL — is a second, later state, reached when someone maps the
-// project's workflow statuses. So a project may carry no rules at all, and
-// each rule is independently complete-or-empty:
+// A stored project is the team's commitment to WATCH it. Being ARMED — pickup
+// plus the in-progress and done rules complete, which is what it takes to
+// contribute anything to the discovery JQL — is a second, later state, reached
+// when someone maps the project's workflow statuses. So a project may carry no
+// rules at all, and each rule is independently complete-or-empty:
 //
 //   - Pickup carries members and nothing else — TF never transitions a ticket
 //     back into pickup, so there is no write target to pair them with, and
 //     empty members is the whole of "unmapped". Nothing to check.
-//   - InProgress / Done: members and canonical together, or neither. The
-//     canonical is the status TF transitions a ticket INTO, so members without
-//     one is a rule that cannot be executed — rejected, as it always was.
+//   - InProgress / InReview / Done: members and canonical together, or neither.
+//     The canonical is the status TF transitions a ticket INTO, so members
+//     without one is a rule that cannot be executed — rejected. InReview is
+//     checked identically even though it arms nothing: half a rule is no more
+//     executable there than anywhere else, and a stored half is what a later
+//     reader would have to guess at.
 //
 // The jpsr_*_complete_or_empty CHECK constraints are the DB-level mirror of
 // the pairing; this is the user-facing gate that surfaces a readable error
@@ -101,6 +104,7 @@ func validateProjectRules(p domain.JiraProjectStatusRules) error {
 		canonical domain.JiraStatusRef
 	}{
 		{"in_progress", p.InProgressMembers, p.InProgressCanonical},
+		{"in_review", p.InReviewMembers, p.InReviewCanonical},
 		{"done", p.DoneMembers, p.DoneCanonical},
 	} {
 		hasMembers, hasCanonical := len(r.members) > 0, !r.canonical.IsZero()
@@ -164,6 +168,7 @@ func cloneJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectS
 		out[i] = p
 		out[i].PickupMembers = slices.Clone(p.PickupMembers)
 		out[i].InProgressMembers = slices.Clone(p.InProgressMembers)
+		out[i].InReviewMembers = slices.Clone(p.InReviewMembers)
 		out[i].DoneMembers = slices.Clone(p.DoneMembers)
 	}
 	return out
@@ -173,6 +178,12 @@ func cloneJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectS
 // order as significant (the user-facing UI keeps projects in the order
 // they were added; reordering counts as a change worth restarting the
 // poller for). Rules are compared with set-equality on Members.
+//
+// InReview is deliberately absent from the comparison. This function exists to
+// answer one question — did anything the Jira poller asks change? — and the
+// in-review rule reaches neither the discovery JQL nor any classification.
+// Mapping or clearing it alone must therefore not re-due a poll, which would
+// re-ask Jira for exactly what it just answered.
 func jiraProjectsEqual(a, b []domain.JiraProjectStatusRules) bool {
 	if len(a) != len(b) {
 		return false
@@ -218,13 +229,14 @@ type jiraStatusRuleJSON struct {
 	Canonical *jiraStatusRefJSON  `json:"canonical"`
 }
 
-// jiraProjectSettings is the per-project read shape: the key plus the three
+// jiraProjectSettings is the per-project read shape: the key plus the four
 // rules. Armed is not a field — it is derivable from these rules by the SPA
 // and a headless caller alike.
 type jiraProjectSettings struct {
 	Key        string             `json:"key"`
 	Pickup     jiraStatusRuleJSON `json:"pickup"`
 	InProgress jiraStatusRuleJSON `json:"in_progress"`
+	InReview   jiraStatusRuleJSON `json:"in_review"`
 	Done       jiraStatusRuleJSON `json:"done"`
 }
 
@@ -271,6 +283,7 @@ func toJiraProjectSettings(in []domain.JiraProjectStatusRules) []jiraProjectSett
 			Key:        p.ProjectKey,
 			Pickup:     toJiraStatusRuleJSON(p.PickupMembers, domain.JiraStatusRef{}),
 			InProgress: toJiraStatusRuleJSON(p.InProgressMembers, p.InProgressCanonical),
+			InReview:   toJiraStatusRuleJSON(p.InReviewMembers, p.InReviewCanonical),
 			Done:       toJiraStatusRuleJSON(p.DoneMembers, p.DoneCanonical),
 		})
 	}

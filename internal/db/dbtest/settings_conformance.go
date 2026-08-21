@@ -880,6 +880,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("JiraStatusRules_ReplaceForTeam_UpsertsRows", func(t *testing.T) {
+		// SKY maps the optional in-review rule and ENG leaves it empty, so one
+		// round-trip covers both stored shapes of it.
 		stores, ids := factory(t)
 		input := []domain.JiraProjectStatusRules{
 			{
@@ -887,6 +889,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				PickupMembers:       jiraRefs("To Do", "Backlog"),
 				InProgressMembers:   jiraRefs("In Progress"),
 				InProgressCanonical: jiraRef("In Progress"),
+				InReviewMembers:     jiraRefs("In Progress", "Code Review"),
+				InReviewCanonical:   jiraRef("Code Review"),
 				DoneMembers:         jiraRefs("Done"),
 				DoneCanonical:       jiraRef("Done"),
 			},
@@ -909,16 +913,57 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// List* reads populate TeamID (the PK's first column);
 		// ReplaceForTeam takes the team as a parameter and ignores the
 		// struct field, so set the expected TeamID before the round-trip
-		// compare.
+		// compare. An unmapped rule reads back as an EMPTY slice rather than
+		// nil — the column holds "[]" and the scan reflects the column — which
+		// is why ENG's untouched in-review members need saying here.
 		want := make([]domain.JiraProjectStatusRules, len(input))
 		copy(want, input)
 		for i := range want {
 			want[i].TeamID = ids.TeamID
+			if want[i].InReviewMembers == nil {
+				want[i].InReviewMembers = []domain.JiraStatusRef{}
+			}
 		}
 		sortRulesByKey(got)
 		sortRulesByKey(want)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after ReplaceForTeam, ListForTeam = %+v; want %+v", got, want)
+		}
+	})
+
+	t.Run("JiraStatusRules_ReplaceForTeam_ClearsInReviewRule", func(t *testing.T) {
+		// The optional rule has to be removable, which is the direction the
+		// complete-or-empty CHECK could get wrong: members and canonical must
+		// clear together, and the row must survive with the other three intact.
+		stores, ids := factory(t)
+		mapped := []domain.JiraProjectStatusRules{{
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			InReviewMembers: jiraRefs("Code Review"), InReviewCanonical: jiraRef("Code Review"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+		}}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, mapped); err != nil {
+			t.Fatalf("ReplaceForTeam (mapped): %v", err)
+		}
+		cleared := mapped
+		cleared[0].InReviewMembers = nil
+		cleared[0].InReviewCanonical = domain.JiraStatusRef{}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, cleared); err != nil {
+			t.Fatalf("ReplaceForTeam (cleared): %v", err)
+		}
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("rules = %+v, want the one SKY row", got)
+		}
+		if len(got[0].InReviewMembers) != 0 || !got[0].InReviewCanonical.IsZero() {
+			t.Errorf("in-review rule = %+v / %+v, want both cleared",
+				got[0].InReviewMembers, got[0].InReviewCanonical)
+		}
+		if got[0].InProgressCanonical != jiraRef("In Progress") || got[0].DoneCanonical != jiraRef("Done") {
+			t.Errorf("row = %+v, want the other rules untouched by the clear", got[0])
 		}
 	})
 

@@ -20,12 +20,21 @@ import { jsonBody } from '../../test/apiResponse'
 const toDo = { id: '10000', name: 'To Do' }
 const inProgress = { id: '10001', name: 'In Progress' }
 const done = { id: '10002', name: 'Done' }
+const codeReview = { id: '10003', name: 'Code Review' }
 
+// armed leaves in_review empty — the optional rule is not part of armed, and
+// this is the shape a team without a review status stores.
 const armed = (key: string): JiraProjectConfig => ({
   key,
   pickup: { members: [toDo] },
   in_progress: { members: [inProgress], canonical: inProgress },
+  in_review: { members: [] },
   done: { members: [done], canonical: done },
+})
+
+const withReview = (key: string): JiraProjectConfig => ({
+  ...armed(key),
+  in_review: { members: [codeReview], canonical: codeReview },
 })
 
 // legacy is a project stored before statuses were identified: names, no ids.
@@ -36,6 +45,7 @@ const legacy = (key: string): JiraProjectConfig => ({
     members: [{ id: '', name: 'In Progress' }],
     canonical: { id: '', name: 'In Progress' },
   },
+  in_review: { members: [] },
   done: { members: [{ id: '', name: 'Done' }], canonical: { id: '', name: 'Done' } },
 })
 
@@ -70,9 +80,20 @@ describe('saveTeamJiraProjects', () => {
       key: 'SKY',
       pickup: { member_ids: ['10000'] },
       in_progress: { member_ids: ['10001'], canonical_id: '10001' },
+      in_review: { member_ids: [], canonical_id: '' },
       done: { member_ids: ['10002'], canonical_id: '10002' },
     })
     expect(JSON.stringify(project)).not.toContain('In Progress')
+  })
+
+  it('sends the in-review rule as ids like its siblings', async () => {
+    const fetchMock = stubPut()
+    await saveTeamJiraProjects('team-1', [withReview('SKY')])
+
+    expect(sentBody(fetchMock).jira_projects[0].in_review).toEqual({
+      member_ids: ['10003'],
+      canonical_id: '10003',
+    })
   })
 
   it('omits a rule it cannot express in ids, rather than clearing it', async () => {
@@ -83,7 +104,10 @@ describe('saveTeamJiraProjects', () => {
     await saveTeamJiraProjects('team-1', [legacy('OLD'), armed('SKY')])
 
     const [old, sky] = sentBody(fetchMock).jira_projects
-    expect(old).toEqual({ key: 'OLD' })
+    // Every rule the legacy project actually names is omitted. Its in-review
+    // rule is empty, and an empty rule is always expressible in ids, so it is
+    // sent — a clear that clears nothing.
+    expect(old).toEqual({ key: 'OLD', in_review: { member_ids: [], canonical_id: '' } })
     expect(sky).toHaveProperty('pickup')
   })
 
@@ -95,6 +119,7 @@ describe('saveTeamJiraProjects', () => {
       key: 'SKY',
       pickup: { member_ids: [] },
       in_progress: { member_ids: [], canonical_id: '' },
+      in_review: { member_ids: [], canonical_id: '' },
       done: { member_ids: [], canonical_id: '' },
     })
   })
@@ -127,6 +152,15 @@ describe('project rule predicates', () => {
     const half = { ...emptyProject('SKY'), in_progress: { members: [inProgress] } }
     expect(projectRulesValid(half)).toBe(false)
     expect(teamProjectsBlocked([half], true)).toBe(true)
+  })
+
+  it('holds the same completeness rule for in-review, which arms nothing', () => {
+    const halfReview = { ...armed('SKY'), in_review: { members: [codeReview] } }
+    expect(projectRulesValid(halfReview)).toBe(false)
+    expect(teamProjectsBlocked([halfReview], true)).toBe(true)
+    // Mapped or empty, the optional rule never moves armed.
+    expect(projectIsArmed(withReview('SKY'))).toBe(true)
+    expect(projectIsArmed(armed('SKY'))).toBe(true)
   })
 
   it('reads a legacy name-only project as armed and identified-less', () => {
@@ -193,6 +227,12 @@ describe('unresolvableStatuses', () => {
     })
     expect(unresolvableStatuses(p, workflow)).toEqual([gone])
   })
+
+  it('checks the in-review rule too', () => {
+    const gone = { id: '99999', name: 'Retired' }
+    const p = project({ in_review: { members: [gone], canonical: gone } })
+    expect(unresolvableStatuses(p, workflow)).toEqual([gone])
+  })
 })
 
 describe('dropStatus', () => {
@@ -224,5 +264,16 @@ describe('dropStatus', () => {
     expect(next.in_progress.members).toEqual([])
     expect(next.in_progress.canonical).toBeNull()
     expect(projectIsArmed(next)).toBe(false)
+  })
+
+  it('strips the in-review rule as well, back to the unmapped state', () => {
+    const p: JiraProjectConfig = {
+      ...emptyProject('SKY'),
+      in_review: { members: [gone], canonical: gone },
+    }
+    const next = dropStatus(p, gone)
+    expect(next.in_review.members).toEqual([])
+    expect(next.in_review.canonical).toBeNull()
+    expect(projectRulesValid(next)).toBe(true)
   })
 })

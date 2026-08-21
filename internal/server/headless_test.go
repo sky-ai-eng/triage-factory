@@ -106,6 +106,38 @@ func TestHeadlessJiraRules(t *testing.T) {
 			!reflect.DeepEqual(domain.JiraStatusNames(r.DoneMembers), []string{"Done"}) {
 			t.Errorf("rule[%d] done = %+v/%v", i, r.DoneCanonical, r.DoneMembers)
 		}
+		// The in-review status is optional and unset here, so both of its
+		// columns stay empty — which is what the CHECK constraint wants.
+		if len(r.InReviewMembers) != 0 || !r.InReviewCanonical.IsZero() {
+			t.Errorf("rule[%d] in-review = %+v/%v, want an unmapped rule", i, r.InReviewCanonical, r.InReviewMembers)
+		}
+	}
+}
+
+// Setting the optional var seeds the rule name-only, exactly like its siblings.
+func TestHeadlessJiraRules_InReviewStatus(t *testing.T) {
+	cfg := headlessConfig{
+		jiraProjects:         []string{"SKY"},
+		jiraPickupStatuses:   []string{"To Do"},
+		jiraInProgressStatus: "In Progress",
+		jiraInReviewStatus:   "Code Review",
+		jiraDoneStatus:       "Done",
+	}
+	rules := headlessJiraRules(cfg)
+	if len(rules) != 1 {
+		t.Fatalf("want 1 rule, got %d", len(rules))
+	}
+	r := rules[0]
+	if r.InReviewCanonical != (domain.JiraStatusRef{Name: "Code Review"}) {
+		t.Errorf("in-review canonical = %+v, want the bare name", r.InReviewCanonical)
+	}
+	if !reflect.DeepEqual(domain.JiraStatusNames(r.InReviewMembers), []string{"Code Review"}) {
+		t.Errorf("in-review members = %v, want [Code Review]", r.InReviewMembers)
+	}
+	// It is not a polling input, so it must not change whether the project is
+	// armed.
+	if !r.Armed() {
+		t.Error("a complete seed should be armed with the in-review rule mapped")
 	}
 }
 

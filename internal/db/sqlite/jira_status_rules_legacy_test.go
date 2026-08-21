@@ -53,6 +53,12 @@ func TestJiraStatusRules_SQLite_LegacyNameOnlyRow(t *testing.T) {
 	if rule.DoneCanonical != (domain.JiraStatusRef{Name: "Done"}) {
 		t.Errorf("legacy done canonical = %+v, want the bare name", rule.DoneCanonical)
 	}
+	// The in-review rule is optional, so a row written without it reads back
+	// unmapped rather than failing to scan.
+	if len(rule.InReviewMembers) != 0 || !rule.InReviewCanonical.IsZero() {
+		t.Errorf("legacy in-review rule = %+v / %+v, want an unmapped rule",
+			rule.InReviewMembers, rule.InReviewCanonical)
+	}
 	// Complete is complete: a legacy row polls exactly as an identified one does.
 	if !rule.Armed() {
 		t.Error("a complete legacy row should read as armed")
@@ -82,6 +88,8 @@ func TestJiraStatusRules_SQLite_SavingALegacyRowFillsIDs(t *testing.T) {
 		PickupMembers:       []domain.JiraStatusRef{{ID: "10000", Name: "To Do"}},
 		InProgressMembers:   []domain.JiraStatusRef{{ID: "10001", Name: "In Progress"}},
 		InProgressCanonical: domain.JiraStatusRef{ID: "10001", Name: "In Progress"},
+		InReviewMembers:     []domain.JiraStatusRef{{ID: "10003", Name: "Code Review"}},
+		InReviewCanonical:   domain.JiraStatusRef{ID: "10003", Name: "Code Review"},
 		DoneMembers:         []domain.JiraStatusRef{{ID: "10002", Name: "Done"}},
 		DoneCanonical:       domain.JiraStatusRef{ID: "10002", Name: "Done"},
 	}}
@@ -97,5 +105,10 @@ func TestJiraStatusRules_SQLite_SavingALegacyRowFillsIDs(t *testing.T) {
 	}
 	if got[0].PickupMembers[0].ID != "10000" || got[0].PickupMembers[0].Name != "To Do" {
 		t.Errorf("pickup member = %+v, want the id and the name", got[0].PickupMembers[0])
+	}
+	// The save is also where a legacy row can first acquire the optional rule,
+	// since nothing before it had a column to write one into.
+	if got[0].InReviewCanonical != (domain.JiraStatusRef{ID: "10003", Name: "Code Review"}) {
+		t.Errorf("in-review canonical = %+v, want the newly mapped rule", got[0].InReviewCanonical)
 	}
 }
