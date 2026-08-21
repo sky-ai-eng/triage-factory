@@ -2,11 +2,30 @@ package domain
 
 import "strings"
 
-// ModelTier is an ordered rank over the Anthropic model tiers TF uses for
-// scoring and delegation. The ordering (Haiku < Sonnet < Opus) is what lets
-// an org cap clamp a team's default: a higher-tier team default collapses to
-// the org's max. Only Anthropic tiers are in scope — non-Anthropic models
-// (future Bedrock-Llama etc.) are a separate concern and parse as Unknown.
+// The concrete model ids the three Anthropic tiers name. Stored configuration
+// carries these verbatim — a team default, a per-prompt override — and they are
+// what reaches the provider, so nothing downstream translates a stored value.
+//
+// Haiku is the dated spelling to stay aligned with the system jobs' pin
+// (ai.SystemJobModelDirect); Sonnet and Opus are the undated current ids. A
+// test in internal/modelcatalog pins all three to catalog keys, which is what
+// keeps a value the settings UI offers from being one the ledger cannot price.
+const (
+	ModelHaiku  = "claude-haiku-4-5-20251001"
+	ModelSonnet = "claude-sonnet-5"
+	ModelOpus   = "claude-opus-5"
+)
+
+// ModelTier is an ordered rank over three Anthropic model tiers. It exists for
+// one consumer, the org max-tier cap: the ordering (Haiku < Sonnet < Opus) is
+// what lets that cap clamp a team's default, collapsing a higher-tier default
+// to the org's max.
+//
+// Only those three are in scope — every other model (Fable, a future
+// Bedrock-Llama) parses as Unknown and sits outside the ladder, which is why
+// nothing but the cap may be built on it. Ranking models in general would need
+// a defensible basis for calling one better than another, and there is none TF
+// asserts; the catalog deliberately publishes no ordering at all.
 type ModelTier int
 
 const (
@@ -16,30 +35,37 @@ const (
 	TierOpus
 )
 
-// ParseTier maps a model name to its tier. Unknown for empty or unrecognized
-// names, so callers can apply their own fallback.
+// ParseTier maps a model id to its tier. Unknown for empty or unrecognized
+// ids, so callers can apply their own fallback.
+//
+// The three bare tier words are recognized because org_settings
+// .max_llm_model_tier still stores them: the org cap is the one setting the
+// concrete-id migration deliberately left alone, since its replacement takes
+// the column with it. Nothing writes those words — this reads what is already
+// there.
 func ParseTier(s string) ModelTier {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "haiku":
+	case ModelHaiku, "haiku":
 		return TierHaiku
-	case "sonnet":
+	case ModelSonnet, "sonnet":
 		return TierSonnet
-	case "opus":
+	case ModelOpus, "opus":
 		return TierOpus
 	default:
 		return TierUnknown
 	}
 }
 
-// String maps a tier back to its model name. Empty string for Unknown.
-func (t ModelTier) String() string {
+// ModelID maps a tier back to the concrete model id it names. Empty string for
+// Unknown, which has no id to name.
+func (t ModelTier) ModelID() string {
 	switch t {
 	case TierHaiku:
-		return "haiku"
+		return ModelHaiku
 	case TierSonnet:
-		return "sonnet"
+		return ModelSonnet
 	case TierOpus:
-		return "opus"
+		return ModelOpus
 	default:
 		return ""
 	}
@@ -49,22 +75,26 @@ func (t ModelTier) String() string {
 // team's configured default and the org's max-tier cap. The team default
 // wins unless it exceeds the cap, in which case the cap applies.
 //
-//   - teamDefault empty/unknown → falls back to DefaultModel.
+//   - teamDefault empty → DefaultModel.
 //   - orgMaxTier empty/unknown → no cap.
+//   - a teamDefault outside the tier ladder → no cap either. The cap ranks the
+//     three Anthropic tiers and can say nothing about a model it cannot place,
+//     and clamping one it cannot compare would substitute a model nobody chose.
 //
 // source is "org-cap" when the cap clamped the team's choice, else "team" —
 // it lets the UI explain "you're on Sonnet because your org caps at Sonnet".
 func EffectiveModel(teamDefault, orgMaxTier string) (model, source string) {
-	team := ParseTier(teamDefault)
-	if team == TierUnknown {
-		team = ParseTier(DefaultModel)
+	model = strings.TrimSpace(teamDefault)
+	if model == "" {
+		model = DefaultModel
 	}
 	capTier := ParseTier(orgMaxTier)
 	if capTier == TierUnknown {
-		return team.String(), "team"
+		return model, "team"
 	}
-	if team > capTier {
-		return capTier.String(), "org-cap"
+	team := ParseTier(model)
+	if team == TierUnknown || team <= capTier {
+		return model, "team"
 	}
-	return team.String(), "team"
+	return capTier.ModelID(), "org-cap"
 }

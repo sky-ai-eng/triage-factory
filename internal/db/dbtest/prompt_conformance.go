@@ -81,12 +81,12 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 			t.Errorf("Create returned a row missing what only the row knows: %+v", created)
 		}
 
-		updated, err := store.Update(ctx, orgID, "ret-1", "Mine v2", "v2", "opus")
+		updated, err := store.Update(ctx, orgID, "ret-1", "Mine v2", "v2", domain.ModelOpus)
 		if err != nil {
 			t.Fatalf("Update: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "Update", updated, read("ret-1"))
-		if updated.Name != "Mine v2" || updated.Model != "opus" {
+		if updated.Name != "Mine v2" || updated.Model != domain.ModelOpus {
 			t.Errorf("Update returned %+v, want the rewritten name and model", updated)
 		}
 
@@ -150,7 +150,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 			t.Fatalf("allowed_tools=%q want Read,Write", got.AllowedTools)
 		}
 		// Update
-		if _, err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", "opus"); err != nil {
+		if _, err := store.Update(ctx, orgID, "user-1", "Mine v2", "body v2", domain.ModelOpus); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 		got2, _ := store.Get(ctx, orgID, "user-1")

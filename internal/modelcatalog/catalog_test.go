@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
@@ -247,5 +248,23 @@ func TestLoad_ReportsEveryUnusableEntry(t *testing.T) {
 	}
 	if got := len(joined.Unwrap()); got != 2 {
 		t.Errorf("error carries %d causes, want 2", got)
+	}
+}
+
+// The three ids domain names for the Anthropic tiers must be catalog keys.
+// They are what a migrated install stores, what the shipped default provisions,
+// and what the org cap clamps to — so a key the catalog stopped offering would
+// leave existing configuration pointing at a model the picker cannot show and
+// the ledger cannot price. The catalog is free to grow; it may not drop one of
+// these without the settings that reference them moving in the same change.
+func TestCatalog_OffersEveryTierID(t *testing.T) {
+	offered := make(map[string]bool, len(Entries()))
+	for _, e := range Entries() {
+		offered[e.Key] = true
+	}
+	for _, id := range []string{domain.ModelHaiku, domain.ModelSonnet, domain.ModelOpus, domain.DefaultModel} {
+		if !offered[id] {
+			t.Errorf("catalog does not offer %q", id)
+		}
 	}
 }

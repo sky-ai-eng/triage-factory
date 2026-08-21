@@ -67,6 +67,7 @@ import {
   discardStagedApp,
 } from '../../lib/githubApp'
 import { apiJSON } from '../../lib/apiClient'
+import { modelDisplayName } from '../../hooks/useModelCatalog'
 import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
@@ -145,6 +146,9 @@ export const initialWizardState = (): WizardState => ({
   duplicateJiraToUser: false,
 })
 
+// The workspace cap's own vocabulary — a rank over the three Anthropic tiers,
+// which is what that column stores. A model CHOICE is a catalog key and reads
+// its name from modelDisplayName instead.
 const TIER_LABELS: Record<string, string> = {
   haiku: 'Haiku',
   sonnet: 'Sonnet',
@@ -1372,10 +1376,10 @@ const jiraProjectsStep: WizardStep = {
 
 // Step 8 · Team default model. The same shared ModelTierSelector the org
 // max-tier step uses (step 4), team-scoped — the model this team delegates
-// with by default, clamped down to the workspace cap if it exceeds it. No load
-// of its own — reads the repos step's seeded team form; persistTeamSettings
-// guards against saving when that load failed. isComplete requires a chosen
-// model (seeded default "sonnet", so a returning team reads complete).
+// with by default. No load of its own — reads the repos step's seeded team form;
+// persistTeamSettings guards against saving when that load failed. isComplete
+// requires a chosen model, which the team GET always carries (the settings row
+// defaults to one), so a returning team reads complete.
 const teamModelStep: WizardStep = {
   id: 'team-model',
   section: 'team',
@@ -1387,7 +1391,7 @@ const teamModelStep: WizardStep = {
     if (warning) toast.info(warning)
   },
   collapsedSummary: (s) =>
-    `Default model: ${TIER_LABELS[s.team.default_model] ?? s.team.default_model}`,
+    `Default model: ${s.team.default_model ? modelDisplayName(s.team.default_model) : 'Not chosen'}`,
   render: (ctx) => <TeamModelStep {...ctx} />,
 }
 

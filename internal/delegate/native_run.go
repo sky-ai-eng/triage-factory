@@ -53,7 +53,6 @@ const toolHostDialTimeout = 60 * time.Second
 // seconds of that. Every failure ahead of engine.Run therefore comes back as a
 // launchErr for the dispatcher to retry; only the loop itself writes terminals.
 func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
-	model = nativeWireModel(model)
 	orgID := cfg.orgID
 	namespace := memoryNamespace(cfg.blueprintRunID)
 	claudeCwd := cfg.wtPath

@@ -1120,10 +1120,10 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 // A claim under a blueprint that has already finished is something else: a
 // follow-up on concluded work, whose model is a fresh decision rather than an
 // inherited one. It gets the team's current default. The alternative is worse
-// than it sounds — a three-step review blueprint ends in a cheap aggregator
-// (stepModelOrInherit's downgrade), so inheriting would answer a person's
-// first-ever follow-up with the aggregator, at exactly the moment they are
-// deciding whether follow-ups work at all.
+// than it sounds — a blueprint's last step is often its cheapest, a mechanical
+// assembly step someone pinned down on purpose, so inheriting would answer a
+// person's first-ever follow-up with that step's model, at exactly the moment
+// they are deciding whether follow-ups work at all.
 //
 // Nothing is written: the conversation row keeps the model its step ran on, and
 // no blueprint step's model moves. Only this turn is re-modelled.
@@ -1137,33 +1137,28 @@ func (s *Spawner) modelForClaim(ctx context.Context, orgID string, br *domain.Bl
 	return conv.Model
 }
 
-// stepModelOrInherit resolves the model a blueprint step runs on from its
-// per-step override (Prompt.Model, frozen into the plan as
-// BlueprintPlanStep.Model) and the run's inherited model — the team default for
-// step 0, the prior step's model on an advance. `inherited` has already been
-// through the org max-tier cap (domain.EffectiveModel in resolveAIModelForTeam).
+// stepModelOrInherit resolves the model a blueprint step runs on: its own pin
+// (Prompt.Model, frozen into the plan as BlueprintPlanStep.Model) when it has
+// one, otherwise the run's inherited model — the team default for step 0, the
+// prior step's model on an advance.
 //
-// The override is DOWNGRADE-ONLY: it applies only when it names a known, cheaper
-// tier than `inherited`. A same-or-higher — or unrecognized — override is
-// ignored. This lets a step pick a cheaper model (the shipped PR-review
-// blueprint runs Opus reviewers, then drops its aggregator step to Haiku)
-// while making it structurally impossible for a per-step value to escalate past
-// the org cap baked into `inherited`. An empty override inherits unchanged,
-// preserving the long-standing one-model-per-blueprint behavior. Honoring a
-// within-cap escalation would require threading the org cap down to here; no
-// shipped or known use needs it yet.
+// Two states, and there is no third. A step is unset and inherits, or it is
+// pinned and runs on what it names; a pin is never ranked, compared, or
+// overruled here. Which models a prompt may name is settled where it is saved —
+// the catalog is the accepted set — and a dispatch that quietly substituted
+// something else would leave the transcript and the ledger describing a model
+// nobody chose.
+//
+// `inherited` has already been through the org max-tier cap
+// (domain.EffectiveModel in resolveAIModelForTeam). A pin has not, and is
+// deliberately not held to it: that cap ranks three Anthropic tiers and can
+// place almost nothing else the catalog offers, so applying it to a pin would
+// mean discarding every model it cannot compare.
 func stepModelOrInherit(stepModel, inherited string) string {
 	if stepModel == "" {
 		return inherited
 	}
-	stepTier := domain.ParseTier(stepModel)
-	if stepTier == domain.TierUnknown {
-		return inherited
-	}
-	if stepTier < domain.ParseTier(inherited) {
-		return stepTier.String()
-	}
-	return inherited
+	return stepModel
 }
 
 // enqueueBlueprintStep mints a queued conversations row for step stepIndex

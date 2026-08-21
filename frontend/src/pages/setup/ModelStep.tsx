@@ -5,7 +5,8 @@
 // the ceiling/ghost treatment); the team step picks the team's default.
 
 import ModelTierSelector from '../settings/ModelTierSelector'
-import { MODEL_CAP_OPTIONS, MODEL_TIER_OPTIONS } from '../settings/modelTiers'
+import { MODEL_CAP_OPTIONS, modelOptionsFrom } from '../settings/modelTiers'
+import { useModelCatalog } from '../../hooks/useModelCatalog'
 import type { StepContext } from './types'
 
 // OrgModelStep body — the workspace max-tier cap.
@@ -32,9 +33,13 @@ export function OrgModelStep({ state, patch }: StepContext) {
   )
 }
 
-// TeamModelStep body — the team's default delegation model.
+// TeamModelStep body — the team's default delegation model, drawn from the
+// org's model catalog. The stored value is the catalog key; the picker shows
+// the display name. Until the read lands the selector renders nothing to pick
+// from, which is right: offering a guess would offer a value the save rejects.
 export function TeamModelStep({ state, patch }: StepContext) {
-  const choose = (tier: string) => patch({ team: { ...state.team, default_model: tier } })
+  const { models, loaded } = useModelCatalog()
+  const choose = (model: string) => patch({ team: { ...state.team, default_model: model } })
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -42,16 +47,19 @@ export function TeamModelStep({ state, patch }: StepContext) {
           This team&rsquo;s default model
         </h2>
         <p className="text-[13px] leading-relaxed text-text-tertiary">
-          The model this team delegates with by default — clamped down to the workspace cap if it
-          exceeds it.
+          The model this team delegates with by default — every step that pins none runs on it.
         </p>
       </div>
-      <ModelTierSelector
-        value={state.team.default_model}
-        onChange={choose}
-        options={MODEL_TIER_OPTIONS}
-        ariaLabel="Team default model"
-      />
+      {loaded && models.length === 0 ? (
+        <p className="text-[13px] text-text-tertiary">No models are available to this workspace.</p>
+      ) : (
+        <ModelTierSelector
+          value={state.team.default_model}
+          onChange={choose}
+          options={modelOptionsFrom(models)}
+          ariaLabel="Team default model"
+        />
+      )}
     </div>
   )
 }

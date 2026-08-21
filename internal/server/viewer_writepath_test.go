@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -152,7 +153,7 @@ func assertViewOnly403(t *testing.T, rec *httptest.ResponseRecorder, what string
 func TestViewer_PromptEdit_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	id := r.seedPrompt(t, "edit-me")
-	body := map[string]string{"name": "edit-me", "body": "rewritten", "model": "sonnet"}
+	body := map[string]string{"name": "edit-me", "body": "rewritten", "model": domain.ModelSonnet}
 
 	// Viewer read succeeds.
 	rec := httptest.NewRecorder()
@@ -188,7 +189,7 @@ func TestViewer_PromptEdit_Forbidden(t *testing.T) {
 func TestViewer_PromptCreate_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
 	// Sole-team callers omit team_id; the resolver falls back to their one team.
-	body := map[string]string{"name": "new-prompt", "body": "mission", "model": "sonnet"}
+	body := map[string]string{"name": "new-prompt", "body": "mission", "model": domain.ModelSonnet}
 
 	rec := httptest.NewRecorder()
 	r.ph.handlePromptCreate(rec, r.req(http.MethodPost, "/api/prompts", r.viewer, body))

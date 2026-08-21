@@ -326,9 +326,9 @@ func TestBootstrapNewOrg_SeedsFullStack(t *testing.T) {
 // acceptance property that a fresh org's first team (BootstrapNewOrg) and a
 // later second team (BootstrapNewTeam) both get the full shipped set — as
 // their own distinct rows, not shared/aliased ids — plus the per-kind
-// enabled state (rules enabled, triggers disabled) and the previously-
-// dropped per-prompt model override (the PR-review aggregate ships
-// Model="haiku"; the retired PromptStore.SeedOrUpdate-based seeder lost it).
+// enabled state (rules enabled, triggers disabled) and each copy's per-prompt
+// model, which a seeder that dropped it would silently change what every
+// seeded step runs on.
 func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 	conn := openInMemorySQLite(t)
 	stores := sqlitestore.New(conn)
@@ -363,15 +363,15 @@ func TestSeedShippedIntoTeam_DistinctUUIDsAcrossTeams(t *testing.T) {
 	if p1.ID == p2.ID {
 		t.Errorf("both teams' system-pr-review-aggregate prompt share id %q; want distinct per-team UUIDs", p1.ID)
 	}
-	// The per-step model override (dropped by the retired seeder) must
-	// carry through on both teams' copies.
-	if p1.Model != "haiku" {
-		t.Errorf("team1 system-pr-review-aggregate model=%q, want haiku", p1.Model)
+	// Each copy carries the shipped prompt's own model, whatever it is.
+	wantModel := shippedModel(t, "system-pr-review-aggregate")
+	if p1.Model != wantModel {
+		t.Errorf("team1 system-pr-review-aggregate model=%q, want %q", p1.Model, wantModel)
 	}
-	if p2.Model != "haiku" {
-		t.Errorf("team2 system-pr-review-aggregate model=%q, want haiku", p2.Model)
+	if p2.Model != wantModel {
+		t.Errorf("team2 system-pr-review-aggregate model=%q, want %q", p2.Model, wantModel)
 	}
-	// A sibling step prompt with no override still inherits (empty model).
+	// A sibling step prompt inherits too (empty model).
 	if sec, err := stores.Prompts.GetBySystemSlug(ctx, org, team1, "system-pr-review-security"); err != nil || sec == nil || sec.Model != "" {
 		t.Errorf("team1 system-pr-review-security model=%v err=%v, want empty (inherit)", sec, err)
 	}
@@ -639,4 +639,20 @@ func countSystemHandlers(t *testing.T, conn *sql.DB, teamID string) int {
 		t.Fatalf("count system handlers: %v", err)
 	}
 	return n
+}
+
+// shippedModel is the Model the shipped seed names for a slug — the value a
+// team's copy must carry. Read from the seed rather than written as a literal:
+// no seed names a model today (a seed goes to every org, whatever its
+// providers), and a literal here would be asserting a decision this test does
+// not own.
+func shippedModel(t *testing.T, slug string) string {
+	t.Helper()
+	for _, p := range promptseed.Prompts() {
+		if p.SystemSlug == slug {
+			return p.Model
+		}
+	}
+	t.Fatalf("no shipped prompt with slug %q", slug)
+	return ""
 }

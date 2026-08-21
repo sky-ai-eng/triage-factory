@@ -906,7 +906,7 @@ func TestTeamSettingsPatch_ModelExceedsOrgCap_Warns(t *testing.T) {
 	s := newTestServer(t)
 	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
 
-	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "opus"})
+	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelOpus})
 	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the org cap") {
 		t.Errorf("expected org-cap warning, got warning=%q", w)
 	}
@@ -916,7 +916,7 @@ func TestTeamSettingsPatch_ModelWithinOrgCap_NoWarning(t *testing.T) {
 	s := newTestServer(t)
 	patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "opus"})
 
-	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "sonnet"})
+	resp := patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelSonnet})
 	if w := settingsWarning(resp); w != "" {
 		t.Errorf("expected no warning when team default is within cap, got %q", w)
 	}
@@ -924,7 +924,7 @@ func TestTeamSettingsPatch_ModelWithinOrgCap_NoWarning(t *testing.T) {
 
 func TestOrgSettingsPatch_CapBelowTeamDefault_Warns(t *testing.T) {
 	s := newTestServer(t)
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "opus"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelOpus})
 
 	resp := patchOrgSettingsOK(t, s, map[string]any{"max_llm_model_tier": "sonnet"})
 	if w := settingsWarning(resp); !strings.Contains(w, "exceeds the new cap") {
@@ -1226,7 +1226,7 @@ func TestTeamSettingsPatch_ReviewPosture(t *testing.T) {
 
 	// An unrelated save leaves the stored posture alone.
 	patchTeamSettingsOK(t, s, "default", map[string]any{"review_posture": domain.ReviewPostureAuto})
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "haiku"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelHaiku})
 	if got := teamReviewPosture(t, s); got != domain.ReviewPostureAuto {
 		t.Errorf("an unrelated save clobbered the posture: got %q, want %q", got, domain.ReviewPostureAuto)
 	}
@@ -1293,7 +1293,7 @@ func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	}
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{"base_branch_push_policy": domain.BaseBranchPushAlways})
-	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": "haiku"})
+	patchTeamSettingsOK(t, s, "default", map[string]any{"ai_model": domain.ModelHaiku})
 	if got := teamBasePushPolicy(t, s); got != domain.BaseBranchPushAlways {
 		t.Errorf("an unrelated save clobbered the policy: got %q, want %q", got, domain.BaseBranchPushAlways)
 	}

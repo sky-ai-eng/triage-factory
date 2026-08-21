@@ -8,10 +8,12 @@ import (
 	"time"
 )
 
-// DefaultModel is the model tier TF falls back to when a team has no
-// explicit default. Shared by DefaultTeamSettings (the stored default) and
-// EffectiveModel (the resolution fallback) so the two can't drift.
-const DefaultModel = "sonnet"
+// DefaultModel is the model TF provisions a team with when nobody has chosen
+// one yet. Shared by DefaultTeamSettings (the stored default) and
+// EffectiveModel (the resolution fallback) so the two can't drift, and pinned
+// to the same value as the team_settings.default_model column default, which
+// is what a partial write materializes a row from.
+const DefaultModel = ModelSonnet
 
 // DefaultBranchTemplate is the branch-name convention suggested to delegated
 // agents as envelope guidance (not enforced). The literal "<ticket-id>" is
@@ -144,7 +146,18 @@ type OrgSettings struct {
 
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
-	MaxLLMModelTier       string // app-validated, NOT DB-constrained; known values "haiku" | "sonnet" | "opus" | "" (no cap) — not an exhaustive set
+	// MaxLLMModelTier is the org's ceiling over the three Anthropic tiers,
+	// stored as the bare tier word ("haiku" | "sonnet" | "opus"; "" = no cap).
+	// App-validated, NOT DB-constrained. It is the one model setting that still
+	// speaks tier words rather than concrete ids, because a rank is all it is:
+	// it can only place models the ladder orders, which is three of them.
+	//
+	// TODO(TFAC-703): replace this column with the org's enable-set — a list of
+	// models with an on/off each — and delete the tier ladder (domain.ModelTier,
+	// ParseTier, EffectiveModel) along with it. A set says which models may be
+	// picked without claiming any is better than another, which is the claim a
+	// ceiling has to make and the catalog declines to.
+	MaxLLMModelTier string
 
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
 	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
@@ -325,7 +338,7 @@ type TeamSettings struct {
 	JiraProjects               []string
 	AIReprioritizeThreshold    int
 	AIPreferenceUpdateInterval int
-	DefaultModel               string // "haiku" | "sonnet" | "opus"
+	DefaultModel               string // a model catalog key; "" inherits
 	AutoDelegateEnabled        bool
 	// AutoModeEnabled starts SDK-runtime delegated conversations in Claude
 	// Code's auto permission mode. Local mode honors the stored team choice;

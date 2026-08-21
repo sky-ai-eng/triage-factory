@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { initialWizardState, persistOrgFields, bedrockFormError } from './steps'
+import { initialWizardState, persistOrgFields, bedrockFormError, WIZARD_STEPS } from './steps'
 import type { WizardState } from './types'
 
 // The org save is FIELD-SCOPED: a step's persist names exactly the fields its
@@ -216,5 +216,32 @@ describe('bedrockFormError — Bedrock form validation (TFAC-68)', () => {
       },
     )
     expect(bedrockFormError(s)).toMatch(/region/i)
+  })
+})
+
+// The team-default step's collapsed summary. A model is stored as an opaque
+// catalog key, so the summary has to render it through the catalog — and the
+// unset case is a real state (the form starts blank, and the wizard's own
+// validate asks the user to choose), which must read as words rather than as
+// "Default model: " with nothing after it.
+describe('team-model step — collapsed summary', () => {
+  const teamModelStep = () => {
+    const step = WIZARD_STEPS.find((s) => s.id === 'team-model')
+    if (!step) throw new Error('team-model step is missing from WIZARD_STEPS')
+    return step
+  }
+
+  it('names the unmade choice rather than trailing off blank', () => {
+    const state = initialWizardState()
+    expect(state.team.default_model).toBe('')
+    expect(teamModelStep().collapsedSummary(state)).toBe('Default model: Not chosen')
+  })
+
+  it('renders a chosen model through the catalog', () => {
+    const base = initialWizardState()
+    const state = { ...base, team: { ...base.team, default_model: 'claude-sonnet-5' } }
+    // The catalog read has not landed in this unit, so the key itself is the
+    // name — the point is that a chosen model is never rendered as blank.
+    expect(teamModelStep().collapsedSummary(state)).toBe('Default model: claude-sonnet-5')
   })
 })

@@ -149,8 +149,10 @@ func TestSeedShippedIntoTeam_Postgres_TwoTeamsAndIdempotent(t *testing.T) {
 	if p1ID == p2ID {
 		t.Errorf("both teams' system-pr-review-aggregate prompt share id %q; want distinct per-team UUIDs", p1ID)
 	}
-	if p1Model != "haiku" || p2Model != "haiku" {
-		t.Errorf("system-pr-review-aggregate model: team1=%q team2=%q; want haiku on both", p1Model, p2Model)
+	// Each copy carries the shipped prompt's own model, whatever it is.
+	wantModel := shippedModel(t, "system-pr-review-aggregate")
+	if p1Model != wantModel || p2Model != wantModel {
+		t.Errorf("system-pr-review-aggregate model: team1=%q team2=%q; want %q on both", p1Model, p2Model, wantModel)
 	}
 
 	handlerEnabled := func(team, slug string) bool {

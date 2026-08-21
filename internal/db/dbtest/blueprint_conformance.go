@@ -1008,7 +1008,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		ctx := context.Background()
 		srcID, srcPrompts := seedConversation(t, store, orgID, teamID, "dup-full",
 			[]domain.Prompt{
-				{Name: "Map", Body: "map the surface", Model: "opus", Source: "user"},
+				{Name: "Map", Body: "map the surface", Model: domain.ModelOpus, Source: "user"},
 				{Name: "Write", Body: "write the review", Source: "user"},
 			}, seed, []string{"brief-a", "brief-b"})
 
@@ -1038,7 +1038,7 @@ func RunBlueprintDuplicationConformance(t *testing.T, factory BlueprintDuplicati
 		}
 		wantBody := []string{"map the surface", "write the review"}
 		wantBrief := []string{"brief-a", "brief-b"}
-		wantModel := []string{"opus", ""}
+		wantModel := []string{domain.ModelOpus, ""}
 		for i, st := range steps {
 			if st.StepIndex != i {
 				t.Errorf("step %d index = %d, want %d", i, st.StepIndex, i)

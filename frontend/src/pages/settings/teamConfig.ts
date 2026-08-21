@@ -257,8 +257,13 @@ export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: bo
 
 // emptyTeamConfig leaves repos/github_groups undefined (unloaded) — a save
 // from this state writes neither, rather than wiping them with [].
+//
+// default_model is blank rather than a guessed model: the accepted set is the
+// org's catalog, which this module cannot see, and a name invented here would
+// be one the save rejects. Every real form is seeded from the team GET, whose
+// settings row always carries one.
 export const emptyTeamConfig = (): TeamConfigForm => ({
-  default_model: 'sonnet',
+  default_model: '',
   auto_delegate_enabled: true,
   auto_mode_enabled: true,
   branch_template: 'tfac/<ticket-id>',
@@ -278,7 +283,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
 // what lets saveTeamConfig skip a slice that never loaded.
 export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
   return {
-    default_model: data.team_settings.DefaultModel || 'sonnet',
+    default_model: data.team_settings.DefaultModel,
     auto_delegate_enabled: data.team_settings.AutoDelegateEnabled,
     auto_mode_enabled: data.team_settings.AutoModeEnabled ?? true,
     branch_template: data.team_settings.BranchTemplate || 'tfac/<ticket-id>',

@@ -48,9 +48,8 @@ import {
   type TeamConfigForm,
 } from '../teamConfig'
 import { apiJSON } from '../../../lib/apiClient'
+import { modelDisplayName } from '../../../hooks/useModelCatalog'
 import SettingsSection from './SettingsSection'
-
-const TIER_LABELS: Record<string, string> = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' }
 
 // Review-posting postures, in the order they're offered: the
 // identity-derived default first, then the three fixed choices from most to
@@ -181,7 +180,7 @@ export default function TeamSettings({
   const [groups, setGroups] = useState<GitHubGroup[]>([])
   const [groupsBaseline, setGroupsBaseline] = useState<GitHubGroup[]>([])
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
-  const [defaultModel, setDefaultModel] = useState('sonnet')
+  const [defaultModel, setDefaultModel] = useState('')
   const [autoDelegate, setAutoDelegate] = useState(true)
   const [autoMode, setAutoMode] = useState(true)
   // Advisory branch-name template suggested to delegated agents (TFAC-498).
@@ -537,7 +536,7 @@ export default function TeamSettings({
 
       <SettingsSection
         title="Team defaults"
-        summary={`Model: ${TIER_LABELS[baseline.default_model] ?? baseline.default_model}${
+        summary={`Model: ${baseline.default_model ? modelDisplayName(baseline.default_model) : 'Not set'}${
           baseline.auto_delegate_enabled ? ' · auto-delegate on' : ''
         }${isLocal ? ` · auto mode ${baseline.auto_mode_enabled ? 'on' : 'off'}` : ''} · Reviews: ${
           REVIEW_POSTURE_LABELS[baseline.review_posture] ?? baseline.review_posture
