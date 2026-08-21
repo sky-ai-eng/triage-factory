@@ -88,6 +88,13 @@ func (a *App) registerSubscribers() {
 	// GitHub event. The source event is already durable by then, normal handlers
 	// have completed, and the disposition names any same-task conversation that
 	// already received the event through additive injection.
+	//
+	// Not brainHolderOnly, unlike the sentinel-driven subscribers above. The bus
+	// is in-process and the disposition is published by Router.HandleEvent, whose
+	// only caller is the brain's queue-drain worker, so a standby's bus never
+	// carries one. The guard would also be wrong on the demotion race it exists
+	// for: this kicks no brain-owned manager, and a note reaches its conversation
+	// from any pod, so one handled just after a demotion should still land.
 	a.bus.Subscribe(eventbus.Subscriber{
 		Name:   "pr-coherence-injection",
 		Filter: []string{domain.EventSystemRoutingDisposition},
