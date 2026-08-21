@@ -4,6 +4,7 @@ package localsandbox
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -352,5 +353,166 @@ func TestResolve_SingleCandidateIsNotProbed(t *testing.T) {
 	}
 	if err := Probe(); !errors.Is(err, ErrNotInstalled) && !errors.Is(err, ErrNamespaceRefused) {
 		t.Errorf("Probe = %v, want a classified failure for a broken binary", err)
+	}
+}
+
+// TestClassifyNamespaceRefusal pins the sub-diagnosis the boot refusal's
+// wording turns on: the AppArmor case fires exactly when the knob says
+// AppArmor is the mechanism, and the profile scan answers "is an exemption
+// even on disk" the way AppArmor itself would — by attachment path in a
+// file's content, not by filename, and only for loadable files directly
+// under the profile dir.
+func TestClassifyNamespaceRefusal(t *testing.T) {
+	const bin = "/usr/local/bin/bwrap"
+	refusal := fmt.Errorf("%w: %s: denied", ErrNamespaceRefused, bin)
+
+	// setHost pins the two host inputs the classification reads: the knob
+	// ("" = absent) and the contents of the profile dir, with subdirFiles
+	// landing one directory down where a profile must not be found.
+	setHost := func(t *testing.T, knob string, files, subdirFiles map[string]string) {
+		t.Helper()
+		dir := t.TempDir()
+		restoreKnob, restoreDir := apparmorRestrictKnob, apparmorProfileDir
+		t.Cleanup(func() { apparmorRestrictKnob, apparmorProfileDir = restoreKnob, restoreDir })
+		apparmorRestrictKnob = filepath.Join(dir, "knob")
+		if knob != "" {
+			if err := os.WriteFile(apparmorRestrictKnob, []byte(knob), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		apparmorProfileDir = filepath.Join(dir, "apparmor.d")
+		if err := os.MkdirAll(apparmorProfileDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range files {
+			if err := os.WriteFile(filepath.Join(apparmorProfileDir, name), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, content := range subdirFiles {
+			sub := filepath.Join(apparmorProfileDir, name)
+			if err := os.MkdirAll(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sub, "inner"), []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	profileText := "abi <abi/4.0>,\nprofile bwrap " + bin + " flags=(unconfined) {\n  userns,\n}\n"
+	otherProfile := "profile firefox /usr/bin/firefox {\n}\n"
+
+	t.Run("knob set with a profile on disk", func(t *testing.T) {
+		setHost(t, "1\n", map[string]string{
+			"aa-something-else": otherProfile,
+			"zz-bwrap-userns":   profileText,
+		}, nil)
+		got := classifyNamespaceRefusal(bin, refusal)
+		var aa *AppArmorDenial
+		if !errors.As(got, &aa) {
+			t.Fatalf("classify = %v, want an AppArmorDenial", got)
+		}
+		if aa.Bin != bin {
+			t.Errorf("Bin = %q, want %q", aa.Bin, bin)
+		}
+		if want := filepath.Join(apparmorProfileDir, "zz-bwrap-userns"); aa.ProfileFile != want {
+			t.Errorf("ProfileFile = %q, want %q — the file whose content names the binary", aa.ProfileFile, want)
+		}
+		if !errors.Is(got, ErrNamespaceRefused) {
+			t.Error("sharpening the refusal lost errors.Is(err, ErrNamespaceRefused)")
+		}
+	})
+
+	t.Run("knob set with no profile anywhere", func(t *testing.T) {
+		setHost(t, "1\n", map[string]string{"aa-something-else": otherProfile}, nil)
+		var aa *AppArmorDenial
+		if got := classifyNamespaceRefusal(bin, refusal); !errors.As(got, &aa) {
+			t.Fatalf("classify = %v, want an AppArmorDenial", got)
+		}
+		if aa.ProfileFile != "" {
+			t.Errorf("ProfileFile = %q, want empty when nothing names the binary", aa.ProfileFile)
+		}
+	})
+
+	t.Run("a file inside a subdirectory is not a loadable profile", func(t *testing.T) {
+		setHost(t, "1\n", nil, map[string]string{"disable": profileText})
+		var aa *AppArmorDenial
+		if got := classifyNamespaceRefusal(bin, refusal); !errors.As(got, &aa) {
+			t.Fatalf("classify = %v, want an AppArmorDenial", got)
+		} else if aa.ProfileFile != "" {
+			t.Errorf("ProfileFile = %q, want empty — subdirectories hold includes and disables, not profiles", aa.ProfileFile)
+		}
+	})
+
+	t.Run("knob zero passes the refusal through", func(t *testing.T) {
+		setHost(t, "0\n", map[string]string{"zz-bwrap-userns": profileText}, nil)
+		if got := classifyNamespaceRefusal(bin, refusal); got != refusal {
+			t.Errorf("classify = %v, want the refusal untouched when AppArmor is not the mechanism", got)
+		}
+	})
+
+	t.Run("absent knob passes the refusal through", func(t *testing.T) {
+		setHost(t, "", nil, nil)
+		if got := classifyNamespaceRefusal(bin, refusal); got != refusal {
+			t.Errorf("classify = %v, want the refusal untouched on a kernel without the gate", got)
+		}
+	})
+
+	t.Run("only namespace refusals are classified", func(t *testing.T) {
+		setHost(t, "1\n", nil, nil)
+		other := errors.New("some other failure")
+		if got := classifyNamespaceRefusal(bin, other); got != other {
+			t.Errorf("classify = %v, want a non-refusal untouched even with the knob set", got)
+		}
+		if got := classifyNamespaceRefusal(bin, nil); got != nil {
+			t.Errorf("classify(nil) = %v, want nil", got)
+		}
+	})
+}
+
+// TestProbe_AppArmorDenialCarriesTheResolvedBinary pins the thread from probe
+// to remedy: the profile the refusal tells the operator to write attaches to
+// a path, so the path must be the binary the probe actually ran, not a guess.
+func TestProbe_AppArmorDenialCarriesTheResolvedBinary(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, Binary)
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then echo bubblewrap 0.0.0; exit 0; fi\n" +
+		"echo 'bwrap: setting up uid map: Permission denied' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	restore := distroBinary
+	distroBinary = filepath.Join(t.TempDir(), "absent")
+	t.Cleanup(func() { distroBinary = restore })
+
+	seam := t.TempDir()
+	restoreKnob, restoreDir := apparmorRestrictKnob, apparmorProfileDir
+	t.Cleanup(func() { apparmorRestrictKnob, apparmorProfileDir = restoreKnob, restoreDir })
+	apparmorRestrictKnob = filepath.Join(seam, "knob")
+	if err := os.WriteFile(apparmorRestrictKnob, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apparmorProfileDir = filepath.Join(seam, "apparmor.d")
+	if err := os.MkdirAll(apparmorProfileDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Probe()
+	var aa *AppArmorDenial
+	if !errors.As(err, &aa) {
+		t.Fatalf("Probe = %v, want an AppArmorDenial", err)
+	}
+	if aa.Bin != fake {
+		t.Errorf("Bin = %q, want the probed binary %q", aa.Bin, fake)
+	}
+	if aa.ProfileFile != "" {
+		t.Errorf("ProfileFile = %q, want empty for an empty profile dir", aa.ProfileFile)
+	}
+	if !errors.Is(err, ErrNamespaceRefused) {
+		t.Error("the sharpened refusal lost errors.Is(err, ErrNamespaceRefused)")
 	}
 }

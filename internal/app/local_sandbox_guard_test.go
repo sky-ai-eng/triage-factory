@@ -21,12 +21,19 @@ func TestCheckLocalSandbox_OffIsAlwaysFine(t *testing.T) {
 }
 
 // TestLocalSandboxRefusal_NamesTheFixForTheFailureThatHappened is the
-// regression for a real misdirection: the refusal used to carry both fixes
-// with "install bubblewrap" first, so an operator who installed it and hit the
-// namespace block a second time was told, again, to do the one thing that
-// could not have helped.
+// regression for two real misdirections. First: the refusal used to carry
+// both fixes with "install bubblewrap" first, so an operator who installed it
+// and hit the namespace block a second time was told, again, to do the one
+// thing that could not have helped. Second, from a stock Ubuntu 24.04 field
+// report: the namespace branch used to suggest `systemctl reload apparmor`,
+// but nothing on a stock system ships a bubblewrap AppArmor profile — the
+// bubblewrap deb contains none and the permitting example lives in the
+// not-installed-by-default apparmor-profiles — so a reload loads nothing and
+// the operator who ran it hit the identical wall a third time. The remedy is
+// a permitting profile attached to the resolved binary's path, and the branch
+// that suggests it must know whether such a file even exists.
 //
-// The two branches are asserted for what they must say AND what they must not.
+// Every branch is asserted for what it must say AND what it must not.
 func TestLocalSandboxRefusal_NamesTheFixForTheFailureThatHappened(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -40,18 +47,52 @@ func TestLocalSandboxRefusal_NamesTheFixForTheFailureThatHappened(t *testing.T) 
 			want: []string{"refusing to start", "apt install bubblewrap", "TF_LOCAL_SANDBOX=off"},
 		},
 		{
-			name: "namespace refused never says install it again",
+			name: "apparmor denial with a profile on disk says load THAT file",
+			err: &localsandbox.AppArmorDenial{
+				Bin:         "/usr/bin/bwrap",
+				ProfileFile: "/etc/apparmor.d/bwrap-userns-restrict",
+				Refusal:     fmt.Errorf("%w: denied", localsandbox.ErrNamespaceRefused),
+			},
+			want: []string{
+				"apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict",
+				"userns,",
+				"TF_LOCAL_SANDBOX=off",
+			},
+			// A file that exists is loaded directly, never through the
+			// service reload that only indirectly (and on some hosts not at
+			// all) reaches it — and never by writing a second profile.
+			exclude: []string{"apt install bubblewrap", "systemctl reload", "sudo tee"},
+		},
+		{
+			name: "apparmor denial with no profile ships the whole exemption",
+			err: &localsandbox.AppArmorDenial{
+				Bin:     "/opt/bwrap/bin/bwrap",
+				Refusal: fmt.Errorf("%w: denied", localsandbox.ErrNamespaceRefused),
+			},
+			want: []string{
+				// The stock-Ubuntu fact that makes the reload suggestion a
+				// misdirection, stated rather than implied.
+				"reloading AppArmor loads nothing",
+				// The profile block, attached to the RESOLVED binary's path.
+				"profile bwrap /opt/bwrap/bin/bwrap flags=(unconfined)",
+				"userns,",
+				"apparmor_parser -r /etc/apparmor.d/bwrap",
+				"TF_LOCAL_SANDBOX=off",
+			},
+			exclude: []string{"apt install bubblewrap", "systemctl reload"},
+		},
+		{
+			name: "namespace refused without apparmor names the non-apparmor causes",
 			err:  fmt.Errorf("%w: bwrap: setting up uid map: Permission denied", localsandbox.ErrNamespaceRefused),
 			want: []string{
 				"re-installing will not help",
-				"AppArmor",
-				"systemctl reload apparmor",
+				"container",
 				"TF_LOCAL_SANDBOX=off",
 			},
-			// The exact misdirection that produced this test. `apt install`
-			// must not appear on the branch where the package is already
-			// there, and root must not be suggested on either.
-			exclude: []string{"apt install bubblewrap"},
+			// `apt install` must not appear on a branch where the package is
+			// already there, and the AppArmor remedies must not appear on the
+			// branch that only fires when AppArmor is not the mechanism.
+			exclude: []string{"apt install bubblewrap", "systemctl reload", "apparmor_parser"},
 		},
 	}
 	for _, c := range cases {
@@ -79,6 +120,15 @@ func TestLocalSandboxRefusal_NeverSuggestsRoot(t *testing.T) {
 	for _, err := range []error{
 		fmt.Errorf("%w: not on PATH", localsandbox.ErrNotInstalled),
 		fmt.Errorf("%w: denied", localsandbox.ErrNamespaceRefused),
+		&localsandbox.AppArmorDenial{
+			Bin:         "/usr/bin/bwrap",
+			ProfileFile: "/etc/apparmor.d/bwrap",
+			Refusal:     fmt.Errorf("%w: denied", localsandbox.ErrNamespaceRefused),
+		},
+		&localsandbox.AppArmorDenial{
+			Bin:     "/usr/bin/bwrap",
+			Refusal: fmt.Errorf("%w: denied", localsandbox.ErrNamespaceRefused),
+		},
 		errors.New("an unclassified probe failure"),
 	} {
 		msg := localSandboxRefusal(err).Error()

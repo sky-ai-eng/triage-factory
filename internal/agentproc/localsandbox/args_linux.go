@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -236,19 +237,23 @@ func Resolve() (string, error) {
 	case 1:
 		return candidates[0], nil
 	}
-	var firstErr error
+	var (
+		firstErr error
+		firstBin string
+	)
 	for _, bin := range candidates {
 		if err := smokeTest(bin); err != nil {
 			if firstErr == nil || errors.Is(err, ErrNamespaceRefused) {
 				// A namespace refusal is the more informative failure to
 				// report: it means a real bwrap ran and the host said no.
 				firstErr = err
+				firstBin = bin
 			}
 			continue
 		}
 		return bin, nil
 	}
-	return "", firstErr
+	return "", classifyNamespaceRefusal(firstBin, firstErr)
 }
 
 // binaryCandidates lists the bubblewrap binaries worth trying, PATH first and
@@ -282,7 +287,7 @@ func Probe() error {
 	if err != nil {
 		return err
 	}
-	return smokeTest(bin)
+	return classifyNamespaceRefusal(bin, smokeTest(bin))
 }
 
 // smokeTest answers the two questions that decide whether one bubblewrap is
@@ -309,13 +314,82 @@ func smokeTest(bin string) error {
 	return nil
 }
 
+// classifyNamespaceRefusal sharpens a namespace refusal with the sub-diagnosis
+// the remedy turns on. bwrap's failure looks the same whether the host is a
+// container that blocks nested namespaces or an Ubuntu 23.10+ whose AppArmor
+// restricts user namespaces to exempted binaries, and the fixes are disjoint —
+// so the knob that separates them is read here, on the failure path, and the
+// AppArmor case goes out as an *AppArmorDenial carrying what the boot
+// refusal's wording branches on: the binary the exemption must attach to, and
+// whether any /etc/apparmor.d file even names it. Everything else passes
+// through as the generic refusal.
+func classifyNamespaceRefusal(bin string, err error) error {
+	if err == nil || !errors.Is(err, ErrNamespaceRefused) {
+		return err
+	}
+	if !apparmorRestrictsUserNS() {
+		return err
+	}
+	return &AppArmorDenial{Bin: bin, ProfileFile: apparmorProfileFor(bin), Refusal: err}
+}
+
+// apparmorRestrictKnob is the sysctl that gates unprivileged user namespaces
+// behind AppArmor on Ubuntu 23.10+. A var so the classification tests can pin
+// every reading on a host whose real value is fixed.
+var apparmorRestrictKnob = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+
+// apparmorRestrictsUserNS reads the knob; absent and 0 both mean AppArmor is
+// not the mechanism (absent = not a kernel that has the gate at all).
+func apparmorRestrictsUserNS() bool {
+	b, err := os.ReadFile(apparmorRestrictKnob)
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	return err == nil && n != 0
+}
+
+// apparmorProfileDir is where AppArmor profiles load from, a var for the same
+// testing reason as the knob.
+var apparmorProfileDir = "/etc/apparmor.d"
+
+// apparmorProfileFor returns the profile file whose content names bin, empty
+// when none does. Content match, not filename — AppArmor attaches a profile by
+// the path in its header, and the file carrying it can be called anything
+// (bwrap, bwrap-userns-restrict, ...). Only regular files directly under the
+// dir are scanned: the subdirectories (abstractions, tunables, local, disable)
+// hold includes and disables, not loadable profiles. This is a scan of ~120
+// small files on a stock system, and it runs only on a path that ends in a
+// boot refusal, where its cost is irrelevant and its answer decides the one
+// line the operator acts on.
+func apparmorProfileFor(bin string) string {
+	entries, err := os.ReadDir(apparmorProfileDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		p := filepath.Join(apparmorProfileDir, e.Name())
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(b), bin) {
+			return p
+		}
+	}
+	return ""
+}
+
 // userNSKnobs are the host toggles that actually gate an unprivileged user
 // namespace, in the order an operator should read them. Each is absent on
 // kernels that don't implement it, which is itself informative — an absent
 // apparmor_restrict_unprivileged_userns means this is not an Ubuntu 23.10+
 // host and that is not the cause.
 var userNSKnobs = []string{
-	"/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+	apparmorRestrictKnob,
 	"/proc/sys/user/max_user_namespaces",
 	"/proc/sys/kernel/unprivileged_userns_clone",
 }

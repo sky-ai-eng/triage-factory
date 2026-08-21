@@ -28,7 +28,10 @@
 // backstop that covers what --unshare-pid would have.
 package localsandbox
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // Binary is the bubblewrap executable. Resolved from PATH at spawn (and at
 // the boot probe), never a pinned absolute path: bubblewrap is the distro's
@@ -44,21 +47,62 @@ const Binary = "bwrap"
 // the two spellings agree.
 const AgentHostSocketDest = "/run/tf.sock"
 
-// ErrNotInstalled and ErrNamespaceRefused are the two ways Resolve fails, and
-// they are separate sentinels because the operator fixes them differently and
-// a message that names the wrong fix is worse than no message: someone who
-// runs the install and hits the identical wall a second time has been told to
-// do the one thing that could not have helped.
+// ErrNotInstalled and ErrNamespaceRefused are the two ways the probe fails,
+// and they are separate sentinels because the operator fixes them differently
+// and a message that names the wrong fix is worse than no message: someone
+// who runs the install and hits the identical wall a second time has been
+// told to do the one thing that could not have helped.
 //
 //   - ErrNotInstalled — no bwrap anywhere, or one that cannot even print its
 //     version. Fix: install the distro package.
 //   - ErrNamespaceRefused — bwrap is there and cannot create a user
 //     namespace. Nothing about installing it again changes that; the block is
 //     the host's, and it is usually one of the toggles reported alongside.
+//     When the toggle is AppArmor's, the refusal is sharpened into an
+//     *AppArmorDenial so the remedy can be concrete.
 var (
 	ErrNotInstalled     = errors.New("bubblewrap is not installed")
 	ErrNamespaceRefused = errors.New("bubblewrap cannot create a user namespace")
 )
+
+// AppArmorDenial is a namespace refusal sharpened with the sub-diagnosis the
+// boot refusal's wording turns on: apparmor_restrict_unprivileged_userns is 1
+// on this host, so bubblewrap can only have a user namespace with an AppArmor
+// exemption attached to its path, and ProfileFile says whether one is even on
+// disk. That distinction decides the remedy. On a stock Ubuntu 24.04 install
+// nothing ships a bubblewrap profile — the bubblewrap deb carries none and
+// the base apparmor package ships only the restrictive transition profile —
+// so "reload AppArmor" reloads nothing and the honest fix is writing the
+// exemption; a profile that IS on disk and still not letting bwrap through is
+// instead fixed or loaded in place.
+//
+// It carries data, not wording: the boot guard owns the remedy prose, which
+// keeps every branch of that prose a pure function of this struct and
+// therefore asserted on every host rather than only where a probe happens to
+// fail this way. errors.Is(err, ErrNamespaceRefused) still holds through
+// Refusal, so callers that only care that a namespace was refused are
+// unaffected.
+type AppArmorDenial struct {
+	// Bin is the resolved bubblewrap the host denied — the path a permitting
+	// profile must attach to.
+	Bin string
+
+	// ProfileFile is the /etc/apparmor.d file whose content names Bin, empty
+	// when the scan found none. Content match rather than filename, because
+	// AppArmor attaches a profile by the path in its header, not by what the
+	// file carrying it is called.
+	ProfileFile string
+
+	// Refusal is the underlying ErrNamespaceRefused, carrying bwrap's own
+	// first output line and the userns toggle readings.
+	Refusal error
+}
+
+func (e *AppArmorDenial) Error() string {
+	return fmt.Sprintf("AppArmor restricts unprivileged user namespaces here and %s has no working exemption: %v", e.Bin, e.Refusal)
+}
+
+func (e *AppArmorDenial) Unwrap() error { return e.Refusal }
 
 // Spec is one run's sandbox plan: the paths that exist because THIS run
 // exists. Everything else about the mount plan is a property of the host and
