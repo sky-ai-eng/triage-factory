@@ -674,21 +674,34 @@ func (c *Client) listProjectsCloud(ctx context.Context, query string, startAt, m
 		return ProjectPage{}, err
 	}
 	var result struct {
-		Values []Project `json:"values"`
-		IsLast *bool     `json:"isLast"`
+		Values     []Project `json:"values"`
+		IsLast     *bool     `json:"isLast"`
+		Total      *int      `json:"total"`
+		MaxResults int       `json:"maxResults"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		return ProjectPage{}, fmt.Errorf("parse project search: %w", err)
 	}
-	// isLast is what this endpoint documents as its end-of-catalog signal. A
-	// response without one is walked on the short-page test instead: a full
-	// page may be followed by more, a short one cannot be. Either way an empty
-	// page ends the walk, so a backend ignoring startAt can't loop.
+	// isLast is what this endpoint documents as its end-of-catalog signal, and
+	// total settles the question outright when it is present instead. A response
+	// carrying neither falls back to the short-page test, measured against the
+	// window the server actually served rather than the one asked for: this
+	// endpoint caps its own page and echoes that cap back in maxResults, so a
+	// caller asking for more than the cap is handed a page that is short by the
+	// ask while catalog remains. Either way an empty page ends the walk, so a
+	// backend ignoring startAt can't loop.
 	more := len(result.Values) > 0
-	if result.IsLast != nil {
+	switch {
+	case result.IsLast != nil:
 		more = more && !*result.IsLast
-	} else {
-		more = more && len(result.Values) >= maxResults
+	case result.Total != nil:
+		more = more && startAt+len(result.Values) < *result.Total
+	default:
+		served := result.MaxResults
+		if served <= 0 {
+			served = maxResults
+		}
+		more = more && len(result.Values) >= served
 	}
 	page := ProjectPage{Projects: result.Values}
 	if more {

@@ -1,10 +1,12 @@
 package jira
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -142,6 +144,51 @@ func TestListProjects_CloudFullPageWithoutIsLast(t *testing.T) {
 	}
 	if page.NextStartAt != 12 {
 		t.Errorf("NextStartAt = %d, want 12", page.NextStartAt)
+	}
+}
+
+// TestListProjects_CloudCappedPageWithoutIsLast is what the short-page test
+// gets wrong when it measures against the ask: this endpoint caps its own page,
+// so a caller asking for 100 is served 50 with catalog still behind it. The cap
+// comes back in maxResults, and that is what "short" has to be measured against.
+func TestListProjects_CloudCappedPageWithoutIsLast(t *testing.T) {
+	values := make([]string, 50)
+	for i := range values {
+		values[i] = fmt.Sprintf(`{"key": "P%02d", "name": "Project %d"}`, i, i)
+	}
+	srv, _ := projectServer(t, `{"maxResults": 50, "values": [`+strings.Join(values, ",")+`]}`)
+	page, err := cloudClient(srv.URL).ListProjects(t.Context(), "", 0, 100)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if page.NextStartAt != 50 {
+		t.Errorf("NextStartAt = %d, want 50 — the page filled the server's own cap", page.NextStartAt)
+	}
+}
+
+// TestListProjects_CloudTotalWalksPastAShortPage covers a response carrying
+// total instead of isLast: the catalog size decides, whatever width came back.
+func TestListProjects_CloudTotalWalksPastAShortPage(t *testing.T) {
+	srv, _ := projectServer(t, `{"total": 120, "maxResults": 50, "values": [{"key": "SKY", "name": "Sky"}]}`)
+	page, err := cloudClient(srv.URL).ListProjects(t.Context(), "", 0, 100)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if page.NextStartAt != 1 {
+		t.Errorf("NextStartAt = %d, want 1 — total says 119 rows remain", page.NextStartAt)
+	}
+}
+
+// TestListProjects_CloudTotalEndsTheWalk is the same signal in the other
+// direction: a page reaching total is the last one even at full width.
+func TestListProjects_CloudTotalEndsTheWalk(t *testing.T) {
+	srv, _ := projectServer(t, `{"total": 12, "maxResults": 2, "values": [{"key": "SKY", "name": "Sky"}, {"key": "OPS", "name": "Ops"}]}`)
+	page, err := cloudClient(srv.URL).ListProjects(t.Context(), "", 10, 2)
+	if err != nil {
+		t.Fatalf("ListProjects: %v", err)
+	}
+	if page.NextStartAt != 0 {
+		t.Errorf("NextStartAt = %d, want 0 — startAt 10 plus 2 rows is the whole catalog", page.NextStartAt)
 	}
 }
 
