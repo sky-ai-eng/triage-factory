@@ -16,8 +16,14 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
+
+// credsLog carries this package's one warning: an org whose stored GitHub
+// credential class this build does not understand.
+var credsLog = logging.Component("integrations")
 
 // The four well-known integration secret keys. The local SQLite shim
 // uses these names verbatim as keychain entry keys, and the env
@@ -349,6 +355,43 @@ func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
 		return jira.Config{}, false
 	}
 	return jira.DataCenterPAT(host, c.JiraPAT), true
+}
+
+// GitHubReady reports whether orgID's GitHub access resolves to a usable
+// credential: a stored PAT (the local env overlay is already folded into creds
+// by Load) or a registered, active App. One derivation stands behind both the
+// setup gate and the org's github event-source availability, so the two cannot
+// drift into disagreeing about whether GitHub is connected.
+//
+// Which of the two can apply is the org's credential CLASS, not the presence
+// of an app row: a rowless org is a PAT org today and would equally be an org
+// on a deployment-level shared App, which a row probe would report as
+// unconfigured and send back through setup it does not need. A class this
+// build does not know resolves no App and leaves the PAT signal standing.
+//
+// A failed read is an ERROR, never a false. Reporting one as "not connected"
+// is indistinguishable to the caller from the real answer, and a caller that
+// would rather degrade than fail can say so at its own call site.
+func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore, orgID string, creds auth.Credentials) (bool, error) {
+	if creds.GitHubPAT != "" {
+		return true, nil
+	}
+	orgSet, err := orgs.GetSettings(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read org settings: %w", err)
+	}
+	if orgSet.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
+		if !orgSet.GitHubCredentialClass.Known() {
+			credsLog.WarnContext(ctx, "unknown github credential class; github access resolves from the pat signal alone",
+				"org", orgID, "class", orgSet.GitHubCredentialClass)
+		}
+		return false, nil
+	}
+	app, err := apps.GetForOrg(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read org github app: %w", err)
+	}
+	return app != nil && app.Active && app.ClientID != "", nil
 }
 
 // ClearGitHub removes GitHub credentials for orgID.

@@ -606,6 +606,15 @@ interface EventHandlerBase {
   applies_to_unowned: boolean
   created_at: string
   updated_at: string
+  // source_available: whether the org can still produce events of this
+  // handler's source — derived per read, never stored. Present on the READ
+  // shapes (the list and the single read); absent from a write's answer, which
+  // is the row it stored. False means the handler can never fire as things
+  // stand: the credential is unbound, the workspace disconnected, the licence
+  // lapsed. Such rows are deliberately still listed and still counted — an
+  // unconfigured source is the reader's to fix, so it is explained rather than
+  // hidden. Undefined means no claim; render as available.
+  source_available?: boolean
 }
 
 export interface RuleHandler extends EventHandlerBase {

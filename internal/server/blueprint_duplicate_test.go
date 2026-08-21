@@ -101,6 +101,7 @@ func TestBlueprintDuplicate_NonContiguousYieldsSeparateBlueprints(t *testing.T) 
 
 func TestBlueprintDuplicate_CopyIsTriggerlessSourceUntouched(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	// A triggered source blueprint (1-step). Duplicating its prompt yields a
 	// trigger-less copy; the source keeps its trigger.
 	src, p := createWrappedBlueprint(t, s, "Triggered")

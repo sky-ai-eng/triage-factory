@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react'
 import * as Tooltip from '@radix-ui/react-tooltip'
 import { Check, Copy, ExternalLink, HelpCircle, Plus, Trash2, X } from 'lucide-react'
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { invalidateEventSources } from '../../hooks/useEventSources'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
 
@@ -270,6 +271,9 @@ function WorkspaceRow({
         `/api/slack/workspaces/${encodeURIComponent(workspace.workspace_id)}/${encodeURIComponent(workspace.api_app_id)}`,
         { method: 'DELETE' },
       )
+      // The org's last workspace going away moves slack from available back to
+      // unconfigured; drop the cached answer either way.
+      invalidateEventSources()
       toast.success(`${label} disconnected`)
       onRemoved()
     } catch (e) {
@@ -464,6 +468,7 @@ function ConnectFlow({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      invalidateEventSources()
       onConnected(ws)
       setBotToken('')
       setSigningSecret('')

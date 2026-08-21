@@ -7,7 +7,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -94,10 +93,10 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// tx with the same shape. These feed the config-step fields
 	// (github/jira/github_repos), not the first-run gate.
 	var (
-		creds         auth.Credentials
-		credsErr      error
-		repoCount     int
-		appRegistered bool
+		creds       auth.Credentials
+		credsErr    error
+		repoCount   int
+		githubReady bool
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
@@ -108,31 +107,18 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		}
 		// GitHub access can be satisfied by a registered GitHub App (the
 		// multi-mode path) rather than a PAT, so the setup-complete gate must
-		// count an App as "GitHub configured."
-		//
-		// Whether there is an App to count is the org's credential class, not
-		// the presence of a registration row — a rowless org is a PAT org today
-		// and would equally be an org on a deployment-level shared App, which
-		// this gate would then report as unconfigured and send back through
-		// setup it doesn't need. Best-effort throughout: any read failure, or a
-		// class this build doesn't know, leaves appRegistered false and the PAT
-		// signal still stands, exactly as a failed App read always has.
-		orgSet, se := tx.Orgs.GetSettings(r.Context(), orgID)
-		if se != nil {
-			setupLog.Warn("read org settings failed; github-configured gate falls back to the pat signal", "org", orgID, "error", se)
+		// count an App as "GitHub configured." Best-effort here, unlike the
+		// availability read that shares the derivation: this route answers 200
+		// with configured=false on its own faults, so a failed probe leaves the
+		// PAT signal standing rather than turning a hiccup into a founder sent
+		// back through setup.
+		ready, ge := integrations.GitHubReady(r.Context(), tx.Orgs, tx.GitHubApps, orgID, creds)
+		if ge != nil {
+			setupLog.Warn("github access probe failed; github-configured gate falls back to the pat signal", "org", orgID, "error", ge)
+			githubReady = creds.GitHubPAT != ""
 			return nil
 		}
-		switch orgSet.GitHubCredentialClass {
-		case domain.GitHubCredentialClassPAT:
-			// No App to count; creds.GitHubPAT below is the whole signal.
-		case domain.GitHubCredentialClassBYOApp:
-			if app, ae := tx.GitHubApps.GetForOrg(r.Context(), orgID); ae == nil && app != nil {
-				appRegistered = app.Active && app.ClientID != ""
-			}
-		default:
-			setupLog.Warn("unknown github credential class; github-configured gate falls back to the pat signal",
-				"org", orgID, "class", orgSet.GitHubCredentialClass)
-		}
+		githubReady = ready
 		return nil
 	}); err != nil {
 		// Status endpoint returns 200 with configured=false so the
@@ -169,7 +155,6 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// setup, and bouncing them back through it would be a regression, not a
 	// reminder. Jira stays optional. setup_step tells the gate which configure
 	// screen an incomplete founder resumes on.
-	githubReady := creds.GitHubPAT != "" || appRegistered
 	setupComplete := githubReady && repoCount >= 1
 	setupStep := "done"
 	switch {

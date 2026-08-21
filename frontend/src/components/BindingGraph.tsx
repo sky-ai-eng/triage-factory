@@ -20,6 +20,8 @@ import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useEventSources } from '../hooks/useEventSources'
+import { sourceLabel } from '../lib/eventSources'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import {
   type BindingScope,
@@ -218,10 +220,15 @@ const FALLBACK_NODE = { width: 220, height: 84 }
 // --- Sidebar ---
 
 function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds: Set<string> }) {
+  const { canProduce } = useEventSources()
+
   const groups: Record<string, EventType[]> = {}
   for (const et of eventTypes) {
     if (et.source === 'system') continue
     if (activeIds.has(et.id)) continue
+    // Dragging an event whose source cannot reach this org would bind a
+    // trigger that waits forever — and the create route refuses it anyway.
+    if (!canProduce(et.source)) continue
     if (!groups[et.source]) groups[et.source] = []
     groups[et.source].push(et)
   }
@@ -231,8 +238,16 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
     e.dataTransfer.effectAllowed = 'move'
   }
 
-  const sourceLabels: Record<string, string> = { github: 'GitHub', jira: 'Jira' }
-  const sourceColors: Record<string, string> = { github: 'bg-emerald-500', jira: 'bg-blue-500' }
+  // Dot colours per source; a source with no entry gets the neutral dot rather
+  // than no dot. The NAMES come from the shared label map, so a source added
+  // to the vocabulary can never render here as a raw lowercase key.
+  const sourceColors: Record<string, string> = {
+    github: 'bg-emerald-500',
+    jira: 'bg-blue-500',
+    slack: 'bg-violet-500',
+    linear: 'bg-indigo-500',
+    schedule: 'bg-amber-500',
+  }
 
   const allPlaced = Object.values(groups).every((g) => g.length === 0)
 
@@ -255,7 +270,7 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
                       className={`w-1.5 h-1.5 rounded-full ${sourceColors[source] || 'bg-gray-400'}`}
                     />
                     <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
-                      {sourceLabels[source] || source}
+                      {sourceLabel(source)}
                     </span>
                   </div>
                   {items.map((et) => (
