@@ -22,11 +22,19 @@ type prCoherenceEvent struct {
 	conclusion string
 }
 
+// parsePRCoherenceEvent reads the stored event's metadata, reporting false
+// unless every field this event type's note is built from is present. Event
+// metadata is schema-less stored JSON, so a row is not guaranteed to carry
+// what the sentence needs — and a note whose subject is blank ("CI check ""
+// failed") costs the agent a turn to read and tells it nothing. Fields that
+// merely qualify the note are not required here; injectionBody drops their
+// clause instead.
 func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 	if evt == nil {
 		return prCoherenceEvent{}, false
 	}
 	var parsed prCoherenceEvent
+	var complete bool
 	switch evt.EventType {
 	case domain.EventGitHubPRNewCommits:
 		var meta events.GitHubPRNewCommitsMetadata
@@ -34,46 +42,65 @@ func parsePRCoherenceEvent(evt *domain.Event) (prCoherenceEvent, bool) {
 			return parsed, false
 		}
 		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, oldHeadSHA: meta.PrevHeadSHA}
+		// The new head is both the news and the freshness gate's input — an
+		// absent one would silently disable the gate as well as empty the copy.
+		complete = parsed.headSHA != ""
 	case domain.EventGitHubPRCICheckFailed:
 		var meta events.GitHubPRCICheckFailedMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
 		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, checkURL: meta.CheckURL, conclusion: "failure"}
+		complete = parsed.checkName != ""
 	case domain.EventGitHubPRCICheckPassed:
 		var meta events.GitHubPRCICheckPassedMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
 		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA, checkName: meta.CheckName, conclusion: meta.Conclusion}
+		complete = parsed.checkName != "" && parsed.conclusion != ""
 	case domain.EventGitHubPRConflicts:
 		var meta events.GitHubPRConflictsMetadata
 		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
 			return parsed, false
 		}
 		parsed = prCoherenceEvent{repo: meta.Repo, prNumber: meta.PRNumber, headSHA: meta.HeadSHA}
+		// The transition into CONFLICTING is itself the news; the head only
+		// says where it was observed.
+		complete = true
 	default:
 		return parsed, false
 	}
-	return parsed, parsed.repo != "" && parsed.prNumber > 0
+	return parsed, complete && parsed.repo != "" && parsed.prNumber > 0
 }
 
 func (p prCoherenceEvent) injectionBody(eventType string) string {
 	target := fmt.Sprintf("PR #%d (%s)", p.prNumber, p.repo)
 	head := domain.ShortSHA(p.headSHA)
+	// On a CI or conflict note the head says where the change was observed
+	// rather than what changed, so an absent one drops the clause instead of
+	// leaving "at ." where a SHA belongs.
+	at := ""
+	if head != "" {
+		at = " at " + head
+	}
 	switch eventType {
 	case domain.EventGitHubPRNewCommits:
-		return fmt.Sprintf("%s advanced from %s to %s. Re-pull the branch and reconcile your work with the new head.", target, domain.ShortSHA(p.oldHeadSHA), head)
+		advance := "advanced to " + head
+		if from := domain.ShortSHA(p.oldHeadSHA); from != "" {
+			advance = "advanced from " + from + " to " + head
+		}
+		return fmt.Sprintf("%s %s. Re-pull the branch and reconcile your work with the new head.", target, advance)
 	case domain.EventGitHubPRCICheckFailed:
-		body := fmt.Sprintf("CI check %q failed on %s at %s. Inspect the failure before relying on the current result.", p.checkName, target, head)
+		body := fmt.Sprintf("CI check %q failed on %s%s. Inspect the failure before relying on the current result.", p.checkName, target, at)
 		if p.checkURL != "" {
 			body += " Check details: " + p.checkURL
 		}
 		return body
 	case domain.EventGitHubPRCICheckPassed:
-		return fmt.Sprintf("CI check %q is now %s on %s at %s. Reconcile this recovery with any CI-fix work in progress.", p.checkName, p.conclusion, target, head)
+		return fmt.Sprintf("CI check %q is now %s on %s%s. Reconcile this recovery with any CI-fix work in progress.", p.checkName, p.conclusion, target, at)
 	case domain.EventGitHubPRConflicts:
-		return fmt.Sprintf("%s is now in GitHub's CONFLICTING merge state at %s. Refresh the base and resolve the merge conflicts before finalizing.", target, head)
+		return fmt.Sprintf("%s is now in GitHub's CONFLICTING merge state%s. Refresh the base and resolve the merge conflicts before finalizing.", target, at)
 	default:
 		return ""
 	}
@@ -112,7 +139,7 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 	}
 	parsed, ok := parsePRCoherenceEvent(original)
 	if !ok {
-		delegateLog.Warn("PR coherence injection: parse source metadata failed", "event", disposition.EventID, "event_type", disposition.EventType)
+		delegateLog.Warn("PR coherence injection: source metadata unusable", "event", disposition.EventID, "event_type", disposition.EventType)
 		return
 	}
 

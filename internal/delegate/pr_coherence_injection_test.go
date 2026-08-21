@@ -296,3 +296,65 @@ func TestHandlePRCoherence_AnchoredReviewStillReceivesCIFailure(t *testing.T) {
 		t.Fatalf("anchored review did not receive the CI note: %+v", got)
 	}
 }
+
+// TestHandlePRCoherence_IncompleteMetadataDeliversNothing: stored event
+// metadata missing the field the note is built from produces no note at all,
+// rather than one whose subject renders blank.
+func TestHandlePRCoherence_IncompleteMetadataDeliversNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		metadata  any
+	}{
+		{"NewCommitsWithoutHead", domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
+			Repo: "o/r", PRNumber: 7, PrevHeadSHA: "old-head",
+		}},
+		{"CIFailedWithoutCheckName", domain.EventGitHubPRCICheckFailed, events.GitHubPRCICheckFailedMetadata{
+			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
+		}},
+		{"CIPassedWithoutConclusion", domain.EventGitHubPRCICheckPassed, events.GitHubPRCICheckPassedMetadata{
+			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head", CheckName: "test",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, conversationID, _, source := coherenceFixture(t, tc.eventType, tc.metadata)
+			s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+			if got := flushOne(t, s, conversationID); len(got) != 0 {
+				t.Fatalf("incomplete metadata still produced a note: %+v", got)
+			}
+		})
+	}
+}
+
+// TestHandlePRCoherence_MissingQualifiersDropTheirClause: a field that only
+// qualifies the note is omitted rather than rendered blank, because the news
+// itself is still real.
+func TestHandlePRCoherence_MissingQualifiersDropTheirClause(t *testing.T) {
+	t.Run("ConflictsWithoutHead", func(t *testing.T) {
+		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRConflicts, events.GitHubPRConflictsMetadata{
+			Repo: "o/r", PRNumber: 7,
+		})
+		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+		got := flushOne(t, s, conversationID)
+		if len(got) != 1 {
+			t.Fatalf("conflicts note not delivered: %+v", got)
+		}
+		if !strings.Contains(got[0].Body, "CONFLICTING merge state.") || strings.Contains(got[0].Body, " at ") {
+			t.Errorf("conflicts note rendered a blank head clause: %q", got[0].Body)
+		}
+	})
+
+	t.Run("NewCommitsWithoutPrevHead", func(t *testing.T) {
+		s, conversationID, _, source := coherenceFixture(t, domain.EventGitHubPRNewCommits, events.GitHubPRNewCommitsMetadata{
+			Repo: "o/r", PRNumber: 7, HeadSHA: "new-head",
+		})
+		s.HandlePRCoherence(coherenceDisposition(t, source, ""))
+		got := flushOne(t, s, conversationID)
+		if len(got) != 1 {
+			t.Fatalf("new-commits note not delivered: %+v", got)
+		}
+		if !strings.Contains(got[0].Body, "advanced to new-head") || strings.Contains(got[0].Body, "from  to") {
+			t.Errorf("new-commits note rendered a blank from clause: %q", got[0].Body)
+		}
+	})
+}
