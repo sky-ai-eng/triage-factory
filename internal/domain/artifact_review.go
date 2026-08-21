@@ -181,8 +181,8 @@ func NewSubmittedReviewArtifact(repoPath string, number, reviewID int, state, ht
 }
 
 // ReviewAnchoredAtHead reports whether a review artifact is already anchored at
-// (or has reconciled to) headSHA — the freshness gate the new-commits notifier
-// uses to skip a note when the agent's checkout is not actually behind (TFAC-501).
+// (or has reconciled to) headSHA — the freshness gate the PR coherence feed
+// uses to skip a note when the agent's checkout is not actually behind.
 //
 // "Anchored at headSHA" means headSHA is among the SHAs the review has recorded
 // working against: the start-review head (details.HeadSHA) OR any staged comment's

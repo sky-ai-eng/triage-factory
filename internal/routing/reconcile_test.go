@@ -173,14 +173,14 @@ func TestReconcile_LeavesLiveWorkAlone(t *testing.T) {
 	// PROJ calls "Shipped" done; OPS does not, and calls "Done" done.
 	seedJiraDoneRules(t, database, runmode.LocalDefaultTeamID,
 		domain.JiraProjectStatusRules{
-			ProjectKey: "PROJ", PickupMembers: []string{"To Do"},
-			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-			DoneMembers: []string{"Shipped"}, DoneCanonical: "Shipped",
+			ProjectKey: "PROJ", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Shipped"), DoneCanonical: jiraRef("Shipped"),
 		},
 		domain.JiraProjectStatusRules{
-			ProjectKey: "OPS", PickupMembers: []string{"To Do"},
-			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-			DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+			ProjectKey: "OPS", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		},
 	)
 

@@ -84,19 +84,22 @@ func (a *App) registerSubscribers() {
 			Handle: a.brainHolderOnly(func(evt domain.Event) { a.marketplaceStats.Trigger(evt.OrgID) }),
 		})
 	}
-	// New-commits review-freshness injection (TFAC-501): when a reviewed PR's head
-	// advances, tell the run authoring the review — live if warm, else staged for
-	// next resume — to re-pull and reconcile. The spawner owns the lookup +
-	// deliver-or-stage; this just routes the event. The bus is the right (lossy)
-	// channel: the injection is an early-warning best-effort feed (the finalize gate
-	// reconciles regardless), the same delivery guarantee ws-broadcast has.
+	// PR coherence runs from the router's settled disposition rather than the raw
+	// GitHub event. The source event is already durable by then, normal handlers
+	// have completed, and the disposition names any same-task conversation that
+	// already received the event through additive injection.
+	//
+	// Not brainHolderOnly, unlike the sentinel-driven subscribers above. The bus
+	// is in-process and the disposition is published by Router.HandleEvent, whose
+	// only caller is the brain's queue-drain worker, so a standby's bus never
+	// carries one. The guard would also be wrong on the demotion race it exists
+	// for: this kicks no brain-owned manager, and a note reaches its conversation
+	// from any pod, so one handled just after a demotion should still land.
 	a.bus.Subscribe(eventbus.Subscriber{
-		Name:   "pr-new-commits-injection",
-		Filter: []string{domain.EventGitHubPRNewCommits},
-		Handle: a.spawner.HandlePRNewCommits,
+		Name:   "pr-coherence-injection",
+		Filter: []string{domain.EventSystemRoutingDisposition},
+		Handle: a.spawner.HandlePRCoherence,
 	})
-	// TODO(TFAC-851): Also inject CI failures, CI passes, and merge conflicts
-	// without absorbing any task routing those events independently trigger.
 }
 
 // brainHolderOnly wraps a subscriber handler so it fires only while this

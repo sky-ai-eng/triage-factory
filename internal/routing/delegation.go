@@ -53,6 +53,15 @@ import (
 // find unchanged is a skip, not an error, or the event burns its attempt
 // budget and parks over a standing condition.
 func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string) (fired bool, err error) {
+	return r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, triggeringEventID, actingTeamID, nil)
+}
+
+// tryAutoDelegateTrackingInjection is tryAutoDelegate with an optional output
+// for the one conversation that consumed this event through the same-task
+// additive path. The routing-disposition subscriber uses that identity to
+// suppress only the informational duplicate while leaving every task/rule
+// write on the normal router path.
+func (r *Router) tryAutoDelegateTrackingInjection(ctx context.Context, orgID string, task *domain.Task, trigger domain.EventHandler, entityID string, triggeringEventID string, actingTeamID string, injectedConversationID *string) (fired bool, err error) {
 	// Exclusive claim: one task, one owner. If the bot has already
 	// claimed this task on behalf of a different team (an earlier
 	// matched team won the CAS), this team's trigger must not pile on a
@@ -209,6 +218,9 @@ func (r *Router) tryAutoDelegate(ctx context.Context, orgID string, task *domain
 			// while its conversation stayed live, which this new event
 			// re-commits.
 			if r.tryAdditiveInjection(ctx, orgID, entityID, activeConversationID, task, trigger, triggeringEventID, claimStamp(agentID, actingTeamID)) {
+				if injectedConversationID != nil {
+					*injectedConversationID = activeConversationID
+				}
 				return false, nil
 			}
 			// The conversation went terminal between the gate read and the
@@ -350,13 +362,15 @@ func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conv
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 
-	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body, delegate.AdditiveFiringRef{
-		EntityID:          entityID,
-		TaskID:            task.ID,
-		TriggerID:         trigger.ID,
-		TriggeringEventID: triggeringEventID,
-		TaskClaim:         claim,
-	})
+	outcome := r.spawner.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, trigger.EventType, body,
+		domain.NoteProvenance{EventID: triggeringEventID, EventType: trigger.EventType},
+		delegate.AdditiveFiringRef{
+			EntityID:          entityID,
+			TaskID:            task.ID,
+			TriggerID:         trigger.ID,
+			TriggeringEventID: triggeringEventID,
+			TaskClaim:         claim,
+		})
 	switch outcome {
 	case delegate.InjectNotDelivered:
 		return false

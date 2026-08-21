@@ -129,6 +129,20 @@ type MessageWindow struct {
 	Limit    int
 }
 
+// PRCoherenceTargetQuery describes the three independent ways a conversation
+// can be working on a PR: its task entity, a pending review target, or a
+// materialized PR/head-branch checkout. EventID is the duplicate fence for
+// same-task additive delivery.
+type PRCoherenceTargetQuery struct {
+	EntityID     string
+	EventID      string
+	BaseRepo     string
+	HeadRepo     string
+	ReviewTarget string
+	PRRef        string
+	BranchRef    string
+}
+
 // Returned-row shapes. The lifecycle writes below split by which
 // table they land on, and the split decides what each returns:
 //
@@ -360,6 +374,13 @@ type ConversationStore interface {
 	//
 	// Empty taskIDs returns nil. MemoryMissing + claim fields derived per Get.
 	ListForTasks(ctx context.Context, orgID string, taskIDs []string, opts ListOpts) ([]domain.Conversation, int, error)
+
+	// ListPRCoherenceTargetsSystem finds delegation conversations relevant to
+	// one PR event. Relevance is entity-, review-, or checkout-level; EventID
+	// excludes a conversation whose same-task additive path already recorded
+	// the event as injected. Admin-pool only: the coherence subscriber has no
+	// viewer claims and must see every relevant team conversation in the org.
+	ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error)
 
 	// HasActiveAutoConversationForTask returns true if the task has a non-terminal
 	// conversation with trigger_type='event'. Manual delegations are intentionally

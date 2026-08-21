@@ -19,6 +19,17 @@ name: refresh-pricing
 #     unmodeled dimension becomes a reviewed formula change, not silent
 #     underpricing.
 #
+# A third gate lives inside the script itself, ahead of both of these: pricing
+# ELIGIBILITY (internal/inference/provider_map.json). It refuses to write
+# anything — non-zero exit, job fails raw, no PR, no tracking issue — when an
+# upstream entry that already passes the mode/tool-support/context-window bar
+# carries a litellm_provider this repo has never mapped to a bifrost provider.
+# That is deliberate: a brand-new upstream vendor is a decision a human makes
+# by editing provider_map.json, not a silent gap the picker inherits. See
+# scripts/refresh-pricing.sh for the full rule set. When the gate passes, the
+# script also reports every entry that IS eligible and mapped to a supported
+# provider — folded into the PR body below as the "models shipped" signal.
+#
 # Both tracking issues are upserted through scripts/ci-upsert-issue.sh, which
 # dedups on a LABEL rather than a title search — see that script for why a
 # title search silently files a duplicate every day instead. They are also
@@ -144,12 +155,25 @@ jobs:
           number="$(./scripts/ci-upsert-issue.sh pricing-schema-drift "$TITLE" "$BODY_FILE")"
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
+      - name: Extract pricing-eligibility report
+        id: eligible
+        if: steps.gate.outputs.ok == '1'
+        run: |
+          count="$(grep '^PRICING_ELIGIBLE_COUNT:' /tmp/refresh.log | sed 's/^PRICING_ELIGIBLE_COUNT: //' || true)"
+          by_provider="$(grep '^PRICING_ELIGIBLE_BY_PROVIDER:' /tmp/refresh.log | sed 's/^PRICING_ELIGIBLE_BY_PROVIDER: //' || true)"
+          echo "count=${count:-0}" >> "$GITHUB_OUTPUT"
+          echo "by_provider=$by_provider" >> "$GITHUB_OUTPUT"
+          awk '/^PRICING_ELIGIBLE_MODELS_BEGIN$/{f=1;next}/^PRICING_ELIGIBLE_MODELS_END$/{f=0}f' /tmp/refresh.log > /tmp/eligible-models.tsv
+          echo "extracted $(wc -l < /tmp/eligible-models.tsv) eligible model row(s)"
+
       - name: Compose pricing PR body
         id: prbody
         if: steps.gate.outputs.ok == '1'
         env:
           DRIFT: ${{ steps.drift.outputs.fields }}
           DRIFT_ISSUE: ${{ steps.drift_issue.outputs.number }}
+          ELIGIBLE_COUNT: ${{ steps.eligible.outputs.count }}
+          ELIGIBLE_BY_PROVIDER: ${{ steps.eligible.outputs.by_provider }}
         run: |
           SHA="$(jq -r .commit internal/inference/pricing_provenance.json)"
           FETCHED="$(jq -r .fetched internal/inference/pricing_provenance.json)"
@@ -179,6 +203,16 @@ jobs:
               else
                 printf '> Models using them may be underpriced. Address that before relying on the affected models'"'"' cost.\n'
               fi
+            fi
+            printf '\n### Eligible models (%s)\n\n' "$ELIGIBLE_COUNT"
+            printf 'Entries in this snapshot that pass the pricing-eligibility gate — chat + tool support, >=64k input window, priced, and mapped in `internal/inference/provider_map.json` to a bifrost provider TF supports. Not yet filtered to what TF names in a catalog (that lands with the model-catalog work) — this is the raw "could be offered" signal.\n\n'
+            if [ -n "$ELIGIBLE_BY_PROVIDER" ]; then
+              printf 'By provider: `%s`\n\n' "$ELIGIBLE_BY_PROVIDER"
+            fi
+            if [ -s /tmp/eligible-models.tsv ]; then
+              printf '<details>\n<summary>Show all %s eligible models</summary>\n\n| Model | Provider |\n| --- | --- |\n' "$ELIGIBLE_COUNT"
+              awk -F'\t' '{printf "| `%s` | %s |\n", $1, $2}' /tmp/eligible-models.tsv
+              printf '\n</details>\n'
             fi
             cat <<'EOF'
 

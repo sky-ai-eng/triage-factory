@@ -228,9 +228,12 @@ describe('Jira source page', () => {
       jira_projects: [
         {
           key: 'PLAT',
-          pickup: { members: ['Ready'] },
-          in_progress: { members: ['In Progress'], canonical: 'In Progress' },
-          done: { members: ['Done'], canonical: 'Done' },
+          pickup: { members: [{ id: '1', name: 'Ready' }] },
+          in_progress: {
+            members: [{ id: '2', name: 'In Progress' }],
+            canonical: { id: '2', name: 'In Progress' },
+          },
+          done: { members: [{ id: '3', name: 'Done' }], canonical: { id: '3', name: 'Done' } },
         },
       ],
       member_count: 4,

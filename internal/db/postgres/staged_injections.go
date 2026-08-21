@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"encoding/json"
 	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -32,7 +31,7 @@ var _ db.StagedInjectionStore = (*stagedInjectionStore)(nil)
 const stagedInjectionSubtype = "injection:system-note"
 
 func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n domain.StagedInjection) (domain.StagedInjection, error) {
-	meta, err := json.Marshal(map[string]string{"producer": n.Producer})
+	meta, err := db.StagedInjectionMetadata(n)
 	if err != nil {
 		return domain.StagedInjection{}, err
 	}
@@ -45,7 +44,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 		VALUES ($1::uuid, $2::uuid, 'user', $3, $4, $5::jsonb, false)
 		RETURNING id, org_id::text, conversation_id::text, content,
 		          COALESCE(user_id::text, ''), COALESCE(metadata::text, ''), created_at
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, meta).Scan(
 		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &r.UserID, &r.Metadata, &r.CreatedAt,
 	); err != nil {
 		return domain.StagedInjection{}, err

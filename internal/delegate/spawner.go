@@ -112,8 +112,8 @@ type Spawner struct {
 	entities                                db.EntityStore       // entity reads for project lookup + resume context
 	artifacts                               db.ArtifactStore     // review + draft-PR artifact lookup on processCompletion park check
 	// stagedInjections is the durable, producer-agnostic "stage for next
-	// resume" agent-injection queue (TFAC-501). The generic staged-injection
-	// API (StageOrDeliverInjection / stagedInjectionsForResume) appends here
+	// resume" agent-injection queue. The generic staged-injection API
+	// (stageOrDeliverInjection / stagedInjectionsForResume) appends here
 	// when a target run has no warm process and flushes on the next resume.
 	// Admin-pool System methods only — both the producer (an eventbus
 	// subscriber) and the consumer (a resume goroutine) run without JWT

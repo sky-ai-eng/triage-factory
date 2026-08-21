@@ -1,29 +1,59 @@
-import { useEffect, useRef, useState } from 'react'
-import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, ChevronDown, ChevronRight, Search, Trash2 } from 'lucide-react'
 import { Section } from './primitives'
 import JiraStatusRule from '../../components/JiraStatusRule'
-import { emptyProject, projectIsComplete, type JiraProjectConfig } from './teamConfig'
-import { apiJSON } from '../../lib/apiClient'
+import {
+  dropStatus,
+  emptyProject,
+  projectIsArmed,
+  unresolvableStatuses,
+  type JiraProjectConfig,
+} from './teamConfig'
+import type { JiraStatusRef } from '../../components/JiraStatusRule'
+import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
+import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
 
-interface JiraStatus {
-  id: string
+/** How long to wait after the last keystroke before asking the server for the
+ *  filtered catalog. The filter is a round trip to Jira, not an array scan, so
+ *  a request per character would be both wasteful and out of order. */
+const SEARCH_DEBOUNCE_MS = 250
+
+/** normKey is the canonical form of a project key — the same uppercase-trim the
+ *  server applies at the write boundary, so a key from the catalog and a key
+ *  from the stored set compare as one value. */
+const normKey = (key: string): string => key.trim().toUpperCase()
+
+/** One row of the watch table: a project the team already watches, a candidate
+ *  from the catalog, or both. `inCatalog` is false for a watched project the
+ *  credential can no longer see — deleted upstream, or the credential's access
+ *  narrowed — which is exactly the row that still needs to be unwatchable. */
+interface WatchRow {
+  key: string
   name: string
+  watched: boolean
+  inCatalog: boolean
 }
 
 /**
- * JiraProjectRulesGroup is the team-scope Jira project-tracking field group:
- * the list of tracked projects and, per project, the pickup / in-progress /
- * done status rules. A controlled component — the container owns the
- * projects array (`value`) and the actual PUT /api/teams/{id}/jira-projects — so
- * the same editor serves the team Settings tab and the setup wizard's
- * team steps.
+ * JiraProjectRulesGroup is the team-scope Jira project surface: which projects
+ * the team watches, and — per watched project — the pickup / in-progress / done
+ * status rules that arm it.
  *
- * It owns only its own presentational state: per-project expand/collapse and
- * the fetched status options (loaded on demand from /api/jira/statuses,
- * which intersects across the queried projects so the returned list is safe
- * to offer in every project's picker). Org-level Jira *access* (credentials,
- * connect/disconnect) lives in JiraAccessGroup; this is the team-scoped
- * project rules only, suppressed until Jira is connected.
+ * Watching and arming are two steps, not one. The watch table below picks from
+ * the org credential's live catalog and a project joins the tracked set on one
+ * click, carrying no rules at all; mapping its workflow's statuses is a
+ * separate gesture on the board above, which is what turns a watched project
+ * into one the poller can actually ask Jira about. An unarmed project is a
+ * valid saved state, so the board says so plainly rather than blocking the save.
+ *
+ * A controlled component — the container owns the projects array (`value`) and
+ * the actual PUT /api/teams/{id}/jira-projects — so the same editor serves the
+ * team Settings tab and the setup wizard's team steps.
+ *
+ * It owns only its own view state: the catalog page and its search, per-project
+ * expand/collapse, and the fetched status options. Org-level Jira *access*
+ * (credentials, connect/disconnect) lives in JiraAccessGroup; this is the
+ * team-scoped projects only, suppressed until Jira is connected.
  */
 export default function JiraProjectRulesGroup({
   value,
@@ -38,109 +68,432 @@ export default function JiraProjectRulesGroup({
   // Settings keeps the carded default.
   bare?: boolean
 }) {
-  // Statuses keyed by project key so each project's picker pulls from the
-  // right per-project list. The backend intersects across the queried
-  // projects, so the same list is mirrored under each requested key.
-  const [statusesByProject, setStatusesByProject] = useState<Record<string, JiraStatus[]>>({})
-  // The (trimmed) project keys whose status fetch is in flight. Per-key rather
-  // than a single boolean so fetching project A then B doesn't re-enable B's
-  // button when A's request settles first.
+  // Statuses keyed by project key. Fetched per project, on demand, because a
+  // project's statuses come from ITS workflow scheme: querying several at once
+  // returns their intersection, which is safe to offer in every picker but
+  // hides statuses a project genuinely has the moment two watched projects
+  // differ — and watching is cheap now, so they will.
+  const [statusesByProject, setStatusesByProject] = useState<Record<string, JiraStatusRef[]>>({})
+  // The project keys whose status fetch is in flight. Per-key rather than a
+  // single boolean so fetching project A then B doesn't re-enable B's button
+  // when A's request settles first.
   const [loadingKeys, setLoadingKeys] = useState<Set<string>>(new Set())
-  // Per-project expand/collapse keyed by index (the key field is editable
-  // mid-render, so keying on it would drop open/closed state every
-  // keystroke). For the common N=1 case the sole project starts expanded.
-  const [expandedKeys, setExpandedKeys] = useState<Record<string, boolean>>({})
+  // Per-project expand/collapse, keyed by the project key. Keys are chosen from
+  // the catalog rather than typed, so unlike the free-text field this replaced
+  // the key is stable for the row's lifetime and makes a safe map key.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
-  // One-shot mount seed: expand the lone project and pull statuses for any
-  // already-tracked projects. Guarded so editing `value` afterwards doesn't
-  // re-run it (which would clobber the user's expand state / re-fetch).
-  const seeded = useRef(false)
+  const [candidates, setCandidates] = useState<JiraProjectCandidate[]>([])
+  const [catalogError, setCatalogError] = useState('')
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogTruncated, setCatalogTruncated] = useState(false)
+  const [search, setSearch] = useState('')
+
+  const watchedKeys = useMemo(() => new Set(value.map((p) => normKey(p.key))), [value])
+
+  // Current in-flight catalog fetch. Each new one aborts the previous so
+  // out-of-order resolution can't leave the table showing an older search's
+  // results.
+  const abortRef = useRef<AbortController | null>(null)
+  const mountedRef = useRef(true)
   useEffect(() => {
-    if (seeded.current) return
-    seeded.current = true
-    // Expand the lone project. Key on idx_0 (not the project key) to match the
-    // rest of the component — keying on the editable project key would drop
-    // the open state the moment the user edits that key.
-    if (value.length === 1) {
-      setExpandedKeys({ idx_0: true })
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      abortRef.current?.abort()
+      abortRef.current = null
     }
-    if (connected) {
-      const keys = value.map((p) => p.key).filter(Boolean)
-      if (keys.length > 0) void fetchJiraStatuses(keys)
-    }
-    // Mount-only seed — deps intentionally omitted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // fetchJiraStatuses queries the backend for statuses across the given
-  // projects. The returned list is the intersection (a status not in every
-  // queried project would fail TransitionTo), so it's mirrored under each
-  // requested key. Keys are trimmed here regardless of source, so the query is
-  // well-formed and the results are stored under the same trimmed key the
-  // lookup uses (raw call-site keys would store under a key the picker's
-  // trimmed lookup can't find).
-  const fetchJiraStatuses = async (projectKeys?: string[]) => {
-    const keys = (projectKeys ?? value.map((p) => p.key)).map((k) => k.trim()).filter(Boolean)
-    if (keys.length === 0) return
-    setLoadingKeys((prev) => new Set([...prev, ...keys]))
+  const fetchCandidates = useCallback(async (q: string) => {
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
+    setCatalogLoading(true)
     try {
-      const params = keys.map((p) => `project=${encodeURIComponent(p)}`).join('&')
-      const statuses = await apiJSON<JiraStatus[]>(`/api/jira/statuses?${params}`)
-      const next: Record<string, JiraStatus[]> = {}
-      for (const k of keys) next[k] = statuses
-      setStatusesByProject((current) => ({ ...current, ...next }))
+      const page = await listJiraProjects(q, { signal: controller.signal })
+      if (!mountedRef.current || controller.signal.aborted) return
+      setCandidates(page.items)
+      setCatalogTruncated(page.hasMore)
+      setCatalogError('')
+    } catch (e) {
+      if (controller.signal.aborted || !mountedRef.current) return
+      setCandidates([])
+      setCatalogTruncated(false)
+      setCatalogError(httpErrorMessage(e, 'Could not read the Jira project list.'))
+    } finally {
+      if (mountedRef.current && !controller.signal.aborted) setCatalogLoading(false)
+    }
+  }, [])
+
+  // Load the catalog on mount and on each settled search. Nothing is cached
+  // server-side, so this is a live read of what the org credential can see —
+  // which is also what makes it the right thing to re-run when the search
+  // changes rather than filtering a snapshot in memory.
+  useEffect(() => {
+    if (!connected) return
+    const timer = setTimeout(() => void fetchCandidates(search), search ? SEARCH_DEBOUNCE_MS : 0)
+    return () => clearTimeout(timer)
+  }, [connected, search, fetchCandidates])
+
+  // The watch table is the union of what the team watches and what the catalog
+  // offers. Watched rows come first and are always present — including one the
+  // catalog no longer offers, which would otherwise become unremovable — so the
+  // client-side filter applies only to them; the candidates below were already
+  // narrowed by the server.
+  const rows = useMemo<WatchRow[]>(() => {
+    const byKey = new Map(candidates.map((c) => [normKey(c.key), c]))
+    const needle = search.trim().toLowerCase()
+    const out: WatchRow[] = []
+    for (const p of value) {
+      const key = normKey(p.key)
+      if (!key) continue
+      const candidate = byKey.get(key)
+      const name = candidate?.name ?? ''
+      if (
+        needle !== '' &&
+        !key.toLowerCase().includes(needle) &&
+        !name.toLowerCase().includes(needle)
+      ) {
+        continue
+      }
+      out.push({ key, name, watched: true, inCatalog: !!candidate })
+    }
+    for (const c of candidates) {
+      const key = normKey(c.key)
+      if (watchedKeys.has(key)) continue
+      out.push({ key, name: c.name, watched: false, inCatalog: true })
+    }
+    return out
+  }, [candidates, search, value, watchedKeys])
+
+  // fetchJiraStatuses loads one project's statuses. Keys are normalized here
+  // regardless of source, so the results are stored under the same key the
+  // lookup uses.
+  const fetchJiraStatuses = async (projectKey: string) => {
+    const key = normKey(projectKey)
+    if (!key) return
+    setLoadingKeys((prev) => new Set([...prev, key]))
+    try {
+      const statuses = await apiJSON<JiraStatusRef[]>(
+        `/api/jira/statuses?project=${encodeURIComponent(key)}`,
+      )
+      setStatusesByProject((current) => ({ ...current, [key]: statuses }))
     } catch {
       // Non-critical — the picker just shows no options until a retry.
     } finally {
       setLoadingKeys((prev) => {
         const n = new Set(prev)
-        for (const k of keys) n.delete(k)
+        n.delete(key)
         return n
       })
     }
   }
 
-  const updateProject = (i: number, patch: Partial<JiraProjectConfig>) => {
-    const next = value.slice()
-    next[i] = { ...next[i], ...patch }
-    onChange(next)
+  const updateProject = (key: string, patch: Partial<JiraProjectConfig>) => {
+    onChange(value.map((p) => (normKey(p.key) === key ? { ...p, ...patch } : p)))
   }
 
-  const addProject = () => {
-    // The appended section lives at index === current length; stamp that
-    // index into expandedKeys so the same key isExpanded reads next render
-    // starts open.
-    const newIndex = value.length
-    onChange([...value, emptyProject('')])
-    setExpandedKeys((m) => ({ ...m, [`idx_${newIndex}`]: true }))
+  // Removing a vanished status is an edit like any other — it lands in the
+  // form and takes effect on save, so the team sees what changed before it is
+  // written. Clearing a canonical this way leaves the rule incomplete on
+  // purpose: the replacement write target is theirs to pick.
+  const dropUnresolvable = (key: string, status: JiraStatusRef) => {
+    onChange(value.map((p) => (normKey(p.key) === key ? dropStatus(p, status) : p)))
   }
 
-  const removeProject = (i: number) => {
-    const next = value.slice()
-    next.splice(i, 1)
-    onChange(next)
-    // Shift idx_ entries above the removed slot down one; drop idx_i.
-    setExpandedKeys((m) => {
-      const out: Record<string, boolean> = {}
-      for (const [k, v] of Object.entries(m)) {
-        if (!k.startsWith('idx_')) {
-          out[k] = v
-          continue
-        }
-        const idx = Number(k.slice('idx_'.length))
-        if (Number.isNaN(idx) || idx < i) out[k] = v
-        else if (idx > i) out[`idx_${idx - 1}`] = v
-      }
-      return out
+  const watch = (key: string) => {
+    if (watchedKeys.has(key)) return
+    onChange([...value, emptyProject(key)])
+  }
+
+  const unwatch = (key: string) => {
+    onChange(value.filter((p) => normKey(p.key) !== key))
+    setExpanded((m) => {
+      const next = { ...m }
+      delete next[key]
+      return next
     })
   }
 
-  const toggleExpanded = (i: number) => {
-    const id = `idx_${i}`
-    setExpandedKeys((m) => ({ ...m, [id]: !m[id] }))
+  // Expanding a project is what asks for its statuses — the arming step needs
+  // them, and nothing before it does.
+  const toggleExpanded = (key: string) => {
+    const opening = !expanded[key]
+    setExpanded((m) => ({ ...m, [key]: opening }))
+    if (opening && !statusesByProject[key] && !loadingKeys.has(key)) {
+      void fetchJiraStatuses(key)
+    }
   }
 
-  const isExpanded = (i: number): boolean => expandedKeys[`idx_${i}`] === true
+  // Shared workflow schemes are common, so a project whose statuses are all
+  // present in this one's is a mapping worth offering to copy wholesale.
+  //
+  // The match is on the status NAMES, and the copy REMAPS to this project's own
+  // ids. Two projects that spell a status the same way still hold two distinct
+  // status entities with two distinct ids, so copying the source's ids across
+  // would write a rule pointing at statuses this project's workflow does not
+  // have — which the server would refuse, correctly.
+  const copySourcesFor = (key: string): JiraProjectConfig[] => {
+    const names = new Set((statusesByProject[key] ?? []).map((s) => s.name))
+    if (names.size === 0) return []
+    return value.filter((p) => {
+      if (normKey(p.key) === key || !projectIsArmed(p)) return false
+      return [...p.pickup.members, ...p.in_progress.members, ...p.done.members].every((m) =>
+        names.has(m.name),
+      )
+    })
+  }
+
+  const copyMapping = (key: string, source: JiraProjectConfig) => {
+    const byName = new Map((statusesByProject[key] ?? []).map((s) => [s.name, s]))
+    const remap = (refs: JiraStatusRef[]): JiraStatusRef[] =>
+      refs.map((r) => byName.get(r.name)).filter((r): r is JiraStatusRef => r !== undefined)
+    const remapOne = (ref: JiraStatusRef | null | undefined): JiraStatusRef | null =>
+      (ref && byName.get(ref.name)) ?? null
+    updateProject(key, {
+      pickup: { members: remap(source.pickup.members) },
+      in_progress: {
+        members: remap(source.in_progress.members),
+        canonical: remapOne(source.in_progress.canonical),
+      },
+      done: { members: remap(source.done.members), canonical: remapOne(source.done.canonical) },
+    })
+  }
+
+  const watchedProjects = value.filter((p) => normKey(p.key) !== '')
+
+  const board = (
+    <div className="space-y-2">
+      {watchedProjects.length === 0 && (
+        <p className="text-ui text-ink-3 italic">
+          No Jira projects watched yet. Pick one below to start.
+        </p>
+      )}
+      {watchedProjects.map((project) => {
+        const key = normKey(project.key)
+        const statuses = statusesByProject[key] || []
+        const missing = unresolvableStatuses(project, statuses)
+        const armed = projectIsArmed(project)
+        const isOpen = expanded[key] === true
+        const sources = isOpen && !armed ? copySourcesFor(key) : []
+        return (
+          <div
+            key={key}
+            className={`rounded-xl border ${
+              bare
+                ? 'border-[var(--color-line-1)] bg-[var(--color-raised)]/50'
+                : 'border-line-1 bg-raised'
+            }`}
+          >
+            <div className="flex items-center gap-2 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => toggleExpanded(key)}
+                className="text-ink-3 hover:text-ink-2"
+                aria-label={isOpen ? 'Collapse project' : 'Expand project'}
+              >
+                {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              </button>
+              <span className="flex-1 min-w-0 truncate text-body font-medium text-ink-1">
+                {key}
+              </span>
+              <button
+                type="button"
+                onClick={() => toggleExpanded(key)}
+                className={`text-label uppercase tracking-wide ${
+                  missing.length > 0
+                    ? 'text-alarm hover:text-alarm/80'
+                    : armed
+                      ? 'text-ink-2'
+                      : 'text-ink-2 hover:text-ink-2/80'
+                }`}
+              >
+                {missing.length > 0
+                  ? `${missing.length} status${missing.length === 1 ? '' : 'es'} missing`
+                  : armed
+                    ? 'Ready'
+                    : 'Statuses not mapped'}
+              </button>
+              <button
+                type="button"
+                onClick={() => unwatch(key)}
+                className="text-ink-3 hover:text-alarm"
+                aria-label={`Stop watching ${key}`}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+
+            {isOpen && (
+              <div className="px-4 pb-4 pt-1 space-y-3">
+                {!armed && (
+                  <p className="text-reported text-ink-3">
+                    {key} is watched but not mapped, so nothing from it reaches the board yet. Map
+                    its statuses below to arm it.
+                  </p>
+                )}
+                <div className="flex items-center justify-between">
+                  <p className="text-reported text-ink-3">
+                    {loadingKeys.has(key)
+                      ? 'Loading statuses…'
+                      : statuses.length > 0
+                        ? `${statuses.length} statuses available`
+                        : 'No statuses loaded'}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void fetchJiraStatuses(key)}
+                    disabled={loadingKeys.has(key)}
+                    className="shrink-0 text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
+                  >
+                    {loadingKeys.has(key) ? 'Loading...' : 'Reload statuses'}
+                  </button>
+                </div>
+
+                {sources.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-reported text-ink-3">
+                      Same status names as{sources.length > 1 ? ' these' : ''}:
+                    </span>
+                    {sources.map((source) => (
+                      <button
+                        key={source.key}
+                        type="button"
+                        onClick={() => copyMapping(key, source)}
+                        className="text-reported text-warm hover:text-warm/80 border border-warm/20 rounded-xl px-2.5 py-1 transition-colors"
+                      >
+                        Copy {normKey(source.key)}&rsquo;s mapping
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {missing.length > 0 && (
+                  <div className="rounded-xl border border-alarm/30 bg-dismiss/5 px-3 py-2.5 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle size={13} className="mt-0.5 shrink-0 text-alarm" />
+                      <p className="text-reported text-ink-2">
+                        These statuses are in {key}&rsquo;s rules but not in its Jira workflow any
+                        more. Polling skips them, and a rule whose write target is gone cannot
+                        transition a ticket. Remove them, then pick replacements below.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 pl-[21px]">
+                      {missing.map((status) => (
+                        <button
+                          key={status.id || status.name}
+                          type="button"
+                          onClick={() => dropUnresolvable(key, status)}
+                          className="group inline-flex items-center gap-1.5 rounded-xl border border-alarm/30 px-2 py-0.5 text-reported text-ink-2 transition-colors hover:border-alarm hover:text-alarm"
+                          aria-label={`Remove ${status.name || status.id} from ${key}`}
+                        >
+                          {status.name || status.id}
+                          <Trash2 size={11} className="opacity-60 group-hover:opacity-100" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {statuses.length > 0 && (
+                  <div className="space-y-4 pt-1">
+                    <JiraStatusRule
+                      label="Pickup"
+                      description="Poll for unassigned tickets in these states."
+                      allStatuses={statuses}
+                      value={project.pickup}
+                      onChange={(v) => updateProject(key, { pickup: v })}
+                      requireCanonical={false}
+                    />
+                    <JiraStatusRule
+                      label="In progress"
+                      description="Count as actively being worked on."
+                      allStatuses={statuses}
+                      value={project.in_progress}
+                      onChange={(v) => updateProject(key, { in_progress: v })}
+                      requireCanonical={true}
+                      canonicalPrompt="Claim →"
+                    />
+                    <JiraStatusRule
+                      label="Done"
+                      description="Count as complete (add every variant — e.g. Resolved + Verified)."
+                      allStatuses={statuses}
+                      value={project.done}
+                      onChange={(v) => updateProject(key, { done: v })}
+                      requireCanonical={true}
+                      canonicalPrompt="Complete →"
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
+
+  const picker = (
+    <div className="mt-4 space-y-2">
+      <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-raised px-3 py-1.5">
+        <Search size={13} className="shrink-0 text-ink-3" />
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search Jira projects"
+          aria-label="Search Jira projects"
+          className="w-full bg-transparent border-0 focus:outline-none text-body text-ink-1 placeholder-ink-3"
+        />
+      </div>
+
+      {catalogError !== '' && <p className="text-reported text-alarm">{catalogError}</p>}
+      {catalogError === '' && catalogLoading && rows.length === 0 && (
+        <p className="text-ui text-ink-3 italic">Loading projects…</p>
+      )}
+      {catalogError === '' && !catalogLoading && rows.length === 0 && (
+        <p className="text-ui text-ink-3 italic">
+          {search.trim() === ''
+            ? 'This workspace’s Jira credential can’t see any projects.'
+            : `No Jira project matches “${search.trim()}”.`}
+        </p>
+      )}
+
+      <div className="divide-y divide-border-subtle rounded-xl border border-line-1 overflow-hidden">
+        {rows.map((row) => (
+          <div key={row.key} className="flex items-center gap-3 bg-raised px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <span className="text-body font-medium text-ink-1">{row.key}</span>
+              {row.name !== '' && (
+                <span className="ml-2 text-ui text-ink-3 truncate">{row.name}</span>
+              )}
+              {!row.inCatalog && (
+                <span className="ml-2 text-reported text-ink-2">not visible to this credential</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => (row.watched ? unwatch(row.key) : watch(row.key))}
+              className={`shrink-0 text-reported rounded-xl border px-3 py-1 transition-colors ${
+                row.watched
+                  ? 'border-warm/25 bg-warm/[0.08] text-warm'
+                  : 'border-warm/20 text-warm hover:text-warm/80'
+              }`}
+            >
+              {row.watched ? 'Watching' : 'Watch'}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {catalogTruncated && (
+        <p className="text-reported text-ink-3">
+          More projects match than fit here — narrow the search to reach them.
+        </p>
+      )}
+    </div>
+  )
 
   const inner = (
     <>
@@ -148,7 +501,8 @@ export default function JiraProjectRulesGroup({
         <div className="mb-4 space-y-1.5">
           <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Jira projects</h2>
           <p className="text-body leading-relaxed text-ink-3">
-            Track Jira projects and map each one&rsquo;s statuses to pickup / in-progress / done.
+            Watch the Jira projects this team works from, then map each one&rsquo;s statuses to
+            pickup / in-progress / done.
           </p>
         </div>
       ) : (
@@ -159,125 +513,10 @@ export default function JiraProjectRulesGroup({
           Connect Jira under Workspace settings before configuring tracked projects.
         </p>
       ) : (
-        <div className="space-y-2">
-          {value.length === 0 && (
-            <p className="text-ui text-ink-3 italic">
-              No Jira projects configured. Click &ldquo;Add project&rdquo; to start.
-            </p>
-          )}
-          {value.map((project, i) => {
-            // Trimmed key drives the status lookup, the fetch arg, and the
-            // disabled gate, so whitespace a user types around a key can't
-            // desync them (fetchJiraStatuses stores under the trimmed key).
-            const key = project.key.trim()
-            const statuses = statusesByProject[key] || []
-            const complete = projectIsComplete(project)
-            const expanded = isExpanded(i)
-            return (
-              <div
-                key={i}
-                className={`rounded-xl border ${
-                  bare
-                    ? 'border-[var(--color-line-1)] bg-[var(--color-raised)]/50'
-                    : 'border-line-1 bg-raised'
-                }`}
-              >
-                <div className="flex items-center gap-2 px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={() => toggleExpanded(i)}
-                    className="text-ink-3 hover:text-ink-2"
-                    aria-label={expanded ? 'Collapse project' : 'Expand project'}
-                  >
-                    {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                  </button>
-                  <input
-                    type="text"
-                    placeholder="PROJ"
-                    value={project.key}
-                    onChange={(e) => updateProject(i, { key: e.target.value })}
-                    className="flex-1 bg-transparent border-0 focus:outline-none text-body font-medium text-ink-1 placeholder-ink-3"
-                  />
-                  {project.key.trim() !== '' && (
-                    <span
-                      className={`text-label uppercase tracking-wide ${
-                        complete ? 'text-ink-2' : 'text-ink-2'
-                      }`}
-                    >
-                      {complete ? 'Ready' : 'Needs rules'}
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => removeProject(i)}
-                    className="text-ink-3 hover:text-alarm"
-                    aria-label="Remove project"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-
-                {expanded && (
-                  <div className="px-4 pb-4 pt-1 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-reported text-ink-3">
-                        {statuses.length > 0
-                          ? `${statuses.length} statuses available`
-                          : 'Click Fetch Statuses to load options'}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => fetchJiraStatuses([key].filter(Boolean))}
-                        disabled={loadingKeys.has(key) || !key}
-                        className="shrink-0 text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
-                      >
-                        {loadingKeys.has(key) ? 'Loading...' : 'Fetch Statuses'}
-                      </button>
-                    </div>
-
-                    {statuses.length > 0 && (
-                      <div className="space-y-4 pt-1">
-                        <JiraStatusRule
-                          label="Pickup"
-                          description="Poll for unassigned tickets in these states."
-                          allStatuses={statuses}
-                          value={project.pickup}
-                          onChange={(v) => updateProject(i, { pickup: v })}
-                          requireCanonical={false}
-                        />
-                        <JiraStatusRule
-                          label="In progress"
-                          description="Count as actively being worked on."
-                          allStatuses={statuses}
-                          value={project.in_progress}
-                          onChange={(v) => updateProject(i, { in_progress: v })}
-                          requireCanonical={true}
-                          canonicalPrompt="Claim →"
-                        />
-                        <JiraStatusRule
-                          label="Done"
-                          description="Count as complete (add every variant — e.g. Resolved + Verified)."
-                          allStatuses={statuses}
-                          value={project.done}
-                          onChange={(v) => updateProject(i, { done: v })}
-                          requireCanonical={true}
-                          canonicalPrompt="Complete →"
-                        />
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-          <button
-            type="button"
-            onClick={addProject}
-            className="w-full text-ui text-warm hover:text-warm/80 border border-dashed border-warm/30 rounded-xl px-3 py-2 transition-colors"
-          >
-            + Add project
-          </button>
-        </div>
+        <>
+          {board}
+          {picker}
+        </>
       )}
     </>
   )

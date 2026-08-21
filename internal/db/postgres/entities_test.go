@@ -189,7 +189,9 @@ func seedPgJiraRule(t *testing.T, h *pgtest.Harness, teamID, projectKey string) 
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO jira_project_status_rules
 			(team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-		VALUES ($1, $2, ARRAY['To Do'], ARRAY['In Progress'], 'In Progress', ARRAY['Done'], 'Done')
+		VALUES ($1, $2, '[{"id":"10000","name":"To Do"}]'::jsonb,
+			'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
+			'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
 	`, teamID, projectKey); err != nil {
 		t.Fatalf("seed jira rule %s for team %s: %v", projectKey, teamID, err)
 	}

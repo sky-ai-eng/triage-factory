@@ -37,16 +37,19 @@ type JiraStatus = { id: string; name: string }
 function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
   if (!p) return null
   return {
-    ready: { members: p.pickup?.members ?? [], primary: null },
+    ready: { members: (p.pickup?.members ?? []).map((m) => m.name), primary: null },
     inprogress: {
-      members: p.in_progress?.members ?? [],
-      primary: p.in_progress?.canonical ?? null,
+      members: (p.in_progress?.members ?? []).map((m) => m.name),
+      primary: p.in_progress?.canonical?.name ?? null,
     },
     // Nothing stores an in-review rule yet, so the column is genuinely empty
     // rather than unmapped-looking: every status it would hold sits in the
     // tray, which is where an unmapped status belongs.
     review: { members: [], primary: null },
-    done: { members: p.done?.members ?? [], primary: p.done?.canonical ?? null },
+    done: {
+      members: (p.done?.members ?? []).map((m) => m.name),
+      primary: p.done?.canonical?.name ?? null,
+    },
   }
 }
 

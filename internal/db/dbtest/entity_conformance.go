@@ -942,14 +942,21 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		closedState := seedSnap("owner/repo#tc-closed", "github", `{"state":"CLOSED","merged":false}`)
 		open := seedSnap("owner/repo#tc-open", "github", `{"state":"OPEN","merged":false}`)
 		noSnapshot := seedSnap("owner/repo#tc-bare", "github", "")
+		// Three Jira shapes, one per arm of the ref match. jiraDone is a
+		// snapshot with no status_id (captured before ids were recorded) that
+		// the NAME arm has to reach; jiraRenamed carries an id whose status was
+		// renamed in Jira since, so only the ID arm reaches it; jiraLive
+		// carries both and matches neither.
 		jiraDone := seedSnap("PROJ-tc-done", "jira", `{"key":"PROJ-tc-done","status":"Done"}`)
-		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress"}`)
+		jiraRenamed := seedSnap("PROJ-tc-renamed", "jira", `{"key":"PROJ-tc-renamed","status":"Complete","status_id":"10001"}`)
+		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress","status_id":"10003"}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
 		}
 
-		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, []string{"Done", "Won't Do"}, 0)
+		doneRefs := []domain.JiraStatusRef{{ID: "10001", Name: "Done"}, {Name: "Won't Do"}}
+		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem: %v", err)
 		}
@@ -962,7 +969,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}{
 			{merged, "a merged PR"},
 			{closedState, "a CLOSED PR"},
-			{jiraDone, "a Jira issue in a done status"},
+			{jiraDone, "a Jira issue in a done status, matched by name because its snapshot predates status ids"},
+			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
 		} {
 			if !ids[want.id] {
 				t.Errorf("%s is missing; its entity row is stranded active and nothing else repairs it", want.why)
@@ -993,8 +1001,34 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			}
 		}
 
+		// A ref set with only ids emits no name arm, and one with only names
+		// emits no id arm. Neither may become a syntax error, and each must
+		// still reach the rows its own half addresses.
+		for _, half := range []struct {
+			name string
+			refs []domain.JiraStatusRef
+			want string
+		}{
+			{"ids only", []domain.JiraStatusRef{{ID: "10001"}}, jiraRenamed},
+			{"names only", []domain.JiraStatusRef{{Name: "Done"}}, jiraDone},
+		} {
+			got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, half.refs, 0)
+			if err != nil {
+				t.Fatalf("ListActiveTerminalCandidatesSystem(%s): %v", half.name, err)
+			}
+			found := false
+			for _, e := range got {
+				if e.ID == half.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s ref set did not reach the row it addresses", half.name)
+			}
+		}
+
 		// The limit bounds the batch; the rest is reached on later passes.
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []string{"Done"}, 1)
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []domain.JiraStatusRef{{Name: "Done"}}, 1)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem(limit): %v", err)
 		}

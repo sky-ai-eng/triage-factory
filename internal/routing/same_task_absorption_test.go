@@ -103,7 +103,7 @@ func (s *injectingStubDelegator) StopBlueprintRun(orgID, blueprintRunID string, 
 	return nil
 }
 
-func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
+func (s *injectingStubDelegator) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome {
 	s.calls = append(s.calls, injectCall{orgID, conversationID, producer, body, firing})
 	return s.outcome
 }
@@ -251,7 +251,15 @@ func TestTryAutoDelegate_SameTask_InjectsIntoActiveRun(t *testing.T) {
 	// before tryAutoDelegate/tryAdditiveInjection ever runs.
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
-	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
+	injectedConversationID := ""
+	if fired, err := router.tryAutoDelegateTrackingInjection(context.Background(), runmode.LocalDefaultOrgID, task, trigger, entityID, secondEventID, "", &injectedConversationID); err != nil {
+		t.Fatalf("tryAutoDelegateTrackingInjection: %v", err)
+	} else if fired {
+		t.Fatal("same-task additive delivery reported a new delegation")
+	}
+	if injectedConversationID != activeConversationID {
+		t.Errorf("tracked injected conversation = %q, want %q", injectedConversationID, activeConversationID)
+	}
 
 	if len(stub.calls) != 1 {
 		t.Fatalf("expected exactly 1 StageOrDeliverAdditiveEvent call, got %d", len(stub.calls))

@@ -75,97 +75,96 @@ func normalizeJiraProjectKey(s string) string {
 	return strings.ToUpper(strings.TrimSpace(s))
 }
 
-// jiraStatusRule is the wire shape for a single status rule (pickup,
-// in-progress, or done). Local to this package now that internal/
-// config is gone; mirrors the prior config.JiraStatusRule view.
-type jiraStatusRule struct {
-	Members   []string `json:"members"`
-	Canonical string   `json:"canonical,omitempty"`
-}
-
-// jiraProjectConfig is the per-project wire shape for the settings
-// handler. Three status rules — pickup, in-progress, done — keyed by
-// project_key. Mirrors what the deleted config.JiraProjectConfig
-// exposed.
-type jiraProjectConfig struct {
-	Key        string         `json:"key"`
-	Pickup     jiraStatusRule `json:"pickup"`
-	InProgress jiraStatusRule `json:"in_progress"`
-	Done       jiraStatusRule `json:"done"`
-}
-
-// validateProjectRules enforces the per-project invariant that every
-// persisted project carries fully-populated Pickup/InProgress/Done
-// rules. The jpsr_*_populated CHECK constraints in the baseline are
-// the DB-level mirror; this is the user-facing gate that surfaces a
-// readable error instead of a constraint violation.
+// validateProjectRules enforces the per-project rule invariants.
 //
-// Pickup: members required, canonical must be empty (TF never writes
-// to pickup). InProgress/Done: members + canonical required, and the
-// canonical must itself be a member (PG CHECK can't subquery, so this
-// check stays in Go).
-func validateProjectRules(p jiraProjectConfig) error {
-	if len(p.Pickup.Members) == 0 {
-		return fmt.Errorf("project %s: pickup members are required", p.Key)
-	}
-	if p.Pickup.Canonical != "" {
-		return fmt.Errorf("project %s: pickup canonical must be empty — TF never writes tickets back to pickup", p.Key)
-	}
+// A stored project is the team's commitment to WATCH it. Being ARMED — all
+// three rules complete, which is what it takes to contribute anything to the
+// discovery JQL — is a second, later state, reached when someone maps the
+// project's workflow statuses. So a project may carry no rules at all, and
+// each rule is independently complete-or-empty:
+//
+//   - Pickup carries members and nothing else — TF never transitions a ticket
+//     back into pickup, so there is no write target to pair them with, and
+//     empty members is the whole of "unmapped". Nothing to check.
+//   - InProgress / Done: members and canonical together, or neither. The
+//     canonical is the status TF transitions a ticket INTO, so members without
+//     one is a rule that cannot be executed — rejected, as it always was.
+//
+// The jpsr_*_complete_or_empty CHECK constraints are the DB-level mirror of
+// the pairing; this is the user-facing gate that surfaces a readable error
+// instead of a constraint violation. "The canonical is itself a member" stays
+// here alone, because a CHECK can't subquery in either dialect.
+func validateProjectRules(p domain.JiraProjectStatusRules) error {
 	for _, r := range []struct {
-		name string
-		rule jiraStatusRule
+		name      string
+		members   []domain.JiraStatusRef
+		canonical domain.JiraStatusRef
 	}{
-		{"in_progress", p.InProgress},
-		{"done", p.Done},
+		{"in_progress", p.InProgressMembers, p.InProgressCanonical},
+		{"done", p.DoneMembers, p.DoneCanonical},
 	} {
-		if len(r.rule.Members) == 0 {
-			return fmt.Errorf("project %s: %s members are required", p.Key, r.name)
+		hasMembers, hasCanonical := len(r.members) > 0, !r.canonical.IsZero()
+		switch {
+		case !hasMembers && !hasCanonical:
+			// Unmapped, which is a state a watched project is allowed to be in.
+			continue
+		case !hasMembers:
+			return fmt.Errorf("project %s: %s members are required", p.ProjectKey, r.name)
+		case !hasCanonical:
+			return fmt.Errorf("project %s: %s canonical is required", p.ProjectKey, r.name)
 		}
-		if r.rule.Canonical == "" {
-			return fmt.Errorf("project %s: %s canonical is required", p.Key, r.name)
-		}
-		if !slices.Contains(r.rule.Members, r.rule.Canonical) {
-			return fmt.Errorf("project %s: %s canonical %q is not in members", p.Key, r.name, r.rule.Canonical)
+		if !slices.ContainsFunc(r.members, r.canonical.SameStatus) {
+			return fmt.Errorf("project %s: %s canonical %q is not in members", p.ProjectKey, r.name, r.canonical.Name)
 		}
 	}
 	return nil
 }
 
+// armedJiraProjects returns the armed subset, order preserved. It is what
+// change detection compares: watching a project without mapping it changes
+// nothing the poller would ask Jira, so it must not re-due a poll.
+func armedJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectStatusRules {
+	out := make([]domain.JiraProjectStatusRules, 0, len(in))
+	for _, p := range in {
+		if p.Armed() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // normalizeMembers returns a sorted, deduplicated copy of members so rules can
-// be compared using set semantics without mutating the original slice.
-func normalizeMembers(members []string) []string {
-	normalized := slices.Clone(members)
+// be compared using set semantics without mutating the original slice. Refs
+// sort on their dedup key — the id when there is one — so two spellings of the
+// same set compare equal regardless of the order they were picked in.
+func normalizeMembers(members []domain.JiraStatusRef) []string {
+	normalized := make([]string, 0, len(members))
+	for _, m := range members {
+		normalized = append(normalized, domain.JiraStatusDedupKey(m))
+	}
 	slices.Sort(normalized)
 	return slices.Compact(normalized)
 }
 
-// ruleEqual compares two status rules by value. Used by change detection to
-// decide whether a Jira poller restart is needed. Nil-safe on the Members slice.
-func ruleEqual(a, b jiraStatusRule) bool {
-	return a.Canonical == b.Canonical &&
-		slices.Equal(normalizeMembers(a.Members), normalizeMembers(b.Members))
+// ruleEqual compares two status rules by identity. Used by change detection to
+// decide whether a Jira poller restart is needed, and by the write path to tell
+// a rule that moved from one that was merely resent. Display names are NOT
+// compared: a name refreshed from Jira is not a configuration change.
+func ruleEqual(aMembers []domain.JiraStatusRef, aCanonical domain.JiraStatusRef,
+	bMembers []domain.JiraStatusRef, bCanonical domain.JiraStatusRef) bool {
+	return domain.JiraStatusDedupKey(aCanonical) == domain.JiraStatusDedupKey(bCanonical) &&
+		slices.Equal(normalizeMembers(aMembers), normalizeMembers(bMembers))
 }
 
 // cloneJiraProjects returns a deep copy so the pre-change snapshot
 // stays stable while the handler mutates the desired project list.
-func cloneJiraProjects(in []jiraProjectConfig) []jiraProjectConfig {
-	out := make([]jiraProjectConfig, len(in))
+func cloneJiraProjects(in []domain.JiraProjectStatusRules) []domain.JiraProjectStatusRules {
+	out := make([]domain.JiraProjectStatusRules, len(in))
 	for i, p := range in {
-		out[i] = jiraProjectConfig{
-			Key: p.Key,
-			Pickup: jiraStatusRule{
-				Members:   slices.Clone(p.Pickup.Members),
-				Canonical: p.Pickup.Canonical,
-			},
-			InProgress: jiraStatusRule{
-				Members:   slices.Clone(p.InProgress.Members),
-				Canonical: p.InProgress.Canonical,
-			},
-			Done: jiraStatusRule{
-				Members:   slices.Clone(p.Done.Members),
-				Canonical: p.Done.Canonical,
-			},
-		}
+		out[i] = p
+		out[i].PickupMembers = slices.Clone(p.PickupMembers)
+		out[i].InProgressMembers = slices.Clone(p.InProgressMembers)
+		out[i].DoneMembers = slices.Clone(p.DoneMembers)
 	}
 	return out
 }
@@ -174,39 +173,21 @@ func cloneJiraProjects(in []jiraProjectConfig) []jiraProjectConfig {
 // order as significant (the user-facing UI keeps projects in the order
 // they were added; reordering counts as a change worth restarting the
 // poller for). Rules are compared with set-equality on Members.
-func jiraProjectsEqual(a, b []jiraProjectConfig) bool {
+func jiraProjectsEqual(a, b []domain.JiraProjectStatusRules) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for i := range a {
-		if a[i].Key != b[i].Key {
+		if a[i].ProjectKey != b[i].ProjectKey {
 			return false
 		}
-		if !ruleEqual(a[i].Pickup, b[i].Pickup) ||
-			!ruleEqual(a[i].InProgress, b[i].InProgress) ||
-			!ruleEqual(a[i].Done, b[i].Done) {
+		if !ruleEqual(a[i].PickupMembers, domain.JiraStatusRef{}, b[i].PickupMembers, domain.JiraStatusRef{}) ||
+			!ruleEqual(a[i].InProgressMembers, a[i].InProgressCanonical, b[i].InProgressMembers, b[i].InProgressCanonical) ||
+			!ruleEqual(a[i].DoneMembers, a[i].DoneCanonical, b[i].DoneMembers, b[i].DoneCanonical) {
 			return false
 		}
 	}
 	return true
-}
-
-// projectConfigsToRules is the inverse of rulesToProjectConfigsOrdered. Used
-// by handleTeamJiraProjectsPut when persisting the team's project list back
-// to jira_project_status_rules via JiraStatusRulesStore.ReplaceForTeam.
-func projectConfigsToRules(projects []jiraProjectConfig) []domain.JiraProjectStatusRules {
-	out := make([]domain.JiraProjectStatusRules, 0, len(projects))
-	for _, p := range projects {
-		out = append(out, domain.JiraProjectStatusRules{
-			ProjectKey:          p.Key,
-			PickupMembers:       slices.Clone(p.Pickup.Members),
-			InProgressMembers:   slices.Clone(p.InProgress.Members),
-			InProgressCanonical: p.InProgress.Canonical,
-			DoneMembers:         slices.Clone(p.Done.Members),
-			DoneCanonical:       p.Done.Canonical,
-		})
-	}
-	return out
 }
 
 // defaultedCloneProtocolView normalizes a stored CloneProtocol value for the
@@ -220,24 +201,40 @@ func defaultedCloneProtocolView(stored string) string {
 	return domain.EffectiveCloneProtocol(stored, runmode.Current() == runmode.ModeMulti)
 }
 
-// jiraProjectSettings is the per-project wire shape. Mirrors
-// jiraProjectConfig but with explicit empty-slice initialization so the
-// JSON response always carries members:[] rather than members:null.
-type jiraProjectSettings struct {
-	Key        string         `json:"key"`
-	Pickup     jiraStatusRule `json:"pickup"`
-	InProgress jiraStatusRule `json:"in_progress"`
-	Done       jiraStatusRule `json:"done"`
+// jiraStatusRefJSON is one workflow status as the API renders it: the id the
+// rules are keyed on, and the display name the SERVER resolved for that id.
+// A caller never supplies a name — see the write shape — so a rendered name is
+// always one Jira gave us, as of the rule's last save.
+type jiraStatusRefJSON struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
-// rulesToProjectConfigsOrdered converts the domain rules into the
-// wire shape and reorders them to match order. Keys present in
-// order but missing from rules are skipped (the store is the source
-// of truth for rule existence); keys in rules but not in order get
-// appended after the ordered set in their store-returned (ASC)
+// jiraStatusRuleJSON is one rule as the API renders it. canonical is null on an
+// unmapped rule rather than absent, so a client reads one shape in both states
+// — and always null on pickup, which has no write target to name.
+type jiraStatusRuleJSON struct {
+	Members   []jiraStatusRefJSON `json:"members"`
+	Canonical *jiraStatusRefJSON  `json:"canonical"`
+}
+
+// jiraProjectSettings is the per-project read shape: the key plus the three
+// rules. Armed is not a field — it is derivable from these rules by the SPA
+// and a headless caller alike.
+type jiraProjectSettings struct {
+	Key        string             `json:"key"`
+	Pickup     jiraStatusRuleJSON `json:"pickup"`
+	InProgress jiraStatusRuleJSON `json:"in_progress"`
+	Done       jiraStatusRuleJSON `json:"done"`
+}
+
+// rulesToProjectConfigsOrdered reorders the stored rules to match order.
+// Keys present in order but missing from rules are skipped (the store is
+// the source of truth for rule existence); keys in rules but not in order
+// get appended after the ordered set in their store-returned (ASC)
 // position so a manual DB poke that adds a row without updating
 // team_settings.jira_projects still surfaces.
-func rulesToProjectConfigsOrdered(rules []domain.JiraProjectStatusRules, order []string) []jiraProjectConfig {
+func rulesToProjectConfigsOrdered(rules []domain.JiraProjectStatusRules, order []string) []domain.JiraProjectStatusRules {
 	if len(rules) == 0 {
 		return nil
 	}
@@ -245,75 +242,59 @@ func rulesToProjectConfigsOrdered(rules []domain.JiraProjectStatusRules, order [
 	for _, r := range rules {
 		byKey[r.ProjectKey] = r
 	}
-	out := make([]jiraProjectConfig, 0, len(rules))
+	out := make([]domain.JiraProjectStatusRules, 0, len(rules))
 	seen := make(map[string]bool, len(rules))
 	for _, k := range order {
 		r, ok := byKey[k]
 		if !ok {
 			continue
 		}
-		out = append(out, ruleToProjectConfig(r))
+		out = append(out, r)
 		seen[k] = true
 	}
 	for _, r := range rules {
 		if seen[r.ProjectKey] {
 			continue
 		}
-		out = append(out, ruleToProjectConfig(r))
+		out = append(out, r)
 	}
 	return out
 }
 
-func ruleToProjectConfig(r domain.JiraProjectStatusRules) jiraProjectConfig {
-	return jiraProjectConfig{
-		Key: r.ProjectKey,
-		Pickup: jiraStatusRule{
-			Members: slices.Clone(r.PickupMembers),
-		},
-		InProgress: jiraStatusRule{
-			Members:   slices.Clone(r.InProgressMembers),
-			Canonical: r.InProgressCanonical,
-		},
-		Done: jiraStatusRule{
-			Members:   slices.Clone(r.DoneMembers),
-			Canonical: r.DoneCanonical,
-		},
-	}
-}
-
-// toJiraProjectSettings converts the persisted view into the wire
-// shape, normalizing nil Members slices to empty slices so the JSON
-// response is friendly to FE consumers (no `members:null`).
-func toJiraProjectSettings(in []jiraProjectConfig) []jiraProjectSettings {
+// toJiraProjectSettings converts the persisted rules into the read shape,
+// normalizing nil member slices to empty ones so the JSON response is friendly
+// to consumers (no `members:null`).
+func toJiraProjectSettings(in []domain.JiraProjectStatusRules) []jiraProjectSettings {
 	out := make([]jiraProjectSettings, 0, len(in))
 	for _, p := range in {
 		out = append(out, jiraProjectSettings{
-			Key:        p.Key,
-			Pickup:     normalizeRule(p.Pickup),
-			InProgress: normalizeRule(p.InProgress),
-			Done:       normalizeRule(p.Done),
+			Key:        p.ProjectKey,
+			Pickup:     toJiraStatusRuleJSON(p.PickupMembers, domain.JiraStatusRef{}),
+			InProgress: toJiraStatusRuleJSON(p.InProgressMembers, p.InProgressCanonical),
+			Done:       toJiraStatusRuleJSON(p.DoneMembers, p.DoneCanonical),
 		})
 	}
 	return out
 }
 
-// normalizeRule replaces a nil Members slice with an empty one so the
-// JSON encoding is `[]` rather than `null`. Canonical and other fields
-// pass through unchanged.
-func normalizeRule(r jiraStatusRule) jiraStatusRule {
-	if r.Members == nil {
-		r.Members = []string{}
+func toJiraStatusRuleJSON(members []domain.JiraStatusRef, canonical domain.JiraStatusRef) jiraStatusRuleJSON {
+	out := jiraStatusRuleJSON{Members: make([]jiraStatusRefJSON, 0, len(members))}
+	for _, m := range members {
+		out.Members = append(out.Members, jiraStatusRefJSON{ID: m.ID, Name: m.Name})
 	}
-	return r
+	if !canonical.IsZero() {
+		out.Canonical = &jiraStatusRefJSON{ID: canonical.ID, Name: canonical.Name}
+	}
+	return out
 }
 
 // projectKeysFromConfigs returns the ordered project keys from a
-// per-project config slice with empty entries filtered out.
-func projectKeysFromConfigs(projects []jiraProjectConfig) []string {
+// per-project rule slice with empty entries filtered out.
+func projectKeysFromConfigs(projects []domain.JiraProjectStatusRules) []string {
 	keys := make([]string, 0, len(projects))
 	for _, p := range projects {
-		if p.Key != "" {
-			keys = append(keys, p.Key)
+		if p.ProjectKey != "" {
+			keys = append(keys, p.ProjectKey)
 		}
 	}
 	return keys

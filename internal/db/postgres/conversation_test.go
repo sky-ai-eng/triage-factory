@@ -996,3 +996,56 @@ func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t 
 		t.Errorf("preferred_executor_id = %q, want exec-warm — a teammate's resume must chase the same warm tree the creator's would", preferred.String)
 	}
 }
+
+// TestConversationStore_Postgres_PRCoherenceTargets runs the PR coherence
+// conformance suite against the Postgres impl.
+func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	dbtest.RunPRCoherenceTargetsConformance(t, func(t *testing.T) (db.ConversationStore, string, dbtest.ConversationSeeder, dbtest.PRCoherenceSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, agentID := seedPgConversationOrg(t, h)
+		promptID := seedPgConversationPrompt(t, h, orgID, userID)
+		teamID := firstTeamForOrg(t, h, orgID)
+		ctx := context.Background()
+		extra := dbtest.PRCoherenceSeeder{
+			PendingReview: func(t *testing.T, conversationID, repo string, prNumber int) {
+				t.Helper()
+				a := domain.NewReviewArtifact(repo, prNumber, "head-sha", conversationID)
+				a.ConversationID = conversationID
+				a.OrgID, a.TeamID = orgID, teamID
+				if _, err := stores.Artifacts.UpsertSystem(ctx, orgID, a); err != nil {
+					t.Fatalf("seed pending review: %v", err)
+				}
+			},
+			Worktree: func(t *testing.T, conversationID, slug, ref string) {
+				t.Helper()
+				if _, err := stores.Repos.GetOrCreateSystem(ctx, orgID, domain.RepoRefFromSlug(slug)); err != nil {
+					t.Fatalf("seed repository %s: %v", slug, err)
+				}
+				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
+					ConversationID: conversationID, RepoID: slug, Ref: ref,
+					Path: "/tmp/coherence/" + conversationID + "/" + ref,
+				}); err != nil {
+					t.Fatalf("seed worktree: %v", err)
+				}
+			},
+			MarkEventInjected: func(t *testing.T, taskID, eventID string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(`
+					INSERT INTO task_events (task_id, event_id, kind, org_id) VALUES ($1, $2, 'injected', $3)
+				`, taskID, eventID, orgID); err != nil {
+					t.Fatalf("record injected task event: %v", err)
+				}
+			},
+			ActiveClaim: func(t *testing.T, conversationID string) {
+				t.Helper()
+				seedPgActiveClaim(t, h, orgID, conversationID, "executor-coherence", 1)
+			},
+		}
+		seeder := newPgConversationSeeder(h.AdminDB, orgID, userID, agentID, promptID)
+		return stores.Conversations, orgID, seeder, extra
+	})
+}

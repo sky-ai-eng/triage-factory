@@ -328,9 +328,11 @@ export default function TeamSettings({
         toast.error(res.error)
         return false
       }
-      const normalized = normProjects(projects)
-      setBaseline((b) => ({ ...b, jira_projects: normalized }))
-      setProjects(normalized)
+      // Render what was STORED, not what was sent: the server resolved every
+      // status display name from Jira on the way in.
+      const stored = normProjects(res.projects)
+      setBaseline((b) => ({ ...b, jira_projects: stored }))
+      setProjects(stored)
       toast.success('Jira projects saved')
       return true
     } finally {

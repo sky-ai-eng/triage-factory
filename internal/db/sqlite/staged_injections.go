@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"sort"
 	"strconv"
 
@@ -34,7 +33,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.StagedInjection{}, err
 	}
-	meta, err := json.Marshal(map[string]string{"producer": n.Producer})
+	meta, err := db.StagedInjectionMetadata(n)
 	if err != nil {
 		return domain.StagedInjection{}, err
 	}
@@ -50,7 +49,7 @@ func (s *stagedInjectionStore) AppendSystem(ctx context.Context, orgID string, n
 		INSERT INTO messages (org_id, conversation_id, role, content, subtype, metadata, delivered)
 		VALUES (?, ?, 'user', ?, ?, ?, 0)
 		RETURNING id, org_id, conversation_id, content, user_id, metadata, created_at
-	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, string(meta)).Scan(
+	`, orgID, n.ConversationID, n.Body, stagedInjectionSubtype, meta).Scan(
 		&r.ID, &r.OrgID, &r.ConvID, &r.Content, &userID, &metadata, &r.CreatedAt,
 	); err != nil {
 		return domain.StagedInjection{}, err

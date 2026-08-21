@@ -247,8 +247,9 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 	// minted, and that is what the sentinel's audience asked about. The
 	// returned error is the other audience — the worker, which retries the
 	// event so the trigger gets its second chance.
-	fired, err := r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
+	fired, injectedConversationID, err := r.fireMatchedTriggers(ctx, orgID, evt, entityID, task, routing)
 	disp.TriggersFired = fired
+	disp.InjectedConversationID = injectedConversationID
 	if err != nil {
 		return fmt.Errorf("fire triggers: %w", err)
 	}
@@ -683,11 +684,12 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 // joined error asks the caller for a replay, and the replay is fenced per
 // (event, trigger) — the siblings that already fired no-op the second time
 // through, leaving only the failed one to actually retry.
-func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, error) {
+func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt domain.Event, entityID string, task *domain.Task, routing eventRouting) (int, string, error) {
 	ctx, span := tracer.Start(ctx, "route.triggers", trace.WithAttributes(telemetry.TaskID(task.ID)))
 	defer span.End()
 
 	fired := 0
+	injectedConversationID := ""
 	var errs []error
 	for _, teamID := range routing.orderedTeams {
 		triggers := routing.teamTriggers[teamID]
@@ -719,7 +721,7 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 			if trigger.MinAutonomySuitability != nil && *trigger.MinAutonomySuitability > 0 {
 				continue // deferred to post-scoring handler
 			}
-			committed, err := r.tryAutoDelegate(ctx, orgID, task, trigger, entityID, evt.ID, acting)
+			committed, err := r.tryAutoDelegateTrackingInjection(ctx, orgID, task, trigger, entityID, evt.ID, acting, &injectedConversationID)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("trigger %s: %w", trigger.ID, err))
 				continue
@@ -730,5 +732,5 @@ func (r *Router) fireMatchedTriggers(ctx context.Context, orgID string, evt doma
 		}
 	}
 	span.SetAttributes(telemetry.Count(fired))
-	return fired, errors.Join(errs...)
+	return fired, injectedConversationID, errors.Join(errs...)
 }
