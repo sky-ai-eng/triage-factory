@@ -16,8 +16,8 @@
 #
 #   ./scripts/refresh-pricing.sh
 #
-# Run daily by .github/workflows/refresh-pricing.yml. Two safety nets guard the
-# gap between fast-moving upstream data and the frozen cost formula:
+# Run daily by .github/workflows/refresh-pricing.yml. Three safety nets guard
+# the gap between fast-moving upstream data and the frozen cost formula:
 #   1. The in-package verification gate (go test ./internal/inference -run
 #      TestPricing) — a moved anchor price, a broken cache multiplier, or
 #      malformed JSON fails it loudly rather than misbilling quietly.
@@ -25,6 +25,16 @@
 #      (a finer context tier, a new cache-TTL bucket) that computeTextCost
 #      doesn't read is flagged so it becomes a reviewed formula change, not
 #      silent underpricing in the data.
+#   3. The pricing-eligibility gate below — a model is eligible for TF's model
+#      picker iff it is mode=chat with tool support, has a >=64k input window,
+#      carries both base prices (and a cache-read price if it claims caching),
+#      and its litellm_provider maps to a bifrost provider in the TF-owned
+#      internal/inference/provider_map.json (never written by this script).
+#      Eligibility is a computed annotation — nothing is dropped from the
+#      datasheet over it. The refresh REFUSES (no PR) when an eligible-gated
+#      entry's provider has no map entry at all, so a new upstream provider is
+#      a deliberate PR decision, never a silent gap; a provider already mapped
+#      to "unsupported" is fine and silent.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,6 +44,7 @@ UPSTREAM_REPO="BerriAI/litellm"
 UPSTREAM_FILE="model_prices_and_context_window.json"
 DATASHEET="internal/inference/pricing_datasheet.json"
 PROVENANCE="internal/inference/pricing_provenance.json"
+PROVIDER_MAP="internal/inference/provider_map.json"
 
 command -v python3 >/dev/null 2>&1 || { echo "python3 not found on PATH" >&2; exit 1; }
 
@@ -54,10 +65,10 @@ curl -fsSL "$RAW_URL" -o "$TMP_RAW"
 FETCHED="$(date -u +%Y-%m-%d)"
 
 echo "Filtering to text-generation models and writing $DATASHEET ..."
-python3 - "$TMP_RAW" "$DATASHEET" "$PROVENANCE" "$CANONICAL_URL" "$SHA" "$FETCHED" <<'PY'
+python3 - "$TMP_RAW" "$DATASHEET" "$PROVENANCE" "$PROVIDER_MAP" "$CANONICAL_URL" "$SHA" "$FETCHED" <<'PY'
 import collections, json, sys
 
-raw_path, datasheet_path, provenance_path, url, sha, fetched = sys.argv[1:7]
+raw_path, datasheet_path, provenance_path, provider_map_path, url, sha, fetched = sys.argv[1:8]
 
 with open(raw_path) as f:
     data = json.load(f)
@@ -132,6 +143,71 @@ for entry in out.values():
             seen.add(field)
 drift = sorted(seen - ACKNOWLEDGED_COST_FIELDS)
 
+# Pricing-eligibility gate. Eligibility is a computed ANNOTATION over the
+# datasheet, never an exclusion from it — the datasheet above stays the broad,
+# unfiltered-beyond-mode mirror it has always been. A model is eligible for
+# TF's model picker iff every rule holds:
+#   - mode == "chat" and supports_function_calling
+#   - max_input_tokens >= 64000, read verbatim (no max_tokens fallback);
+#     absent fails closed
+#   - has both input_cost_per_token and output_cost_per_token
+#   - if supports_prompt_caching, has cache_read_input_token_cost (a missing
+#     cache-*write* price alone is fine — the automatic-caching-vendor
+#     signature: OpenAI/Gemini/xAI/Azure charge nothing to populate a cache)
+#   - litellm_provider maps to a real bifrost provider in provider_map.json
+#
+# "Gated" below is the first two rules only (mode+tools+window) — the
+# smallest population that already represents a real, capable model. The
+# refusal contract checks THAT population against provider_map.json, not the
+# fully-eligible one: a capable model under a brand-new upstream provider
+# label must force a mapping decision even if it also happens to lack a
+# price today.
+with open(provider_map_path) as f:
+    provider_map = json.load(f)
+
+
+def is_gated(entry):
+    if entry.get("mode") != "chat" or not entry.get("supports_function_calling"):
+        return False
+    max_input = entry.get("max_input_tokens")
+    return isinstance(max_input, (int, float)) and max_input >= 64000
+
+
+def is_eligible(entry):
+    if not is_gated(entry):
+        return False
+    if "input_cost_per_token" not in entry or "output_cost_per_token" not in entry:
+        return False
+    if entry.get("supports_prompt_caching") and "cache_read_input_token_cost" not in entry:
+        return False
+    provider = provider_map.get(entry.get("litellm_provider"))
+    return provider is not None and provider != "unsupported"
+
+
+unmapped = collections.OrderedDict()
+for model, entry in out.items():
+    if not is_gated(entry):
+        continue
+    provider = entry.get("litellm_provider")
+    if provider not in provider_map:
+        unmapped.setdefault(provider, []).append(model)
+
+if unmapped:
+    lines = [
+        f"refusing to refresh: litellm_provider(s) with no entry in {provider_map_path}:",
+    ]
+    for provider in sorted(unmapped, key=lambda p: (p is None, p)):
+        models = unmapped[provider]
+        lines.append(f"  {provider!r}: {len(models)} eligible-gated model(s), e.g. {models[0]!r}")
+    lines.append('Add a mapping (a bifrost provider constant, or "unsupported") before refreshing.')
+    sys.exit("\n".join(lines))
+
+eligible = sorted(
+    (model, provider_map[entry["litellm_provider"]])
+    for model, entry in out.items()
+    if is_eligible(entry)
+)
+
 with open(datasheet_path, "w") as f:
     json.dump(out, f, indent=1, sort_keys=True)
     f.write("\n")
@@ -151,6 +227,17 @@ if drift:
     # A single-line, greppable marker the workflow surfaces in the PR. Not fatal
     # — prices still refresh; the formula review is the follow-up.
     print("PRICING_SCHEMA_DRIFT: " + ",".join(drift))
+
+# Report, don't block: greppable markers the workflow turns into a "models
+# shipped" section of the PR body — every entry eligible for TF's picker,
+# under a provider TF already maps, in this snapshot.
+by_provider = collections.Counter(provider for _, provider in eligible)
+print(f"PRICING_ELIGIBLE_COUNT: {len(eligible)}")
+print("PRICING_ELIGIBLE_BY_PROVIDER: " + ",".join(f"{p}={n}" for p, n in sorted(by_provider.items())))
+print("PRICING_ELIGIBLE_MODELS_BEGIN")
+for model, provider in eligible:
+    print(f"{model}\t{provider}")
+print("PRICING_ELIGIBLE_MODELS_END")
 PY
 
 echo "Done. Verify with: go test ./internal/inference -run TestPricing"
