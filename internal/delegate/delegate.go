@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/prskeleton"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -485,6 +486,46 @@ func cloneHostBase(cloneURL string) string {
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Local reads the PR through
 // the resolver-built client and routes the clone through its loopback proxy.
+// toolsReferenceFor composes a run's <tools> section from what the ORG can
+// reach, unioned with the source the run is about.
+//
+// The union is what makes this safe to change: a run never loses the verbs for
+// its own entity source, so nothing regresses, and it gains the verbs for every
+// other source the org actually has. That is the fix for a real hole — a run
+// triggered by a GitHub event was handed the gh verbs alone, so an agent
+// working a pull request that referenced a ticket had no way to read, comment
+// on, or transition it.
+//
+// A failed resolve degrades to the superset every run used to get (its own
+// source plus GitHub), never to nothing. The tools block is documentation; the
+// gate that actually stops a verb is the credential funnel it resolves through,
+// which refuses with an error naming the reason. An agent told about a verb
+// that then refuses knows what happened; an agent told about no verb improvises.
+func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, conversationID, ownSource string) string {
+	fallback := agentprompt.ToolsReferenceForSources([]string{eventsource.KindGitHub, ownSource})
+	stores, ok := s.getStores()
+	if !ok || stores.Tx == nil || stores.Conversations == nil {
+		return fallback
+	}
+	conv, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil || conv == nil {
+		delegateLog.Warn("read conversation for tools reference failed; using the run's own sources",
+			"conversation", conversationID, "error", err)
+		return fallback
+	}
+	var kinds []string
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, conv.CreatorUserID, func(tx db.TxStores) error {
+		var e error
+		kinds, e = eventsource.AvailableKinds(ctx, tx, orgID)
+		return e
+	}); err != nil {
+		delegateLog.Warn("resolve event-source availability for tools reference failed; using the run's own sources",
+			"conversation", conversationID, "org", orgID, "error", err)
+		return fallback
+	}
+	return agentprompt.ToolsReferenceForSources(append(kinds, ownSource))
+}
+
 func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {
@@ -633,7 +674,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:   agentprompt.GitHubToolsReference(),
+		toolsRef:   s.toolsReferenceFor(ctx, orgID, conversationID, eventsource.KindGitHub),
 		wtPath:     wtPath,
 		hasWT:      true,
 		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
@@ -721,7 +762,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 	return runConfig{
 		orgID:     orgID,
 		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef:  agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference(),
+		toolsRef:  s.toolsReferenceFor(ctx, orgID, conversationID, eventsource.KindJira),
 		wtPath:    runRoot,
 		hasWT:     false,
 		runRoot:   runRoot,
@@ -757,10 +798,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
-	toolsRef := agentprompt.GitHubToolsReference()
-	if ref, ok := agentprompt.ToolsReferenceFor("slack"); ok {
-		toolsRef += "\n\n" + ref
-	}
+	toolsRef := s.toolsReferenceFor(ctx, orgID, conversationID, "slack")
 
 	return runConfig{
 		orgID:    orgID,

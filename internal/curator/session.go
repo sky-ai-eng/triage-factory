@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -95,6 +96,32 @@ func (s *projectSession) run() {
 // the turn becomes observable has a handle to fire. The released_at IS NULL
 // filter on the release is belt-and-suspenders (first terminal writer wins),
 // but registering early closes the race window in the first place.
+// availableSources resolves which event sources this org can reach, deciding
+// which verb families the turn's envelope documents. A turn in an org with no
+// Jira has no reason to be handed the Jira verbs.
+//
+// nil on any failure, which renderToolsReference reads as core's two — the
+// superset, and the safe direction: the credential funnel refuses an
+// unreachable verb with an error that names the reason, while a missing verb
+// just makes the agent improvise.
+func (s *projectSession) availableSources(item queueItem) []string {
+	stores := s.curator.stores
+	if stores.Tx == nil {
+		return nil
+	}
+	var kinds []string
+	if err := stores.Tx.SyntheticClaimsWithTx(s.ctx, item.orgID, item.creatorUserID, func(tx db.TxStores) error {
+		var e error
+		kinds, e = eventsource.AvailableKinds(s.ctx, tx, item.orgID)
+		return e
+	}); err != nil {
+		curatorLog.Warn("resolve event-source availability for the curator envelope failed; documenting the core verb families",
+			"org", item.orgID, "error", err)
+		return nil
+	}
+	return kinds
+}
+
 func (s *projectSession) dispatch(item queueItem) {
 	if item.done != nil {
 		defer close(item.done)
@@ -356,6 +383,7 @@ func (s *projectSession) dispatch(item queueItem) {
 	}
 
 	envelope := envelopeInputs{
+		AvailableSources:   s.availableSources(item),
 		ProjectName:        project.Name,
 		ProjectDescription: project.Description,
 		PinnedRepos:        project.PinnedRepos,

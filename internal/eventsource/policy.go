@@ -76,3 +76,25 @@ func Label(kind string) string {
 	}
 	return strings.ToUpper(kind[:1]) + kind[1:]
 }
+
+// AvailableKinds returns the sources this org can actually reach right now, in
+// the vocabulary's wire order.
+//
+// It exists for the callers that need to know what an AGENT can be told about,
+// which is a different question from what an event handler may bind to: a run
+// working a GitHub pull request that references a Jira ticket needs the Jira
+// verbs, and the kind of entity that triggered the run says nothing about
+// whether the org has Jira at all. Availability does.
+func AvailableKinds(ctx context.Context, tx db.TxStores, orgID string) ([]string, error) {
+	avail, err := Resolve(ctx, tx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(avail))
+	for _, src := range avail {
+		if src.State == StateAvailable {
+			out = append(out, src.Kind)
+		}
+	}
+	return out, nil
+}

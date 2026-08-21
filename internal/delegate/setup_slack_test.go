@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -127,7 +128,7 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 
 // TestSetupSlack_ToolsRef_NoRegisteredReference pins that a Slack run works
 // with base tools when no ee package has registered a "slack" tools
-// reference — no error, toolsRef is exactly the GH template.
+// reference — no error, and the GitHub verbs are still documented.
 func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	agentprompt.ResetToolsReferences()
 	s, _, task := slackTaskFixture(t, "notools")
@@ -141,8 +142,11 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	if cfg.toolsRef != agentprompt.GitHubToolsReference() {
-		t.Errorf("toolsRef = %q, want the base GH template with no registered slack reference", cfg.toolsRef)
+	if !strings.Contains(cfg.toolsRef, "exec gh") {
+		t.Errorf("toolsRef documents no github verbs: %q", cfg.toolsRef)
+	}
+	if strings.Contains(cfg.toolsRef, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef documents slack with nothing registered for it: %q", cfg.toolsRef)
 	}
 }
 
@@ -164,9 +168,14 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	want := agentprompt.GitHubToolsReference() + "\n\n" + "SLACK VERB DOCS"
-	if cfg.toolsRef != want {
-		t.Errorf("toolsRef = %q, want %q", cfg.toolsRef, want)
+	// Composed by source rather than by exact bytes: both families present,
+	// core first. The assembly is canonical, so a caller's order and repeats
+	// cannot change what the agent reads.
+	if !strings.Contains(cfg.toolsRef, "exec gh") || !strings.Contains(cfg.toolsRef, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef = %q, want both the github and the registered slack verbs", cfg.toolsRef)
+	}
+	if strings.Index(cfg.toolsRef, "exec gh") > strings.Index(cfg.toolsRef, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef = %q, want github before the registered source", cfg.toolsRef)
 	}
 }
 
@@ -280,7 +289,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 	if cfg.scope != wantScope {
 		t.Errorf("scope = %q, want %q", cfg.scope, wantScope)
 	}
-	if cfg.toolsRef != agentprompt.GitHubToolsReference() {
-		t.Errorf("toolsRef = %q, want the base GH template with no registered slack reference", cfg.toolsRef)
+	if !strings.Contains(cfg.toolsRef, "exec gh") {
+		t.Errorf("toolsRef documents no github verbs: %q", cfg.toolsRef)
 	}
 }
