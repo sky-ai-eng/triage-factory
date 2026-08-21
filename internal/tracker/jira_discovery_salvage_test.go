@@ -154,3 +154,50 @@ func TestDiscoverJira_NoRetryWhenEveryStatusIsLive(t *testing.T) {
 		t.Errorf("pickup query ran %d times; a failure with no dead status must not be retried", pickups)
 	}
 }
+
+// The assigned-to-me query EXCLUDES its status set, so narrowing it widens the
+// result. That is unsound in a way the pickup query is not, and it is not only
+// the all-deleted case: the filter drops every status missing from the
+// project's workflow, while JQL only rejects one missing from the instance —
+// so a status a workflow-scheme change retired, still holding finished
+// tickets, would be dropped from the exclusion and hand those tickets back as
+// new work. The query is left to fail instead.
+func TestDiscoverJira_NeverSalvagesTheAssignedQuery(t *testing.T) {
+	// Every Done member is rejected, and none of them is in the workflow the
+	// salvage would filter against — the shape that would produce a query with
+	// no terminal exclusion at all.
+	srv := newDeadStatusServer(t, "10100",
+		jiraclient.Status{ID: "10001", Name: "To Do"})
+	client := jiraclient.NewClient(jiraclient.CloudAPIToken(srv.URL, "me@example.com", "tok"))
+
+	if _, err := (&Tracker{}).discoverJira(context.Background(), client, srv.URL, salvageRules()); err != nil {
+		t.Fatalf("discoverJira: %v", err)
+	}
+	for _, jql := range srv.sentJQLs() {
+		if !strings.Contains(jql, "currentUser()") {
+			continue
+		}
+		if !strings.Contains(jql, "status NOT IN") {
+			t.Errorf("assigned query %q ran with no terminal exclusion; every completed ticket comes back as new work", jql)
+		}
+	}
+}
+
+// An inclusion set narrowed to nothing is an unfiltered query, not a narrower
+// one. Every pickup member being gone must end the query, never widen it.
+func TestDiscoverJira_NoSalvageWhenNothingSurvives(t *testing.T) {
+	// The workflow shares no status with the pickup rule, so both members drop.
+	srv := newDeadStatusServer(t, "99999",
+		jiraclient.Status{ID: "20001", Name: "Fresh Start"},
+		jiraclient.Status{ID: "10100", Name: "Done"})
+	client := jiraclient.NewClient(jiraclient.CloudAPIToken(srv.URL, "me@example.com", "tok"))
+
+	if _, err := (&Tracker{}).discoverJira(context.Background(), client, srv.URL, salvageRules()); err != nil {
+		t.Fatalf("discoverJira: %v", err)
+	}
+	for _, jql := range srv.sentJQLs() {
+		if strings.Contains(jql, "assignee IS EMPTY") && !strings.Contains(jql, "status IN") {
+			t.Errorf("pickup query %q ran with no status filter; every unassigned ticket in the project becomes work", jql)
+		}
+	}
+}

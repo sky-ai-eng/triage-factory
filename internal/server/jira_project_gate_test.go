@@ -329,3 +329,48 @@ func TestJiraStatusesRead_ForwardsIDs(t *testing.T) {
 		t.Errorf("In Progress id = %q, want %q", byName["In Progress"], statusInProgressID)
 	}
 }
+
+// TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure: a replace-set
+// can carry both kinds of fault at once, and they are not equally useful. A bad
+// identifier is the caller's own and is true whether or not Jira is reachable —
+// they have to fix it before any retry can store anything. "Jira did not
+// answer" only says try again. Reporting the second over the first throws away
+// the half of the answer that is certain and sends the caller round a loop to
+// rediscover it.
+func TestJiraProjectsPut_FieldFaultSurvivesALaterUpstreamFailure(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY")
+	// SKY resolves as a project but its workflow read fails, so the fault the
+	// gate finds first (GHOST) and the one that stops it are in one request.
+	fake.SetStatusesFailing("SKY")
+
+	rec := putJiraProjects(t, s, "GHOST", "SKY")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT = %d, want 400 naming GHOST; body=%s", rec.Code, rec.Body.String())
+	}
+	items := decodeErrorItems(t, rec)
+	if len(items) != 1 || !strings.Contains(items[0].Message, "GHOST") {
+		t.Fatalf("errors = %+v, want the unknown key named; body=%s", items, rec.Body.String())
+	}
+	if items[0].Field == "" {
+		t.Error("the field fault lost its field on the way out")
+	}
+	// Nothing is stored under either fault.
+	if got := teamJiraProjectKeys(t, s); len(got) != 0 {
+		t.Errorf("stored keys = %v, want none — neither project was verified", got)
+	}
+}
+
+// The other half: with no field fault to report, an unreachable Jira is still
+// an upstream error rather than a 400 blaming the caller.
+func TestJiraProjectsPut_UpstreamFailureAloneIsStillUpstream(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY")
+	fake.SetStatusesFailing("SKY")
+
+	rec := putJiraProjects(t, s, "SKY")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("PUT = %d, want 502; body=%s", rec.Code, rec.Body.String())
+	}
+	if items := decodeErrorItems(t, rec); len(items) != 1 || items[0].Reason != "UPSTREAM_UNAVAILABLE" {
+		t.Errorf("errors = %+v, want a single upstream reason", items)
+	}
+}

@@ -1615,8 +1615,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	defer span.End()
 
 	// build renders the JQL from a status set, so a query that Jira rejects can
-	// be rendered again from a narrower one. members is the set the live jql
-	// was built from; the pair is what makes the salvage below possible.
+	// be rendered again from a narrower one; members is the set the live jql was
+	// built from. The pair is set only where narrowing is SOUND, which is why
+	// the assigned-to-me query leaves it nil — see salvageJiraQuery.
 	type queryWithDone struct {
 		projectKey            string
 		jql                   string
@@ -1664,8 +1665,12 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 			return jql
 		}
+		// No build/members: this query EXCLUDES its status set, so narrowing it
+		// would widen the result rather than shrink it. salvageJiraQuery says
+		// why that is unsound even though the members here are just as capable
+		// of naming a status Jira has deleted.
 		queries = append(queries, queryWithDone{
-			projectKey: p.Key, jql: assignedJQL(p.DoneMembers), build: assignedJQL, members: p.DoneMembers,
+			projectKey: p.Key, jql: assignedJQL(p.DoneMembers),
 			doneMembers: allDone, assignedToCurrentUser: true,
 		})
 	}
@@ -1688,7 +1693,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	failed, salvaged := 0, 0
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
-		if err != nil {
+		if err != nil && q.build != nil {
 			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectKey, q.members, q.build, liveStatuses); jql != "" {
 				trackerLog.WarnContext(ctx, "jira discovery query rebuilt without statuses the workflow no longer has",
 					"project", q.projectKey, "dropped", domain.JiraStatusNames(dropped), "error", err)
@@ -1739,12 +1744,23 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 // condition that almost never holds — so the workflow is read only once a
 // query has already failed, and cached in live for the rest of the cycle.
 //
+// Only an INCLUSION set may be salvaged this way, and callers enforce that by
+// passing build only for those. Narrowing a `status IN (…)` set shrinks the
+// result; narrowing a `status NOT IN (…)` set widens it — and the filter here
+// is deliberately broader than the condition that broke the query. JQL rejects
+// a status deleted from the instance, but this drops every status missing from
+// the PROJECT's workflow, and an issue can sit in a status a workflow-scheme
+// change retired. Dropping one of those from an exclusion set would hand back
+// finished tickets as new work; dropping it from an inclusion set only costs
+// the tickets that status holds, which is the trade this exists to make.
+//
 // Returns an empty jql when nothing can be salvaged: the workflow is
 // unreachable, every member is still live (so the failure is something else
-// entirely and rerunning the same query would only repeat it), or nothing
-// survives the filter and the narrowed query would widen its result set.
-// The stored rule is never edited — a status that vanished upstream is the
-// team's to remove, and the settings board is where they are told.
+// entirely and rerunning the same query would only repeat it), or nothing at
+// all survives — an inclusion set narrowed to empty is an unfiltered query,
+// never a narrower one. The stored rule is never edited: a status that
+// vanished upstream is the team's to remove, and the settings board is where
+// they are told.
 func (t *Tracker) salvageJiraQuery(
 	ctx context.Context, client *jiraclient.Client,
 	projectKey string, members []domain.JiraStatusRef,
@@ -1774,7 +1790,7 @@ func (t *Tracker) salvageJiraQuery(
 			dropped = append(dropped, m)
 		}
 	}
-	if len(dropped) == 0 {
+	if len(dropped) == 0 || len(surviving) == 0 {
 		return "", nil
 	}
 	return build(surviving), dropped

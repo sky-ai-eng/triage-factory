@@ -9,7 +9,12 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 
 import JiraProjectRulesGroup from './JiraProjectRulesGroup'
-import { emptyProject, projectIsArmed, type JiraProjectConfig } from './teamConfig'
+import {
+  emptyProject,
+  projectIsArmed,
+  ruleIsIdentified,
+  type JiraProjectConfig,
+} from './teamConfig'
 import { jsonBody } from '../../test/apiResponse'
 
 const CATALOG = [
@@ -56,6 +61,14 @@ function Harness({ seed = [] as JiraProjectConfig[] }) {
           .join(',')}
       </output>
       <output data-testid="watched">{value.map((p) => p.key).join(',')}</output>
+      {/* What the write path sees: the ids it would send, and whether the rule
+          is sendable at all — a rule with any name-only member is omitted. */}
+      <output data-testid="pickup-ids">
+        {value[0]?.pickup.members.map((m) => m.id).join(',') ?? ''}
+      </output>
+      <output data-testid="pickup-sendable">
+        {value[0] && ruleIsIdentified(value[0].pickup) ? 'yes' : 'no'}
+      </output>
     </>
   )
 }
@@ -238,5 +251,43 @@ describe('JiraProjectRulesGroup · statuses that vanished upstream', () => {
 
     expect(await screen.findByText('Ready')).toBeInTheDocument()
     expect(screen.queryByText(/status(es)? missing/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('JiraProjectRulesGroup · editing a rule written before statuses had ids', () => {
+  // A rule stored by an older TF: names, no ids. The PUT takes ids, so such a
+  // rule is omitted from the body and the server keeps what it has — which is
+  // correct only for as long as it stays untouched. Editing it has to make it
+  // sendable, or the edit reverts on the next load with no error shown.
+  const legacyRule = (): JiraProjectConfig => ({
+    ...emptyProject('SKY'),
+    pickup: { members: [{ id: '', name: 'To Do' }] },
+    in_progress: {
+      members: [{ id: '', name: 'In Progress' }],
+      canonical: { id: '', name: 'In Progress' },
+    },
+    done: { members: [{ id: '', name: 'Done' }], canonical: { id: '', name: 'Done' } },
+  })
+
+  async function expandAndAddDoneToPickup() {
+    const user = userEvent.setup()
+    render(<Harness seed={[legacyRule()]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand project' }))
+    const pickup = (await screen.findByText('Pickup')).closest('div')!.parentElement!.parentElement!
+    // One new status onto a rule whose existing member is still name-only.
+    await user.click(within(pickup).getByRole('button', { name: 'Done' }))
+    return pickup
+  }
+
+  it('carries ids onto the members the click did not touch', async () => {
+    await expandAndAddDoneToPickup()
+    // Both members identified: the clicked one by construction, the carried-over
+    // one by resolving the name against the freshly-fetched list.
+    expect(screen.getByTestId('pickup-ids')).toHaveTextContent('10000,10002')
+  })
+
+  it('leaves the whole rule sendable, so the edit is not silently dropped', async () => {
+    await expandAndAddDoneToPickup()
+    expect(screen.getByTestId('pickup-sendable')).toHaveTextContent('yes')
   })
 })

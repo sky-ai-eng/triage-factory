@@ -46,19 +46,36 @@ export default function JiraStatusRule({
 }: Props) {
   const isMember = (status: JiraStatusRef) => value.members.some((m) => sameStatus(m, status))
 
+  /** identify re-points a stored ref at the freshly-fetched status it names, so
+   *  a member carried over from a rule written before statuses had ids gains
+   *  one without being clicked.
+   *
+   *  This is what makes "editing a rule identifies it" true. Only the status a
+   *  click touches arrives with an id of its own; every other member is carried
+   *  over verbatim, and the write path can send a rule only when EVERY member
+   *  has an id — so one untouched name-only member would have silently held the
+   *  whole rule back and reverted the edit on the next load. A ref the list
+   *  cannot resolve is left exactly as it is: the board flags it as missing
+   *  from the workflow, which is a thing to be told, not to be quietly fixed. */
+  const identify = (ref: JiraStatusRef): JiraStatusRef =>
+    allStatuses.find((s) => sameStatus(s, ref)) ?? ref
+
+  const emit = (members: JiraStatusRef[], canonical: JiraStatusRef | null | undefined) =>
+    onChange({ members: members.map(identify), canonical: canonical && identify(canonical) })
+
   const toggle = (status: JiraStatusRef) => {
     if (isMember(status)) {
       const nextMembers = value.members.filter((m) => !sameStatus(m, status))
       const nextCanonical =
         value.canonical && sameStatus(value.canonical, status) ? null : value.canonical
-      onChange({ members: nextMembers, canonical: nextCanonical })
+      emit(nextMembers, nextCanonical)
     } else {
       const nextMembers = [...value.members, status]
       const nextCanonical =
         requireCanonical && !value.canonical && value.members.length === 0
           ? status
           : value.canonical
-      onChange({ members: nextMembers, canonical: nextCanonical })
+      emit(nextMembers, nextCanonical)
     }
   }
 
@@ -79,10 +96,10 @@ export default function JiraStatusRule({
             <select
               value={value.canonical?.id || value.canonical?.name || ''}
               onChange={(e) =>
-                onChange({
-                  members: value.members,
-                  canonical: value.members.find((m) => (m.id || m.name) === e.target.value) ?? null,
-                })
+                emit(
+                  value.members,
+                  value.members.find((m) => (m.id || m.name) === e.target.value) ?? null,
+                )
               }
               disabled={value.members.length === 0}
               className={`bg-white/50 border rounded-lg px-2 py-1 text-[12px] text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${

@@ -55,6 +55,7 @@ type jiraCatalogFake struct {
 	keys     []string
 	statuses map[string][]fakeJiraStatus
 	failing  bool
+	failFor  map[string]bool
 	calls    int
 }
 
@@ -62,13 +63,14 @@ type jiraCatalogFake struct {
 // the fixture workflow.
 func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 	t.Helper()
-	f := &jiraCatalogFake{keys: keys, statuses: map[string][]fakeJiraStatus{}}
+	f := &jiraCatalogFake{keys: keys, statuses: map[string][]fakeJiraStatus{}, failFor: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.calls++
 		failing, keys := f.failing, append([]string(nil), f.keys...)
 		project, isStatuses := projectFromStatusesPath(r.URL.Path)
 		statuses, custom := f.statuses[project]
+		failing = failing || (isStatuses && f.failFor[project])
 		f.mu.Unlock()
 
 		if failing {
@@ -133,6 +135,15 @@ func (f *jiraCatalogFake) SetStatuses(project string, statuses ...fakeJiraStatus
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statuses[project] = statuses
+}
+
+// SetStatusesFailing makes one project's workflow read fail while the rest of
+// the instance keeps answering — the shape that puts an upstream failure and a
+// field fault in the same request.
+func (f *jiraCatalogFake) SetStatusesFailing(project string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failFor[project] = true
 }
 
 // SetFailing makes every later read fail, standing in for an unreachable Jira.

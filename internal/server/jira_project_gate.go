@@ -167,7 +167,7 @@ func (s *Server) gateJiraProjects(
 		if p.newKey {
 			visible, err := jiraProjectVisible(r.Context(), client, p.wish.key)
 			if err != nil {
-				writeJiraGateUpstream(w, orgID, "project "+p.wish.key, err)
+				writeJiraGateStopped(w, &v, orgID, "project "+p.wish.key, err)
 				return nil, false
 			}
 			if !visible {
@@ -184,7 +184,7 @@ func (s *Server) gateJiraProjects(
 		// display name comes from.
 		statuses, err := client.ProjectStatuses(r.Context(), p.wish.key)
 		if err != nil {
-			writeJiraGateUpstream(w, orgID, "the statuses of project "+p.wish.key, err)
+			writeJiraGateStopped(w, &v, orgID, "the statuses of project "+p.wish.key, err)
 			return nil, false
 		}
 		byID := make(map[string]domain.JiraStatusRef, len(statuses))
@@ -304,6 +304,21 @@ func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID, u
 		return nil, false
 	}
 	return jira.NewClient(cfg), true
+}
+
+// writeJiraGateStopped ends the gate when Jira stops answering partway through
+// a set. Faults already found in earlier elements win: they are the caller's
+// own, they are true whether or not Jira is reachable, and they have to be
+// fixed before any retry can store anything — whereas the upstream failure
+// says only "try again". Reporting the 502 over them would throw away the half
+// of the answer that is certain. Nothing is stored either way.
+func writeJiraGateStopped(w http.ResponseWriter, v *httpx.Validation, orgID, what string, err error) {
+	if v.Flush(w, http.StatusBadRequest) {
+		serverLog.Warn("jira write gate could not reach jira; reporting the field faults found first",
+			"org", orgID, "checking", what, "error", err)
+		return
+	}
+	writeJiraGateUpstream(w, orgID, what, err)
 }
 
 func writeJiraGateUpstream(w http.ResponseWriter, orgID, what string, err error) {
