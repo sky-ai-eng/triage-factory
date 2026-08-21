@@ -20,11 +20,19 @@ export interface EventSourceAvailability {
 const cache = new Map<string, EventSourceAvailability[]>()
 const inFlight = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
-// Bumped whenever the cache is dropped. A read captures the generation at
-// dispatch and discards its answer if an invalidation has since bumped it, so
-// a request that was already in flight when a credential changed cannot
-// repopulate the cache with the answer from before the change.
-let generation = 0
+// Bumped PER ORG whenever that org's cached answer is dropped. A read captures
+// its org's generation at dispatch and discards its answer if an invalidation
+// has since bumped it, so a request already in flight when a credential
+// changed cannot repopulate the cache with the answer from before the change.
+//
+// Per org rather than one global counter because invalidation is per org: a
+// bump is "this org's answer is stale", and spending it globally would discard
+// a perfectly good in-flight read for an org nothing happened to.
+const generations = new Map<string, number>()
+
+function generationOf(orgId: string): number {
+  return generations.get(orgId) ?? 0
+}
 
 function notify() {
   for (const l of listeners) l()
@@ -33,12 +41,12 @@ function notify() {
 function load(orgId: string): Promise<void> {
   const pending = inFlight.get(orgId)
   if (pending) return pending
-  const gen = generation
-  const p = apiJSON<{ sources?: EventSourceAvailability[] }>(
+  const gen = generationOf(orgId)
+  const read: Promise<void> = apiJSON<{ sources?: EventSourceAvailability[] }>(
     `/api/orgs/${encodeURIComponent(orgId)}/sources`,
   )
     .then((data) => {
-      if (gen !== generation) return // superseded — a newer invalidation won
+      if (gen !== generationOf(orgId)) return // superseded — a newer invalidation won
       cache.set(orgId, data.sources ?? [])
       notify()
     })
@@ -48,21 +56,31 @@ function load(orgId: string): Promise<void> {
       // every handler inert and empty the event picker — a far worse answer
       // than making no claim, which is what an unresolved read does below.
     })
-    .finally(() => {
-      inFlight.delete(orgId)
-    })
-  inFlight.set(orgId, p)
-  return p
+  const tracked: Promise<void> = read.finally(() => {
+    // Retire only OUR OWN entry. An invalidation can start a newer read for
+    // this org while this one is still open, and a blind delete here would
+    // retire that one — leaving it running but untracked, so the next caller
+    // starts a third duplicate read of the same org.
+    if (inFlight.get(orgId) === tracked) inFlight.delete(orgId)
+  })
+  inFlight.set(orgId, tracked)
+  return tracked
 }
 
 /** Drop the cached availability and refetch for any mounted subscriber. Call
  *  after a change that can move a source — binding or unbinding a credential,
- *  connecting a workspace. */
+ *  connecting a workspace. Pass an orgId to invalidate just that org; omit it
+ *  to invalidate every org this page has read. */
 export function invalidateEventSources(orgId?: string): void {
-  generation++
-  inFlight.clear()
-  if (orgId) cache.delete(orgId)
-  else cache.clear()
+  const targets = orgId ? [orgId] : [...cache.keys(), ...inFlight.keys()]
+  for (const id of new Set(targets)) {
+    // Bump before dropping: a read still in flight for this org has captured
+    // the old generation and must not write its pre-change answer into the
+    // cache we are about to empty.
+    generations.set(id, generationOf(id) + 1)
+    inFlight.delete(id)
+    cache.delete(id)
+  }
   // Mounted consumers refetch from their own subscription (below) rather than
   // this function knowing which orgs are on screen.
   notify()
@@ -139,5 +157,6 @@ export function useEventSources(): UseEventSources {
 export function resetEventSourcesForTest(): void {
   cache.clear()
   inFlight.clear()
+  generations.clear()
   listeners.clear()
 }

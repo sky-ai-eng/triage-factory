@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"errors"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -44,9 +45,12 @@ func availability(ctx context.Context, tx db.TxStores, orgID string) (eventsourc
 	}
 	bundle := slackstore.FromTx(tx)
 	if bundle == nil {
-		// This package is linked, so its store factories are too; reaching
-		// here means a transaction built without them.
-		return eventsource.StateUnconfigured, nil
+		// A FAULT, not a state. This package being linked links its store
+		// factories too, so a transaction without the bundle is a miswired
+		// build — and answering "unconfigured" would file that under the one
+		// state a reader is invited to go fix themselves, where it can sit
+		// forever looking like an unconnected workspace.
+		return "", errors.New("slack store bundle absent from the transaction: the slack store extension is not registered")
 	}
 	workspaces, err := bundle.Workspaces.ListForOrg(ctx, orgID)
 	if err != nil {

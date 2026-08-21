@@ -27,6 +27,11 @@ function stubSources(read: () => EventSourceAvailability[] | 'fail') {
   return fetchMock
 }
 
+// flush drains the microtask queue past a settled fetch — apiJSON awaits
+// `text()` and then parses, so a read's own cleanup runs several ticks after
+// its body resolves. A test that asserts before that has not observed anything.
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
 const configured: EventSourceAvailability[] = [
   { kind: 'github', state: 'available' },
   { kind: 'jira', state: 'unconfigured' },
@@ -99,6 +104,75 @@ describe('useEventSources', () => {
 
     await waitFor(() => expect(a.result.current.loaded).toBe(true))
     await waitFor(() => expect(b.result.current.loaded).toBe(true))
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  // An invalidation starts a second read while the first is still open. When
+  // the first one finally settles it must retire only its OWN in-flight entry
+  // — a blind delete would untrack the second, leaving it running while the
+  // next consumer starts a third read of the same org.
+  it('a superseded read does not untrack the one that replaced it', async () => {
+    const opened: Array<(value: EventSourceAvailability[]) => void> = []
+    const fetchMock = vi.fn((input: unknown) => {
+      if (String(input).split('?')[0] !== sourcesPath) {
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
+      }
+      // Park each read open; the test settles them by hand, in order.
+      const body = new Promise<{ sources: EventSourceAvailability[] }>((resolve) => {
+        opened.push((sources) => resolve({ sources }))
+      })
+      return Promise.resolve({ ok: true, ...jsonBody(body) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const first = renderHook(() => useEventSources())
+    await waitFor(() => expect(opened).toHaveLength(1))
+
+    invalidateEventSources()
+    await waitFor(() => expect(opened).toHaveLength(2)) // the replacement read
+
+    // The superseded read settles now, after its replacement was dispatched —
+    // and is given time to run its cleanup, which is where the bug would be.
+    opened[0](configured)
+    await flush()
+
+    // A newly mounted consumer must join the read in flight, not start another.
+    const second = renderHook(() => useEventSources())
+    await flush()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+
+    opened[1]([{ kind: 'jira', state: 'available' }])
+    await waitFor(() => expect(first.result.current.stateOf('jira')).toBe('available'))
+    expect(second.result.current.stateOf('jira')).toBe('available')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  // Invalidation is per org. Naming one org must not discard another's read
+  // that is already in flight — the discarded answer would never reach the
+  // cache, and the consumer waiting on it would have to start a second one.
+  it('invalidating another org does not discard this org’s open read', async () => {
+    const opened: Array<(value: EventSourceAvailability[]) => void> = []
+    const fetchMock = vi.fn((input: unknown) => {
+      if (String(input).split('?')[0] !== sourcesPath) {
+        return Promise.resolve({ ok: false, status: 404, ...jsonBody({}) })
+      }
+      const body = new Promise<{ sources: EventSourceAvailability[] }>((resolve) => {
+        opened.push((sources) => resolve({ sources }))
+      })
+      return Promise.resolve({ ok: true, ...jsonBody(body) })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() => useEventSources())
+    await waitFor(() => expect(opened).toHaveLength(1))
+
+    invalidateEventSources('11111111-1111-1111-1111-111111111111')
+
+    // The open read is this org's and nothing happened to this org, so its
+    // answer still counts — and no second read was started to replace it.
+    opened[0](configured)
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.canProduce('jira')).toBe(false)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
