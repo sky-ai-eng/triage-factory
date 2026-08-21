@@ -95,6 +95,12 @@ type Stores struct {
 	// TxStores instead.
 	Factory FactoryReadStore
 
+	// TeamActivity computes the team activity node (GET
+	// /api/teams/{team_id}/activity). Read it through TxStores under the
+	// caller's claims — the Postgres predicates lean on tf.user_in_team and
+	// RLS; this non-tx binding exists for wiring symmetry.
+	TeamActivity TeamActivityStore
+
 	// Conversations owns conversations + messages — agent conversation
 	// lifecycle and transcript (per-engagement execution state lives on
 	// claims). App pool in Postgres; every consumer is
@@ -491,6 +497,7 @@ type TxStores struct {
 	Users                    UsersStore
 	Tasks                    TaskStore
 	Factory                  FactoryReadStore
+	TeamActivity             TeamActivityStore
 	Conversations            ConversationStore
 	Artifacts                ArtifactStore
 	Entities                 EntityStore

@@ -489,7 +489,7 @@ func (h *usageHandler) handleUsageTeamCaps(w http.ResponseWriter, r *http.Reques
 	)
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		caps, total, e = tx.Teams.ListActiveCapsForOrgSystem(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		caps, total, e = tx.Teams.ListActiveCapsForOrgSystem(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "usage", err)

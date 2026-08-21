@@ -105,7 +105,7 @@ func (bf *backfillHandler) handleBackfillCandidates(w http.ResponseWriter, r *ht
 			ExcludeProjectID: projectID,
 			GitHubRepos:      project.PinnedRepos,
 			JiraProjectKey:   project.JiraProjectKey,
-		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		}, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}

@@ -337,7 +337,7 @@ func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
 		total    int
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		rows, count, e := tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		rows, count, e := tx.Projects.List(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}

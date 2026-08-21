@@ -50,6 +50,7 @@ func New(conn *sql.DB) db.Stores {
 		Users:          users,
 		Tasks:          newTaskStore(conn, conn),
 		Factory:        newFactoryReadStore(conn),
+		TeamActivity:   newTeamActivityStore(conn),
 		Conversations:  newConversationStore(conn),
 		Artifacts:      newArtifactStore(conn),
 		Entities:       newEntityStore(conn, conn),

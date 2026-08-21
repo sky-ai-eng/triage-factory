@@ -84,6 +84,9 @@ func (s *invitesStore) ListActive(ctx context.Context, orgID string, opts db.Lis
 		SELECT COUNT(*) FROM org_invites`+pgActiveInviteWhere, orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count active org_invites: %w", err)
 	}
+	if opts.CountOnly {
+		return []domain.OrgInvite{}, total, nil
+	}
 
 	query := pgActiveInviteSelect + `
 		ORDER BY created_at DESC, id ASC`

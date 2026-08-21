@@ -240,6 +240,9 @@ func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Repository{}, total, nil
+	}
 	query := `
 		SELECT ` + repoProfileFullColumns + `
 		FROM repositories

@@ -125,6 +125,9 @@ func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts)
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects`).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Project{}, total, nil
+	}
 	query := `
 		SELECT ` + sqliteProjectColumns + `
 		FROM projects ORDER BY LOWER(name) ASC, id`

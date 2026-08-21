@@ -101,6 +101,9 @@ func (s *dashboardStore) PRs(ctx context.Context, orgID, username string, opts d
 	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, orgID, username).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.PRSummaryRow{}, total, nil
+	}
 
 	query := `SELECT snapshot_json FROM entities` + where + `
 		ORDER BY last_polled_at DESC NULLS LAST, id`

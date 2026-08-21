@@ -92,7 +92,7 @@ func (h *failedEventsHandler) handleFailedEventsList(w http.ResponseWriter, r *h
 		return
 	}
 
-	rows, total, err := h.queue.ListFailedEvents(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+	rows, total, err := h.queue.ListFailedEvents(r.Context(), orgID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		internalError(w, "failed-events", err)
 		return

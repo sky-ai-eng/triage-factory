@@ -46,6 +46,13 @@ type PollReadinessStore interface {
 	// completed at least one poll ever). False, nil for an unknown pair.
 	Ready(ctx context.Context, orgID, source string) (bool, error)
 
+	// LastPollTimes returns each source's last completed poll time for the
+	// org, keyed by source. A source with no row, or none since its last
+	// restart cleared the stamp, is simply absent — "never completed" and
+	// "no poller" both read as a missing key, which a caller renders as
+	// unknown rather than as a time.
+	LastPollTimes(ctx context.Context, orgID string) (map[string]time.Time, error)
+
 	// TakeAnnouncePending atomically reads-and-clears the one-shot "config
 	// took effect" toast flag for (orgID, source) — true at most once per
 	// SetAnnouncePending call, even across pods racing this read (the CAS

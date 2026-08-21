@@ -358,6 +358,9 @@ func (s *artifactStore) ListByTeam(ctx context.Context, orgID, teamID string, op
 	if err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Artifact{}, total, nil
+	}
 	// Base WHERE only — the filter helper appends the optional predicates, the
 	// ORDER BY, and LIMIT/OFFSET so this and ListByOrgSystem share one builder.
 	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1 AND team_id = $2`
@@ -433,6 +436,9 @@ func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts 
 	total, err := countPgArtifacts(ctx, s.admin, `org_id = $1`, []any{orgID}, opts)
 	if err != nil {
 		return nil, 0, err
+	}
+	if opts.CountOnly {
+		return []domain.Artifact{}, total, nil
 	}
 	query := `SELECT ` + pgArtifactColumns + ` FROM artifacts WHERE org_id = $1`
 	query, args := appendPgArtifactFilters(query, []any{orgID}, opts)

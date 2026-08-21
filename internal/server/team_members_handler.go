@@ -137,7 +137,7 @@ func (h *teamMembersHandler) handleTeamRosterList(w http.ResponseWriter, r *http
 			return e
 		}
 		members, total, e = tx.Teams.ListMembers(r.Context(), teamID, orgSet.GitHubBaseURL, orgSet.JiraBaseURL,
-			db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+			db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		if e != nil {
 			return e
 		}

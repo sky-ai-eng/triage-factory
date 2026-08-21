@@ -102,7 +102,7 @@ func (ph *promptsHandler) handlePromptsList(w http.ResponseWriter, r *http.Reque
 	)
 	if err := ph.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		list, total, e = tx.Prompts.List(r.Context(), orgID, req.TeamID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "prompts", err)

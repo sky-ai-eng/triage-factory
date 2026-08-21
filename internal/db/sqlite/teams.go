@@ -152,6 +152,9 @@ func (s *teamsStore) ListForUser(ctx context.Context, orgID string, opts db.List
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count teams for user: %w", err)
 	}
+	if opts.CountOnly {
+		return []domain.Team{}, total, nil
+	}
 
 	query := `
 		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, 'admin' AS role
@@ -375,6 +378,9 @@ func (s *teamsStore) ListArchivedForOrgSystem(ctx context.Context, orgID string,
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count archived teams: %w", err)
 	}
+	if opts.CountOnly {
+		return []domain.Team{}, total, nil
+	}
 
 	query := `
 		SELECT id, org_id, slug, name, COALESCE(description, ''), created_at, deleted_at
@@ -437,6 +443,9 @@ func (s *teamsStore) ListActiveCapsForOrgSystem(ctx context.Context, orgID strin
 		SELECT COUNT(*) FROM teams WHERE org_id = ? AND deleted_at IS NULL
 	`, orgID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count active teams: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.TeamCap{}, total, nil
 	}
 	// LEFT JOIN, not JOIN: a team with no settings row has no cap, and an
 	// inner join would silently drop it from the editor that exists to give
@@ -616,6 +625,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		WHERE m.team_id = ?
 	`, teamID).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count team members: %w", err)
+	}
+	if opts.CountOnly {
+		return []domain.TeamMember{}, total, nil
 	}
 
 	// display_name is nullable, so COALESCE renders the empty string (matching

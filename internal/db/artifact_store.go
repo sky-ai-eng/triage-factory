@@ -234,6 +234,10 @@ type ArtifactListOpts struct {
 	// Offset skips the first N rows, for limit/offset paging ("load more").
 	// Only meaningful alongside a positive Limit.
 	Offset int
+	// CountOnly returns only the filtered total: the count query runs, the row
+	// query doesn't, and the page comes back empty. Limit and Offset are
+	// ignored. Mirrors ListOpts.CountOnly (the explicit page_size: 0 request).
+	CountOnly bool
 	// Provider / Kind / State are optional exact-match filters on the matching
 	// artifact column. Empty means no filter on that column.
 	Provider string

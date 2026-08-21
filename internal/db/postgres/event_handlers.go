@@ -163,6 +163,9 @@ func (s *eventHandlerStore) List(ctx context.Context, orgID string, f db.EventHa
 	if err := s.app.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_handlers`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.EventHandler{}, total, nil
+	}
 
 	// Order: rules first (sort_order ASC, name ASC), then triggers
 	// (created_at DESC), with an id tiebreaker so ties can't reshuffle

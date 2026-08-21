@@ -212,6 +212,9 @@ func listProjects(ctx context.Context, q queryer, orgID string, opts db.ListOpts
 	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM projects WHERE org_id = $1`, orgID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
+	if opts.CountOnly {
+		return []domain.Project{}, total, nil
+	}
 	query := `
 		SELECT ` + pgProjectColumns + `
 		FROM projects

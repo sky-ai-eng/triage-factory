@@ -167,7 +167,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, class, q,
-		db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		reposLog.Error("list reachable repos failed", "org", orgID, "error", err)
 		internalError(w, "repos", err)
@@ -524,7 +524,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	)
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset}
+		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly}
 		if isAdmin {
 			repos, total, e = tx.Repos.List(r.Context(), orgID, opts)
 		} else {

@@ -113,6 +113,60 @@ func RunTaskStoreConformance(t *testing.T, mk TaskStoreFactory) {
 				t.Errorf("task %s shouldn't appear in the queue projection (has claim)", task.ID)
 			}
 		}
+
+		coRows, coTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{CountOnly: true})
+		if err != nil {
+			t.Fatalf("List count-only: %v", err)
+		}
+		AssertCountOnlyList(t, "tasks.List", len(coRows), coTotal, total)
+	})
+
+	t.Run("List_created_since_and_sources_filters", func(t *testing.T) {
+		s, orgID, _, _, _, seed, _ := mk(t)
+		seed(t, "flt1")
+		seed(t, "flt2")
+
+		all, allTotal, err := s.List(ctx, orgID, queueFilter(), db.ListOpts{Limit: 50})
+		if err != nil {
+			t.Fatalf("List: %v", err)
+		}
+		if len(all) < 2 {
+			t.Fatalf("seeded queue has %d rows, want >= 2", len(all))
+		}
+
+		// created_since is a flow window on every status: a bound in the past
+		// keeps the set, a bound in the future empties it.
+		past, future := time.Now().Add(-time.Hour).UTC(), time.Now().Add(time.Hour).UTC()
+		f := queueFilter()
+		f.CreatedSince = &past
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("created_since in the past: total = %d (err %v), want %d", total, err, allTotal)
+		}
+		f.CreatedSince = &future
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
+			t.Errorf("created_since in the future: total = %d (err %v), want 0", total, err)
+		}
+
+		// Sources narrows on the joined entity's source. The seeded rows all
+		// share one source, so filtering on it keeps the set and filtering on
+		// any other source drops it.
+		seededSource := all[0].EntitySource
+		if seededSource == "" {
+			t.Fatal("seeded task carries no EntitySource")
+		}
+		other := "jira"
+		if seededSource == "jira" {
+			other = "github"
+		}
+		f = queueFilter()
+		f.Sources = []string{seededSource}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != allTotal {
+			t.Errorf("sources = [%s]: total = %d (err %v), want %d", seededSource, total, err, allTotal)
+		}
+		f.Sources = []string{other}
+		if _, total, err := s.List(ctx, orgID, f, db.ListOpts{CountOnly: true}); err != nil || total != 0 {
+			t.Errorf("sources = [%s]: total = %d (err %v), want 0", other, total, err)
+		}
 	})
 
 	t.Run("List_done_excludes_active", func(t *testing.T) {

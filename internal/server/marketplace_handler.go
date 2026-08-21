@@ -621,7 +621,7 @@ func (mh *marketplaceHandler) handleMarketplaceList(w http.ResponseWriter, r *ht
 	)
 	if err := mh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		listings, total, e = tx.Marketplace.List(r.Context(), orgID, userID, f, db.ListOpts{Limit: page.Limit, Offset: page.Offset})
+		listings, total, e = tx.Marketplace.List(r.Context(), orgID, userID, f, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "marketplace", err)

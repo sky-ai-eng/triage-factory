@@ -99,12 +99,22 @@ var TaskListStatuses = []string{
 //     mixed query windows its terminal tail without touching the rest. Nil
 //     means no window — the board asks for the one it wants, and there is no
 //     hidden default.
+//   - CreatedSince: when set, only tasks whose created_at is at or after it.
+//     Unlike ClosedSince it applies to every status — "tasks created this
+//     week" is a question about the flow, not the terminal tail. Combined
+//     with a count-only page it is the "tasks · N days" figure.
+//   - Sources: when non-empty, only tasks whose entity came from one of
+//     these sources (entities.source — the event catalog's vocabulary,
+//     domain.EventSources). The list already joins entities, so the filter
+//     narrows on the joined column rather than prefix-matching event_type.
 type TaskListFilter struct {
 	Statuses       []string
 	TeamIDs        []string
 	OnlyUnclaimed  bool
 	IncludeSnoozed bool
 	ClosedSince    *time.Time
+	CreatedSince   *time.Time
+	Sources        []string
 }
 
 // TaskStore owns the tasks table — lifecycle, claims, dedup,

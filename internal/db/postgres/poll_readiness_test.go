@@ -106,3 +106,40 @@ func TestPollReadinessStore_Postgres_AnnouncePendingIsAtomicOneShot(t *testing.T
 		t.Fatalf("exactly one concurrent taker should see true, got %d", trueCount)
 	}
 }
+
+// TestPollReadinessStore_Postgres_LastPollTimes mirrors the SQLite case: see
+// that file for what each step pins.
+func TestPollReadinessStore_Postgres_LastPollTimes(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+	const orgID = "22222222-2222-2222-2222-222222222222"
+
+	if times, err := stores.PollReadiness.LastPollTimes(ctx, orgID); err != nil || len(times) != 0 {
+		t.Fatalf("LastPollTimes before any poll = %v err=%v, want empty", times, err)
+	}
+	if err := stores.PollReadiness.MarkPollComplete(ctx, orgID, "github", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stores.PollReadiness.MarkPollComplete(ctx, orgID, "jira", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	times, err := stores.PollReadiness.LastPollTimes(ctx, orgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(times) != 2 {
+		t.Fatalf("times = %v, want github + jira", times)
+	}
+	if err := stores.PollReadiness.MarkRestarted(ctx, orgID, "jira"); err != nil {
+		t.Fatal(err)
+	}
+	times, err = stores.PollReadiness.LastPollTimes(ctx, orgID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := times["jira"]; ok || len(times) != 1 {
+		t.Fatalf("after jira restart times = %v, want github only", times)
+	}
+}
