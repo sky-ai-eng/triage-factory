@@ -9,7 +9,11 @@ Status: **requirements settled — design and ticketing next.** Every open
 question in §4 has been answered (struck through with its resolution
 inline; the reasoning is kept, not deleted). §1 and §2 are stable to build
 against; §3 records the shape the discussion converged on and remains
-provisional until the design pass.
+provisional until the design pass. **Amended 2026-08-21**: §3's
+file-is-the-allowlist shape is superseded by the registry design in §3's
+dated amendment block; D4 carries a matching dated note on benchmark
+scores. The reasoning that was superseded is struck, not deleted, per this
+document's convention.
 
 Scope note: multi-mode is where the new machinery lands. **Local mode stays
 SDK-bound** — see §2.6, which is a requirement, not an implementation
@@ -206,6 +210,20 @@ differently, enforced at different times, and fail differently.
   industry standardizes one — auto-selection would be false confidence
   with an audit trail. The org/team **rate cap** (R7) already provides the
   spend guardrail without pretending to know which model is best.
+
+  *Amended 2026-08-21.* Storing and displaying a TF-harness benchmark
+  score is no longer rejected — see the §3 amendment's evaluation
+  contract. Two of the objections above are answered by that design: a
+  score earned in TF's own harness has no scaffold-dependence problem (it
+  measures exactly the *(model, harness)* pair that will run), and the
+  first-party-suite cost objection is accepted knowingly by placing the
+  whole apparatus — suite, runner, statistics, leaderboard — **outside the
+  product repo**, with only a vendored result snapshot crossing in. What
+  D4 continues to forbid is unchanged and now needs stating more sharply,
+  because a stored float will attract this feature request forever:
+  **no ordering the picker by any score, and no auto-resolving selection
+  of any kind.** A score may be displayed, badged, and used to derive a
+  categorical verdict; a step remains unset or pinned.
 
 ---
 
@@ -548,8 +566,11 @@ Not accepted.
    - `pricing_datasheet.json` — auto-refreshed upstream mirror. Never
      hand-edited.
    - A TF-owned file of supported entries, each with the display name
-     exactly as it should render. **This file is the allowlist**: in it ⇒
-     supported and named; absent ⇒ not offered. One concept, not two.
+     exactly as it should render. ~~**This file is the allowlist**: in it ⇒
+     supported and named; absent ⇒ not offered. One concept, not two.~~
+     **Superseded 2026-08-21** — three concepts after all, and only one of
+     them belongs to the file; see the amendment below. The file is a
+     registry of editorial facts; the allowlist is derived.
 2. **CI on the refresh job** distinguishes blocking from reporting:
    - *Block*: an entry we name no longer exists upstream (retirement needs
      a decision); an entry we name now fails a §2.3 gate; a
@@ -565,12 +586,170 @@ Not accepted.
    alias map has drift built in: resolve `"sonnet"` at call time and every
    historical row storing it gets retroactively repriced when the map
    moves.
-4. **The picker is** `named allowlist ∩ ListModels ∩ probe-verified`, with
-   Azure's middle term being deployments-mapped-to-models.
+4. **The picker is** ~~`named allowlist ∩ ListModels ∩ probe-verified`~~
+   `derived eligibility ∩ org enablement ∩ ListModels ∩ probe-verified`
+   (amended 2026-08-21 — the first term changed with item 1; the registry
+   names and groups that universe rather than bounding it), with Azure's
+   ListModels term being deployments-mapped-to-models.
 5. **Per-org alias tables** (§2.5) hold the per-vendor id shapes; TF
    requests alias names.
 6. **Rate caps shrink the picker; budget caps stop work.** Separate
    storage, separate enforcement points.
+
+### Amendment (2026-08-21): the file is a registry, not the allowlist
+
+Item 1's "one concept, not two" was wrong in the other direction: the
+file's single bit was carrying **three** different claims, and only one of
+them is irreducibly human.
+
+1. **Capability** — TF can drive and bill the model. Fully derivable, and
+   §2.3 already demanded exactly that ("exclusion is derived, not
+   curated"): the mechanical gates plus the provider map compute it with
+   no judgement. Hand-listing capable models re-curates what §2.3 derives.
+2. **Quality** — TF has evaluated the model in its own harness. Editorial,
+   but it is a *statement about* a model, not a reason to withhold it.
+3. **Identity** — what the model is called, which datasheet keys are
+   spellings of it, and which harness family drives it. The only part
+   that cannot be derived (§2.1: names and groupings are editorial
+   metadata TF adds, never parsed out of keys).
+
+Binding the first two to the file makes TF the blocking factor for models
+its providers already serve. The credential is the customer's own
+subscription — their Bedrock account, their spend, not a repackaging — so
+when a vendor ships a new model there, waiting on a TF release that edits
+a JSON file gates something TF neither executes nor pays for. The only
+legitimate TF-side gates are *the harness can drive it* and *the ledger
+can price it*, and both are mechanical.
+
+**The registry.** One row per **logical model** — not per spelling:
+
+```json
+{
+  "name": "Claude Sonnet 5",
+  "family": "claude",
+  "keys": {
+    "anthropic": "claude-sonnet-5",
+    "bedrock": "us.anthropic.claude-sonnet-5-...-v1:0"
+  }
+}
+```
+
+The name is written once; the "(via Bedrock)" parenthetical is derived
+from which key matched instead of hand-written per spelling; file order is
+display order. The `keys` grouping is the editorial identity mapping §2.1
+promised and is **load-bearing, not decoration**: the derived universe
+contains alias-and-pin duplicates (`claude-sonnet-5` *and* its dated
+spelling, plus prior generations) that nothing in the strings relates, and
+the registry hiding spellings it already covers is what keeps the
+uncurated tier below from being noise.
+
+**The derived universe.** What may be offered =
+`datasheet ∩ §2.3 gates ∩ provider map ∩ supported families`, recomputed
+from whatever snapshot the deployment holds. The eligibility logic gets a
+Go implementation shared with the refresh gate so CI and runtime cannot
+drift. A new model on an already-supported provider appears when the
+snapshot carries it — no TF code change. TF's engineering unit is the
+**execution path** (a provider integration, a harness family), never the
+model.
+
+**The uncurated tier.** Eligible-but-unnamed models surface under their
+raw datasheet key, disabled by default, org-admin-enableable through the
+enable-set machinery. Curated vs. uncurated travels as data on the model
+read (the same pattern as `availability`), never as a gate: a model TF has
+not evaluated is *ugly and opt-in*, not absent. People who want a day-one
+Bedrock model know exactly what its raw key means.
+
+**Family.** An editorial registry field, and the one legitimate hard gate:
+a family the harness genuinely cannot drive is not offered. It is
+deliberately *assigned*, never parsed from keys — which dissolves the
+otherwise-unsolvable problem that family is not derivable from opaque
+ids. The harness work a family selects splits into three buckets:
+
+- *Prompt text* — the `agentprompt` manifest's existing family axis.
+- *Tool surface* — which tools, and which shapes (find-and-replace
+  editing for Claude, patch-style for GPT), the loop presents. Needs the
+  same manifest discipline prompts already have; this is new work.
+- *Loop mechanics* — reasoning-signature replay, cache breakpoints,
+  effort mapping: per-family code above bifrost. Bifrost normalizes the
+  wire *envelope* (tool calls are JSON-schema-defined with JSON arguments
+  on every major vendor; the differences are content-block vs. tool_calls
+  shapes, result framing, id formats) — it cannot normalize which tools a
+  model is *good at*, which is why the tool-surface bucket exists.
+
+Family-granular is the default grain; a model-granular override is rare
+and deliberate. This is what keeps maintenance from scaling with model
+count: a vendor's next model in an existing family costs one registry row
+(or zero, in the uncurated tier), never a harness change.
+
+**Evaluation.** The benchmark apparatus — suite, runner, repeated runs,
+statistics, leaderboard — lives **outside the product repo**, in its own
+system. What crosses in is a vendored snapshot, the same relationship the
+pricing datasheet has to LiteLLM: a data file with provenance, written
+only by its sync. Per logical model:
+
+```json
+{
+  "bench_version": "3",
+  "score": 0.78,
+  "runs": 40,
+  "scored_at": "2026-08-14",
+  "verdict": "validated",
+  "scored_via": "claude-sonnet-5"
+}
+```
+
+The contract that keeps every semantic on the bench side: the **verdict is
+derived by the bench system before export** (the threshold is part of the
+methodology, not the product); `bench_version` is opaque to the product,
+which only equality-compares it against the snapshot header's current
+version to detect staleness (stale ⇒ unevaluated); scores are comparable
+**only within one version**, and the version covers the whole measurement
+apparatus — suite *and* harness configuration — since a score is a
+property of the *(model, harness)* pair; `runs` rides along because a mean
+of 5 and a mean of 200 are different facts; `scored_via` records which
+key actually served the runs, because score transfer across providers is
+a per-provider-family policy (safe for first-party hosts serving identical
+weights, unsafe for aggregators that may re-quantize). An absent snapshot
+file means every model reads *unevaluated* and blocks nothing — the bench
+system can arrive whenever it arrives.
+
+This lands the product's model layer on three data files with **one
+writer each**: the registry (hand-authored), the pricing snapshot (its
+refresh script), the bench snapshot (its sync). Measurement data is never
+hand-edited into an editorial file — that is the pricing rule (§2.3)
+applied uniformly.
+
+**Freshness, decided in order.** The formula is frozen in the binary; the
+numbers are data (a release is required only when the cost *shape*
+changes, which the refresh script's unknown-field tripwire detects).
+Lever one: make the release train data-fast — once the refresh gates
+land, the daily data PR auto-merges, and SaaS deploys on TF's own
+cadence. Lever two, **deferred until a real customer lags releases**:
+runtime adoption of a TF-operated, signed snapshot with the same gates
+applied at adoption time (unknown cost fields ⇒ refuse, fall back to
+embedded, log loudly) — never a raw third-party URL at runtime, opt-in
+for self-hosted, and nonexistent for airgapped installs, which keep the
+embedded posture §2.5 records. One freshness cost is real either way: for
+API-key customers the provider invoices at live prices while TF's ledger
+estimates from the snapshot, so staleness is ledger-vs-invoice drift, not
+mis-billing (R17 already insulates history).
+
+**What does not change.** R6 (resolve once, no fallback), the probe and
+its semantics (§2.4, Q4), enable-sets as the org's control surface, the
+mechanical gates failing closed, D4's prohibition on ordering and
+auto-selection, and §7's mode contract — local serves the identical read
+from the identical registry, and its universe stays what the SDK can
+drive.
+
+**Ship order.** The four-entry Anthropic file ships now with
+file-as-offered-set semantics — correct at one provider and one family,
+where the derived universe would add only alias/pin duplicates the
+registry exists to hide. The registry schema (logical models, `keys`,
+`family`), the derived universe with its uncurated tier, and the
+tool-surface family axis land with the multi-provider work, which is the
+point where file-as-allowlist would otherwise start gating customers. The
+bench snapshot lands when the external bench system exists; nothing
+sequences on it.
 
 ---
 
