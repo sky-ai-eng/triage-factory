@@ -169,7 +169,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Factory wires admin — the snapshot is a system-level view
 		// (no per-user identity, must see every in-flight run
 		// regardless of creator).
-		Factory: newFactoryReadStore(admin),
+		Factory:      newFactoryReadStore(admin),
+		TeamActivity: newTeamActivityStore(admin),
 		// Conversations wires app — every consumer is request-
 		// equivalent (server agent handler, delegate spawner
 		// goroutine spawned from a handler, chains). System-service
@@ -469,6 +470,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Users:         newUsersStore(tx, tx),
 		Tasks:         newTaskStore(tx, tx),
 		Factory:       newFactoryReadStore(tx),
+		TeamActivity:  newTeamActivityStore(tx),
 		// NewForTx is a test door — both pools collapse to the
 		// supplied tx. Tests that exercise the admin-only branch
 		// (event-triggered ConversationStore.Create, or any of the

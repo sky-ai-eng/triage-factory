@@ -860,6 +860,10 @@ func (s *Server) routes() {
 	s.api("GET /api/me/usage", uh.handleUsageMe)
 	s.api("GET /api/teams/{team_id}/usage", uh.handleUsageTeam)
 	s.api("GET /api/orgs/{org_id}/usage", uh.handleUsageOrg)
+	// The team's flow node — events/tasks/runs cuts over a window, the
+	// spend node's sibling with the member-level gate (the team page's
+	// figures are every member's; spend stays admin-gated on /usage).
+	s.api("GET /api/teams/{team_id}/activity", s.handleTeamActivity)
 	// Org-scoped operations subset (TFAC-589): an org admin's own queue waits +
 	// run durations + failure rates. Org-admin gated, SaaS-safe (no cross-tenant
 	// machine truth) — the org-facing complement to the operator-only fleet console.
