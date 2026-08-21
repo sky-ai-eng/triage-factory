@@ -37,6 +37,67 @@ func RunStagedInjectionStoreConformance(t *testing.T, mk StagedInjectionStoreFac
 	t.Helper()
 	ctx := context.Background()
 
+	t.Run("Provenance_round_trips_through_the_metadata_column", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "provenance")
+
+		// The write returns the row it persisted, so the returned copy and a
+		// later flush of the same row must agree — both map through the
+		// shared mapper, and this is what pins the metadata keys one writes
+		// to the keys the other reads.
+		want := domain.NoteProvenance{EventID: "evt-provenance-1", EventType: domain.EventGitHubPRCICheckFailed}
+		written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+			ConversationID: conversationID,
+			Producer:       domain.StagedInjectionProducerPRCoherence,
+			Body:           "CI went red",
+			Provenance:     want,
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if written.Provenance != want {
+			t.Errorf("returned row provenance = %+v, want %+v", written.Provenance, want)
+		}
+
+		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("flush returned %d rows, want 1", len(got))
+		}
+		if got[0].Provenance != want {
+			t.Errorf("flushed provenance = %+v, want %+v", got[0].Provenance, want)
+		}
+		if got[0].Producer != domain.StagedInjectionProducerPRCoherence {
+			t.Errorf("flushed producer = %q, want %q", got[0].Producer, domain.StagedInjectionProducerPRCoherence)
+		}
+	})
+
+	t.Run("A_note_with_no_originating_event_stays_valid", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "no-provenance")
+
+		written, err := store.AppendSystem(ctx, orgID, domain.StagedInjection{
+			ConversationID: conversationID,
+			Producer:       domain.StagedInjectionProducerPRCoherence,
+			Body:           "no event caused this",
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if !written.Provenance.Empty() {
+			t.Errorf("returned provenance = %+v, want empty", written.Provenance)
+		}
+		got, err := store.FlushPendingSystem(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("flush: %v", err)
+		}
+		if len(got) != 1 || !got[0].Provenance.Empty() {
+			t.Errorf("flushed rows = %+v, want one with empty provenance", got)
+		}
+	})
+
 	t.Run("Append_then_Flush_returns_notes_sorted_and_drains", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "drain")

@@ -54,7 +54,7 @@ type Delegator interface {
 	// caller must NOT record task_events 'injected' itself); the other two
 	// outcomes are handled exactly like the pre-TFAC-585 delivered/staged
 	// cases.
-	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
+	StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conversationID, producer, body string, prov domain.NoteProvenance, firing delegate.AdditiveFiringRef) delegate.InjectOutcome
 }
 
 // ReDeriveLedger is the one write the post-scoring re-derive owns on the

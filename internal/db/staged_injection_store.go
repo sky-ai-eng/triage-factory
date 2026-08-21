@@ -11,7 +11,7 @@ import (
 // (role='user', subtype='injection:system-note', delivered=false — the
 // producer tag rides metadata). It is the terminal/parked half of the
 // staged-injection delivery seam: a producer that can't re-derive its
-// injection from a durable row of its own (the new-commits notifier)
+// injection from a durable row of its own (the PR coherence feed)
 // appends here when the target conversation has no warm process, and the
 // delegate spawner flushes the conversation's pending injections ahead of the
 // user's text on the next resume.

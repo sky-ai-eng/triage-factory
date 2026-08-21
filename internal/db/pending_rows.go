@@ -68,12 +68,26 @@ func StagedInjectionFromPending(r PendingRow) domain.StagedInjection {
 	}
 	if r.Metadata != "" {
 		var meta struct {
-			Producer string `json:"producer"`
+			Producer  string `json:"producer"`
+			EventID   string `json:"event_id"`
+			EventType string `json:"event_type"`
 		}
 		_ = json.Unmarshal([]byte(r.Metadata), &meta)
 		n.Producer = meta.Producer
+		n.Provenance = domain.NoteProvenance{EventID: meta.EventID, EventType: meta.EventType}
 	}
 	return n
+}
+
+// StagedInjectionMetadata renders the metadata column a staged note is written
+// with. It is the write half of the pair StagedInjectionFromPending reads, kept
+// beside it so the keys one writes are the keys the other looks for.
+func StagedInjectionMetadata(n domain.StagedInjection) (string, error) {
+	raw, err := json.Marshal(domain.NoteMetadata(n.Producer, n.Provenance))
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
 }
 
 // StagedInjectionsFromPending maps flushed pending rows through

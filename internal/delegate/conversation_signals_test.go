@@ -3,6 +3,7 @@ package delegate
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sort"
 	"sync"
@@ -478,7 +479,7 @@ func TestStageOrDeliverAdditiveEvent_RemoteLiveSignals(t *testing.T) {
 	}}
 	s.SetConversationSignals(fakeSignals, nil)
 
-	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj", "producer", "body", AdditiveFiringRef{
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{
 		EntityID: "e1", TaskID: "t1", TriggerID: "tr1", TriggeringEventID: "ev1",
 	})
 	if outcome != InjectDeliveredRemote {
@@ -502,7 +503,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
 	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
-	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", AdditiveFiringRef{})
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj2", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{})
 	if outcome != InjectStagedResumable {
 		t.Fatalf("outcome = %v, want InjectStagedResumable", outcome)
 	}
@@ -530,7 +531,7 @@ func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	s := NewSpawner(database, stores, nil, nil, "m")
 	s.SetConversationSignals(newFakeConversationSignalStore(), nil)
 
-	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", AdditiveFiringRef{})
+	outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-inj3", "producer", "body", domain.NoteProvenance{}, AdditiveFiringRef{})
 	if outcome != InjectNotDelivered {
 		t.Fatalf("outcome = %v, want InjectNotDelivered", outcome)
 	}
@@ -748,4 +749,34 @@ func TestConversationSignalApplyLoop_AppliesQueuedSignalsAndWakesOnAck(t *testin
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("signal was never acked")
+}
+
+// TestStageOrDeliverAdditiveEvent_RemoteSignalCarriesProvenance: the owning
+// pod writes the transcript row, so the note's provenance has to cross the
+// pod boundary in the payload or it is simply lost for remote deliveries.
+func TestStageOrDeliverAdditiveEvent_RemoteSignalCarriesProvenance(t *testing.T) {
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-prov", "sess", "/tmp/wt")
+	dbtest.SeedActiveClaim(t, database, "r-prov", "executor-9", 0)
+	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "m")
+	fakeSignals := newFakeConversationSignalStore()
+	s.instances = &fakeInstanceStore{insts: map[string]*domain.Instance{
+		"executor-9": {ID: "executor-9", LastHeartbeatAt: time.Now()},
+	}}
+	s.SetConversationSignals(fakeSignals, nil)
+
+	want := domain.NoteProvenance{EventID: "ev-remote", EventType: domain.EventGitHubPRNewCommits}
+	if outcome := s.StageOrDeliverAdditiveEvent(context.Background(), runmode.LocalDefaultOrgID, "r-prov",
+		domain.StagedInjectionProducerPRCoherence, "body", want, AdditiveFiringRef{}); outcome != InjectDeliveredRemote {
+		t.Fatalf("outcome = %v, want InjectDeliveredRemote", outcome)
+	}
+
+	var payload injectPayload
+	if err := json.Unmarshal([]byte(fakeSignals.findUnacked(t, "executor-9").Payload), &payload); err != nil {
+		t.Fatalf("unmarshal inject payload: %v", err)
+	}
+	if payload.EventID != want.EventID || payload.EventType != want.EventType {
+		t.Errorf("payload provenance = %s/%s, want %s/%s",
+			payload.EventID, payload.EventType, want.EventID, want.EventType)
+	}
 }
