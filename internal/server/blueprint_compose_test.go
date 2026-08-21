@@ -108,6 +108,7 @@ func TestBlueprintMerge_AppendsAndRetiresSource(t *testing.T) {
 
 func TestBlueprintMerge_TriggeredSourceRejected(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	host, _ := createWrappedBlueprint(t, s, "Host")
 	source, _ := createWrappedBlueprint(t, s, "TriggeredSource")
 
@@ -278,6 +279,7 @@ func TestBlueprintSplit_AtEndsRejected(t *testing.T) {
 
 func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "bp-one-trigger")
 	first := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
@@ -303,6 +305,7 @@ func TestEventHandlerCreate_SecondTriggerConflicts(t *testing.T) {
 
 func TestEventHandlerPromote_OntoTriggeredBlueprintConflicts(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "bp-promote-conflict")
 	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",

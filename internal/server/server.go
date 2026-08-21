@@ -1294,6 +1294,12 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/settings", s.handleOrgSettingsGet)
 	s.apiMutating("PATCH /api/orgs/{org_id}/settings", s.handleOrgSettingsPatch)
 
+	// Which event sources can reach this org — derived on every read, never
+	// stored, and member-gated like the settings read above: it is the signal
+	// the authoring surfaces and the source cards render from, and every
+	// member renders those. See sources_handler.go.
+	s.api("GET /api/orgs/{org_id}/sources", s.handleOrgSources)
+
 	// The org's LLM provider credential — one resource per credential SHAPE, so
 	// a route's required fields are fixed and a blank secret never selects a
 	// second behaviour. Rotation is the PUT with a new value; removal is the

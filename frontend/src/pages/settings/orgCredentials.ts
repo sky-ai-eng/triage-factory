@@ -15,6 +15,7 @@
 // call this — the stored one is untouched because nothing asked it to change.
 
 import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+import { invalidateEventSources } from '../../hooks/useEventSources'
 
 // CredentialResult carries the bind/unbind outcome. `login` is the identity the
 // bound credential resolved to (GitHub only, and only on a bind) — the caller
@@ -83,6 +84,10 @@ async function credentialRequest(
       warning?: string
       login?: string
     } | null
+    // Binding or unbinding a credential is exactly what moves a source
+    // between available and unconfigured, so the cached availability answer is
+    // now stale for every surface holding it.
+    invalidateEventSources()
     return { ok: true, warning: parsed?.warning, login: parsed?.login }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not reach the server.') }

@@ -51,6 +51,7 @@ func TestBlueprintStepsPut_FaultReasons(t *testing.T) {
 func TestBlueprintMerge_FaultReasons(t *testing.T) {
 	t.Run("triggered source", func(t *testing.T) {
 		s := newTestServer(t)
+		configureEventSources(t, s)
 		host, _ := createWrappedBlueprint(t, s, "Host")
 		source, _ := createWrappedBlueprint(t, s, "TriggeredSource")
 		tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
@@ -125,6 +126,7 @@ func TestBlueprintSplit_FaultReason(t *testing.T) {
 func TestBlueprintReconnect_FaultReasons(t *testing.T) {
 	t.Run("into itself", func(t *testing.T) {
 		s := newTestServer(t)
+		configureEventSources(t, s)
 		bp, _ := createWrappedBlueprint(t, s, "SelfReconnect")
 		rec := doJSON(t, s, http.MethodPost, "/api/blueprints/"+bp+"/reconnect", map[string]any{
 			"target_blueprint_id": bp,

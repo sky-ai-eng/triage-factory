@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
@@ -121,16 +122,56 @@ func (eh *eventHandlersHandler) handleEventHandlersList(w http.ResponseWriter, r
 	var (
 		handlers []domain.EventHandler
 		total    int
+		sources  eventsource.Availability
 	)
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handlers, total, e = tx.EventHandlers.List(r.Context(), orgID, filter, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+		if e != nil || page.CountOnly {
+			return e // count-only answers no rows, so nothing needs the flag
+		}
+		sources, e = eventsource.Resolve(r.Context(), tx, orgID)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
 		return
 	}
-	httpx.WriteList(w, page, handlers, total)
+	httpx.WriteList(w, page, readRows(handlers, sources), total)
+}
+
+// eventHandlerReadRow is a handler as a READ answers it: the stored row, plus
+// whether its source can still produce events for this org.
+//
+// The flag is derived per read and never stored — the source's own state is
+// what moves, and a column would be a copy of it free to go stale. A handler
+// whose source has gone unavailable is deliberately still LISTED and still
+// COUNTED: unlike the entitlement gate beside it, which hides a handler bound
+// to an unlicensed type, an unconfigured source is the reader's to fix, so
+// this one is explained rather than made to disappear. Absent means never
+// yours; explained means not yet.
+//
+// It rides the read shapes only. A write answers with the row it stored, which
+// is a different question and a different guarantee.
+type eventHandlerReadRow struct {
+	domain.EventHandler
+	SourceAvailable bool `json:"source_available"`
+}
+
+// readRow pairs one handler with its source's availability.
+func readRow(h domain.EventHandler, sources eventsource.Availability) eventHandlerReadRow {
+	return eventHandlerReadRow{
+		EventHandler:    h,
+		SourceAvailable: sources.CanProduce(eventsource.KindOf(h.EventType)),
+	}
+}
+
+// readRows is readRow over a page.
+func readRows(handlers []domain.EventHandler, sources eventsource.Availability) []eventHandlerReadRow {
+	rows := make([]eventHandlerReadRow, 0, len(handlers))
+	for _, h := range handlers {
+		rows = append(rows, readRow(h, sources))
+	}
+	return rows
 }
 
 // handleEventHandlerGet is the canonical single read, in the list's row shape.
@@ -158,10 +199,17 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 		return
 	}
 
-	var handler *domain.EventHandler
+	var (
+		handler *domain.EventHandler
+		sources eventsource.Availability
+	)
 	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
 		handler, e = tx.EventHandlers.Get(r.Context(), orgID, id)
+		if e != nil || handler == nil {
+			return e
+		}
+		sources, e = eventsource.Resolve(r.Context(), tx, orgID)
 		return e
 	}); err != nil {
 		internalError(w, "event_handlers", err)
@@ -171,7 +219,7 @@ func (eh *eventHandlersHandler) handleEventHandlerGet(w http.ResponseWriter, r *
 		notFound(w, "event handler")
 		return
 	}
-	writeJSON(w, http.StatusOK, handler)
+	writeJSON(w, http.StatusOK, readRow(*handler, sources))
 }
 
 // fieldScopePredicate is the wire name of the predicate on every write. One
@@ -297,6 +345,58 @@ func gateEventTypeEntitlement(w http.ResponseWriter, orgID, eventType string) bo
 	return false
 }
 
+// gateEventTypeSourceAvailability records a 422 fault on v when the org cannot
+// produce events from the source this handler would bind to — no Jira
+// credential, no connected Slack workspace, a source TF has not built. It
+// reports false only when it has already written a response: a failed read is
+// a 500, never a source silently reported off.
+//
+// Create is the only enforcement point there will ever be, which is why it
+// exists at all: event_type is immutable after create, and matchHandlers is an
+// exact equality on it, so a handler authored against a source the org cannot
+// produce is not merely wrong-for-now — no event will ever arrive to match it,
+// nothing logs that, and nothing else surfaces it.
+//
+// It is a 422 INVALID_FIELD rather than the entitlement gate's 403: the value
+// names a source that exists and the caller may well be entitled to, it just
+// does not resolve for this org yet. That is a semantically invalid reference,
+// and it is the caller's to fix — which is exactly what 403 FORBIDDEN would
+// deny.
+func (eh *eventHandlersHandler) gateEventTypeSourceAvailability(w http.ResponseWriter, r *http.Request, v *httpx.Validation, orgID, userID, eventType string) bool {
+	kind := eventsource.KindOf(eventType)
+	var (
+		state eventsource.State
+		known bool
+	)
+	if err := eh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		state, known, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
+		return e
+	}); err != nil {
+		internalError(w, "event_handlers", err)
+		return false
+	}
+	if known && state != eventsource.StateAvailable {
+		v.Invalid("event_type", sourceUnavailableMessage(kind, state))
+	}
+	return true
+}
+
+// sourceUnavailableMessage names the source and what is missing, because the
+// remedy differs per state and only one of them is the caller's to carry out.
+func sourceUnavailableMessage(kind string, state eventsource.State) string {
+	switch state {
+	case eventsource.StateUnconfigured:
+		return kind + " is not configured for this organization"
+	case eventsource.StateUnlicensed:
+		return kind + " is not enabled for this organization"
+	case eventsource.StateWIP:
+		return kind + " events are not supported yet"
+	default:
+		return kind + " cannot produce events for this organization"
+	}
+}
+
 // insertEventHandler resolves the acting team and writes the composed row,
 // answering 201 with the row the INSERT returned. Shared by both create
 // routes: everything above it differs per kind, everything from here down does
@@ -375,6 +475,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateRule(w http.ResponseWrit
 	if bad.Flush(w, http.StatusBadRequest) {
 		return
 	}
+	// After the body is known well-formed, because this one reads the org's
+	// credentials to answer.
+	if !eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType) {
+		return
+	}
 	if unproc.Flush(w, http.StatusUnprocessableEntity) {
 		return
 	}
@@ -439,6 +544,11 @@ func (eh *eventHandlersHandler) handleEventHandlerCreateTrigger(w http.ResponseW
 	}
 	threshold, minAutonomy := triggerTuningFields(&unproc, req.BreakerThreshold, req.MinAutonomySuitability)
 	if bad.Flush(w, http.StatusBadRequest) {
+		return
+	}
+	// After the body is known well-formed, because this one reads the org's
+	// credentials to answer.
+	if !eh.gateEventTypeSourceAvailability(w, r, &unproc, orgID, userID, req.EventType) {
 		return
 	}
 	if unproc.Flush(w, http.StatusUnprocessableEntity) {

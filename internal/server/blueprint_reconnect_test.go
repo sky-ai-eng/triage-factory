@@ -96,6 +96,7 @@ func TestBlueprintReconnect_SelfRejected(t *testing.T) {
 
 func TestBlueprintReconnect_TriggeredTargetRejected(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	b, p := build3StepBlueprint(t, s, "Chain")
 	target, _ := createWrappedBlueprint(t, s, "TriggeredTarget")
 	if tr := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
@@ -215,6 +216,7 @@ func TestEventHandlerRetarget_AlreadyTriggeredRejected(t *testing.T) {
 
 func TestEventHandlerRetarget_RuleRejected(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	to, _ := createWrappedBlueprint(t, s, "To")
 	rule := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type": "github:pr:ci_check_failed",

@@ -17,6 +17,7 @@
 // authenticates with an Atlassian API token (email + token, Basic / REST v3),
 // Data Center with a personal access token (Bearer / REST v2).
 import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
+import { invalidateEventSources } from '../../hooks/useEventSources'
 
 export type JiraDeployment = 'cloud' | 'data_center'
 
@@ -97,6 +98,9 @@ export async function connectJira(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
+    // The org can produce jira events now; drop the cached availability so the
+    // authoring surfaces stop hiding them.
+    invalidateEventSources()
     return { ok: true }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'The connection failed.') }
