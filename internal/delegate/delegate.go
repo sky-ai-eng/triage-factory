@@ -486,6 +486,7 @@ func cloneHostBase(cloneURL string) string {
 // the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
 // orchestrator holds no GitHub credential for either. Local reads the PR through
 // the resolver-built client and routes the clone through its loopback proxy.
+
 // toolsReferenceFor composes a run's <tools> section from what the ORG can
 // reach, unioned with the source the run is about.
 //
@@ -501,32 +502,33 @@ func cloneHostBase(cloneURL string) string {
 // gate that actually stops a verb is the credential funnel it resolves through,
 // which refuses with an error naming the reason. An agent told about a verb
 // that then refuses knows what happened; an agent told about no verb improvises.
-func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, conversationID, ownSource string) string {
+//
+// creatorUserID is the caller's already-loaded conv.CreatorUserID, not a
+// conversation id to look up: every caller sits inside buildStepConfig, which
+// already holds the full conversation row for other reasons, so a second
+// fetch here to recover one field off the same row would be a synchronous
+// round trip added to the serial run-setup path for nothing it doesn't
+// already have.
+func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, ownSource string) string {
 	fallback := agentprompt.ToolsReferenceForSources([]string{eventsource.KindGitHub, ownSource})
 	stores, ok := s.getStores()
-	if !ok || stores.Tx == nil || stores.Conversations == nil {
-		return fallback
-	}
-	conv, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || conv == nil {
-		delegateLog.Warn("read conversation for tools reference failed; using the run's own sources",
-			"conversation", conversationID, "error", err)
+	if !ok || stores.Tx == nil {
 		return fallback
 	}
 	var kinds []string
-	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, conv.CreatorUserID, func(tx db.TxStores) error {
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, creatorUserID, func(tx db.TxStores) error {
 		var e error
 		kinds, e = eventsource.AvailableKinds(ctx, tx, orgID)
 		return e
 	}); err != nil {
 		delegateLog.Warn("resolve event-source availability for tools reference failed; using the run's own sources",
-			"conversation", conversationID, "org", orgID, "error", err)
+			"org", orgID, "error", err)
 		return fallback
 	}
 	return agentprompt.ToolsReferenceForSources(append(kinds, ownSource))
 }
 
-func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
+func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
@@ -674,7 +676,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:   s.toolsReferenceFor(ctx, orgID, conversationID, eventsource.KindGitHub),
+		toolsRef:   s.toolsReferenceFor(ctx, orgID, creatorUserID, eventsource.KindGitHub),
 		wtPath:     wtPath,
 		hasWT:      true,
 		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
@@ -742,7 +744,7 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // runs don't have a single "the worktree" the way GitHub PR runs do,
 // the run-root IS the agent's session cwd, which is the load-bearing
 // invariant for resume.
-func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a blueprint-run resource — shared across every step and
 	// rebuilt under the same key on a cold rehydrate — so it is keyed by rootKey
 	// (the blueprint run id), not this step's conversation id. conversationID
@@ -762,7 +764,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 	return runConfig{
 		orgID:     orgID,
 		scope:     fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef:  s.toolsReferenceFor(ctx, orgID, conversationID, eventsource.KindJira),
+		toolsRef:  s.toolsReferenceFor(ctx, orgID, creatorUserID, eventsource.KindJira),
 		wtPath:    runRoot,
 		hasWT:     false,
 		runRoot:   runRoot,
@@ -786,7 +788,7 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 //     demand and then needs the gh verbs, the same reasoning as the Jira
 //     arm's GH+Jira composition. No registered reference is not an error:
 //     the conversation still works with base tools.
-func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID, rootKey string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
+func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// Keyed by rootKey (the blueprint run id), not this step's conversation id
 	// — the run-root is blueprint-scoped and cold-rehydrates under the same key.
 	// See setupJira.
@@ -798,7 +800,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
-	toolsRef := s.toolsReferenceFor(ctx, orgID, conversationID, "slack")
+	toolsRef := s.toolsReferenceFor(ctx, orgID, creatorUserID, "slack")
 
 	return runConfig{
 		orgID:    orgID,

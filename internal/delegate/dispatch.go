@@ -1227,11 +1227,11 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 	)
 	switch task.EntitySource {
 	case "github":
-		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar, localGit)
+		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
 	case "jira":
-		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 	case "slack":
-		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 	default:
 		return "", fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
@@ -1262,11 +1262,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar, localGit)
+			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}

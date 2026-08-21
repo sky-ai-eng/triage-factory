@@ -96,6 +96,7 @@ func (s *projectSession) run() {
 // the turn becomes observable has a handle to fire. The released_at IS NULL
 // filter on the release is belt-and-suspenders (first terminal writer wins),
 // but registering early closes the race window in the first place.
+
 // availableSources resolves which event sources this org can reach, deciding
 // which verb families the turn's envelope documents. A turn in an org with no
 // Jira has no reason to be handed the Jira verbs.
