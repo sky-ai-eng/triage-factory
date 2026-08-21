@@ -69,9 +69,12 @@ equivalent — the distro package is what carries the AppArmor profile that
 permits unprivileged user namespaces on Ubuntu 23.10 and later) or set
 `TF_LOCAL_SANDBOX=off`.
 
-The sandbox is Linux-only. On macOS and Windows the setting resolves to off; an
-explicit `TF_LOCAL_SANDBOX=on` there is a boot error rather than a no-op, since
-a security setting that is quietly ignored is worse than one that is refused.
+The sandbox is Linux-only today. On macOS and Windows the setting resolves to
+off; an explicit `TF_LOCAL_SANDBOX=on` there is a boot error rather than a
+no-op, since a security setting that is quietly ignored is worse than one that
+is refused. macOS support is planned on `sandbox-exec`, which is a different
+enough mechanism — it filters paths where bubblewrap replaces them — to be its
+own piece of work rather than a port.
 
 ## Base-branch pushes
 

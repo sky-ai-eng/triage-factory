@@ -11,6 +11,18 @@ import "errors"
 // ever builds a Spec on a platform that lands here. The stubs exist so the
 // spawn seam — which names *Spec on every platform — still compiles on a
 // Darwin dev box, exactly like cmd/exec/agenthost's socket_other.go.
+//
+// TODO(TFAC-885): macOS has a mechanism and currently gets nothing — a local
+// run there is still a plain child of this process with the operator's whole
+// filesystem in view. The seam is deliberately ready for it: Spec and the
+// spawn-side prefix are untagged, so darwin needs its own Args/Probe over
+// sandbox-exec rather than a re-plumb. It is not a port of the Linux plan,
+// though — Seatbelt filters paths where bubblewrap remaps them, so the profile
+// inverts to a deny-by-default allowlist, every path needs canonicalizing
+// before it becomes a rule (Seatbelt matches literal strings and macOS reaches
+// its temp dir through symlinks), and worktree.selfContainedRunTrees must stop
+// keying on the sandbox alone, since a filtered bare cache is still reachable
+// and darwin keeps its zero-copy worktrees.
 
 var errUnsupported = errors.New("localsandbox: the local agent sandbox (bubblewrap) is not supported on this platform")
 
