@@ -479,14 +479,6 @@ func cloneHostBase(cloneURL string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// setupGitHub prepares a worktree for a GitHub PR task.
-//
-// On the executor path (sidecar non-nil) the GetPR client and the host-side
-// clone both route through the run's credential sidecar — the client against
-// the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
-// orchestrator holds no GitHub credential for either. Local reads the PR through
-// the resolver-built client and routes the clone through its loopback proxy.
-
 // toolsReferenceFor composes a run's <tools> section from what the ORG can
 // reach, unioned with the source the run is about.
 //
@@ -528,6 +520,13 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, o
 	return agentprompt.ToolsReferenceForSources(append(kinds, ownSource))
 }
 
+// setupGitHub prepares a worktree for a GitHub PR task.
+//
+// On the executor path (sidecar non-nil) the GetPR client and the host-side
+// clone both route through the run's credential sidecar — the client against
+// the sidecar's GitHub-REST proxy, the clone through its git proxy — so the
+// orchestrator holds no GitHub credential for either. Local reads the PR through
+// the resolver-built client and routes the clone through its loopback proxy.
 func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(ghClient, sidecar)
 	if ghClient == nil {

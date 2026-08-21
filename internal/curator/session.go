@@ -82,21 +82,6 @@ func (s *projectSession) run() {
 	}
 }
 
-// dispatch drives one ALREADY-CLAIMED turn under the requesting user's
-// identity (item.orgID, item.creatorUserID). The claim loop minted
-// item.claimID before handing the turn over, so this owns the engagement
-// from delivery to release, never the claim's creation. Message writes wrap
-// in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates the rows
-// through the conversation's private-visibility arm; claim writes ride the
-// admin-pool System doors (tf_app cannot write claims). Each transition is
-// broadcast so the Projects page updates without re-fetching.
-//
-// Cancel ordering: msgCtx and inFlightCancel are registered before any work
-// that a cancel would want to interrupt, so a cancel arriving the instant
-// the turn becomes observable has a handle to fire. The released_at IS NULL
-// filter on the release is belt-and-suspenders (first terminal writer wins),
-// but registering early closes the race window in the first place.
-
 // availableSources resolves which event sources this org can reach, deciding
 // which verb families the turn's envelope documents. A turn in an org with no
 // Jira has no reason to be handed the Jira verbs.
@@ -123,6 +108,20 @@ func (s *projectSession) availableSources(item queueItem) []string {
 	return kinds
 }
 
+// dispatch drives one ALREADY-CLAIMED turn under the requesting user's
+// identity (item.orgID, item.creatorUserID). The claim loop minted
+// item.claimID before handing the turn over, so this owns the engagement
+// from delivery to release, never the claim's creation. Message writes wrap
+// in stores.Tx.SyntheticClaimsWithTx so multi-mode RLS gates the rows
+// through the conversation's private-visibility arm; claim writes ride the
+// admin-pool System doors (tf_app cannot write claims). Each transition is
+// broadcast so the Projects page updates without re-fetching.
+//
+// Cancel ordering: msgCtx and inFlightCancel are registered before any work
+// that a cancel would want to interrupt, so a cancel arriving the instant
+// the turn becomes observable has a handle to fire. The released_at IS NULL
+// filter on the release is belt-and-suspenders (first terminal writer wins),
+// but registering early closes the race window in the first place.
 func (s *projectSession) dispatch(item queueItem) {
 	if item.done != nil {
 		defer close(item.done)
