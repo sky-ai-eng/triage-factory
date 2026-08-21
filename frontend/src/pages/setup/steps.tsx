@@ -1329,11 +1329,13 @@ const githubTeamsStep: WizardStep = {
   ),
 }
 
-// Step 7 · Jira projects. The shared JiraProjectRulesGroup — the per-project
-// pickup/in-progress/done status rules. Gated: omitted entirely unless a Jira
-// tracker was configured (step 2). No load of its own — the rules came in with
-// the team load. Optional (zero tracked projects is valid); only a half-filled
-// project (a key with incomplete rules) blocks, which validate also catches.
+// Step 7 · Jira projects. The shared JiraProjectRulesGroup — the watch picker
+// plus the per-project pickup/in-progress/done status rules. Gated: omitted
+// entirely unless a Jira tracker was configured (step 2). No load of its own —
+// the rules came in with the team load. Optional twice over: zero watched
+// projects is valid, and so is a watched project nobody has mapped yet, since
+// mapping is the step after watching. Only a rule the server would reject
+// blocks — members with no write target — which validate also catches.
 const jiraProjectsStep: WizardStep = {
   id: 'team-jira-projects',
   section: 'team',
@@ -1342,7 +1344,7 @@ const jiraProjectsStep: WizardStep = {
   isComplete: (s) => !teamProjectsBlocked(s.team.jira_projects, s.jiraConnected),
   validate: (s) =>
     teamProjectsBlocked(s.team.jira_projects, s.jiraConnected)
-      ? 'Finish or remove the partially-configured Jira project before continuing.'
+      ? 'Finish or clear the half-mapped Jira status rule before continuing.'
       : null,
   persist: async ({ state, teamId }) => {
     // The rules are their own replace-set resource now, not a key inside the

@@ -236,8 +236,10 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 		for _, existing := range out[rule.ProjectKey] {
 			seen[existing] = true
 		}
-		for _, done := range rule.DoneMembers {
-			if done != "" && !seen[done] {
+		// Names, not ids: this map is compared against the status a snapshot
+		// recorded, and a snapshot records the name.
+		for _, done := range domain.JiraStatusNames(rule.DoneMembers) {
+			if !seen[done] {
 				seen[done] = true
 				out[rule.ProjectKey] = append(out[rule.ProjectKey], done)
 			}

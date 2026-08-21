@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1000,9 +1001,14 @@ func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, 
 // but kept independent so the tracker doesn't depend on internal/config
 // — call sites in the poller manager convert at the boundary.
 type JiraProjectRules struct {
-	Key           string
-	PickupMembers []string
-	DoneMembers   []string
+	Key string
+	// The status sets discovery queries on. They are refs — id plus the display
+	// name captured with it — because the two uses want different halves: the
+	// JQL is built from ids, which survive a rename in Jira, while classifying
+	// an issue the query returned compares against the name its snapshot
+	// records.
+	PickupMembers []domain.JiraStatusRef
+	DoneMembers   []domain.JiraStatusRef
 }
 
 // JiraRules is a slice of per-project rules with lookup helpers.
@@ -1021,21 +1027,19 @@ func (r JiraRules) ForKey(key string) *JiraProjectRules {
 	return nil
 }
 
-// AllDoneMembers returns the deduplicated union of every project's
-// DoneMembers. Useful for subtask classification when the parent and
-// subtasks may live in different projects.
+// AllDoneMembers returns the deduplicated union of every project's DoneMembers
+// as status NAMES. Useful for subtask classification when the parent and
+// subtasks may live in different projects — a subtask arrives inlined in the
+// search response carrying a status name and nothing else, so a name is the
+// only thing there is to match on.
 func (r JiraRules) AllDoneMembers() []string {
-	return r.unionMembers(func(p JiraProjectRules) []string { return p.DoneMembers })
-}
-
-func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0)
 	for _, p := range r {
-		for _, m := range pick(p) {
-			if !seen[m] {
-				seen[m] = true
-				out = append(out, m)
+		for _, name := range domain.JiraStatusNames(p.DoneMembers) {
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
 			}
 		}
 	}
@@ -1059,7 +1063,7 @@ func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
 // for an entity whose actual workflow has nothing to do with NEW's.
 func (r JiraRules) doneMembersForKey(issueKey string) []string {
 	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
-		return rule.DoneMembers
+		return domain.JiraStatusNames(rule.DoneMembers)
 	}
 	return nil
 }
@@ -1088,12 +1092,10 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		if rule == nil {
 			return false
 		}
-		for _, d := range rule.DoneMembers {
-			if d == snap.Status {
-				return true
-			}
-		}
-		return false
+		// The snapshot records the status it saw as a name, so that is what the
+		// terminal test compares — the ids the rule stores are what the JQL and
+		// the transitions are built from.
+		return slices.Contains(domain.JiraStatusNames(rule.DoneMembers), snap.Status)
 	}
 	// Phase 1: Discovery
 	discovered, err := t.discoverJira(ctx, client, baseURL, projects)
@@ -1558,6 +1560,41 @@ func jiraReadIsStale(stored, fetched domain.JiraSnapshot) (storedAt, fetchedAt t
 	return storedAt, fetchedAt, fetchedAt.Before(storedAt)
 }
 
+// jiraStatusTerms renders a status set as the inside of a JQL `IN (...)` list,
+// or "" when the set contributes nothing.
+//
+// A numeric id goes in bare, which is how JQL is told to read a term as a
+// status id rather than a name — and matching on the id is what keeps a query
+// right after someone renames the status in Jira. A ref with no usable id
+// falls back to its quoted name, which is all a rule armed before statuses
+// were identified has to offer. The all-digits test is the guard on that: an
+// id that isn't a number would be read as a name if written bare, silently
+// matching nothing, so it takes the name path instead.
+func jiraStatusTerms(refs []domain.JiraStatusRef) string {
+	terms := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		switch {
+		case isJiraStatusID(ref.ID):
+			terms = append(terms, ref.ID)
+		case ref.Name != "":
+			terms = append(terms, fmt.Sprintf("%q", ref.Name))
+		}
+	}
+	return strings.Join(terms, ", ")
+}
+
+func isJiraStatusID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // discoverJira runs JQL queries to find new issues. Each project gets
 // its own JQL pair — one Pickup query against the project's
 // PickupMembers and one assigned-to-me query that excludes the
@@ -1595,15 +1632,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			continue
 		}
 
-		if len(p.PickupMembers) > 0 {
-			quoted := make([]string, len(p.PickupMembers))
-			for i, s := range p.PickupMembers {
-				quoted[i] = fmt.Sprintf("%q", s)
-			}
+		if pickup := jiraStatusTerms(p.PickupMembers); pickup != "" {
 			queries = append(queries, queryWithDone{
 				jql: fmt.Sprintf(
 					`project = %q AND status IN (%s) AND assignee IS EMPTY`,
-					p.Key, strings.Join(quoted, ", ")),
+					p.Key, pickup),
 				doneMembers: allDone,
 			})
 		}
@@ -1615,12 +1648,8 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// rather than falling back to a hardcoded list that would
 		// contradict the user's workflow.
 		assignedJQL := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
-		if len(p.DoneMembers) > 0 {
-			quoted := make([]string, len(p.DoneMembers))
-			for i, s := range p.DoneMembers {
-				quoted[i] = fmt.Sprintf("%q", s)
-			}
-			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+		if done := jiraStatusTerms(p.DoneMembers); done != "" {
+			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, done)
 		}
 		queries = append(queries, queryWithDone{
 			jql: assignedJQL, doneMembers: allDone, assignedToCurrentUser: true,

@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -419,25 +420,181 @@ func DefaultTeamSettings() TeamSettings {
 // fields without a signature change.
 type UserSettings struct{}
 
+// JiraStatusRef is one workflow status as the rules store it: the id Jira's
+// workflow references it by, plus the display name captured beside it.
+//
+// The id is the identity. A workflow points at the status entity, so the id
+// survives a rename and the name does not — which is what makes an id-built
+// rule stable in the two places TF acts on one: the discovery JQL
+// (`status IN (10001, 10002)` is valid JQL) and the transition performed at
+// claim and complete time. The name rides along so a rule renders without a
+// live fetch, and it is refreshed from Jira every time the rule is saved.
+//
+// A ref carrying a name and no id is a row written before statuses were
+// identified. Nothing rewrites those in place — resolving an id means asking
+// Jira, and no background job does that on a team's behalf — so readers fall
+// back to matching on the name and the ids fill on the row's next save.
+type JiraStatusRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// IsZero reports whether the ref names nothing at all — an unset canonical,
+// which is what an unmapped write-target rule carries.
+func (r JiraStatusRef) IsZero() bool { return r.ID == "" && r.Name == "" }
+
+// SameStatus reports whether two refs name the same status. Ids decide when
+// both carry one; otherwise the names do, which is what lets a legacy
+// name-only ref still compare equal to itself.
+func (r JiraStatusRef) SameStatus(other JiraStatusRef) bool {
+	if r.ID != "" && other.ID != "" {
+		return r.ID == other.ID
+	}
+	return r.Name != "" && r.Name == other.Name
+}
+
+// JiraStatusNames renders refs as their display names — for the surfaces that
+// compare against a name because a name is all they hold (a poll snapshot's
+// status, a live issue's current status).
+func JiraStatusNames(refs []JiraStatusRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.Name != "" {
+			out = append(out, r.Name)
+		}
+	}
+	return out
+}
+
+// --- the stored form of a status rule's members ---
+//
+// Rules persist as JSON in both dialects (SQLite TEXT, Postgres jsonb), so the
+// encoding lives here with the type rather than twice in the store impls.
+//
+// Both decoders accept the shape written before statuses were identified — a
+// bare name where an object now sits — because those rows are live data, not a
+// migration that has not run yet: there is no id to backfill without asking
+// Jira, and nothing asks on a team's behalf. They decode to a ref with a name
+// and no id, which is exactly what the readers' name fallback expects, and the
+// next save of that rule writes the object form.
+
+// MarshalJiraStatusRefs renders a rule's members for storage. A nil slice
+// renders as [] rather than null, so the stored value is always a JSON array
+// and the CHECK constraints have one empty form to recognize.
+func MarshalJiraStatusRefs(refs []JiraStatusRef) (string, error) {
+	if refs == nil {
+		refs = []JiraStatusRef{}
+	}
+	raw, err := json.Marshal(refs)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// UnmarshalJiraStatusRefs reads a rule's members back.
+func UnmarshalJiraStatusRefs(raw string) ([]JiraStatusRef, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []JiraStatusRef{}, nil
+	}
+	var elems []json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &elems); err != nil {
+		return nil, err
+	}
+	out := make([]JiraStatusRef, 0, len(elems))
+	for _, elem := range elems {
+		ref, err := decodeJiraStatusRef(elem)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+// MarshalJiraStatusRef renders a canonical for storage, or "" for an unset one
+// — which the stores write as SQL NULL.
+func MarshalJiraStatusRef(ref JiraStatusRef) (string, error) {
+	if ref.IsZero() {
+		return "", nil
+	}
+	raw, err := json.Marshal(ref)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// UnmarshalJiraStatusRef reads a canonical back. An empty column is an unset
+// canonical — an unarmed write-target rule — not an error.
+func UnmarshalJiraStatusRef(raw string) (JiraStatusRef, error) {
+	if strings.TrimSpace(raw) == "" {
+		return JiraStatusRef{}, nil
+	}
+	return decodeJiraStatusRef(json.RawMessage(raw))
+}
+
+func decodeJiraStatusRef(raw json.RawMessage) (JiraStatusRef, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	switch {
+	case strings.HasPrefix(trimmed, "{"):
+		var ref JiraStatusRef
+		if err := json.Unmarshal(raw, &ref); err != nil {
+			return JiraStatusRef{}, err
+		}
+		return ref, nil
+	case strings.HasPrefix(trimmed, `"`):
+		// A name inside a members array, which was a JSON array of strings
+		// before statuses were identified.
+		var name string
+		if err := json.Unmarshal(raw, &name); err != nil {
+			return JiraStatusRef{}, err
+		}
+		return JiraStatusRef{Name: name}, nil
+	default:
+		// Not JSON at all: the bare display name a canonical column held
+		// before statuses were identified, which was never quoted because the
+		// column stored the name itself rather than a document.
+		return JiraStatusRef{Name: trimmed}, nil
+	}
+}
+
+// JiraStatusDedupKey is the value a ref is deduplicated and set-compared on:
+// the id when it has one, else the name under a prefix so a legacy name-only
+// ref can never collide with an id that happens to read like it.
+func JiraStatusDedupKey(r JiraStatusRef) string {
+	if r.ID != "" {
+		return "id:" + r.ID
+	}
+	return "name:" + r.Name
+}
+
 // JiraProjectStatusRules is one row of jira_project_status_rules —
 // the team's status configuration for a single Jira project. Multiple
 // rows per team (keyed `(team_id, project_key)`) so two projects on
-// the same team can have different workflows. The CHECK constraints
-// on the table guarantee any persisted row carries a non-empty pickup
-// set + members + canonical for both write-target rules.
+// the same team can have different workflows.
+//
+// A row is the team's commitment to WATCH the project. Whether it is ARMED —
+// see Armed — is a second, later state: the rules may be entirely empty, and
+// each of the three is independently complete-or-empty, which the table's
+// CHECK constraints mirror for the two write-target rules.
 type JiraProjectStatusRules struct {
 	// TeamID is the owning team (the PK's first column). The List* store
 	// methods populate it; ReplaceForTeam ignores it (the team is a
 	// parameter). Needed by the poller's per-project member merge (to
 	// break canonical ties by lowest team_id) and the router's team↔project
 	// gate (to look up the handler's team).
-	TeamID              string
-	ProjectKey          string
-	PickupMembers       []string
-	InProgressMembers   []string
-	InProgressCanonical string
-	DoneMembers         []string
-	DoneCanonical       string
+	TeamID     string
+	ProjectKey string
+	// The three rules. A canonical is always one of its rule's members, so it
+	// carries no information its member entry doesn't — it is stored as a full
+	// ref anyway so a caller performing a transition has the id and the name in
+	// hand without a lookup.
+	PickupMembers       []JiraStatusRef
+	InProgressMembers   []JiraStatusRef
+	InProgressCanonical JiraStatusRef
+	DoneMembers         []JiraStatusRef
+	DoneCanonical       JiraStatusRef
 }
 
 // TeamGitHubGroup is one row of team_github_groups — a fully-qualified
@@ -592,19 +749,41 @@ func NormalizeGitHubTeamSlugs(slugs []string) []string {
 	return out
 }
 
+// Armed reports whether this project's rules are complete enough for TF to act
+// on the project: pickup members to discover with, and members-plus-canonical
+// on both write-target rules. An unarmed project is WATCHED but not yet mapped
+// — a valid stored state, reached by adding it from the picker and left there
+// until someone maps its workflow's statuses — and it contributes nothing to
+// the discovery JQL, so the poller skips it.
+func (r JiraProjectStatusRules) Armed() bool {
+	return len(r.PickupMembers) > 0 &&
+		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&
+		len(r.DoneMembers) > 0 && !r.DoneCanonical.IsZero()
+}
+
+// The three membership tests take a status NAME, because a name is what the
+// callers hold: a poll snapshot records the status it saw as a name, and so
+// does the live claim-state read. A rule renamed in Jira since it was armed
+// therefore stops matching here until the row is saved again — the ids the
+// rule stores are what keep the JQL and the transitions right meanwhile.
+
 // PickupContains reports whether status is a member of the Pickup rule.
 func (r JiraProjectStatusRules) PickupContains(status string) bool {
-	return slices.Contains(r.PickupMembers, status)
+	return containsStatusName(r.PickupMembers, status)
 }
 
 // InProgressContains reports whether status is a member of the InProgress rule.
 func (r JiraProjectStatusRules) InProgressContains(status string) bool {
-	return slices.Contains(r.InProgressMembers, status)
+	return containsStatusName(r.InProgressMembers, status)
 }
 
 // DoneContains reports whether status is a member of the Done rule.
 func (r JiraProjectStatusRules) DoneContains(status string) bool {
-	return slices.Contains(r.DoneMembers, status)
+	return containsStatusName(r.DoneMembers, status)
+}
+
+func containsStatusName(refs []JiraStatusRef, status string) bool {
+	return slices.ContainsFunc(refs, func(r JiraStatusRef) bool { return r.Name == status })
 }
 
 // RuleForProject returns the per-project rule for the given key, or
@@ -636,24 +815,24 @@ func JiraProjectKeys(rules []JiraProjectStatusRules) []string {
 // JiraAllPickupMembers returns the union of every project's pickup
 // members, in first-seen order, each member deduped. Used by JQL
 // queries that span every project a team tracks.
-func JiraAllPickupMembers(rules []JiraProjectStatusRules) []string {
-	return jiraUnionMembers(rules, func(p JiraProjectStatusRules) []string { return p.PickupMembers })
+func JiraAllPickupMembers(rules []JiraProjectStatusRules) []JiraStatusRef {
+	return jiraUnionMembers(rules, func(p JiraProjectStatusRules) []JiraStatusRef { return p.PickupMembers })
 }
 
 // JiraAllDoneMembers returns the union of every project's done members.
 // Used by JQL queries that exclude terminal tickets across the team's
 // full project list.
-func JiraAllDoneMembers(rules []JiraProjectStatusRules) []string {
-	return jiraUnionMembers(rules, func(p JiraProjectStatusRules) []string { return p.DoneMembers })
+func JiraAllDoneMembers(rules []JiraProjectStatusRules) []JiraStatusRef {
+	return jiraUnionMembers(rules, func(p JiraProjectStatusRules) []JiraStatusRef { return p.DoneMembers })
 }
 
-func jiraUnionMembers(rules []JiraProjectStatusRules, pick func(JiraProjectStatusRules) []string) []string {
+func jiraUnionMembers(rules []JiraProjectStatusRules, pick func(JiraProjectStatusRules) []JiraStatusRef) []JiraStatusRef {
 	seen := map[string]bool{}
-	out := make([]string, 0)
+	out := make([]JiraStatusRef, 0)
 	for _, p := range rules {
 		for _, m := range pick(p) {
-			if !seen[m] {
-				seen[m] = true
+			if key := JiraStatusDedupKey(m); !seen[key] {
+				seen[key] = true
 				out = append(out, m)
 			}
 		}

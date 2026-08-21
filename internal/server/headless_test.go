@@ -84,16 +84,27 @@ func TestHeadlessJiraRules(t *testing.T) {
 		if r.ProjectKey != key {
 			t.Errorf("rule[%d].ProjectKey = %q, want %q", i, r.ProjectKey, key)
 		}
-		// The same global mapping is applied to every project.
-		if !reflect.DeepEqual(r.PickupMembers, []string{"To Do", "Backlog"}) {
+		// The same global mapping is applied to every project. The operator
+		// supplies status NAMES, so the rows land name-only — a supported
+		// stored shape that the poller matches on and that gains ids the first
+		// time the team saves the rules through the API.
+		if !reflect.DeepEqual(domain.JiraStatusNames(r.PickupMembers), []string{"To Do", "Backlog"}) {
 			t.Errorf("rule[%d].PickupMembers = %v", i, r.PickupMembers)
 		}
-		// CHECK constraints want non-empty members + canonical for both write targets.
-		if r.InProgressCanonical != "In Progress" || !reflect.DeepEqual(r.InProgressMembers, []string{"In Progress"}) {
-			t.Errorf("rule[%d] in-progress = %q/%v", i, r.InProgressCanonical, r.InProgressMembers)
+		for _, ref := range r.PickupMembers {
+			if ref.ID != "" {
+				t.Errorf("rule[%d].PickupMembers carries an id (%q) boot never resolved", i, ref.ID)
+			}
 		}
-		if r.DoneCanonical != "Done" || !reflect.DeepEqual(r.DoneMembers, []string{"Done"}) {
-			t.Errorf("rule[%d] done = %q/%v", i, r.DoneCanonical, r.DoneMembers)
+		// The CHECK constraints want members and canonical together on both
+		// write targets.
+		if r.InProgressCanonical.Name != "In Progress" ||
+			!reflect.DeepEqual(domain.JiraStatusNames(r.InProgressMembers), []string{"In Progress"}) {
+			t.Errorf("rule[%d] in-progress = %+v/%v", i, r.InProgressCanonical, r.InProgressMembers)
+		}
+		if r.DoneCanonical.Name != "Done" ||
+			!reflect.DeepEqual(domain.JiraStatusNames(r.DoneMembers), []string{"Done"}) {
+			t.Errorf("rule[%d] done = %+v/%v", i, r.DoneCanonical, r.DoneMembers)
 		}
 	}
 }

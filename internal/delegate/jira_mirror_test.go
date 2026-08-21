@@ -79,9 +79,12 @@ func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 	case req.Method == http.MethodGet && strings.HasSuffix(path, "/myself"):
 		_, _ = io.WriteString(w, `{"name":"`+r.myselfName+`"}`)
 	case req.Method == http.MethodGet && strings.HasSuffix(path, "/transitions"):
+		// The transition targets carry status ids, which is what the client
+		// matches a rule's canonical on — they are the same ids jiraRef mints,
+		// so the seeded rules and this workflow describe one instance.
 		_, _ = io.WriteString(w, `{"transitions":[`+
-			`{"id":"31","name":"Start","to":{"name":"In Progress"}},`+
-			`{"id":"41","name":"Finish","to":{"name":"Done"}}]}`)
+			`{"id":"31","name":"Start","to":{"id":"st-In Progress","name":"In Progress"}},`+
+			`{"id":"41","name":"Finish","to":{"id":"st-Done","name":"Done"}}]}`)
 	case req.Method == http.MethodPost && strings.HasSuffix(path, "/transitions"):
 		var body struct {
 			Transition struct {
@@ -162,11 +165,11 @@ func mirrorRule() domain.JiraProjectStatusRules {
 	return domain.JiraProjectStatusRules{
 		TeamID:              runmode.LocalDefaultTeamID,
 		ProjectKey:          "SKY",
-		PickupMembers:       []string{"To Do"},
-		InProgressMembers:   []string{"In Progress"},
-		InProgressCanonical: "In Progress",
-		DoneMembers:         []string{"Done"},
-		DoneCanonical:       "Done",
+		PickupMembers:       jiraRefs("To Do"),
+		InProgressMembers:   jiraRefs("In Progress"),
+		InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers:         jiraRefs("Done"),
+		DoneCanonical:       jiraRef("Done"),
 	}
 }
 
@@ -451,7 +454,7 @@ func TestLookupJiraRuleForTaskSystem_ResolvesForJiraTask(t *testing.T) {
 	if rule == nil {
 		t.Fatal("rule = nil, want the SKY rule")
 	}
-	if rule.InProgressCanonical != "In Progress" || rule.DoneCanonical != "Done" {
+	if rule.InProgressCanonical.Name != "In Progress" || rule.DoneCanonical.Name != "Done" {
 		t.Errorf("rule = %+v, want InProgress/Done canonicals", rule)
 	}
 }

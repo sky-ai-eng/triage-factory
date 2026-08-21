@@ -268,7 +268,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", "")
 	if err != nil {

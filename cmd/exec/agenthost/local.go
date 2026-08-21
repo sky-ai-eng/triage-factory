@@ -884,7 +884,10 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	if err != nil {
 		return err
 	}
-	if err := client.TransitionTo(ctx, key, status); err != nil {
+	// The agent names a status, not an id — the verb's whole vocabulary is what
+	// GetTransitions showed it — so the target carries a name alone and the
+	// client resolves it by name.
+	if err := client.TransitionTo(ctx, key, jiraclient.Status{Name: status}); err != nil {
 		return err
 	}
 	c.recordJiraIssue(ctx, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, jiraDetailsJSON(map[string]any{"status": status}))

@@ -828,7 +828,7 @@ func (s *Server) stockQueueTicket(r *http.Request, b *stockBatch, entity *domain
 // it to the project's in-progress status, then mints the task and stamps the
 // user claim.
 func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain.Entity, snap domain.JiraSnapshot, rule *domain.JiraProjectStatusRules) stockItemResult {
-	if rule == nil || rule.InProgressCanonical == "" {
+	if rule == nil || rule.InProgressCanonical.IsZero() {
 		return stockFailed(snap.Key, httpx.ReasonNotConfigured, "in_progress canonical status not configured for this project")
 	}
 
@@ -847,10 +847,11 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 		}
 	}
 	if state == nil || !rule.InProgressContains(state.StatusName) {
-		if err := b.jiraUserClient.TransitionTo(r.Context(), snap.Key, rule.InProgressCanonical); err != nil {
+		if err := b.jiraUserClient.TransitionTo(r.Context(), snap.Key,
+			jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
 		}
-		snap.Status = rule.InProgressCanonical
+		snap.Status = rule.InProgressCanonical.Name
 	} else {
 		snap.Status = state.StatusName
 	}
@@ -895,7 +896,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 // closes the entity. No task is minted.
 func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.Entity, rule *domain.JiraProjectStatusRules) stockItemResult {
 	issueKey := entity.SourceID
-	if rule == nil || rule.DoneCanonical == "" {
+	if rule == nil || rule.DoneCanonical.IsZero() {
 		return stockFailed(issueKey, httpx.ReasonNotConfigured, "done canonical status not configured for this project")
 	}
 	// Skip the transition when the ticket is already in any Done member (not
@@ -905,7 +906,8 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 	// violation at worst.
 	state := b.jiraUserClient.GetClaimState(r.Context(), issueKey)
 	if state == nil || !rule.DoneContains(state.StatusName) {
-		if err := b.jiraUserClient.TransitionTo(r.Context(), issueKey, rule.DoneCanonical); err != nil {
+		if err := b.jiraUserClient.TransitionTo(r.Context(), issueKey,
+			jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
 			return stockFailed(issueKey, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
 		}
 	}

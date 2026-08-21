@@ -299,15 +299,20 @@ func assertPGUpdateCounter(t *testing.T, h *Harness, want int) {
 	}
 }
 
-// TestBaseline_JiraStatusRulesPopulated_CHECKsFire pins the three
-// jpsr_*_populated CHECK constraints. The HTTP handler's
+// TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire pins the two
+// jpsr_*_complete_or_empty CHECK constraints. The HTTP handler's
 // validateProjectRules is the user-facing gate; these CHECKs are
 // defense-in-depth so any path that bypasses validation (admin UI in
 // multi mode, direct SQL, restore from backup) still can't persist a
-// partial row. Each subtest writes one minimally-broken row and
-// asserts the matching CHECK fires; the happy-path full insert is
-// implicit in TestRLS_SettingsAdminOnly already.
-func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
+// half-mapped write-target rule.
+//
+// What they refuse is members without a canonical or a canonical without
+// members — a rule that cannot be executed, since the canonical is the status
+// TF transitions a ticket INTO. What they permit, and the happy-path cases
+// below prove, is a rule with NEITHER: a project may be watched without being
+// armed, and pickup carries no constraint at all now that it has nothing to be
+// cross-checked against.
+func TestBaseline_JiraStatusRulesCompleteOrEmpty_CHECKsFire(t *testing.T) {
 	h := Shared(t)
 	h.Reset(t)
 
@@ -318,71 +323,55 @@ func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
 	teamID := SeedTeam(t, h, orgID, "check-team")
 	_ = orgID // referenced only for FK chain
 
-	cases := []struct {
-		name       string
-		insert     string
-		wantSubstr string
+	const insertRule = `INSERT INTO jira_project_status_rules
+		(team_id, project_key, pickup_members,
+		 in_progress_members, in_progress_canonical,
+		 done_members, done_canonical)
+		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)`
+
+	const (
+		toDo       = `[{"id":"10000","name":"To Do"}]`
+		inProgress = `[{"id":"10001","name":"In Progress"}]`
+		inProgOne  = `{"id":"10001","name":"In Progress"}`
+		done       = `[{"id":"10002","name":"Done"}]`
+		doneOne    = `{"id":"10002","name":"Done"}`
+		empty      = `[]`
+	)
+
+	refused := []struct {
+		name                                                       string
+		pickup, inProgMembers, inProgCanon, doneMembers, doneCanon any
+		wantConstraint                                             string
 	}{
 		{
-			name: "pickup_members empty",
-			insert: `INSERT INTO jira_project_status_rules
-				(team_id, project_key, pickup_members,
-				 in_progress_members, in_progress_canonical,
-				 done_members, done_canonical)
-				VALUES ($1, 'SKY', ARRAY[]::text[],
-				        ARRAY['In Progress'], 'In Progress',
-				        ARRAY['Done'], 'Done')`,
-			wantSubstr: "jpsr_pickup_populated",
+			name:   "in_progress members with no canonical",
+			pickup: toDo, inProgMembers: inProgress, inProgCanon: nil,
+			doneMembers: done, doneCanon: doneOne,
+			wantConstraint: "jpsr_in_progress_complete_or_empty",
 		},
 		{
-			name: "in_progress_members empty",
-			insert: `INSERT INTO jira_project_status_rules
-				(team_id, project_key, pickup_members,
-				 in_progress_members, in_progress_canonical,
-				 done_members, done_canonical)
-				VALUES ($1, 'SKY', ARRAY['To Do'],
-				        ARRAY[]::text[], 'In Progress',
-				        ARRAY['Done'], 'Done')`,
-			wantSubstr: "jpsr_in_progress_populated",
+			name:   "in_progress canonical with no members",
+			pickup: toDo, inProgMembers: empty, inProgCanon: inProgOne,
+			doneMembers: done, doneCanon: doneOne,
+			wantConstraint: "jpsr_in_progress_complete_or_empty",
 		},
 		{
-			name: "in_progress_canonical null",
-			insert: `INSERT INTO jira_project_status_rules
-				(team_id, project_key, pickup_members,
-				 in_progress_members, in_progress_canonical,
-				 done_members, done_canonical)
-				VALUES ($1, 'SKY', ARRAY['To Do'],
-				        ARRAY['In Progress'], NULL,
-				        ARRAY['Done'], 'Done')`,
-			wantSubstr: "jpsr_in_progress_populated",
+			name:   "done members with no canonical",
+			pickup: toDo, inProgMembers: inProgress, inProgCanon: inProgOne,
+			doneMembers: done, doneCanon: nil,
+			wantConstraint: "jpsr_done_complete_or_empty",
 		},
 		{
-			name: "done_members empty",
-			insert: `INSERT INTO jira_project_status_rules
-				(team_id, project_key, pickup_members,
-				 in_progress_members, in_progress_canonical,
-				 done_members, done_canonical)
-				VALUES ($1, 'SKY', ARRAY['To Do'],
-				        ARRAY['In Progress'], 'In Progress',
-				        ARRAY[]::text[], 'Done')`,
-			wantSubstr: "jpsr_done_populated",
-		},
-		{
-			name: "done_canonical null",
-			insert: `INSERT INTO jira_project_status_rules
-				(team_id, project_key, pickup_members,
-				 in_progress_members, in_progress_canonical,
-				 done_members, done_canonical)
-				VALUES ($1, 'SKY', ARRAY['To Do'],
-				        ARRAY['In Progress'], 'In Progress',
-				        ARRAY['Done'], NULL)`,
-			wantSubstr: "jpsr_done_populated",
+			name:   "done canonical with no members",
+			pickup: toDo, inProgMembers: inProgress, inProgCanon: inProgOne,
+			doneMembers: empty, doneCanon: doneOne,
+			wantConstraint: "jpsr_done_complete_or_empty",
 		},
 	}
-
-	for _, tc := range cases {
+	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := h.AdminDB.Exec(tc.insert, teamID)
+			_, err := h.AdminDB.Exec(insertRule, teamID, "SKY",
+				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon)
 			if err == nil {
 				t.Fatalf("expected CHECK violation for %q, got nil", tc.name)
 			}
@@ -393,8 +382,26 @@ func TestBaseline_JiraStatusRulesPopulated_CHECKsFire(t *testing.T) {
 			if pgErr.Code != "23514" { // check_violation
 				t.Errorf("expected SQLSTATE 23514, got %s: %v", pgErr.Code, err)
 			}
-			if !strings.Contains(pgErr.Message, tc.wantSubstr) && !strings.Contains(pgErr.ConstraintName, tc.wantSubstr) {
-				t.Errorf("expected CHECK %q in error, got: %v (constraint=%s)", tc.wantSubstr, pgErr.Message, pgErr.ConstraintName)
+			if !strings.Contains(pgErr.Message, tc.wantConstraint) && !strings.Contains(pgErr.ConstraintName, tc.wantConstraint) {
+				t.Errorf("expected CHECK %q in error, got: %v (constraint=%s)", tc.wantConstraint, pgErr.Message, pgErr.ConstraintName)
+			}
+		})
+	}
+
+	accepted := []struct {
+		name                                                       string
+		key                                                        string
+		pickup, inProgMembers, inProgCanon, doneMembers, doneCanon any
+	}{
+		{"watched with no rules at all", "UNARMED", empty, empty, nil, empty, nil},
+		{"pickup mapped, write targets not", "PARTIAL", toDo, empty, nil, empty, nil},
+		{"fully armed", "ARMED", toDo, inProgress, inProgOne, done, doneOne},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := h.AdminDB.Exec(insertRule, teamID, tc.key,
+				tc.pickup, tc.inProgMembers, tc.inProgCanon, tc.doneMembers, tc.doneCanon); err != nil {
+				t.Fatalf("expected %q to be storable, got: %v", tc.name, err)
 			}
 		})
 	}
@@ -1300,8 +1307,9 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical
 			) VALUES ($1, 'SKY',
-				ARRAY['To Do'], ARRAY['In Progress'], 'In Progress',
-				ARRAY['Done'], 'Done')
+				'[{"id":"10000","name":"To Do"}]'::jsonb,
+				'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
+				'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
 		`, teamA)
 		return err
 	})
@@ -1325,8 +1333,9 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 				pickup_members, in_progress_members, in_progress_canonical,
 				done_members, done_canonical
 			) VALUES ($1, 'SKY',
-				ARRAY['To Do'], ARRAY['In Progress'], 'In Progress',
-				ARRAY['Done'], 'Done')
+				'[{"id":"10000","name":"To Do"}]'::jsonb,
+				'[{"id":"10001","name":"In Progress"}]'::jsonb, '{"id":"10001","name":"In Progress"}'::jsonb,
+				'[{"id":"10002","name":"Done"}]'::jsonb, '{"id":"10002","name":"Done"}'::jsonb)
 		`, teamA)
 		return err
 	})

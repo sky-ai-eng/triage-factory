@@ -1494,7 +1494,9 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 	}
 	var inProgressMembers []string
 	if rule != nil {
-		inProgressMembers = rule.InProgressMembers
+		// Names: the membership test below compares against the status a live
+		// claim-state read reported, which is a name.
+		inProgressMembers = domain.JiraStatusNames(rule.InProgressMembers)
 	}
 	go func(issueKey, originalStatus string, ipMembers []string) {
 		// Detached from the request (see syncJiraClaim's guard): the
@@ -1535,7 +1537,9 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 				jiraLog.Error("failed to unassign on requeue", "issue", issueKey, "error", err)
 			}
 		}
-		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
+		// The target is the status the ticket was in before the claim, recorded
+		// on the task as a name — so the transition resolves by name here.
+		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, jira.Status{Name: originalStatus}); err != nil {
 			jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", originalStatus, "error", err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)

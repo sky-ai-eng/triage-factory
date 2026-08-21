@@ -8,14 +8,20 @@ UI, not direct DB access.
 
 ## Jira setup
 
-Jira uses a two-stage flow in Settings:
+Jira setup in Settings goes connect → watch → map:
 
 1. Enter your Jira URL and Personal Access Token, click **Connect**. Credentials
    are validated and stored immediately.
-2. The card expands to reveal project selection, poll interval, and status
-   configuration. Statuses are fetched automatically from your Jira instance.
-3. **Save** is disabled until you've configured projects, pickup statuses, and an
-   in-progress status.
+2. The card expands to reveal the project picker, the poll interval, and the
+   per-project status mapping. The picker lists the projects your Jira
+   credential can see, read live from Jira rather than from a stored copy.
+3. **Watch** a project in one click. A watched project is tracked but not yet
+   polled: it shows as *Statuses not mapped* until you map its workflow — which
+   of its statuses count as pickup, as in-progress, and as done. Mapping is
+   per-project, because each project's workflow scheme has its own statuses.
+4. Only a fully mapped project is polled. Watching one without mapping it is a
+   valid saved state, so **Save** is blocked only by a half-finished rule (one
+   with statuses picked but no write target), never by an unmapped project.
 
 ## Credentials
 

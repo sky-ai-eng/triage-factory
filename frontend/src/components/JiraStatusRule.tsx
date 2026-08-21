@@ -1,22 +1,39 @@
-interface JiraStatus {
+/** JiraStatusRef is one workflow status as the API speaks it: the id the rules
+ *  are keyed on, and the display name the SERVER resolved for that id.
+ *
+ *  The id is the identity. A Jira workflow references the status entity, so an
+ *  id survives a rename and a name does not — which is why the write path sends
+ *  ids and never names, and why a name that appears here is always one Jira
+ *  gave us, as of the rule's last save. A ref carrying a name and no id is a
+ *  rule stored before statuses were identified; it renders and polls fine, and
+ *  gains its id when that rule is next saved. */
+export interface JiraStatusRef {
   id: string
   name: string
 }
 
 export interface JiraStatusRuleValue {
-  members: string[]
-  canonical?: string
+  members: JiraStatusRef[]
+  /** The status TF transitions a ticket INTO. Always one of `members`. Null on
+   *  a rule nobody has mapped yet, which is a valid saved state. */
+  canonical?: JiraStatusRef | null
 }
 
 interface Props {
   label: string
   description: string
-  allStatuses: JiraStatus[]
+  allStatuses: JiraStatusRef[]
   value: JiraStatusRuleValue
   onChange: (next: JiraStatusRuleValue) => void
   requireCanonical: boolean
   canonicalPrompt?: string
 }
+
+/** sameStatus compares two refs the way the server does: ids decide when both
+ *  carry one, names otherwise — which is what lets a legacy name-only member
+ *  still match the status it names in the freshly-fetched list. */
+const sameStatus = (a: JiraStatusRef, b: JiraStatusRef): boolean =>
+  a.id && b.id ? a.id === b.id : !!a.name && a.name === b.name
 
 export default function JiraStatusRule({
   label,
@@ -27,15 +44,20 @@ export default function JiraStatusRule({
   requireCanonical,
   canonicalPrompt,
 }: Props) {
-  const toggle = (name: string) => {
-    if (value.members.includes(name)) {
-      const nextMembers = value.members.filter((n) => n !== name)
-      const nextCanonical = value.canonical === name ? undefined : value.canonical
+  const isMember = (status: JiraStatusRef) => value.members.some((m) => sameStatus(m, status))
+
+  const toggle = (status: JiraStatusRef) => {
+    if (isMember(status)) {
+      const nextMembers = value.members.filter((m) => !sameStatus(m, status))
+      const nextCanonical =
+        value.canonical && sameStatus(value.canonical, status) ? null : value.canonical
       onChange({ members: nextMembers, canonical: nextCanonical })
     } else {
-      const nextMembers = [...value.members, name]
+      const nextMembers = [...value.members, status]
       const nextCanonical =
-        requireCanonical && !value.canonical && value.members.length === 0 ? name : value.canonical
+        requireCanonical && !value.canonical && value.members.length === 0
+          ? status
+          : value.canonical
       onChange({ members: nextMembers, canonical: nextCanonical })
     }
   }
@@ -55,11 +77,11 @@ export default function JiraStatusRule({
               {canonicalPrompt || 'Write to'}
             </span>
             <select
-              value={value.canonical || ''}
+              value={value.canonical?.id || value.canonical?.name || ''}
               onChange={(e) =>
                 onChange({
                   members: value.members,
-                  canonical: e.target.value || undefined,
+                  canonical: value.members.find((m) => (m.id || m.name) === e.target.value) ?? null,
                 })
               }
               disabled={value.members.length === 0}
@@ -69,8 +91,8 @@ export default function JiraStatusRule({
             >
               <option value="">{value.members.length === 0 ? 'pick below' : 'choose…'}</option>
               {value.members.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+                <option key={m.id || m.name} value={m.id || m.name}>
+                  {m.name}
                 </option>
               ))}
             </select>
@@ -80,13 +102,14 @@ export default function JiraStatusRule({
 
       <div className="flex flex-wrap gap-1.5">
         {allStatuses.map((s) => {
-          const selected = value.members.includes(s.name)
-          const isCanonical = requireCanonical && value.canonical === s.name
+          const selected = isMember(s)
+          const isCanonical =
+            requireCanonical && !!value.canonical && sameStatus(value.canonical, s)
           return (
             <button
-              key={s.id}
+              key={s.id || s.name}
               type="button"
-              onClick={() => toggle(s.name)}
+              onClick={() => toggle(s)}
               className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
                 selected
                   ? isCanonical

@@ -103,9 +103,10 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	if rule == nil {
 		return
 	}
-	if rule.InProgressCanonical == "" {
-		// Never guess a status. The table's CHECK keeps this non-empty for a
-		// persisted row, so this is defensive parity with the user path.
+	if rule.InProgressCanonical.IsZero() {
+		// Never guess a status. A watched project may be stored unmapped, so an
+		// unset canonical here is the ordinary "not armed yet" state rather than
+		// a broken row — either way there is nothing to transition into.
 		jiraLog.Warn("mirror: no in_progress rule for project, skipping", "issue", task.EntitySourceID)
 		return
 	}
@@ -200,8 +201,8 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 			jiraLog.Debug("mirror: already in done bucket, skipping", "issue", issueKey, "status", state.StatusName)
 			return
 		}
-		if err := client.TransitionTo(ctx, issueKey, rule.DoneCanonical); err != nil {
-			jiraLog.Warn("mirror: transition to done failed", "issue", issueKey, "target", rule.DoneCanonical, "error", err)
+		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
+			jiraLog.Warn("mirror: transition to done failed", "issue", issueKey, "target", rule.DoneCanonical.Name, "error", err)
 			return
 		}
 		// from is the status read before the move (nil state → unknown/"").
@@ -209,7 +210,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 		if state != nil {
 			from = state.StatusName
 		}
-		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical)
+		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical.Name)
 		return
 	}
 
@@ -242,11 +243,11 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(state.StatusName) {
-		if err := client.TransitionTo(ctx, issueKey, rule.InProgressCanonical); err != nil {
-			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical, "error", err)
+		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
+			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
 		}
-		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical)
+		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
 }
 

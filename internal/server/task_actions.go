@@ -633,11 +633,11 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 	if err != nil || task == nil || task.EntitySource != "jira" {
 		return
 	}
-	if rule == nil || rule.InProgressCanonical == "" {
+	if rule == nil || rule.InProgressCanonical.IsZero() {
 		jiraLog.Warn("claim guard: no in_progress rule configured for project, skipping transition", "ticket", task.EntitySourceID)
 		return
 	}
-	go func(issueKey string, ipMembers []string, ipCanonical string) {
+	go func(issueKey string, ipMembers []string, ipCanonical jira.Status) {
 		// Detached from the request: this claim guard outlives the response,
 		// so it uses a background context.
 		bgCtx := context.Background()
@@ -659,10 +659,13 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		}
 		if needTransition {
 			if err := jiraUserClient.TransitionTo(bgCtx, issueKey, ipCanonical); err != nil {
-				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical, "error", err)
+				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
 			}
 		}
-	}(task.EntitySourceID, rule.InProgressMembers, rule.InProgressCanonical)
+		// Names for the membership test (a live claim state reports the status
+		// it saw as a name) and the full ref for the transition (matched by id).
+	}(task.EntitySourceID, domain.JiraStatusNames(rule.InProgressMembers),
+		jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
 }
 
 // triggerDelegation fires the delegation run and records the conversation_id on

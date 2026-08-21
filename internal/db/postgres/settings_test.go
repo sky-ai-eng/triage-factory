@@ -197,11 +197,11 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	seed := []domain.JiraProjectStatusRules{{
 		ProjectKey:          "SKY",
-		PickupMembers:       []string{"To Do"},
-		InProgressMembers:   []string{"In Progress"},
-		InProgressCanonical: "In Progress",
-		DoneMembers:         []string{"Done"},
-		DoneCanonical:       "Done",
+		PickupMembers:       jiraRefs("To Do"),
+		InProgressMembers:   jiraRefs("In Progress"),
+		InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers:         jiraRefs("Done"),
+		DoneCanonical:       jiraRef("Done"),
 	}}
 	if err := stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, seed); err != nil {
 		t.Fatalf("owner seed ReplaceForTeam: %v", err)
@@ -212,11 +212,11 @@ func TestJiraStatusRulesStore_Postgres_ReplaceForTeam_TeamAdminGated(t *testing.
 		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
 		return stores.JiraStatusRules.ReplaceForTeam(context.Background(), teamID, []domain.JiraProjectStatusRules{{
 			ProjectKey:          "ENG",
-			PickupMembers:       []string{"New"},
-			InProgressMembers:   []string{"Doing"},
-			InProgressCanonical: "Doing",
-			DoneMembers:         []string{"Closed"},
-			DoneCanonical:       "Closed",
+			PickupMembers:       jiraRefs("New"),
+			InProgressMembers:   jiraRefs("Doing"),
+			InProgressCanonical: jiraRef("Doing"),
+			DoneMembers:         jiraRefs("Closed"),
+			DoneCanonical:       jiraRef("Closed"),
 		}})
 	})
 	if err == nil {

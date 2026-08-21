@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -435,16 +436,27 @@ func (c *Client) Unassign(ctx context.Context, issueKey string) error {
 	return c.put(ctx, url, map[string]*string{"name": nil})
 }
 
-// TransitionTo transitions an issue to the target status name.
-// It finds the appropriate transition by matching the target status name.
-func (c *Client) TransitionTo(ctx context.Context, issueKey, targetStatusName string) error {
+// TransitionTo transitions an issue into the target status.
+//
+// The target is matched by ID when it carries one: a Jira workflow references
+// the status entity, so an id keeps resolving across a rename while a name
+// captured earlier goes stale. A target with no id — a status a caller named
+// directly, or a rule armed before statuses were identified — falls back to
+// the case-insensitive name match, which is what this always did.
+func (c *Client) TransitionTo(ctx context.Context, issueKey string, target Status) error {
 	transitions, err := c.getTransitions(ctx, issueKey)
 	if err != nil {
 		return err
 	}
 
 	for _, t := range transitions {
-		if strings.EqualFold(t.To.Name, targetStatusName) {
+		if target.ID != "" {
+			if t.To.ID == target.ID {
+				return c.doTransition(ctx, issueKey, t.ID)
+			}
+			continue
+		}
+		if strings.EqualFold(t.To.Name, target.Name) {
 			return c.doTransition(ctx, issueKey, t.ID)
 		}
 	}
@@ -453,7 +465,11 @@ func (c *Client) TransitionTo(ctx context.Context, issueKey, targetStatusName st
 	for i, t := range transitions {
 		available[i] = t.To.Name
 	}
-	return fmt.Errorf("no transition to %q found (available: %s)", targetStatusName, strings.Join(available, ", "))
+	wanted := target.Name
+	if wanted == "" {
+		wanted = "status id " + target.ID
+	}
+	return fmt.Errorf("no transition to %q found (available: %s)", wanted, strings.Join(available, ", "))
 }
 
 // ClaimState describes the assignee + status of a Jira issue, used by
@@ -595,6 +611,122 @@ func (c *Client) ListPriorities(ctx context.Context) ([]Priority, error) {
 		return nil, fmt.Errorf("parse priorities: %w", err)
 	}
 	return priorities, nil
+}
+
+// Project is one entry of the instance's project catalog: the key rules and
+// JQL are written against, plus the display name a picker renders beside it.
+// Nothing more — this catalog is read live for a picker, not mirrored for
+// anything downstream to consume.
+type Project struct {
+	Key  string `json:"key"`
+	Name string `json:"name"`
+}
+
+// ProjectPage is one window of the catalog plus the offset the following
+// window resumes from. NextStartAt is 0 when this was the last page, so a
+// caller walks until it stops rather than asking for a window it already
+// knows is empty.
+type ProjectPage struct {
+	Projects    []Project
+	NextStartAt int
+}
+
+// maxProjectPageSize caps one ListProjects window. Cloud's catalog endpoint
+// caps its own page at 50 and silently serves fewer than asked; the cap here
+// is about the Data Center arm, which windows a whole catalog held in memory
+// and would otherwise hand back however many rows a caller asked for.
+const maxProjectPageSize = 200
+
+// ListProjects returns one window of the projects this credential can see,
+// narrowed by query — a case-insensitive match against the key and the name.
+//
+// The two deployments answer differently, and this is the one place that
+// difference lives. Cloud has a paged, server-filtered catalog endpoint
+// (/project/search, taking startAt + maxResults + query), so both the window
+// and the filter go upstream. Data Center serves the whole catalog from
+// /project in a single response with neither, so both are applied here to the
+// catalog in hand. Callers get one signature, one page, and one resume offset
+// either way.
+func (c *Client) ListProjects(ctx context.Context, query string, startAt, maxResults int) (ProjectPage, error) {
+	if startAt < 0 {
+		startAt = 0
+	}
+	if maxResults <= 0 || maxResults > maxProjectPageSize {
+		maxResults = maxProjectPageSize
+	}
+	if c.cfg.Deployment == DeploymentCloud {
+		return c.listProjectsCloud(ctx, query, startAt, maxResults)
+	}
+	return c.listProjectsDataCenter(ctx, query, startAt, maxResults)
+}
+
+// listProjectsCloud reads one page of /project/search, which pages on startAt
+// offsets and filters on a literal `query` matched against key and name.
+func (c *Client) listProjectsCloud(ctx context.Context, query string, startAt, maxResults int) (ProjectPage, error) {
+	params := url.Values{}
+	params.Set("startAt", strconv.Itoa(startAt))
+	params.Set("maxResults", strconv.Itoa(maxResults))
+	if q := strings.TrimSpace(query); q != "" {
+		params.Set("query", q)
+	}
+	body, err := c.get(ctx, c.apiURL("project/search")+"?"+params.Encode())
+	if err != nil {
+		return ProjectPage{}, err
+	}
+	var result struct {
+		Values []Project `json:"values"`
+		IsLast *bool     `json:"isLast"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return ProjectPage{}, fmt.Errorf("parse project search: %w", err)
+	}
+	// isLast is what this endpoint documents as its end-of-catalog signal. A
+	// response without one is walked on the short-page test instead: a full
+	// page may be followed by more, a short one cannot be. Either way an empty
+	// page ends the walk, so a backend ignoring startAt can't loop.
+	more := len(result.Values) > 0
+	if result.IsLast != nil {
+		more = more && !*result.IsLast
+	} else {
+		more = more && len(result.Values) >= maxResults
+	}
+	page := ProjectPage{Projects: result.Values}
+	if more {
+		page.NextStartAt = startAt + len(result.Values)
+	}
+	return page, nil
+}
+
+// listProjectsDataCenter reads the whole catalog from /project — this backend
+// serves it unpaged and unfiltered — then applies the caller's filter and
+// window to what came back.
+func (c *Client) listProjectsDataCenter(ctx context.Context, query string, startAt, maxResults int) (ProjectPage, error) {
+	body, err := c.get(ctx, c.apiURL("project"))
+	if err != nil {
+		return ProjectPage{}, err
+	}
+	var catalog []Project
+	if err := json.Unmarshal(body, &catalog); err != nil {
+		return ProjectPage{}, fmt.Errorf("parse projects: %w", err)
+	}
+	needle := strings.ToLower(strings.TrimSpace(query))
+	matched := make([]Project, 0, len(catalog))
+	for _, p := range catalog {
+		if needle == "" ||
+			strings.Contains(strings.ToLower(p.Key), needle) ||
+			strings.Contains(strings.ToLower(p.Name), needle) {
+			matched = append(matched, p)
+		}
+	}
+	if startAt >= len(matched) {
+		return ProjectPage{Projects: []Project{}}, nil
+	}
+	end := min(startAt+maxResults, len(matched))
+	page := ProjectPage{Projects: matched[startAt:end]}
+	if end < len(matched) {
+		page.NextStartAt = end
+	}
+	return page, nil
 }
 
 // GetIssue fetches a single issue by key.
