@@ -166,6 +166,12 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 //
 // The whole sequence is bounded by jiraMirrorTimeout so a slow ticket releases
 // the lock rather than pinning it.
+//
+// TODO(TFAC-878): every failure below is a log line and a return. A canonical
+// status that is no longer a reachable transition — retired from the project's
+// workflow — makes the mirror a no-op on every board move, so Jira silently
+// stops tracking the board and nothing tells the team. Needs the durable
+// notification channel.
 func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {

@@ -16,6 +16,13 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // N-valued, so the team-shared rule needs a slice of identifiers. The
 // metadata carries the *_account_id alongside the existing display-name
 // fields; the matcher compares account IDs via stringInSliceFold.
+//
+// TODO(TFAC-878): status predicates are free-text names the user types, matched
+// against the name on the event. Nothing validates them against the project's
+// live workflow, so a status renamed in Jira leaves a predicate that matches
+// nothing and a trigger that silently stops firing. They cannot simply become
+// ids: the name is also the dedup_key on stored events. Reporting the drift
+// needs the durable notification channel.
 
 // -----------------------------------------------------------------------------
 // issue:assigned — issue was assigned (possibly to someone else; predicates

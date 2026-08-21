@@ -1687,6 +1687,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		}
 	}
 	if failed > 0 {
+		// TODO(TFAC-878): a log line and this span attribute are the only trace.
+		// A project whose JQL is permanently invalid — a rule naming a status
+		// Jira no longer has — fails here every cycle and silently stops
+		// producing work, and nothing tells the team. Surfacing a condition
+		// nobody is watching needs the durable notification channel.
 		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed))
 	}
 
