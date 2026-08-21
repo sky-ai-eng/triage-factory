@@ -281,11 +281,11 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 }
 
 // ListPendingReviewsByTargetSystem runs on the admin pool (BYPASSRLS) for the
-// new-commits notifier — a background eventbus subscriber with no JWT-claims
+// PR coherence feed — a background eventbus subscriber with no JWT-claims
 // context that must see every team's pending review drafts anchored to the PR
 // (the head-SHA change is org-wide, not team-scoped). Filters to pending review
 // drafts on the given PR target. org_id stays in the WHERE clause as defense in
-// depth. See TFAC-501.
+// depth.
 func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`

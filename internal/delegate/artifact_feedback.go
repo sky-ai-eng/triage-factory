@@ -62,7 +62,7 @@ func (s *Spawner) InjectArtifactNote(orgID, conversationID string, a domain.Arti
 // it into the run's warm process, on a DETACHED goroutine. The caller must have
 // already confirmed the run is live (getProc != nil) — this is the shared live-
 // delivery core of both the artifact-change note (InjectArtifactNote) and the
-// generic staged-injection queue (StageOrDeliverInjection).
+// generic staged-injection queue (stageOrDeliverInjection).
 //
 // Detached so the caller (an HTTP resolve handler or an eventbus subscriber)
 // returns immediately. Record + broadcast first so the live transcript shows the

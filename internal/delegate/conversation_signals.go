@@ -474,12 +474,10 @@ type AdditiveFiringRef struct {
 	TaskClaim         db.AgentClaimStamp
 }
 
-// StageOrDeliverAdditiveEvent is StageOrDeliverInjectionResult's cross-pod-
-// aware successor for TFAC-594's additive-injection gate specifically
-// (every other staged-injection producer — e.g. the new-commits notifier —
-// keeps calling StageOrDeliverInjection/-Result unchanged; this method
-// exists only because the routed additive gate needs the "handed to a
-// live remote executor" outcome its callers must NOT re-record locally).
+// StageOrDeliverAdditiveEvent is the cross-pod-aware entry point for the
+// routed additive-injection gate: it adds the "handed to a live remote
+// executor" outcome, which its callers must NOT re-record locally, to the
+// live/staged decision stageOrDeliverInjection makes on its own.
 //
 // Decision order: local live process (byte-identical to the pre-TFAC-585
 // path) → a live remote owner (insert an `inject` conversation_signals row,

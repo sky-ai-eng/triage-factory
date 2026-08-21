@@ -9,7 +9,7 @@ import (
 // delivery on a conversation's next resume/steer. It is the "terminal ledger"
 // half of the artifact-sidecar feedback design (TFAC-493) made generic
 // (TFAC-501): a producer that has no durable row to re-derive its injection
-// from (the new-commits notifier is the first such producer) stages the
+// from (the PR coherence feed is such a producer) stages the
 // injection here, and the spawner flushes the conversation's pending injections
 // ahead of the user's text on the next ResumeWithMessage.
 //
