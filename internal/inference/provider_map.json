@@ -10,7 +10,7 @@
  "bedrock": "bedrock",
  "bedrock_converse": "bedrock",
  "bedrock_mantle": "unsupported",
- "cerebras": "unsupported",
+ "cerebras": "cerebras",
  "chatgpt": "unsupported",
  "cloudflare": "unsupported",
  "codestral": "unsupported",
