@@ -8380,9 +8380,9 @@ REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 
 
 -- org_event_sources: declared per-(org, source) POLICY — today, whether an org
--- admin has paused a source's event production without unbinding its
--- credential, so `tfac exec jira` and an in-flight agent keep working while
--- nothing new mints tasks.
+-- admin has turned a source off: it is not polled, produces no events, mints no
+-- tasks, and resolves no credential for an agent. The credential itself is left
+-- bound, which is what makes this reversible where unbinding it is not.
 --
 -- Its own table, not a column on org_settings, for two reasons. The source
 -- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source

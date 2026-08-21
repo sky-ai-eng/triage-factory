@@ -38,24 +38,29 @@ describe('EventSourcesGroup', () => {
     stub(everyState)
     render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
 
-    await waitFor(() => expect(screen.getByLabelText('GitHub events')).toBeTruthy())
+    await waitFor(() => expect(screen.getByLabelText('GitHub')).toBeTruthy())
     // Available and disabled are the two states a pause moves between.
-    expect(screen.getByLabelText('GitHub events').getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByLabelText('Jira events').getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByLabelText('GitHub').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByLabelText('Jira').getAttribute('aria-checked')).toBe('false')
     // Unconfigured, unlicensed and wip are already off for reasons this switch
     // does not control — a toggle there would change nothing visible.
-    expect(screen.queryByLabelText('Slack events')).toBeNull()
-    expect(screen.queryByLabelText('Linear events')).toBeNull()
+    expect(screen.queryByLabelText('Slack')).toBeNull()
+    expect(screen.queryByLabelText('Linear')).toBeNull()
   })
 
-  it('says a paused source is paused, not unconnected', async () => {
+  it('says a turned-off source is off for agents too, and still connected', async () => {
     stub(everyState)
     render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
 
-    await waitFor(() => expect(screen.getByText(/Paused\./)).toBeTruthy())
-    // The distinction the whole ticket rests on: a pause leaves the credential
-    // bound, so agent access is unaffected.
-    expect(screen.getByText(/agents can still read and write/)).toBeTruthy()
+    await waitFor(() => expect(screen.getByText(/Off —/)).toBeTruthy())
+    // The row has to name all three effects. An admin who reads only "no new
+    // tasks" would not learn that the agents lost their access too, which is
+    // the thing they most need to know before flipping it.
+    expect(screen.getByText(/not polled/)).toBeTruthy()
+    expect(screen.getByText(/agents cannot reach it/)).toBeTruthy()
+    // And it is still a pause, not a disconnect — otherwise the switch reads
+    // as the destructive action it exists to replace.
+    expect(screen.getByText(/credential is still stored/)).toBeTruthy()
     expect(screen.getByText(/Slack is not connected yet/)).toBeTruthy()
   })
 
@@ -63,7 +68,7 @@ describe('EventSourcesGroup', () => {
     stub(everyState)
     render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit={false} />)
 
-    await waitFor(() => expect(screen.getByText(/Paused\./)).toBeTruthy())
+    await waitFor(() => expect(screen.getByText(/Off —/)).toBeTruthy())
     expect(screen.queryByRole('switch')).toBeNull()
   })
 
@@ -71,8 +76,8 @@ describe('EventSourcesGroup', () => {
     const fetchMock = stub(everyState)
     render(<EventSourcesGroup orgId={LOCAL_DEFAULT_ORG_ID} canEdit />)
 
-    await waitFor(() => expect(screen.getByLabelText('Jira events')).toBeTruthy())
-    await userEvent.click(screen.getByLabelText('Jira events'))
+    await waitFor(() => expect(screen.getByLabelText('Jira')).toBeTruthy())
+    await userEvent.click(screen.getByLabelText('Jira'))
 
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(

@@ -160,20 +160,29 @@ func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.eventQueue, orgID)
 }
 
-// sourcePaused reports whether an org admin has turned this source off. A read
-// failure answers false and polls: the skip is an API-budget optimization, not
-// the enforcement point, so a transient database blip must cost one wasted
-// cycle rather than stop polling for every tenant.
-func (m *Manager) sourcePaused(ctx context.Context, source, orgID string) bool {
+// sourceDisabled reports whether this cycle must not run, and the span outcome
+// that says why. It is not an optimization: a source an org admin turned off
+// makes zero API calls, which is a promise measurable from the other end — an
+// operator watching their own Jira Data Center is entitled to see the traffic
+// go to nothing, and a cycle that polls anyway is a broken switch, not a
+// wasted call.
+//
+// So an unreadable policy skips. The two mistakes are not symmetric: skipping
+// wrongly costs one cycle of latency on a source that is polled again at the
+// next tick, while polling wrongly puts load on somebody's instance precisely
+// when this deployment's database is already unhealthy. The outcomes stay
+// distinct so a skipped cycle never has to be read as a deliberate pause.
+func (m *Manager) sourceDisabled(ctx context.Context, source, orgID string) (skip bool, outcome string) {
 	if m.EventSources == nil {
-		return false
+		return false, ""
 	}
 	kinds, err := m.EventSources.ListDisabledSystem(ctx, orgID)
 	if err != nil {
-		pollerLog.WarnContext(ctx, "read event-source policy failed; polling anyway", "source", source, "org", orgID, "error", err)
-		return false
+		pollerLog.ErrorContext(ctx, "read event-source policy failed; skipping this cycle rather than polling a source that may be turned off",
+			"source", source, "org", orgID, "error", err)
+		return true, "policy_unreadable"
 	}
-	return slices.Contains(kinds, source)
+	return slices.Contains(kinds, source), "disabled"
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
@@ -505,13 +514,14 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
 
-	// An org admin turned GitHub off. An anticipated outcome, not an error —
-	// the same posture as the no_repos skip below and the Jira twin's
-	// unconfigured one. It is here to stop spending the API budget on a source
-	// nothing will route; the drop that makes the pause correct is the
-	// router's, at the single funnel every producer crosses.
-	if m.sourcePaused(ctx, "github", orgID) {
-		span.SetAttributes(telemetry.Outcome("disabled"))
+	// An org admin turned GitHub off, so this org's cycle makes no GitHub
+	// calls at all. An anticipated outcome, not an error — the same posture as
+	// the no_repos skip below and the Jira twin's unconfigured one. This is
+	// where "no polling" is enforced; the router's drop is what separately
+	// guarantees no events, since an event can also arrive from a producer
+	// that never went through a poll cycle.
+	if skip, outcome := m.sourceDisabled(ctx, "github", orgID); skip {
+		span.SetAttributes(telemetry.Outcome(outcome))
 		return
 	}
 
@@ -1216,13 +1226,15 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// keeps this slot, so a likely-persistent auth failure backs off to the
 	// org's own cadence instead of hammering every base tick.
 	m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
-	// An org admin turned Jira off. Checked after the slot reservation above so
-	// a paused org falls back to its own cadence rather than being re-examined
-	// every base tick, and before the credential load because a paused source
-	// has no reason to touch the secret store. Same posture as the unconfigured
-	// skip below: an anticipated outcome, never an error.
-	if m.sourcePaused(ctx, "jira", orgID) {
-		span.SetAttributes(telemetry.Outcome("disabled"))
+	// An org admin turned Jira off, so this org's cycle makes no Jira calls at
+	// all — the load an operator is watching for goes to nothing. Checked after
+	// the slot reservation above so a turned-off org falls back to its own
+	// cadence rather than being re-examined every base tick, and before the
+	// credential load because a source nobody may call has no reason to touch
+	// the secret store. Same posture as the unconfigured skip below: an
+	// anticipated outcome, never an error.
+	if skip, outcome := m.sourceDisabled(ctx, "jira", orgID); skip {
+		span.SetAttributes(telemetry.Outcome(outcome))
 		return
 	}
 	creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -143,6 +144,14 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 		if err := worktree.ValidateCheckoutRef(ref); err != nil {
 			return "", fmt.Errorf("create workspace checkout: %w", err)
 		}
+	}
+	// A clone is a credentialed GitHub read, so it answers to the org's source
+	// switch like every verb does. It is gated here rather than at either
+	// caller because both funnel through this, and it is gated ahead of the
+	// repo lookup so a turned-off source reports itself rather than whatever
+	// the registry happens to say about the repo.
+	if err := c.requireSourceEnabled(ctx, eventsource.KindGitHub); err != nil {
+		return "", err
 	}
 
 	repoID := owner + "/" + repo

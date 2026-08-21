@@ -1,11 +1,15 @@
-// Per-source event-production switches for the org.
+// Per-source on/off switches for the org.
 //
-// The switch reads "produce events", not "connected". Turning a source off
-// leaves its credential bound, so `tfac exec jira` keeps working and an agent
-// can still comment on the ticket it is working — only new events stop, and
-// only going forward: existing tasks, in-flight runs and authored handlers are
-// untouched. Cutting an agent's access is the credential disconnect above,
-// which keeps that meaning.
+// The switch reads "on", not "connected", and off means off: the source is not
+// polled, creates no tasks, and resolves no credential for an agent. Saying so
+// plainly is the point — an admin who turns Jira off to take load off their
+// instance would have no way to discover from this screen that the agents kept
+// their access, so the row states all three effects rather than the one this
+// screen happens to be about.
+//
+// What survives is everything stored: the credential stays bound, and existing
+// tasks, in-flight runs and authored handlers are untouched. That is the
+// difference from the credential disconnect above, which keeps its own meaning.
 //
 // Admin-only, matching the route: an org admin can flip it, a member can only
 // read it. The read is what makes an inert handler explainable, which is why it
@@ -29,14 +33,14 @@ function isPausable(state: EventSourceAvailability['state']): boolean {
   return state === 'available' || state === 'disabled'
 }
 
-// The word under each row: what this state means for event production, phrased
-// from the org's point of view rather than the reader's.
+// The word under each row: what this state means for the org, phrased from the
+// org's point of view rather than the reader's.
 function stateNote(kind: string, state: EventSourceAvailability['state']): string {
   switch (state) {
     case 'available':
-      return 'Producing events.'
+      return 'On — polled, creating tasks, and reachable by agents.'
     case 'disabled':
-      return 'Paused. The credential is still bound, so agents can still read and write here.'
+      return 'Off — not polled, creating no tasks, and agents cannot reach it. The credential is still stored.'
     case 'unconfigured':
       return `${sourceLabel(kind)} is not connected yet — connect it above.`
     case 'unlicensed':
@@ -70,10 +74,7 @@ export default function EventSourcesGroup({
       invalidateEventSources(orgId)
     } catch (err) {
       toast.error(
-        httpErrorMessage(
-          err,
-          `Could not ${disabled ? 'turn off' : 'turn on'} ${sourceLabel(kind)} events.`,
-        ),
+        httpErrorMessage(err, `Could not turn ${sourceLabel(kind)} ${disabled ? 'off' : 'on'}.`),
       )
     } finally {
       setPending(null)
@@ -87,8 +88,9 @@ export default function EventSourcesGroup({
   return (
     <div className="flex flex-col gap-3">
       <p className="text-[11px] text-text-tertiary">
-        Pausing a source stops it creating new tasks. It does not disconnect the integration, and it
-        does not close tasks or stop runs that already exist.
+        Turning a source off stops everything Triage Factory does with it: polling it, creating
+        tasks from it, and giving agents access to it. It does not disconnect the integration, and
+        it does not close tasks or stop runs that already exist.
       </p>
       {sources.map((src) => {
         const off = src.state === 'disabled'
@@ -105,7 +107,7 @@ export default function EventSourcesGroup({
               <button
                 type="button"
                 role="switch"
-                aria-label={`${sourceLabel(src.kind)} events`}
+                aria-label={sourceLabel(src.kind)}
                 aria-checked={!off}
                 disabled={pending === src.kind}
                 onClick={() => void setDisabled(src.kind, !off)}

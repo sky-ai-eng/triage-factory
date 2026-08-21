@@ -9,11 +9,20 @@
 // here, and nothing here sets one.
 //
 // The one stored input is POLICY, not capability: an org admin's deliberate
-// pause (org_event_sources.disabled), read ahead of the probes below. It
-// mirrors nothing — before it existed the only way to stop a source producing
-// events was to unbind its credential, which also cut the agent's own access to
-// the ticket it was working on. It is read here rather than checked by each
-// consumer so that a source registered from outside core gets it for free.
+// off switch (org_event_sources.disabled), read ahead of the probes below. It
+// mirrors nothing, because the alternative way to turn a source off is to
+// unbind its credential, and that destroys the configuration rather than
+// suspending it. It is read here rather than checked by each consumer so that
+// a source registered from outside core gets it for free.
+//
+// Off means off: a turned-off source is not polled, produces no events, mints
+// no tasks, and resolves no credential for an agent. Those gates live with the
+// machinery they guard and share one check (Disabled, policy.go) — this package
+// derives the STATE, and a state that meant "off for some purposes" would be a
+// permission for every gate to pick its own reading. What survives a pause is
+// the stored configuration: the bound credential, the tracked repos, the
+// authored handlers. That is the whole distinction between this and a
+// disconnect, and it is what makes resuming one switch instead of re-onboarding.
 //
 // Its readers want different slices of the same derivation: the org
 // availability read hands the whole vocabulary to the UI, an event-handler
@@ -87,9 +96,9 @@ const (
 	// missing. The one state a reader can fix themselves, or ask an org admin
 	// to.
 	StateUnconfigured State = "unconfigured"
-	// StateDisabled — an org admin paused it. The credential (if any) is
-	// untouched, so agent access to the source is unaffected; only event
-	// production stops.
+	// StateDisabled — an org admin turned it off: no polling, no events, no
+	// tasks, and no credential resolved for an agent. The stored credential
+	// itself is untouched, so this is reversible where a disconnect is not.
 	StateDisabled State = "disabled"
 	// StateUnlicensed — the entitlement is absent. Not the reader's to fix.
 	StateUnlicensed State = "unlicensed"

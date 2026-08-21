@@ -1,6 +1,7 @@
 -- +goose Up
 -- org_event_sources: declared per-(org, source) policy — today, whether an org
--- admin has paused a source's event production.
+-- admin has turned a source off: no polling, no events, no tasks, and no
+-- credential resolved for an agent, with the credential itself left bound.
 --
 -- Its own table rather than a column on org_settings, because the source
 -- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source

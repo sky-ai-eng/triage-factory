@@ -426,10 +426,11 @@ type Stores struct {
 	Permissions PermissionStore
 
 	// OrgEventSources owns the org_event_sources table — declared per-(org,
-	// source) policy, which today is whether an org admin has paused the
-	// source's event production. Split-pool in Postgres: member-readable /
-	// admin-writable through the app pool under RLS, with ...System reads on
-	// the admin pool for the router and the poller.
+	// source) policy, which today is whether an org admin has turned the source
+	// off: no polling, no events, no tasks, no credential resolved for an
+	// agent. Split-pool in Postgres: member-readable / admin-writable through
+	// the app pool under RLS, with ...System reads on the admin pool for the
+	// JWT-less readers.
 	OrgEventSources OrgEventSourceStore
 
 	// PollReadiness owns the poll_readiness table — the org-scoped

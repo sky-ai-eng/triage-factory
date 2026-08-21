@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -69,10 +71,10 @@ func pauseSource(t *testing.T, database *sql.DB, kind string) {
 }
 
 // TestRunGitHubCycleForOrg_SkipsPausedSource: an org admin turned GitHub off,
-// so the cycle spends no API budget on it. The skip is an optimization, not the
-// enforcement point — the router drops a paused source's events at the single
-// funnel every producer crosses — so its whole observable contract is that the
-// cycle did nothing and said why.
+// so the cycle makes no GitHub calls at all. This is the enforcement point for
+// API load — a promise measurable from the other end, by an operator watching
+// their own instance — which is why the assertions are that nothing was
+// reached, not merely that nothing was routed.
 func TestRunGitHubCycleForOrg_SkipsPausedSource(t *testing.T) {
 	recorder := recordSpans(t)
 	runmode.SetForTest(t, runmode.ModeMulti)
@@ -171,4 +173,43 @@ func newTestBus(t *testing.T) *eventbus.Bus {
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
 	return bus
+}
+
+// erroringSourceStore fails every policy read, standing in for a transient
+// database fault while a cycle is deciding whether it may poll.
+type erroringSourceStore struct{ dbpkg.OrgEventSourceStore }
+
+func (erroringSourceStore) ListDisabledSystem(context.Context, string) ([]string, error) {
+	return nil, errors.New("boom: org_event_sources read failed")
+}
+
+// TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls pins fail-closed.
+// The two mistakes are not symmetric: skipping wrongly costs one cycle of
+// latency on a source polled again at the next tick, while polling wrongly puts
+// load on somebody's Jira instance exactly when this deployment's database is
+// already unhealthy — and that is load an operator may be watching for.
+//
+// The nil resolver is the assertion's teeth: reaching it would panic, so
+// nothing but the skip stands between this test and a poll.
+func TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T) {
+	recorder := recordSpans(t)
+	ctx := context.Background()
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+
+	m := &Manager{
+		database: database, pub: busPublisher{bus: newTestBus(t)},
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos,
+		orgs: stores.Orgs, users: stores.Users, secrets: stores.Secrets,
+		jiraRules:    stores.JiraStatusRules,
+		EventSources: erroringSourceStore{},
+	}
+	m.runJiraCycleForOrg(ctx, nil, runmode.LocalDefaultOrgID, time.Now())
+
+	// A distinct outcome from `disabled`: a skipped cycle must never be
+	// readable as a deliberate pause, or an operator debugging silence goes
+	// looking for an admin who never touched the switch.
+	if got := spanOutcome(t, recorder, "poll.jira.org"); got != "policy_unreadable" {
+		t.Errorf("span outcome = %q, want %q", got, "policy_unreadable")
+	}
 }

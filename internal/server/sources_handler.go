@@ -103,21 +103,27 @@ type orgSourcePatch struct {
 	Disabled json.RawMessage `json:"disabled,omitempty"`
 }
 
-// handleOrgSourcePatch turns one source's event production off or back on for
-// the whole org.
+// handleOrgSourcePatch turns one source off, or back on, for the whole org.
 //
-// This is the non-destructive half of a pair whose other half already existed.
-// Unbinding the credential (DELETE …/jira/access/credential) stopped events by
-// removing the org's ability to reach Jira at all — which also removed the
-// running agent's ability to read or comment on the ticket it was working, and
-// priced an undo at "go find the API token again". This route stops event
-// INGESTION and nothing else: the credential stays bound, `tfac exec jira`
-// keeps working, and re-enabling is one more PATCH. The destructive action
-// keeps its current meaning; it is just no longer the only one.
+// Off means off. From this write the source is not polled, its events mint no
+// tasks, and no credential for it resolves for an agent — the three gates read
+// the row this route writes (internal/poller, internal/routing, and
+// eventsource.Disabled at the agenthost and credential-provisioning funnels).
+// A switch that only stopped one of those would be the worst kind of control:
+// an admin who turns Jira off to take load off their instance, or to cut a
+// tenant's reach into it, has no way to tell from the UI that the agents kept
+// their access.
+//
+// What it does NOT do is destroy anything, and that is the whole reason it
+// exists next to DELETE …/jira/access/credential. Unbinding the credential
+// achieves the same silence by throwing the credential away: it prices an undo
+// at "go find the API token again" and audits as a credential removal. Here the
+// credential stays bound, the tracked repos and authored handlers stay as they
+// are, and re-enabling is one more PATCH.
 //
 // Org admin, not team admin. CLAUDE.md's org-wide-write rule admits a team
 // admin of a team whose tracked set contains the subject — but a source is in
-// nobody's tracked set, and pausing one lands on every team in the org. The
+// nobody's tracked set, and turning one off lands on every team in the org. The
 // binding argument is symmetry: unbinding the credential is RequireOrgAdmin, so
 // a team-admin gate here would be a way for a team admin to reach an org-admin
 // effect.
@@ -126,6 +132,10 @@ type orgSourcePatch struct {
 // runs and authored handlers are untouched. A handler whose source went dark
 // renders inert and explained rather than being hidden or deleted, because a
 // task is durable work that may have an open PR and agent memory behind it.
+// The same reasoning bounds what this does to a run already in flight: its next
+// exec verb refuses, but the git and gh channels its sandbox was built around a
+// sealed bundle are not torn out from under work in progress — a half-pushed
+// branch is destroyed work, which is exactly what this route exists to avoid.
 //
 // PATCH /api/orgs/{org_id}/sources/{kind}
 func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 )
@@ -139,6 +140,9 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 // path stays byte-identical. nil when the org has no usable GitHub credential
 // (a Jira-only org — no regression, its curator does no git).
 func (m *Manager) resolveGitHubForCuratorTurn(ctx context.Context, orgID, teamID string, pinnedRepos []string) (*credbundle.GitHubCreds, error) {
+	if off, err := m.sourceOff(ctx, orgID, eventsource.KindGitHub); err != nil || off {
+		return nil, err
+	}
 	scoped, ok := m.ghResolver.(ghclient.ScopedResolver)
 	if !ok {
 		return nil, nil

@@ -7,14 +7,17 @@ import (
 )
 
 // OrgEventSourceStore owns the org_event_sources table — declared per-(org,
-// source) policy, which today is one fact: whether an org admin has paused the
-// source's event production.
+// source) policy, which today is one fact: whether an org admin has turned the
+// source off. Off covers everything the deployment does with that source —
+// polling it, routing its events, resolving its credential for an agent — so
+// this row is read by the poll cycle and the credential paths as well as by the
+// availability derivation.
 //
 // Split-pool in Postgres. The reads a request serves run on the app pool under
 // RLS (member SELECT, admin write — a source belongs to no team, so the
 // org-wide-mutation rule reduces to plain org admin and RLS can express it),
-// and the ...System reads route through the admin pool for the two producers
-// that have no JWT claims: the event router and the poller.
+// and the ...System reads route through the admin pool for the readers that
+// carry no JWT claims at all.
 //
 // Every read answers about the whole org rather than one kind. Both consumers
 // that matter — the availability derivation resolving a vocabulary, the router
@@ -28,7 +31,9 @@ type OrgEventSourceStore interface {
 	ListDisabled(ctx context.Context, orgID string) ([]string, error)
 
 	// ListDisabledSystem is ListDisabled on the admin pool, for the JWT-less
-	// producers (router, poller) with org_id bound by argument.
+	// readers — the router, the poll cycles, the credential provisioner, and a
+	// run's agenthost acting for a conversation rather than a signed-in user —
+	// with org_id bound by argument.
 	ListDisabledSystem(ctx context.Context, orgID string) ([]string, error)
 
 	// Get returns one source's row, or (nil, nil) when the org has recorded
