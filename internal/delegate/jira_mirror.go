@@ -21,9 +21,14 @@
 //     review + merge. That is precisely the in-review moment, and it is NOT
 //     done. A ticket only reaches Done when its PR merges — a separate,
 //     entity-driven mirror (forthcoming), never a board/task-completion move.
-//     PR-opened ≠ ticket-done: that conflated the task lifecycle (TF's board
-//     "done" column = work submitted) with the entity lifecycle (the change
-//     shipped).
+//
+// The second one does NOT track the board column, and that divergence is the
+// point. A clean completion either closes the task (board done) or, when the
+// run left an unresolved artifact, parks it in the board's in_review column —
+// and the Jira ticket is aimed at the review bucket in both cases, closed card
+// included. TF's done column means the work was submitted; the Jira ticket's
+// Done means the change shipped, and nothing here knows yet whether it did.
+// Collapsing the two is what would mark a ticket Done the moment a PR opened.
 //
 // The InReview rule is OPTIONAL, and a project that leaves it unmapped is the
 // simple case: both chokepoints aim InProgress, and a watcher sees exactly what
@@ -203,11 +208,13 @@ func (s *Spawner) mirrorJiraBoardMove(orgID string, task *domain.Task, target mi
 // forthcoming), never on run completion. A user takeover mid-run flips
 // claimed_by_agent_id to the user, after which the terminal Jira write belongs
 // to the user's own task-lifecycle writes, so a no-longer-bot-owned task is
-// skipped. Called from terminateBlueprint's completed branch; a
-// failed/aborted/cancelled run never reaches it. The mirror is idempotent, so in
-// the common case (the board's own in_review move already ran) this is a single
-// GetClaimState read and no write — and it self-heals a ticket left in To Do by
-// a transient dispatch-time mirror failure.
+// skipped. Called from terminateBlueprint's completed branch for BOTH of its
+// outcomes — the closed task and the one parked for approval — since a Jira
+// watcher is owed the same thing either way; a failed/aborted/cancelled run
+// never reaches it. The mirror is idempotent, so when a board in_review move
+// already mirrored this ticket during the run it is a single GetClaimState read
+// and no write, and it self-heals a ticket left behind by a transient
+// dispatch-time mirror failure.
 func (s *Spawner) mirrorJiraInReviewForTask(ctx context.Context, orgID, taskID string) {
 	if s.tasks == nil {
 		return

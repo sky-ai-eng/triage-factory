@@ -790,9 +790,11 @@ func TestTerminateBlueprint_CompletedJiraTask_MirrorsInProgress(t *testing.T) {
 }
 
 // With the rule mapped, that same clean completion lands the ticket in the
-// review bucket instead — the moment the agent's PR goes up is exactly what the
-// in-review status is for. Still never Done.
-func TestTerminateBlueprint_CompletedJiraTask_MappedReview_MirrorsInReview(t *testing.T) {
+// review bucket — and the TF card CLOSES while it does. That divergence is the
+// behavior worth pinning: TF's done column means the work was submitted, the
+// Jira ticket's Done means the change shipped, and a PR that just went up is
+// only the first of those.
+func TestTerminateBlueprint_CompletedJiraTask_MappedReview_ClosedCardStillMirrorsInReview(t *testing.T) {
 	s, database, conversationID, taskID, fake, res := setupJiraMirrorFixture(t, "complete-review", "To Do", "")
 	mapInReviewRule(t, database)
 	stampBotClaim(t, database, taskID)
@@ -801,6 +803,9 @@ func TestTerminateBlueprint_CompletedJiraTask_MappedReview_MirrorsInReview(t *te
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
 		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
 
+	if got := readTaskStatus(t, database, taskID); got != "done" {
+		t.Fatalf("task status = %q, want done (no unresolved artifact, so the card closes)", got)
+	}
 	fake.waitTransition(t)
 	if n := res.systemCalls(); n != 1 {
 		t.Errorf("ForSystem calls = %d, want 1", n)
@@ -811,6 +816,28 @@ func TestTerminateBlueprint_CompletedJiraTask_MappedReview_MirrorsInReview(t *te
 	}
 	if len(transitions) != 1 || transitions[0] != "In Review" {
 		t.Errorf("transitions = %v, want [In Review] (completion must not move the ticket to Done)", transitions)
+	}
+}
+
+// The completed branch's other outcome — an unresolved draft PR parks the card
+// in the board's in_review column instead of closing it — owes the Jira watcher
+// exactly the same thing, so the mirror does not branch on which one happened.
+func TestTerminateBlueprint_CompletedJiraTask_MappedReview_ParkedCardMirrorsInReview(t *testing.T) {
+	s, database, conversationID, taskID, fake, _ := setupJiraMirrorFixture(t, "complete-review-parked", "To Do", "")
+	mapInReviewRule(t, database)
+	stampBotClaim(t, database, taskID)
+	seedDraftPRArtifact(t, s, conversationID)
+	bpr := blueprintRunIDForConversation(t, database, conversationID)
+
+	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "",
+		time.Now(), runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
+
+	if got := readTaskStatus(t, database, taskID); got != "in_review" {
+		t.Fatalf("task status = %q, want in_review (an unresolved artifact keeps the card open)", got)
+	}
+	fake.waitTransition(t)
+	if _, transitions := fake.snapshot(); len(transitions) != 1 || transitions[0] != "In Review" {
+		t.Errorf("transitions = %v, want [In Review]", transitions)
 	}
 }
 
