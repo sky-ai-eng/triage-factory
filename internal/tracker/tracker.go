@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -1027,19 +1026,19 @@ func (r JiraRules) ForKey(key string) *JiraProjectRules {
 	return nil
 }
 
-// AllDoneMembers returns the deduplicated union of every project's DoneMembers
-// as status NAMES. Useful for subtask classification when the parent and
-// subtasks may live in different projects — a subtask arrives inlined in the
-// search response carrying a status name and nothing else, so a name is the
-// only thing there is to match on.
-func (r JiraRules) AllDoneMembers() []string {
+// AllDoneMembers returns the deduplicated union of every project's DoneMembers.
+// Useful for subtask classification when the parent and subtasks may live in
+// different projects — a subtask arrives inlined in the search response, and it
+// carries the same status object the parent does, id included.
+func (r JiraRules) AllDoneMembers() []domain.JiraStatusRef {
 	seen := map[string]bool{}
-	out := make([]string, 0)
+	out := make([]domain.JiraStatusRef, 0)
 	for _, p := range r {
-		for _, name := range domain.JiraStatusNames(p.DoneMembers) {
-			if !seen[name] {
-				seen[name] = true
-				out = append(out, name)
+		for _, ref := range p.DoneMembers {
+			key := domain.JiraStatusDedupKey(ref)
+			if key != "" && !seen[key] {
+				seen[key] = true
+				out = append(out, ref)
 			}
 		}
 	}
@@ -1061,9 +1060,9 @@ func (r JiraRules) AllDoneMembers() []string {
 // "done" word (e.g. OLD-1 transitioning to "Resolved" when NEW project
 // also uses "Resolved" as Done) — emits a spurious jira:issue:completed
 // for an entity whose actual workflow has nothing to do with NEW's.
-func (r JiraRules) doneMembersForKey(issueKey string) []string {
+func (r JiraRules) doneMembersForKey(issueKey string) []domain.JiraStatusRef {
 	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
-		return domain.JiraStatusNames(rule.DoneMembers)
+		return rule.DoneMembers
 	}
 	return nil
 }
@@ -1092,10 +1091,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		if rule == nil {
 			return false
 		}
-		// The snapshot records the status it saw as a name, so that is what the
-		// terminal test compares — the ids the rule stores are what the JQL and
-		// the transitions are built from.
-		return slices.Contains(domain.JiraStatusNames(rule.DoneMembers), snap.Status)
+		return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
 	}
 	// Phase 1: Discovery
 	discovered, err := t.discoverJira(ctx, client, baseURL, projects)
@@ -1620,8 +1616,8 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 
 	type queryWithDone struct {
 		jql                   string
-		doneMembers           []string // for subtask classification on issues returned by this query
-		assignedToCurrentUser bool     // this query's arrival is itself an assignment signal
+		doneMembers           []domain.JiraStatusRef // for subtask classification on issues returned by this query
+		assignedToCurrentUser bool                   // this query's arrival is itself an assignment signal
 	}
 	var queries []queryWithDone
 
@@ -1795,7 +1791,7 @@ type jiraIssueState struct {
 // separately; the snapshot itself only carries fields that DiffJiraSnapshots
 // compares. doneStatuses is the user's configured Done.Members set, used
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
-func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string) jiraIssueState {
+func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		Key:     issue.Key,
 		Summary: issue.Fields.Summary,
@@ -1803,6 +1799,7 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Status != nil {
 		snap.Status = issue.Fields.Status.Name
+		snap.StatusID = issue.Fields.Status.ID
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
@@ -1850,21 +1847,17 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 // is counted as open — conservative default: better to show a parent as
 // "has open subtasks" and suppress task creation than to wrongly surface
 // it as atomic when we couldn't classify.
-func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []string) int {
+func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []domain.JiraStatusRef) int {
 	if len(issue.Fields.Subtasks) == 0 {
 		return 0
 	}
-	done := make(map[string]struct{}, len(doneStatuses))
-	for _, s := range doneStatuses {
-		done[s] = struct{}{}
-	}
 	open := 0
 	for _, sub := range issue.Fields.Subtasks {
-		name := ""
+		var ref domain.JiraStatusRef
 		if sub.Fields.Status != nil {
-			name = sub.Fields.Status.Name
+			ref = domain.JiraStatusRef{ID: sub.Fields.Status.ID, Name: sub.Fields.Status.Name}
 		}
-		if _, ok := done[name]; !ok {
+		if !domain.ContainsStatus(doneStatuses, ref) {
 			open++
 		}
 	}

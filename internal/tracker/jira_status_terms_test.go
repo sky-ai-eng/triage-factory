@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -59,16 +60,18 @@ func TestJiraStatusTerms_EmptySet(t *testing.T) {
 	}
 }
 
-// TestJiraRules_AllDoneMembers_Names: subtasks arrive inlined in the search
-// response carrying a status name and nothing else, so the union they are
-// classified against is names.
-func TestJiraRules_AllDoneMembers_Names(t *testing.T) {
+// TestJiraRules_AllDoneMembers: the union subtasks are classified against is
+// deduplicated on status identity, so one status configured by two projects
+// contributes once — and it carries the id, because an inlined subtask reports
+// the same status object its parent does.
+func TestJiraRules_AllDoneMembers(t *testing.T) {
 	rules := JiraRules{
 		{Key: "SKY", DoneMembers: []domain.JiraStatusRef{{ID: "1", Name: "Done"}}},
 		{Key: "OPS", DoneMembers: []domain.JiraStatusRef{{ID: "2", Name: "Resolved"}, {ID: "1", Name: "Done"}}},
 	}
 	got := rules.AllDoneMembers()
-	if len(got) != 2 || got[0] != "Done" || got[1] != "Resolved" {
-		t.Errorf("AllDoneMembers = %v, want [Done Resolved] deduped in first-seen order", got)
+	want := []domain.JiraStatusRef{{ID: "1", Name: "Done"}, {ID: "2", Name: "Resolved"}}
+	if !slices.Equal(got, want) {
+		t.Errorf("AllDoneMembers = %v, want %v deduped in first-seen order", got, want)
 	}
 }

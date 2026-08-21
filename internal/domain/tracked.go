@@ -217,9 +217,15 @@ func DedupCheckRunsByName(runs []CheckRun) []CheckRun {
 // PR bodies) lives on entities.description instead so diff reads don't
 // drag it through every refresh cycle.
 type JiraSnapshot struct {
-	Key      string `json:"key"`
-	Summary  string `json:"summary"`
-	Status   string `json:"status"`
+	Key     string `json:"key"`
+	Summary string `json:"summary"`
+	Status  string `json:"status"`
+	// StatusID is Jira's identifier for the status Status names. It is the
+	// stable half of the pair: a workflow status can be renamed, and matching
+	// on the id is what keeps rule membership and change detection right when
+	// it is. Empty on snapshots captured before the field existed, and on any
+	// response without one — every comparison falls back to the name there.
+	StatusID string `json:"status_id,omitempty"`
 	Assignee string `json:"assignee"` // display name (UI surfaces)
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
 	// on Cloud, legacy key on Server / DC. Captured alongside the
@@ -252,4 +258,10 @@ type JiraSnapshot struct {
 	// and to fire jira:issue:became_atomic when an issue transitions from
 	// "has open subtasks" to "none open".
 	OpenSubtaskCount int `json:"open_subtask_count"`
+}
+
+// StatusRef pairs the snapshot's status name with its id, for comparison
+// against a rule's members through JiraStatusRef.SameStatus.
+func (s JiraSnapshot) StatusRef() JiraStatusRef {
+	return JiraStatusRef{ID: s.StatusID, Name: s.Status}
 }

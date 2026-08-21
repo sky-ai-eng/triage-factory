@@ -57,7 +57,7 @@ func TestJiraStatusRules_SQLite_LegacyNameOnlyRow(t *testing.T) {
 	if !rule.Armed() {
 		t.Error("a complete legacy row should read as armed")
 	}
-	if !rule.DoneContains("Done") {
+	if !rule.DoneContains(domain.JiraStatusRef{Name: "Done"}) {
 		t.Error("membership tests should match a legacy row on the name")
 	}
 }

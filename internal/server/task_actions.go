@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"slices"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -637,14 +636,14 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		jiraLog.Warn("claim guard: no in_progress rule configured for project, skipping transition", "ticket", task.EntitySourceID)
 		return
 	}
-	go func(issueKey string, ipMembers []string, ipCanonical jira.Status) {
+	go func(issueKey string, ipMembers []domain.JiraStatusRef, ipCanonical jira.Status) {
 		// Detached from the request: this claim guard outlives the response,
 		// so it uses a background context.
 		bgCtx := context.Background()
 		state := jiraUserClient.GetClaimState(bgCtx, issueKey)
 
 		needAssign := state == nil || !state.AssignedToSelf
-		needTransition := state == nil || !slices.Contains(ipMembers, state.StatusName)
+		needTransition := state == nil || !domain.ContainsStatus(ipMembers, claimStatusRef(state))
 
 		if !needAssign && !needTransition {
 			jiraLog.Info("claim guard: already assigned to self and in in-progress, skipping", "issue", issueKey, "status", state.StatusName)
@@ -662,9 +661,7 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 				jiraLog.Error("failed to transition", "issue", issueKey, "status", ipCanonical.Name, "error", err)
 			}
 		}
-		// Names for the membership test (a live claim state reports the status
-		// it saw as a name) and the full ref for the transition (matched by id).
-	}(task.EntitySourceID, domain.JiraStatusNames(rule.InProgressMembers),
+	}(task.EntitySourceID, rule.InProgressMembers,
 		jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
 }
 

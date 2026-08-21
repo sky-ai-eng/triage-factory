@@ -256,10 +256,10 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case isSelf:
 			baseTicket.Bucket = "assigned"
-			baseTicket.PrefilledAction = prefillForAssigned(projectRule, snap.Status)
+			baseTicket.PrefilledAction = prefillForAssigned(projectRule, snap.StatusRef())
 			assigned = append(assigned, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
 
-		case isUnassigned && projectRule != nil && projectRule.PickupContains(snap.Status):
+		case isUnassigned && projectRule != nil && projectRule.PickupContains(snap.StatusRef()):
 			baseTicket.Bucket = "available"
 			baseTicket.PrefilledAction = "" // user decides
 			available = append(available, scored{baseTicket, snap.CreatedAt, e.CreatedAt.Format("2006-01-02T15:04:05Z07:00")})
@@ -328,7 +328,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 // A nil project rule (the ticket's project_key has no configured rules)
 // returns "" — user picks the action manually, matching the "no rules
 // configured" degrade-cleanly contract.
-func prefillForAssigned(rule *domain.JiraProjectStatusRules, status string) string {
+func prefillForAssigned(rule *domain.JiraProjectStatusRules, status domain.JiraStatusRef) string {
 	if rule == nil {
 		return ""
 	}
@@ -756,7 +756,7 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 
 	isSelf := (snap.AssigneeAccountID != "" && snap.AssigneeAccountID == b.localAccountID) ||
 		(snap.AssigneeAccountID == "" && snap.Assignee == b.localDisplayName)
-	isAvailable := snap.Assignee == "" && rule != nil && rule.PickupContains(snap.Status)
+	isAvailable := snap.Assignee == "" && rule != nil && rule.PickupContains(snap.StatusRef())
 	if !isSelf && !isAvailable {
 		return fail(httpx.ReasonConflict, "ticket is not assigned to you and not in the available pickup queue")
 	}
@@ -788,7 +788,7 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 	// (a no-op guard skips the Jira transition when the status is already a
 	// Done member); queue/claim on an already-done ticket is pointless, so
 	// reject those outright.
-	if bucket == bucketAssigned && rule != nil && rule.DoneContains(snap.Status) && b.action != stockActionDone {
+	if bucket == bucketAssigned && rule != nil && rule.DoneContains(snap.StatusRef()) && b.action != stockActionDone {
 		return fail(httpx.ReasonConflict, "ticket is already in a done status — only the done action is valid")
 	}
 
@@ -846,7 +846,7 @@ func (s *Server) stockClaimTicket(r *http.Request, b *stockBatch, entity *domain
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "assign: "+err.Error())
 		}
 	}
-	if state == nil || !rule.InProgressContains(state.StatusName) {
+	if state == nil || !rule.InProgressContains(claimStatusRef(state)) {
 		if err := b.jiraUserClient.TransitionTo(r.Context(), snap.Key,
 			jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			return stockFailed(snap.Key, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
@@ -905,7 +905,7 @@ func (s *Server) stockDoneTicket(r *http.Request, b *stockBatch, entity *domain.
 	// transitioning to Resolved would be a no-op at best and a workflow
 	// violation at worst.
 	state := b.jiraUserClient.GetClaimState(r.Context(), issueKey)
-	if state == nil || !rule.DoneContains(state.StatusName) {
+	if state == nil || !rule.DoneContains(claimStatusRef(state)) {
 		if err := b.jiraUserClient.TransitionTo(r.Context(), issueKey,
 			jira.Status{ID: rule.DoneCanonical.ID, Name: rule.DoneCanonical.Name}); err != nil {
 			return stockFailed(issueKey, httpx.ReasonUpstreamRejected, "transition: "+err.Error())
@@ -992,4 +992,13 @@ func projectFromKey(key string) string {
 		return key[:i]
 	}
 	return key
+}
+
+// claimStatusRef pairs a live claim read's status name with its id, so the
+// membership tests compare on the id whenever both sides carry one.
+func claimStatusRef(state *jira.ClaimState) domain.JiraStatusRef {
+	if state == nil {
+		return domain.JiraStatusRef{}
+	}
+	return domain.JiraStatusRef{ID: state.StatusID, Name: state.StatusName}
 }

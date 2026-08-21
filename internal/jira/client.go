@@ -478,6 +478,7 @@ type ClaimState struct {
 	AssignedToSelf bool
 	Unassigned     bool   // true when assignee is null (no one assigned)
 	StatusName     string // current workflow status
+	StatusID       string // its identifier, which a rename does not move
 }
 
 // GetClaimState fetches the current assignee and status of an issue and
@@ -513,6 +514,7 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 	state := &ClaimState{}
 	if issue.Fields.Status != nil {
 		state.StatusName = issue.Fields.Status.Name
+		state.StatusID = issue.Fields.Status.ID
 	}
 	if issue.Fields.Assignee == nil {
 		state.Unassigned = true

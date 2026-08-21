@@ -203,7 +203,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 		// means the work is complete, so moving to Done is correct either way — and
 		// a redundant Done→Done attempt just errors harmlessly. Moving to Done is
 		// forward, never the backward regression the in-progress skip guards.
-		if state != nil && rule.DoneContains(state.StatusName) {
+		if state != nil && rule.DoneContains(claimStatusRef(state)) {
 			jiraLog.Debug("mirror: already in done bucket, skipping", "issue", issueKey, "status", state.StatusName)
 			return
 		}
@@ -233,7 +233,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 	}
 	// Forward-only: a concurrent done mirror may have already advanced the ticket
 	// into the Done bucket — never drag a terminal ticket back to In Progress.
-	if rule.DoneContains(state.StatusName) {
+	if rule.DoneContains(claimStatusRef(state)) {
 		jiraLog.Debug("mirror: already advanced to done, skipping in-progress mirror", "issue", issueKey, "status", state.StatusName)
 		return
 	}
@@ -248,7 +248,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 		}
 		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueAssigned, "", "")
 	}
-	if !rule.InProgressContains(state.StatusName) {
+	if !rule.InProgressContains(claimStatusRef(state)) {
 		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
@@ -380,4 +380,13 @@ func (k *keyedMutex) release(key string, rm *refMutex) {
 func (k *keyedMutex) releaseUnlock(key string, rm *refMutex) {
 	rm.mu.Unlock()
 	k.release(key, rm)
+}
+
+// claimStatusRef pairs a live claim read's status name with its id, so the
+// membership tests compare on the id whenever both sides carry one.
+func claimStatusRef(state *jira.ClaimState) domain.JiraStatusRef {
+	if state == nil {
+		return domain.JiraStatusRef{}
+	}
+	return domain.JiraStatusRef{ID: state.StatusID, Name: state.StatusName}
 }

@@ -466,6 +466,19 @@ func JiraStatusNames(refs []JiraStatusRef) []string {
 	return out
 }
 
+// JiraStatusIDs renders refs as their identifiers, skipping the ones that
+// carry none — for the surfaces that can match on an id but must not treat a
+// name-only ref as having an empty one.
+func JiraStatusIDs(refs []JiraStatusRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.ID != "" {
+			out = append(out, r.ID)
+		}
+	}
+	return out
+}
+
 // --- the stored form of a status rule's members ---
 //
 // Rules persist as JSON in both dialects (SQLite TEXT, Postgres jsonb), so the
@@ -761,29 +774,36 @@ func (r JiraProjectStatusRules) Armed() bool {
 		len(r.DoneMembers) > 0 && !r.DoneCanonical.IsZero()
 }
 
-// The three membership tests take a status NAME, because a name is what the
-// callers hold: a poll snapshot records the status it saw as a name, and so
-// does the live claim-state read. A rule renamed in Jira since it was armed
-// therefore stops matching here until the row is saved again — the ids the
-// rule stores are what keep the JQL and the transitions right meanwhile.
+// The three membership tests take a full ref and compare through SameStatus,
+// so the id decides whenever both sides carry one and a status renamed in Jira
+// keeps matching. The name is the fallback, and it is not a transitional one:
+// a rule seeded from the headless env vars is name-only by contract, and so is
+// any snapshot captured before status ids were recorded.
 
 // PickupContains reports whether status is a member of the Pickup rule.
-func (r JiraProjectStatusRules) PickupContains(status string) bool {
-	return containsStatusName(r.PickupMembers, status)
+func (r JiraProjectStatusRules) PickupContains(status JiraStatusRef) bool {
+	return containsStatus(r.PickupMembers, status)
 }
 
 // InProgressContains reports whether status is a member of the InProgress rule.
-func (r JiraProjectStatusRules) InProgressContains(status string) bool {
-	return containsStatusName(r.InProgressMembers, status)
+func (r JiraProjectStatusRules) InProgressContains(status JiraStatusRef) bool {
+	return containsStatus(r.InProgressMembers, status)
 }
 
 // DoneContains reports whether status is a member of the Done rule.
-func (r JiraProjectStatusRules) DoneContains(status string) bool {
-	return containsStatusName(r.DoneMembers, status)
+func (r JiraProjectStatusRules) DoneContains(status JiraStatusRef) bool {
+	return containsStatus(r.DoneMembers, status)
 }
 
-func containsStatusName(refs []JiraStatusRef, status string) bool {
-	return slices.ContainsFunc(refs, func(r JiraStatusRef) bool { return r.Name == status })
+func containsStatus(refs []JiraStatusRef, status JiraStatusRef) bool {
+	return slices.ContainsFunc(refs, func(r JiraStatusRef) bool { return r.SameStatus(status) })
+}
+
+// ContainsStatus reports whether a set of refs holds one naming the same
+// status — the free-standing form of the membership tests, for the callers
+// that hold a union of several rules' members rather than one rule.
+func ContainsStatus(refs []JiraStatusRef, status JiraStatusRef) bool {
+	return containsStatus(refs, status)
 }
 
 // RuleForProject returns the per-project rule for the given key, or

@@ -335,10 +335,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains("Backlog") {
+	if r := domain.RuleForProject(got, "SKY"); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY rules round-trip: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains("Triage") {
+	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains(jiraRef("Triage")) {
 		t.Errorf("OPS rules round-trip: %+v", r)
 	}
 
@@ -355,10 +355,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || !r.PickupContains("Ready") || r.PickupContains("Backlog") {
+	if r := domain.RuleForProject(got, "SKY"); r == nil || !r.PickupContains(jiraRef("Ready")) || r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY edit didn't apply: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || !r.PickupContains("Triage") || r.DoneCanonical.Name != "Resolved" {
+	if r := domain.RuleForProject(got, "OPS"); r == nil || !r.PickupContains(jiraRef("Triage")) || r.DoneCanonical.Name != "Resolved" {
 		t.Errorf("OPS untouched check failed: %+v", r)
 	}
 

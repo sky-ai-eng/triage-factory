@@ -468,23 +468,32 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // an entity that never stored a snapshot has said nothing about whether its
 // subject finished. json_extract returns 1 for a JSON true, hence the
 // integer comparison on $.merged.
-func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error) {
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	args := []any{}
-	// The Jira arm is omitted rather than emitted empty: `IN ()` is a
-	// syntax error, and "no configured done status" genuinely means no Jira
-	// entity can be terminal.
-	jiraArm := ""
-	if len(jiraDoneStatuses) > 0 {
-		placeholders := make([]string, len(jiraDoneStatuses))
-		for i, status := range jiraDoneStatuses {
+	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
+	// error, and a ref set with no ids (or no names) genuinely has nothing to
+	// match on that side. With neither, no Jira entity can be terminal.
+	arm := func(path string, values []string) string {
+		placeholders := make([]string, len(values))
+		for i, v := range values {
 			placeholders[i] = "?"
-			args = append(args, status)
+			args = append(args, v)
 		}
-		jiraArm = ` OR (source = 'jira' AND json_extract(snapshot_json, '$.status') IN (` +
-			strings.Join(placeholders, ", ") + `))`
+		return `json_extract(snapshot_json, '` + path + `') IN (` + strings.Join(placeholders, ", ") + `)`
+	}
+	var matches []string
+	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
+		matches = append(matches, arm("$.status_id", ids))
+	}
+	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
+		matches = append(matches, arm("$.status", names))
+	}
+	jiraArm := ""
+	if len(matches) > 0 {
+		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
 	}
 	limitClause := ""
 	if limit > 0 {
