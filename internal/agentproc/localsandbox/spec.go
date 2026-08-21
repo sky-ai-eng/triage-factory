@@ -28,6 +28,8 @@
 // backstop that covers what --unshare-pid would have.
 package localsandbox
 
+import "errors"
+
 // Binary is the bubblewrap executable. Resolved from PATH at spawn (and at
 // the boot probe), never a pinned absolute path: bubblewrap is the distro's
 // package, and its AppArmor profile — the thing that permits unprivileged
@@ -41,6 +43,22 @@ const Binary = "bwrap"
 // drift test in internal/delegate — the package that wires both — cross-checks
 // the two spellings agree.
 const AgentHostSocketDest = "/run/tf.sock"
+
+// ErrNotInstalled and ErrNamespaceRefused are the two ways Resolve fails, and
+// they are separate sentinels because the operator fixes them differently and
+// a message that names the wrong fix is worse than no message: someone who
+// runs the install and hits the identical wall a second time has been told to
+// do the one thing that could not have helped.
+//
+//   - ErrNotInstalled — no bwrap anywhere, or one that cannot even print its
+//     version. Fix: install the distro package.
+//   - ErrNamespaceRefused — bwrap is there and cannot create a user
+//     namespace. Nothing about installing it again changes that; the block is
+//     the host's, and it is usually one of the toggles reported alongside.
+var (
+	ErrNotInstalled     = errors.New("bubblewrap is not installed")
+	ErrNamespaceRefused = errors.New("bubblewrap cannot create a user namespace")
+)
 
 // Spec is one run's sandbox plan: the paths that exist because THIS run
 // exists. Everything else about the mount plan is a property of the host and
@@ -96,6 +114,13 @@ type Spec struct {
 // Args pure and every cell of the plan testable without relocating a real
 // home directory.
 type Host struct {
+	// Bwrap is the bubblewrap binary this run executes, from Resolve — the
+	// same call the boot probe validates through, so the binary that was
+	// proven to work is the binary that runs. Empty falls back to the bare
+	// Binary name and a PATH lookup at exec, which is only what a test that
+	// builds a plan by hand wants.
+	Bwrap string
+
 	// Home is the operator's real home directory, masked with a tmpfs.
 	// HOME itself is NOT relocated: the agent still runs with the operator's
 	// real value, so subscription OAuth keeps working and the transcript

@@ -3,7 +3,9 @@
 package localsandbox
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -235,4 +237,120 @@ func indexOfOp(args []string, flag, target string) int {
 		}
 	}
 	return -1
+}
+
+// TestProbe_ClassifiesTheFailure pins that Probe reports WHICH step failed,
+// which is what lets the boot refusal name a fix that could actually work. A
+// probe that returned one undifferentiated error is how an operator ends up
+// installing a package they already have.
+func TestProbe_ClassifiesTheFailure(t *testing.T) {
+	// No bwrap on PATH and none at the distro path — the not-installed shape.
+	// Both have to be cut: falling back to the distro path when PATH misses is
+	// exactly the behavior Resolve adds, so an empty PATH alone no longer
+	// means "not installed" on a machine that has the package.
+	t.Setenv("PATH", t.TempDir())
+	restore := distroBinary
+	distroBinary = filepath.Join(t.TempDir(), "no-bwrap-here")
+	t.Cleanup(func() { distroBinary = restore })
+
+	err := Probe()
+	if err == nil {
+		t.Fatal("Probe succeeded with no bwrap on PATH")
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Errorf("Probe error = %v, want ErrNotInstalled", err)
+	}
+	if errors.Is(err, ErrNamespaceRefused) {
+		t.Errorf("a missing binary was classified as a refused namespace: %v", err)
+	}
+}
+
+// TestUserNSDiagnostics_ReportsEveryKnob pins that the refusal carries a
+// reading for each toggle that gates an unprivileged user namespace, absent
+// ones included — an absent apparmor_restrict_unprivileged_userns is itself
+// the answer to "is this the Ubuntu 23.10+ AppArmor block?", so reporting
+// nothing for it would drop the most useful line.
+func TestUserNSDiagnostics_ReportsEveryKnob(t *testing.T) {
+	got := userNSDiagnostics()
+	if len(got) != len(userNSKnobs) {
+		t.Fatalf("diagnostics = %v, want one entry per knob (%d)", got, len(userNSKnobs))
+	}
+	for i, knob := range userNSKnobs {
+		name := filepath.Base(knob)
+		if !strings.HasPrefix(got[i], name+"=") {
+			t.Errorf("entry %d = %q, want a %s= reading", i, got[i], name)
+		}
+		if strings.TrimPrefix(got[i], name+"=") == "" {
+			t.Errorf("entry %d = %q has no value; an unreadable knob must report <absent>", i, got[i])
+		}
+	}
+}
+
+// TestResolve_PrefersABwrapThatWorks is the point of Resolve. A snap, nix or
+// hand-built bwrap earlier on PATH is unconfined by the distro AppArmor
+// profile and gets denied a namespace on Ubuntu 23.10+, while the distro
+// binary two directories over works. Ranking the candidates would be a guess;
+// trying them is not, and it turns a boot refusal that asks the operator to go
+// audit their PATH into a boot that simply succeeds.
+func TestResolve_PrefersABwrapThatWorks(t *testing.T) {
+	real, err := exec.LookPath(Binary)
+	if err != nil {
+		t.Skipf("no bubblewrap installed: %v", err)
+	}
+	if err := smokeTest(real); err != nil {
+		t.Skipf("bubblewrap unusable here: %v", err)
+	}
+
+	// A broken bwrap that shadows the working one on PATH, standing in for the
+	// unconfined-binary case (it fails for a different reason; what Resolve
+	// sees either way is a candidate whose smoke test does not pass).
+	shadowDir := t.TempDir()
+	shadow := filepath.Join(shadowDir, Binary)
+	if err := os.WriteFile(shadow, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", shadowDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	restore := distroBinary
+	distroBinary = real
+	t.Cleanup(func() { distroBinary = restore })
+
+	got, err := Resolve()
+	if err != nil {
+		t.Fatalf("Resolve rejected the host even though a working bubblewrap is installed: %v", err)
+	}
+	if got == shadow {
+		t.Errorf("Resolve picked the broken shadowing binary %q", got)
+	}
+	if got != real {
+		t.Errorf("Resolve = %q, want the working %q", got, real)
+	}
+	// And the whole point: the boot gate passes rather than refusing.
+	if err := Probe(); err != nil {
+		t.Errorf("Probe failed with a working bubblewrap present: %v", err)
+	}
+}
+
+// TestResolve_SingleCandidateIsNotProbed pins the cheap path. One installed
+// bwrap is no choice at all, and paying two fork+execs per agent launch to
+// re-confirm what the boot probe already established would be waste — so a
+// lone candidate comes back even when it is plainly broken, and Probe is what
+// rejects it.
+func TestResolve_SingleCandidateIsNotProbed(t *testing.T) {
+	dir := t.TempDir()
+	broken := filepath.Join(dir, Binary)
+	if err := os.WriteFile(broken, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	restore := distroBinary
+	distroBinary = filepath.Join(t.TempDir(), "absent")
+	t.Cleanup(func() { distroBinary = restore })
+
+	got, err := Resolve()
+	if err != nil || got != broken {
+		t.Fatalf("Resolve = (%q, %v), want the sole candidate %q unprobed", got, err, broken)
+	}
+	if err := Probe(); !errors.Is(err, ErrNotInstalled) && !errors.Is(err, ErrNamespaceRefused) {
+		t.Errorf("Probe = %v, want a classified failure for a broken binary", err)
+	}
 }

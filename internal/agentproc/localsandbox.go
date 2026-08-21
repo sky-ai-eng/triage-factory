@@ -47,6 +47,12 @@ func directArgv(opts RunOptions, nodeArgs []string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The same resolution the boot probe validated through, so a host with
+	// more than one bubblewrap installed runs the one that was proven to
+	// work rather than whichever happens to lead PATH at spawn.
+	if host.Bwrap, err = localsandbox.Resolve(); err != nil {
+		return nil, fmt.Errorf("local sandbox: %w", err)
+	}
 	// A copy, because a run that is retried or resumed hands the same *Spec
 	// back and must not accumulate the last spawn's resolved host paths.
 	spec := *opts.LocalSandbox

@@ -76,8 +76,18 @@ func TestNewDirectCommand_SandboxPrefixesBwrapAndMarks(t *testing.T) {
 		t.Fatalf("newDirectCommand: %v", err)
 	}
 
-	if cmd.Args[0] != localsandbox.Binary {
-		t.Fatalf("argv[0] = %q, want %q", cmd.Args[0], localsandbox.Binary)
+	// argv[0] is the RESOLVED bubblewrap, not the bare name: the probe and the
+	// spawn route through one resolution so a host with several installed
+	// cannot have one blessed at boot and a different one executed per run.
+	wantBwrap, err := localsandbox.Resolve()
+	if err != nil {
+		t.Skipf("no usable bubblewrap on this host: %v", err)
+	}
+	if cmd.Args[0] != wantBwrap {
+		t.Fatalf("argv[0] = %q, want the resolved %q", cmd.Args[0], wantBwrap)
+	}
+	if !filepath.IsAbs(cmd.Args[0]) {
+		t.Errorf("argv[0] = %q, want an absolute path", cmd.Args[0])
 	}
 	sep := slices.Index(cmd.Args, "--")
 	if sep < 0 || sep+1 >= len(cmd.Args) {

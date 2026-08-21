@@ -48,8 +48,12 @@ func Args(spec Spec, host Host) ([]string, error) {
 	// Setpgid + kill-process-group teardown reaches the agent's children
 	// only while they share this pid namespace; --die-with-parent below is
 	// what covers the case --unshare-pid would have).
+	bwrap := host.Bwrap
+	if bwrap == "" {
+		bwrap = Binary
+	}
 	args := []string{
-		Binary,
+		bwrap,
 		"--ro-bind", "/", "/",
 		"--dev", "/dev",
 		"--proc", "/proc",
@@ -194,36 +198,144 @@ func mustExist(path, what string) error {
 // the operator needs told about either way.
 const probeTimeout = 10 * time.Second
 
-// Probe reports whether bubblewrap can actually build a namespace on this
-// host. Boot calls it when the sandbox is on and refuses to start if it
-// fails — never a silent downgrade to an unsandboxed run.
+// distroBinary is where a distribution's bubblewrap package installs it, and
+// the reason this package looks past PATH at all. On Ubuntu 23.10+
+// unprivileged user namespaces are gated behind AppArmor, and the profile
+// that permits them is attached to THIS path — so a snap, nix, Homebrew or
+// hand-built bwrap sitting earlier on PATH is unconfined and gets denied a
+// namespace, while the distro one two directories over works fine.
 //
-// It is two steps because they fail for different reasons and the operator
-// fixes them differently. `--version` answers "is bubblewrap installed".
-// The smoke run answers "may this user create a namespace", which on Ubuntu
-// 23.10+ is a separate question entirely: unprivileged user namespaces are
-// restricted by AppArmor, and it is the distro bubblewrap package's own
-// profile that permits them — so a hand-built bwrap, or a TF running inside
-// a container that blocks nested userns, passes the first step and fails the
-// second.
-func Probe() error {
-	bin, err := exec.LookPath(Binary)
-	if err != nil {
-		return fmt.Errorf("%s is not on PATH: %w", Binary, err)
+// A var rather than a const so a test can point it somewhere else and
+// exercise the no-bubblewrap-anywhere path on a machine that has one — the
+// same seam hostGHBinaryPath uses in internal/agentproc.
+var distroBinary = "/usr/bin/bwrap"
+
+// Resolve returns the path of a bubblewrap that can actually build a namespace
+// on this host.
+//
+// It exists because "the first bwrap on PATH" is the wrong answer often enough
+// to matter, and the right one is knowable without asking the operator: when
+// more than one candidate is installed, the one that WORKS is discovered by
+// trying them rather than by ranking them. That turns a boot refusal telling
+// someone to go audit their PATH into a boot that just succeeds.
+//
+// One candidate is returned unprobed. A host with a single bwrap has no choice
+// to make, and paying two fork+execs per agent launch to re-confirm what the
+// boot probe already established would be waste; Probe still validates it at
+// boot, which is where the fail-closed guarantee lives.
+//
+// Every caller routes through here — the boot probe and the spawn seam alike —
+// so the binary the probe validated is the binary the run executes. Resolving
+// separately in each is how a probe comes to bless one bwrap while runs use
+// another.
+func Resolve() (string, error) {
+	candidates := binaryCandidates()
+	switch len(candidates) {
+	case 0:
+		return "", fmt.Errorf("%w: no %s on PATH or at %s", ErrNotInstalled, Binary, distroBinary)
+	case 1:
+		return candidates[0], nil
 	}
+	var firstErr error
+	for _, bin := range candidates {
+		if err := smokeTest(bin); err != nil {
+			if firstErr == nil || errors.Is(err, ErrNamespaceRefused) {
+				// A namespace refusal is the more informative failure to
+				// report: it means a real bwrap ran and the host said no.
+				firstErr = err
+			}
+			continue
+		}
+		return bin, nil
+	}
+	return "", firstErr
+}
+
+// binaryCandidates lists the bubblewrap binaries worth trying, PATH first and
+// the distro path second, deduplicated. Order is preference only for the
+// single-candidate shortcut — when both exist, Resolve picks by what works.
+func binaryCandidates() []string {
+	var out []string
+	if p, err := exec.LookPath(Binary); err == nil {
+		if abs, aerr := filepath.Abs(p); aerr == nil {
+			out = append(out, abs)
+		}
+	}
+	if len(out) == 0 || out[0] != distroBinary {
+		if info, err := os.Stat(distroBinary); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			out = append(out, distroBinary)
+		}
+	}
+	return out
+}
+
+// Probe reports whether the local sandbox can run on this host. Boot calls it
+// when the sandbox is on and refuses to start if it fails — never a silent
+// downgrade to an unsandboxed run.
+//
+// Neither failure is fixed by running TF as root, and the refusal must never
+// suggest it. bubblewrap creating an UNPRIVILEGED user namespace is the
+// design; a host that needs privilege to do it has a policy saying no, and the
+// answers are to change that policy or to opt out.
+func Probe() error {
+	bin, err := Resolve()
+	if err != nil {
+		return err
+	}
+	return smokeTest(bin)
+}
+
+// smokeTest answers the two questions that decide whether one bubblewrap is
+// usable, in the order whose failures have different fixes: can it run at all,
+// and will this host let it create a namespace.
+func smokeTest(bin string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	if out, err := exec.CommandContext(ctx, bin, "--version").CombinedOutput(); err != nil {
-		return fmt.Errorf("%s --version failed: %w (%s)", bin, err, firstLine(out))
+		return fmt.Errorf("%w: %s --version failed: %v (%s)", ErrNotInstalled, bin, err, firstLine(out))
 	}
-	// The smoke run uses the same argv SHAPE a real spawn does — including
-	// the "--" terminator — so a bubblewrap too old to understand one of
-	// them is caught here rather than on the first delegated run.
+	// The same argv SHAPE a real spawn uses — including the "--" terminator —
+	// so a bubblewrap too old to understand one of them is caught here rather
+	// than on the first delegated run.
 	smoke := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--die-with-parent", "--", trueBinary()}
 	if out, err := exec.CommandContext(ctx, bin, smoke...).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s could not create a namespace: %w (%s)", bin, err, firstLine(out))
+		// bwrap's own first line is the most diagnostic thing available
+		// ("setting up uid map: Permission denied" vs "No permissions to
+		// create new namespace"), and the toggles say which host policy did
+		// it — so the operator reads the cause rather than going to find it.
+		return fmt.Errorf("%w: %s: %v (%s); %s",
+			ErrNamespaceRefused, bin, err, firstLine(out), strings.Join(userNSDiagnostics(), ", "))
 	}
 	return nil
+}
+
+// userNSKnobs are the host toggles that actually gate an unprivileged user
+// namespace, in the order an operator should read them. Each is absent on
+// kernels that don't implement it, which is itself informative — an absent
+// apparmor_restrict_unprivileged_userns means this is not an Ubuntu 23.10+
+// host and that is not the cause.
+var userNSKnobs = []string{
+	"/proc/sys/kernel/apparmor_restrict_unprivileged_userns",
+	"/proc/sys/user/max_user_namespaces",
+	"/proc/sys/kernel/unprivileged_userns_clone",
+}
+
+// userNSDiagnostics reads the toggles above so the refusal carries the values
+// that decide the answer rather than making the operator go find them. Only
+// consulted on the failure path, so three file reads cost nothing in the
+// normal case.
+func userNSDiagnostics() []string {
+	out := make([]string, 0, len(userNSKnobs))
+	for _, knob := range userNSKnobs {
+		name := filepath.Base(knob)
+		b, err := os.ReadFile(knob)
+		if err != nil {
+			out = append(out, name+"=<absent>")
+			continue
+		}
+		out = append(out, name+"="+strings.TrimSpace(string(b)))
+	}
+	return out
 }
 
 // trueBinary resolves the do-nothing program the smoke run executes inside

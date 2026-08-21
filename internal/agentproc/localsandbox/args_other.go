@@ -26,6 +26,11 @@ import "errors"
 
 var errUnsupported = errors.New("localsandbox: the local agent sandbox (bubblewrap) is not supported on this platform")
 
+// Resolve always errors off Linux. It is the untagged spawn seam's entry
+// point, so it must exist on every platform even though nothing there can
+// reach it with the sandbox resolved off.
+func Resolve() (string, error) { return "", errUnsupported }
+
 // Args always errors off Linux.
 func Args(_ Spec, _ Host) ([]string, error) { return nil, errUnsupported }
 
