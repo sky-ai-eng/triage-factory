@@ -4,8 +4,15 @@
 // The answer is DERIVED on every read and never stored. Every way a source can
 // be off already exists and is meaningful somewhere else — the credential is
 // unbound, the workspace was disconnected, the licence lapsed, the source has
-// not shipped — so a stored flag would be one more way to be off, free to
-// disagree with the other four. Nothing here has a setter.
+// not shipped — so mirroring one of those into a stored flag would be one more
+// way to be off, free to disagree with the fact it copies. Nothing here has a
+// setter.
+//
+// TODO(TFAC-882): an org admin cannot pause a source without unbinding its
+// credential, which also cuts the agent's own access to it. What that wants is
+// not a mirror of anything above but a deliberate control of its own: a fifth
+// state resolved here ahead of the probes, a drop in the router, and a skip in
+// both poll cycles. Every consumer of State picks it up unchanged.
 //
 // Its readers want different slices of the same derivation: the org
 // availability read hands the whole vocabulary to the UI, an event-handler
