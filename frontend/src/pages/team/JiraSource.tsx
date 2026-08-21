@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import StatusRules from '../../ui/statusrules/StatusRules'
@@ -7,8 +7,15 @@ import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiJSON } from '../../lib/apiClient'
 import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
-import { fetchTeamSettings, saveTeamJiraProjects } from '../settings/teamConfig'
+import {
+  fetchTeamSettings,
+  saveTeamJiraProjects,
+  emptyProject,
+  projectIsArmed,
+} from '../settings/teamConfig'
 import type { JiraProjectConfig } from '../settings/teamConfig'
+import type { JiraStatusRef } from '../../components/JiraStatusRule'
+import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
 
 // Jira, as this team's event source.
 //
@@ -16,6 +23,18 @@ import type { JiraProjectConfig } from '../settings/teamConfig'
 // status board already lands column by column and owns that space, so the two
 // halves weigh the same rather than 2:3, and the prose and the board share a
 // column because they are one argument.
+//
+// Watching and arming are two different gestures. The table on the right picks
+// from the org credential's live project catalog, and watching is one verb —
+// a project joins the tracked set carrying no rules at all. Mapping its
+// statuses (arming) happens in Settings, and until then the project simply
+// contributes nothing to the poller's discovery query.
+//
+// EVERY PROJECT CARRIES ITS OWN MAP, so the board shows one project at a time
+// and the key strip above it is the selector. The prototype pinned the board
+// to the first project with a note; per-project rules make that a page that
+// hides every other project's mapping, which is why the strip is this page's
+// own device rather than the mock's.
 //
 // The board reads and does not write. Two reasons, and both have to go before
 // it can drag here: `StatusRules` reports no change out to a caller, and the
@@ -27,13 +46,22 @@ import type { JiraProjectConfig } from '../settings/teamConfig'
 // needs.
 
 const PROSE =
-  'Tracked Jira projects spawn events this team can automate, like new tickets being assigned to team ' +
+  'Watched Jira projects spawn events this team can automate, like new tickets being assigned to team ' +
   'members or priorities changing. Then map your ticket lifecycle to our four states so Triage Factory ' +
   'can understand your workflows. Changes do not apply to runs already in-flight.'
 
-type JiraStatus = { id: string; name: string }
+/** How long after the last keystroke before asking Jira for the narrowed
+ *  catalog. The filter is a round trip, not an array scan. */
+const SEARCH_DEBOUNCE_MS = 250
 
-/** The stored three rules, in the board's four columns. */
+/** The canonical form of a project key — the same uppercase-trim the server
+ *  applies at the write boundary, so a stored key and a catalog key compare
+ *  as one value. */
+const normKey = (key: string): string => key.trim().toUpperCase()
+
+/** The stored three rules, in the board's four columns. Rules are keyed by
+ *  status id on the wire; the board is a display of names, so it reads the
+ *  server-resolved name off each ref. */
 function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
   if (!p) return null
   return {
@@ -55,9 +83,19 @@ function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
 
 export default function JiraSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
   const [projects, setProjects] = useState<JiraProjectConfig[] | null>(null)
-  const [fetched, setFetched] = useState<string[] | null>(null)
+  // The live catalog page for the current filter. `null` means the read
+  // failed or has not landed — the table still shows what is watched, and
+  // only the Watch direction has nothing to offer.
+  const [candidates, setCandidates] = useState<JiraProjectCandidate[] | null>(null)
+  const [truncated, setTruncated] = useState(false)
+  // Each watched project's own status vocabulary, fetched when its board is
+  // first shown. Per project because statuses come from a project's workflow
+  // scheme: querying several keys returns their intersection, which hides
+  // statuses a project genuinely has the moment two watched projects differ.
+  const [statusesByKey, setStatusesByKey] = useState<Record<string, JiraStatusRef[]>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
+  const [shownKey, setShownKey] = useState('')
 
   // The frame's three figures, from the team activity node at the window
   // their labels name.
@@ -83,54 +121,94 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
     }
   }, [teamId])
 
-  const keys = useMemo(() => (projects ?? []).map((p) => p.key.trim()).filter(Boolean), [projects])
-
-  // Every status the tracked projects have. The endpoint returns the
-  // intersection across the keys it is given, which is the same set a
-  // transition has to be legal in.
+  // The catalog, re-read from Jira as the filter settles. Nothing is cached
+  // server-side, so this is a live view of what the org credential can see —
+  // and the filter runs server-side for the same reason: the page holds one
+  // page of a proxied list, so a client-side scan would silently miss.
   useEffect(() => {
-    if (!keys.length) return
+    const q = filter.trim()
     let live = true
-    const query = keys.map((k) => 'project=' + encodeURIComponent(k)).join('&')
-    void apiJSON<JiraStatus[]>('/api/jira/statuses?' + query)
+    const controller = new AbortController()
+    const run = () =>
+      listJiraProjects(q, { signal: controller.signal })
+        .then((page) => {
+          if (!live) return
+          setCandidates(page.items)
+          setTruncated(page.hasMore)
+        })
+        .catch(() => {
+          if (!live || controller.signal.aborted) return
+          setCandidates(null)
+          setTruncated(false)
+        })
+    const timer = setTimeout(run, q ? SEARCH_DEBOUNCE_MS : 0)
+    return () => {
+      live = false
+      controller.abort()
+      clearTimeout(timer)
+    }
+  }, [filter])
+
+  const watched = useMemo(() => projects ?? [], [projects])
+  const watchedKeys = useMemo(() => new Set(watched.map((p) => normKey(p.key))), [watched])
+
+  // The board's project: the picked key while it is still watched, else the
+  // first watched project — so unwatching what is shown falls back rather
+  // than pinning a board to a project the team no longer watches.
+  const shown = useMemo(
+    () => watched.find((p) => normKey(p.key) === shownKey) ?? watched[0] ?? null,
+    [watched, shownKey],
+  )
+  const shownK = shown ? normKey(shown.key) : ''
+
+  useEffect(() => {
+    if (!shownK || statusesByKey[shownK]) return
+    let live = true
+    void apiJSON<JiraStatusRef[]>('/api/jira/statuses?project=' + encodeURIComponent(shownK))
       .then((list) => {
-        if (live) setFetched(list.map((s) => s.name))
+        if (live) setStatusesByKey((m) => ({ ...m, [shownK]: list }))
       })
       .catch(() => {
         // The board still draws what is mapped; only the tray goes empty.
-        if (live) setFetched([])
+        if (live) setStatusesByKey((m) => ({ ...m, [shownK]: [] }))
       })
     return () => {
       live = false
     }
-  }, [keys])
+  }, [shownK, statusesByKey])
 
-  // A team tracking no project has no statuses to offer, and that is an answer
-  // rather than a pending read — derived rather than written, so the effect
-  // above only ever handles the fetch.
-  const statuses = keys.length ? fetched : projects ? [] : null
+  const board = useMemo(() => mapFor(shown ?? undefined), [shown])
+  // Never null into the board: StatusRules falls back to a demo status list
+  // for null, and a demo vocabulary on a real team's page would be a claim.
+  const statuses = shown ? (statusesByKey[shownK] ?? []).map((s) => s.name) : []
 
-  const board = useMemo(() => mapFor((projects ?? [])[0]), [projects])
-  const showing = (projects ?? [])[0]?.key ?? ''
-
-  const rows: TableRow[] = useMemo(
-    () =>
-      (projects ?? []).map((p) => ({
-        id: p.key,
-        key: p.key,
-        // Only the key is stored; nothing returns a project's display name or
-        // its issue count for a team.
-        name: null,
-        issues: null,
-        watched: true,
-      })),
-    [projects],
-  )
-
-  const shown = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return q ? rows.filter((r) => String(r.key).toLowerCase().includes(q)) : rows
-  }, [rows, filter])
+  const rows: TableRow[] = useMemo(() => {
+    const byKey = new Map((candidates ?? []).map((c) => [normKey(c.key), c]))
+    const needle = filter.trim().toLowerCase()
+    const out: TableRow[] = []
+    for (const p of watched) {
+      const key = normKey(p.key)
+      if (!key) continue
+      // A watched project the catalog cannot see is still watched — deleted
+      // upstream, or the credential's access narrowed. Dropping it would make
+      // the page lie about what it watches (and make it unremovable).
+      const name = byKey.get(key)?.name ?? null
+      if (
+        needle !== '' &&
+        !key.toLowerCase().includes(needle) &&
+        !(name ?? '').toLowerCase().includes(needle)
+      ) {
+        continue
+      }
+      out.push({ id: key, key, name, issues: null, watched: true })
+    }
+    for (const c of candidates ?? []) {
+      const key = normKey(c.key)
+      if (watchedKeys.has(key)) continue
+      out.push({ id: key, key, name: c.name, issues: null, watched: false })
+    }
+    return out
+  }, [candidates, filter, watched, watchedKeys])
 
   const columns: TableColumn[] = useMemo(
     () => [
@@ -139,42 +217,68 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         label: 'KEY',
         width: '78px',
         color: (r) => (r.watched ? 'var(--color-ink-1)' : 'var(--color-ink-4)'),
+        // Watched first, then the catalog's alphabet — the set the team acts
+        // on outranks the set it could.
+        sortValue: (r) => (r.watched ? '0' : '1') + String(r.key),
       },
       {
         key: 'name',
         label: 'PROJECT',
         floor: 120,
         render: (r) => r.name ?? '—',
-        color: () => 'var(--color-ink-4)',
+        color: (r) => (r.watched ? 'var(--color-ink-2)' : 'var(--color-ink-4)'),
       },
       {
         key: 'issues',
         label: 'ISSUES',
         align: 'end',
         drop: 1,
+        // Nothing counts a project's issues for a team yet; a number here
+        // would be a claim.
         render: (r) => r.issues ?? '—',
-        sortValue: (r) => -(r.issues ?? 0),
+        sortValue: (r) => -((r.issues as number | null) ?? 0),
         color: () => 'var(--color-ink-4)',
       },
     ],
     [],
   )
 
+  // Which commit the adopted response may land on: the PUT answers with the
+  // set AS STORED (status names re-resolved from Jira), and adopting a stale
+  // answer over a newer optimistic set would undo the newer verb.
+  const commitSeq = useRef(0)
+
   const commit = useCallback(
     (actionId: string, ids: Array<string | number>) => {
-      // The write is a full replace-set, so a set we never read is not a set we
-      // may rewrite: committing against `null` would PUT [] and untrack every
-      // project the team has.
-      if (actionId !== 'unwatch' || projects === null) return
-      const dropped = new Set(ids.map(String))
-      const next = projects.filter((p) => !dropped.has(p.key))
+      // The write is a full replace-set, so a set we never read is not a set
+      // we may rewrite: committing against `null` would PUT [] and untrack
+      // every project the team has.
+      if (projects === null) return
+      const picked = new Set(ids.map((v) => normKey(String(v))))
+      const have = new Set(projects.map((p) => normKey(p.key)))
+      const next =
+        actionId === 'watch'
+          ? projects.concat([...picked].filter((k) => !have.has(k)).map((k) => emptyProject(k)))
+          : projects.filter((p) => !picked.has(normKey(p.key)))
       setProjects(next)
+      const seq = ++commitSeq.current
       void saveTeamJiraProjects(teamId, next).then((res) => {
-        if (!res.ok) setError(res.error)
+        if (commitSeq.current !== seq) return
+        if (res.ok) setProjects(res.projects)
+        else setError(res.error)
       })
     },
     [teamId, projects],
   )
+
+  // The note under the board: the strip names the shown project when there is
+  // one to pick, so the note only carries the key when it is the sole voice.
+  const note = shown
+    ? (watched.length > 1 ? '' : `showing ${shownK} · `) +
+      (projectIsArmed(shown)
+        ? 'edit the mapping in Settings'
+        : 'statuses not mapped yet · map them in Settings')
+    : ''
 
   return (
     <SourceFrame
@@ -199,31 +303,51 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
               column.
             </span>
           </div>
+          {watched.length > 1 ? (
+            <div className="sp-projstrip" role="tablist" aria-label="Watched projects">
+              {watched.map((p) => {
+                const key = normKey(p.key)
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    role="tab"
+                    aria-selected={key === shownK}
+                    className="sp-projkey"
+                    data-on={key === shownK ? '' : undefined}
+                    data-unarmed={projectIsArmed(p) ? undefined : ''}
+                    title={projectIsArmed(p) ? undefined : 'statuses not mapped'}
+                    onClick={() => setShownKey(key)}
+                  >
+                    {key}
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
           <div className="sp-board">
             {board ? (
               <StatusRules
+                key={shownK}
                 map={board}
                 statuses={statuses}
                 showProjects={false}
                 interactive={false}
                 build
-                note={
-                  (projects ?? []).length > 1
-                    ? `showing ${showing} of ${(projects ?? []).length} tracked projects · edit the mapping in Settings`
-                    : `showing ${showing} · edit the mapping in Settings`
-                }
+                note={note}
               />
             ) : (
               <p className="sp-prose">
                 {projects
-                  ? 'No Jira project is tracked by this team yet, so there is no lifecycle to map.'
+                  ? 'No Jira project is watched by this team yet, so there is no lifecycle to map.'
                   : ''}
               </p>
             )}
           </div>
         </div>
 
-        {/* The numbers and the projects they count, in that order. */}
+        {/* The projects: what is watched, and what the credential could
+            watch, in that order. */}
         <div className="sp-jira-right">
           <div className="sp-jira-head">
             <span className="sp-subhead-t">Which projects</span>
@@ -235,20 +359,26 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
             <Table
               build={!!projects}
               columns={columns}
-              rows={shown}
+              rows={rows}
               pageSize="auto"
               sortKey="key"
               sortDir={1}
               showHeader={false}
               barPosition="absolute"
-              emptyLabel={projects ? 'no projects tracked' : 'loading…'}
+              emptyLabel={projects ? 'no projects visible' : 'loading…'}
+              // The catalog is a live proxy that reports no total, so a full
+              // page can only say that narrowing would reveal more.
+              footer={truncated ? 'more projects exist · narrow the filter' : undefined}
               selectable={isAdmin}
-              // Only one direction is offered, because only one is reachable:
-              // nothing lists the Jira projects this team COULD watch, so
-              // there are no unwatched rows for a Watch verb to act on.
               actions={
                 isAdmin
                   ? [
+                      {
+                        id: 'watch',
+                        label: 'Watch',
+                        message: (n) =>
+                          n + (n === 1 ? ' project is' : ' projects are') + ' now watched',
+                      },
                       {
                         id: 'unwatch',
                         label: 'Stop watching',
@@ -259,7 +389,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
                     ]
                   : []
               }
-              mutate={isAdmin ? () => null : null}
+              mutate={isAdmin ? (row, id) => ({ ...row, watched: id === 'watch' }) : null}
               bar={isAdmin ? {} : null}
               onCommit={isAdmin ? (id, ids) => commit(id, ids) : null}
             />

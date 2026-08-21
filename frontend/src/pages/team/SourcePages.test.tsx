@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
@@ -214,7 +214,7 @@ describe('Jira source page', () => {
   const SETTINGS = {
     '/api/teams/t1/settings': {
       team_settings: {
-        JiraProjects: ['PLAT'],
+        JiraProjects: ['PLAT', 'SKY'],
         AIReprioritizeThreshold: 0,
         AIPreferenceUpdateInterval: 0,
         DefaultModel: 'sonnet',
@@ -235,16 +235,42 @@ describe('Jira source page', () => {
           },
           done: { members: [{ id: '3', name: 'Done' }], canonical: { id: '3', name: 'Done' } },
         },
+        // Watched but never armed — a valid saved state since watch-then-arm,
+        // and the strip's marker case.
+        {
+          key: 'SKY',
+          pickup: { members: [] },
+          in_progress: { members: [] },
+          done: { members: [] },
+        },
       ],
       member_count: 4,
       role: 'admin',
     },
+    // The org credential's live catalog: both watched projects plus one the
+    // team could watch. The stub matches by path, so every project's status
+    // read answers the same list — per-project routing is asserted on the
+    // fetch calls instead.
+    '/api/jira/projects/list': [
+      { key: 'PLAT', name: 'Platform Core' },
+      { key: 'SKY', name: 'Skyworks' },
+      { key: 'OPS', name: 'Operations' },
+    ],
     '/api/jira/statuses': [
       { id: '1', name: 'Ready' },
       { id: '2', name: 'In Progress' },
       { id: '3', name: 'Done' },
       { id: '4', name: 'QA' },
     ],
+  }
+
+  /** The fixture with a single watched project — the no-strip shape. */
+  const ONE_PROJECT = {
+    ...SETTINGS,
+    '/api/teams/t1/settings': {
+      ...SETTINGS['/api/teams/t1/settings'],
+      jira_projects: SETTINGS['/api/teams/t1/settings'].jira_projects.slice(0, 1),
+    },
   }
 
   it('has no chart — the board is its build', async () => {
@@ -256,19 +282,78 @@ describe('Jira source page', () => {
     expect(document.querySelector('.sr-board')).not.toBeNull()
   })
 
-  it('maps the stored rules into the board and names the project it shows', async () => {
-    stub(SETTINGS)
+  it("maps the stored rules into the board, from its own project's statuses", async () => {
+    const fetchMock = stub(SETTINGS)
+    render(<JiraSource {...BODY} />)
+
+    // A status nobody mapped sits in the tray rather than being hidden.
+    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
+    expect(screen.getByText('In Progress')).toBeInTheDocument()
+
+    // The vocabulary is the shown project's own, never an intersection
+    // across the watched set — two workflows differ the moment they can.
+    const statusReads = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes('/api/jira/statuses'))
+    expect(statusReads).toEqual(['/api/jira/statuses?project=PLAT'])
+  })
+
+  it('names the project it shows when there is no strip to', async () => {
+    stub(ONE_PROJECT)
     render(<JiraSource {...BODY} />)
 
     await waitFor(() => expect(screen.getByText(/showing PLAT/)).toBeInTheDocument())
-    // A status nobody mapped sits in the tray rather than being hidden.
-    expect(screen.getByText('QA')).toBeInTheDocument()
+    expect(document.querySelector('.sp-projstrip')).toBeNull()
+  })
+
+  it('switches the board through the strip, and marks the unmapped key', async () => {
+    const fetchMock = stub(SETTINGS)
+    render(<JiraSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
+
+    // Two keys, the shown one selected, the unarmed one marked.
+    const keys = Array.from(document.querySelectorAll('.sp-projkey'))
+    expect(keys.map((k) => k.textContent)).toEqual(['PLAT', 'SKY'])
+    expect(keys[0].getAttribute('aria-selected')).toBe('true')
+    expect(keys[0].hasAttribute('data-unarmed')).toBe(false)
+    expect(keys[1].hasAttribute('data-unarmed')).toBe(true)
+
+    fireEvent.click(keys[1])
+
+    // SKY's board: nothing mapped, so the page says so — and SKY's own
+    // statuses were asked for, not reused from PLAT's read.
+    await waitFor(() => expect(screen.getByText(/statuses not mapped yet/)).toBeInTheDocument())
+    expect(keys[1].getAttribute('aria-selected')).toBe('true')
+    const statusReads = fetchMock.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes('/api/jira/statuses'))
+    expect(statusReads).toEqual([
+      '/api/jira/statuses?project=PLAT',
+      '/api/jira/statuses?project=SKY',
+    ])
+  })
+
+  it('lists the catalog with names, the watched projects first', async () => {
+    stub(SETTINGS)
+    render(<JiraSource {...BODY} />)
+
+    // The candidate is offerable, named, and last — the set the team acts on
+    // outranks the set it could.
+    await waitFor(() => expect(screen.getByText('Operations')).toBeInTheDocument())
+    expect(screen.getByText('Platform Core')).toBeInTheDocument()
+    const keys = Array.from(document.querySelectorAll('.tb-row [data-col="key"], .tb-cell')).map(
+      (e) => e.textContent,
+    )
+    const order = ['PLAT', 'SKY', 'OPS'].map((k) => keys.findIndex((t) => t === k))
+    expect(order[0]).toBeGreaterThanOrEqual(0)
+    expect(order[0]).toBeLessThan(order[2])
+    expect(order[1]).toBeLessThan(order[2])
   })
 
   it('offers no drag, because nothing would persist it', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText(/showing PLAT/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
 
     // Absent, not disabled: a cursor that says "pick me up" over a chip that
     // cannot be picked up promises and then fails.

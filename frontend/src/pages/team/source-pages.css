@@ -345,6 +345,53 @@
   text-wrap: pretty;
 }
 
+/* ── The board's project strip ─────────────────────────────────────
+   One key per watched project; the selected one is the board below. A
+   project whose statuses are not mapped yet carries a small hollow marker,
+   because scanning for unfinished setup is what the strip is for. */
+
+.sp-projstrip {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: -6px;
+}
+
+.sp-projkey {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 3px 0 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0.12em;
+  color: var(--color-ink-3);
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.sp-projkey:hover {
+  color: var(--color-ink-2);
+}
+
+.sp-projkey[data-on] {
+  color: var(--color-ink-1);
+  border-bottom-color: var(--color-warm);
+}
+
+.sp-projkey[data-unarmed]::after {
+  content: '';
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin-left: 5px;
+  vertical-align: 2px;
+  border-radius: 50%;
+  border: 1px solid var(--color-ink-4);
+}
+
 .sp-board {
   flex: 1;
   min-height: 0;
