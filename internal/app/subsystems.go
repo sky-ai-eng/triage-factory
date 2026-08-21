@@ -622,9 +622,10 @@ func (a *App) buildRouting() {
 	// leader gating is the poller's own, which is the same brain lease every
 	// other timer-driven pass sits behind.
 	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
-	// Skip a cycle for a source an org admin paused. An API-budget saving, not
-	// an enforcement point — the router's drop is what makes the pause correct
-	// for every producer at once (TFAC-882 D4).
+	// Skip a cycle for a source an org admin turned off. This is what makes
+	// "a turned-off source makes zero API calls" true, which is a promise
+	// measurable from the other end; the router's drop beside it is what makes
+	// "no tasks" true for every producer at once.
 	a.pollerMgr.EventSources = a.stores.OrgEventSources
 	a.pollerMgr.OnError = func(source, orgID string, err error) {
 		// Throttle key includes orgID so a chronic failure on one tenant

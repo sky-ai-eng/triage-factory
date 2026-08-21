@@ -367,7 +367,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// seed marks a snapshot-less entity being enriched this cycle. Phase 3
 		// populates it like the discovery create-branch (snapshot + title,
 		// close if terminal) WITHOUT diffing, so we don't synthesize events for
-		// state that predates our tracking. See resolveStubNodeID + TFAC-513 §3.
+		// state that predates our tracking. See resolveStubNodeID.
 		//
 		// Two things land here. A stub created outside the poller, which never
 		// had a snapshot; and an entity whose snapshot an org admin's
@@ -385,13 +385,13 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		}
 		if snap.NodeID == "" {
 			// No stored snapshot, so no node_id either: a stub created outside
-			// the poller (e.g. exec-touch FindOrCreate, TFAC-513 §2), or an
+			// the poller (e.g. exec-touch FindOrCreate), or an
 			// entity whose snapshot was cleared when an org admin paused this
 			// source. Resolve the node_id via a cheap REST read and route it
 			// into the refresh batch as a seed; Phase 3 enriches it quietly.
 			// Unresolvable this cycle (bad shape / unreachable PR) → skip and
 			// retry next cycle (one extra fetch per row until it carries a
-			// node_id). TFAC-513 §3.
+			// node_id).
 			nodeID, terminal, ok := t.resolveStubNodeID(ctx, client, e)
 			if !ok {
 				continue
@@ -539,7 +539,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		newSnap.NodeID = item.nodeID
 
 		if item.seed {
-			// Quiet-seed a snapshot-less entity (TFAC-513 §3): populate it like the
+			// Quiet-seed a snapshot-less entity: populate it like the
 			// discovery create-branch — snapshot + title, close if terminal — and
 			// emit NOTHING. DiffPRSnapshots already suppresses non-terminal first-
 			// discovery events, but seeding without diffing also keeps a terminal
@@ -634,7 +634,7 @@ func (t *Tracker) refreshPRBatch(ctx context.Context, client *ghclient.Client, n
 
 // resolveStubNodeID resolves the GitHub GraphQL node_id for a snapshot-less stub
 // entity so the Phase-2 refresh can fetch its full snapshot. Stubs are created
-// outside the poller (exec-touch FindOrCreate, TFAC-513 §2) and carry no
+// outside the poller (exec-touch FindOrCreate) and carry no
 // node_id, so they can't ride the entity-based GraphQL refresh until we resolve
 // one. The source_id is "owner/repo#N"; a cheap REST read (GetPRBasic) returns
 // the node_id plus enough state to route the seed to the open (full fragment) or
@@ -1197,8 +1197,8 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		newSnap := newState.Snap
 
 		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
-			// Quiet-seed a snapshot-less row (TFAC-513 §3): a stub created
-			// outside the poller (exec-touch FindOrCreate, §2), or an entity
+			// Quiet-seed a snapshot-less row: a stub created
+			// outside the poller (exec-touch FindOrCreate), or an entity
 			// whose snapshot was cleared when an org admin paused this source.
 			// DiffJiraSnapshots' prev.Key=="" branch would synthesize an initial
 			// assigned/available/completed event for state that predates our

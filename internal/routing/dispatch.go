@@ -144,13 +144,13 @@ func (r *Router) HandleEvent(ctx context.Context, evt domain.Event) error {
 		return nil
 	}
 
-	// Event-source pause (TFAC-882) — an org admin turned this source off
-	// without unbinding its credential. The drop is HERE, after the event is
-	// recorded and before anything ephemeral is derived from it, because this
-	// is the single funnel every source's events cross: poll-driven,
-	// push-driven, and any future emitter alike. The poller skips beside it
-	// save an API call; a producer that forgets one wastes a request, and this
-	// is what keeps it from leaking an event.
+	// An org admin turned this source off without unbinding its credential.
+	// The drop is HERE, after the event is recorded and before anything
+	// ephemeral is derived from it, because this is the single funnel every
+	// source's events cross: poll-driven, push-driven, and any future emitter
+	// alike. The poll-cycle skip beside it guarantees something different — no
+	// API calls, not no tasks — so an event reaching this point from a producer
+	// that never went through a poll cycle is still stopped here.
 	//
 	// The append-only log stays complete, so an admin can still see what
 	// happened while the source was paused; only the ephemeral layer is
