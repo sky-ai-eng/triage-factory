@@ -204,6 +204,12 @@ func load(fileJSON []byte, lookup func(string) (inference.Info, bool)) ([]Entry,
 			problems = append(problems, fmt.Errorf("%s: no priced row in the pricing datasheet", s.Key))
 			continue
 		}
+		if info.MaxInputTokens <= 0 {
+			// A priced row can still lack a window fact; offering it would
+			// publish context_window 0 as if it meant something.
+			problems = append(problems, fmt.Errorf("%s: datasheet row records no context window", s.Key))
+			continue
+		}
 		out = append(out, Entry{
 			Key:         s.Key,
 			DisplayName: s.DisplayName,

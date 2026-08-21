@@ -122,6 +122,34 @@ func TestLoad_RejectsMalformedRows(t *testing.T) {
 	}
 }
 
+// A priced row with no recorded context window is refused like an unpriced
+// one: the join must not mint an entry whose context_window the API would
+// publish as 0.
+func TestLoad_RejectsAWindowlessRow(t *testing.T) {
+	const key = "priced-but-windowless-model"
+	windowless := func(k string) (inference.Info, bool) {
+		if k != key {
+			return inference.Info{}, false
+		}
+		return inference.Info{
+			Provider:           "anthropic",
+			InputCostPerToken:  1e-6,
+			OutputCostPerToken: 5e-6,
+		}, true
+	}
+
+	got, err := load([]byte(fmt.Sprintf(`[{"key": %q, "display_name": "Windowless"}]`, key)), windowless)
+	if err == nil {
+		t.Fatalf("load accepted a row with no context window; entries = %+v", got)
+	}
+	if !strings.Contains(err.Error(), key) {
+		t.Errorf("error %q does not name the key %q", err, key)
+	}
+	if len(got) != 0 {
+		t.Errorf("entries = %+v, want none", got)
+	}
+}
+
 func TestLoad_RejectsUnparseableFile(t *testing.T) {
 	if _, err := load([]byte(`{"key": "not-an-array"}`), inference.ModelInfo); err == nil {
 		t.Fatal("load accepted a file that is not an array of entries")
