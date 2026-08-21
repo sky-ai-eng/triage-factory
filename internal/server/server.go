@@ -1319,6 +1319,15 @@ func (s *Server) routes() {
 	s.apiMutating("PUT /api/orgs/{org_id}/llm/bedrock/role", se.handleBedrockRolePut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/llm/bedrock", se.handleBedrockDelete)
 
+	// The models this deployment offers, as one org sees them: the shipped
+	// catalog joined to the org's own enable-set. Org-scoped because that
+	// enable-set is org state, and member-level because its widest reader is a
+	// team admin who cannot see org settings but must know what the org
+	// enabled. Unpaginated for the same reason /api/event-types is — a
+	// compile-time vocabulary, not a collection that grows with use.
+	mdh := &modelsHandler{az: s.az}
+	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
+
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
 	// start redirects to {github_base_url}/login/oauth/authorize;
