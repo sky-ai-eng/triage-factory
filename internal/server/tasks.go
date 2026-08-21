@@ -472,10 +472,11 @@ func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sources := canonicalStrings(req.Sources)
+	validSources := domain.EventSources()
 	for _, src := range sources {
-		if !slices.Contains(domain.EventSources(), src) {
+		if !slices.Contains(validSources, src) {
 			v.Invalid("sources", fmt.Sprintf("unknown source %q; must be one of: %s",
-				src, strings.Join(domain.EventSources(), ", ")))
+				src, strings.Join(validSources, ", ")))
 		}
 	}
 	page := httpx.ResolvePage(&v, req.PageRequest, httpx.FilterFingerprint(taskListFilterKey{

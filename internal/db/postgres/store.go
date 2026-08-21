@@ -169,8 +169,15 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Factory wires admin — the snapshot is a system-level view
 		// (no per-user identity, must see every in-flight run
 		// regardless of creator).
-		Factory:      newFactoryReadStore(admin),
-		TeamActivity: newTeamActivityStore(admin),
+		Factory: newFactoryReadStore(admin),
+		// TeamActivity is request-equivalent (member-gated, like Dashboard),
+		// not a system-level view — it wires app here so a caller reaching
+		// this top-level bundle directly (bypassing WithTx and the
+		// membership check the handler does) hits authenticator's lack of
+		// grants instead of quietly reading past RLS on the admin pool. The
+		// real, request-scoped access path is the tx-bound handle in
+		// txStoresFromTx.
+		TeamActivity: newTeamActivityStore(app),
 		// Conversations wires app — every consumer is request-
 		// equivalent (server agent handler, delegate spawner
 		// goroutine spawned from a handler, chains). System-service
