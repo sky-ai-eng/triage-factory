@@ -38,32 +38,3 @@ func TestStagedInjectionBlock_EmptyAndBlankBodies(t *testing.T) {
 		t.Errorf("all-blank bodies: want empty, got %q", got)
 	}
 }
-
-// TestPRNewCommitsInjection_NamesPRAndShortSHAs: the copy names the PR and both
-// short SHAs and tells the agent to re-pull and reconcile.
-func TestPRNewCommitsInjection_NamesPRAndShortSHAs(t *testing.T) {
-	injection := PRNewCommitsInjection("owner/repo", 42,
-		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-	for _, want := range []string{"#42", "owner/repo", "aaaaaaaaaaaa", "bbbbbbbbbbbb", "Re-pull", "reconcile"} {
-		if !strings.Contains(injection, want) {
-			t.Errorf("injection missing %q: %q", want, injection)
-		}
-	}
-	// Full 40-char SHAs must NOT leak — they're shortened to 12.
-	if strings.Contains(injection, "aaaaaaaaaaaaa") { // 13 a's
-		t.Errorf("SHA not shortened to 12 chars: %q", injection)
-	}
-}
-
-func TestShortSHA(t *testing.T) {
-	if got := ShortSHA("abcdef0123456789"); got != "abcdef012345" {
-		t.Errorf("ShortSHA truncate: got %q want abcdef012345", got)
-	}
-	if got := ShortSHA("abc"); got != "abc" {
-		t.Errorf("ShortSHA short value: got %q want abc", got)
-	}
-	if got := ShortSHA(""); got != "" {
-		t.Errorf("ShortSHA empty: got %q want empty", got)
-	}
-}

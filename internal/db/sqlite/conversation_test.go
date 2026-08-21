@@ -385,3 +385,50 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 		t.Fatalf("ActiveIDsForTeamSystem = %v; want exactly the running + open conversations (%s, %s)", ids, running, open)
 	}
 }
+
+// TestConversationStore_SQLite_PRCoherenceTargets runs the PR coherence
+// conformance suite against the SQLite impl.
+func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
+	dbtest.RunPRCoherenceTargetsConformance(t, func(t *testing.T) (db.ConversationStore, string, dbtest.ConversationSeeder, dbtest.PRCoherenceSeeder) {
+		t.Helper()
+		conn := newSQLiteForConversationTest(t)
+		stores := sqlitestore.New(conn)
+		ctx := context.Background()
+		extra := dbtest.PRCoherenceSeeder{
+			PendingReview: func(t *testing.T, conversationID, repo string, prNumber int) {
+				t.Helper()
+				a := domain.NewReviewArtifact(repo, prNumber, "head-sha", conversationID)
+				a.ConversationID = conversationID
+				a.OrgID, a.TeamID = runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+				if _, err := stores.Artifacts.UpsertSystem(ctx, runmode.LocalDefaultOrgID, a); err != nil {
+					t.Fatalf("seed pending review: %v", err)
+				}
+			},
+			Worktree: func(t *testing.T, conversationID, slug, ref string) {
+				t.Helper()
+				if _, err := stores.Repos.GetOrCreateSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(slug)); err != nil {
+					t.Fatalf("seed repository %s: %v", slug, err)
+				}
+				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+					ConversationID: conversationID, RepoID: slug, Ref: ref,
+					Path: "/tmp/coherence/" + conversationID + "/" + ref,
+				}); err != nil {
+					t.Fatalf("seed worktree: %v", err)
+				}
+			},
+			MarkEventInjected: func(t *testing.T, taskID, eventID string) {
+				t.Helper()
+				if _, err := conn.Exec(`
+					INSERT INTO task_events (task_id, event_id, kind, org_id) VALUES (?, ?, 'injected', ?)
+				`, taskID, eventID, runmode.LocalDefaultOrgID); err != nil {
+					t.Fatalf("record injected task event: %v", err)
+				}
+			},
+			ActiveClaim: func(t *testing.T, conversationID string) {
+				t.Helper()
+				dbtest.SeedActiveClaim(t, conn, conversationID, "executor-coherence", 1)
+			},
+		}
+		return stores.Conversations, runmode.LocalDefaultOrgID, newSQLiteConversationSeeder(conn), extra
+	})
+}

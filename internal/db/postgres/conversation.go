@@ -1135,6 +1135,57 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	return convs, total, rows.Err()
 }
 
+func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query db.PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT r.id::text, COALESCE(r.task_id::text, ''), COALESCE(r.status, ''),
+		       COALESCE(r.outcome, ''),
+		       EXISTS (SELECT 1 FROM claims cl WHERE cl.org_id = $1 AND cl.conversation_id = r.id AND cl.released_at IS NULL)
+		FROM conversations r
+		LEFT JOIN tasks t ON t.org_id = $1 AND t.id = r.task_id
+		WHERE r.org_id = $1
+		  AND r.type = 'delegation'
+		  AND (
+		       t.entity_id = $2
+		       OR EXISTS (
+		           SELECT 1 FROM artifacts a
+		           WHERE a.org_id = $1 AND a.conversation_id = r.id
+		             AND a.kind = $6 AND a.state = $7 AND a.target = $8
+		       )
+		       OR EXISTS (
+		           SELECT 1
+		           FROM conversation_worktrees w
+		           JOIN repositories repo ON repo.org_id = $1 AND repo.id = w.repository_id
+		           WHERE w.org_id = $1 AND w.conversation_id = r.id
+		             AND (
+		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER($4) AND w.ref = $9)
+		                  OR (w.ref = $10 AND (
+		                       LOWER(repo.owner || '/' || repo.repo) = LOWER($4)
+		                       OR LOWER(repo.owner || '/' || repo.repo) = LOWER($5)
+		                  ))
+		             )
+		       )
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM task_events te
+		      WHERE te.org_id = $1 AND te.task_id = r.task_id AND te.event_id = $3 AND te.kind = 'injected'
+		  )
+		ORDER BY r.started_at ASC, r.id ASC
+	`, orgID, query.EntityID, query.EventID, query.BaseRepo, query.HeadRepo, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.PRRef, query.BranchRef)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PRCoherenceTarget
+	for rows.Next() {
+		var target domain.PRCoherenceTarget
+		if err := rows.Scan(&target.ConversationID, &target.TaskID, &target.Status, &target.Outcome, &target.Active); err != nil {
+			return nil, err
+		}
+		out = append(out, target)
+	}
+	return out, rows.Err()
+}
+
 // HasActiveAutoConversationForTask: any non-terminal trigger_type='event'
 // conversation on the task. Manual delegations are excluded. Used by the
 // router's per-task firing gate.

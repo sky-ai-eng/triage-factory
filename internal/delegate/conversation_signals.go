@@ -537,6 +537,15 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 	return InjectStagedResumable
 }
 
+// StageOrDeliverInformationalEvent exposes the same live/local, live/remote,
+// and resumable staging transport without attaching routing side effects.
+// The empty firing reference is load-bearing: an owner that receives the
+// cross-pod signal delivers the note but neither marks task_events nor
+// compensates with a pending firing if the conversation disappeared.
+func (s *Spawner) StageOrDeliverInformationalEvent(ctx context.Context, orgID, conversationID, producer, body string) InjectOutcome {
+	return s.StageOrDeliverAdditiveEvent(ctx, orgID, conversationID, producer, body, AdditiveFiringRef{})
+}
+
 // --- Owner-side signal-apply loop ---
 
 // DefaultSignalApplyScanInterval is the apply loop's backstop scan cadence

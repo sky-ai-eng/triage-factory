@@ -27,13 +27,31 @@ type StagedInjection struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+// PRCoherenceTarget is one delegation conversation that is working on a PR
+// entity or has materialized that PR's checkout/head branch. Active is derived
+// from an unreleased claim; Status and Outcome are the stored conversation
+// lifecycle fields used to decide whether a non-live note can ever flush.
+type PRCoherenceTarget struct {
+	ConversationID string
+	TaskID         string
+	Status         string
+	Outcome        string
+	Active         bool
+}
+
 // StagedInjectionProducer* tag a staged injection's origin. Free-text (no DB CHECK) so a
 // new producer adds a const without a migration; used for audit/debugging and a
 // future per-producer flush policy, never for control flow today.
 const (
-	// StagedInjectionProducerPRNewCommits — the head-SHA-change notifier (TFAC-501):
-	// a reviewed PR advanced under an in-progress/parked review conversation.
+	// StagedInjectionProducerPRNewCommits tags a head-SHA-change note. Nothing
+	// writes it — the PR coherence feed carries head changes under its own tag
+	// — but staged rows persist across an upgrade, so a queue being read today
+	// may still hold one.
 	StagedInjectionProducerPRNewCommits = "pr_new_commits"
+	// StagedInjectionProducerPRCoherence is the entity-level PR state feed.
+	// The event type remains in the rendered body; one producer tag keeps the
+	// queue vocabulary independent of the four event kinds it carries.
+	StagedInjectionProducerPRCoherence = "pr_coherence"
 )
 
 // StagedInjectionBlock renders the bundled <system-note> block the resume path

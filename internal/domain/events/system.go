@@ -211,13 +211,14 @@ func (p SystemConversationResumedPredicate) Matches(m SystemConversationResumedM
 // -----------------------------------------------------------------------------
 
 type SystemRoutingDispositionMetadata struct {
-	EventID       string `json:"event_id"`
-	EventType     string `json:"event_type"`
-	EntityID      string `json:"entity_id,omitempty"`
-	Disposition   string `json:"disposition"`
-	OwnerTeamID   string `json:"owner_team_id,omitempty"`
-	TaskID        string `json:"task_id,omitempty"`
-	TriggersFired int    `json:"triggers_fired"`
+	EventID                string `json:"event_id"`
+	EventType              string `json:"event_type"`
+	EntityID               string `json:"entity_id,omitempty"`
+	Disposition            string `json:"disposition"`
+	OwnerTeamID            string `json:"owner_team_id,omitempty"`
+	TaskID                 string `json:"task_id,omitempty"`
+	TriggersFired          int    `json:"triggers_fired"`
+	InjectedConversationID string `json:"injected_conversation_id,omitempty"`
 }
 
 const (

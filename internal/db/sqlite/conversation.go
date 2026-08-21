@@ -773,6 +773,58 @@ func (s *conversationStore) ListForTasks(ctx context.Context, orgID string, task
 	return convs, total, nil
 }
 
+func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query db.PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT r.id, COALESCE(r.task_id, ''), COALESCE(r.status, ''),
+		       COALESCE(r.outcome, ''),
+		       EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+		FROM conversations r
+		LEFT JOIN tasks t ON t.id = r.task_id
+		WHERE r.type = 'delegation'
+		  AND (
+		       t.entity_id = ?
+		       OR EXISTS (
+		           SELECT 1 FROM artifacts a
+		           WHERE a.conversation_id = r.id AND a.kind = ? AND a.state = ? AND a.target = ?
+		       )
+		       OR EXISTS (
+		           SELECT 1
+		           FROM conversation_worktrees w
+		           JOIN repositories repo ON repo.id = w.repository_id
+		           WHERE w.conversation_id = r.id
+		             AND (
+		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER(?) AND w.ref = ?)
+		                  OR (w.ref = ? AND (
+		                       LOWER(repo.owner || '/' || repo.repo) = LOWER(?)
+		                       OR LOWER(repo.owner || '/' || repo.repo) = LOWER(?)
+		                  ))
+		             )
+		       )
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM task_events te
+		      WHERE te.task_id = r.task_id AND te.event_id = ? AND te.kind = 'injected'
+		  )
+		ORDER BY r.started_at ASC, r.id ASC
+	`, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.PRCoherenceTarget
+	for rows.Next() {
+		var target domain.PRCoherenceTarget
+		if err := rows.Scan(&target.ConversationID, &target.TaskID, &target.Status, &target.Outcome, &target.Active); err != nil {
+			return nil, err
+		}
+		out = append(out, target)
+	}
+	return out, rows.Err()
+}
+
 // inListArgs renders an id slice as a "?, ?, ?" placeholder list plus its
 // bind args.
 func inListArgs(ids []string) (string, []any) {
