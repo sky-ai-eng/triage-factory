@@ -41,7 +41,7 @@ const testUserAccountID = "557058:abc-aidan"
 
 // testDoneStatuses matches the pre-existing hardcoded terminal set, kept so
 // the Jira diff tests continue exercising the Done/Closed/Resolved branch.
-var testDoneStatuses = []string{"Done", "Closed", "Resolved"}
+var testDoneStatuses = jiraRefs("Done", "Closed", "Resolved")
 
 // --- Helpers ----------------------------------------------------------------
 

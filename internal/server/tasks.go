@@ -1492,11 +1492,11 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		jiraLog.Warn("requeue rule lookup failed, skipping revert", "error", err)
 		return
 	}
-	var inProgressMembers []string
+	var inProgressMembers []domain.JiraStatusRef
 	if rule != nil {
 		inProgressMembers = rule.InProgressMembers
 	}
-	go func(issueKey, originalStatus string, ipMembers []string) {
+	go func(issueKey, originalStatus string, ipMembers []domain.JiraStatusRef) {
 		// Detached from the request (see syncJiraClaim's guard): the
 		// revert outlives the undo response, so use a background context.
 		bgCtx := context.Background()
@@ -1516,18 +1516,11 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 		// than strict-canonical match, because a user moving Claim →
 		// "In Review" is still "working on it on my plate" and the
 		// requeue should still unwind to the original status.
-		if state != nil && len(ipMembers) > 0 {
-			contains := false
-			for _, m := range ipMembers {
-				if m == state.StatusName {
-					contains = true
-					break
-				}
-			}
-			if !contains {
-				jiraLog.Warn("requeue guard: status not in in-progress members, skipping", "issue", issueKey, "status", state.StatusName, "in_progress_members", ipMembers)
-				return
-			}
+		if state != nil && len(ipMembers) > 0 && !domain.ContainsStatus(ipMembers, claimStatusRef(state)) {
+			jiraLog.Warn("requeue guard: status not in in-progress members, skipping",
+				"issue", issueKey, "status", state.StatusName,
+				"in_progress_members", domain.JiraStatusNames(ipMembers))
+			return
 		}
 
 		if state == nil || state.AssignedToSelf {
@@ -1535,7 +1528,9 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 				jiraLog.Error("failed to unassign on requeue", "issue", issueKey, "error", err)
 			}
 		}
-		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, originalStatus); err != nil {
+		// The target is the status the ticket was in before the claim, recorded
+		// on the task as a name — so the transition resolves by name here.
+		if err := jiraUserClient.TransitionTo(bgCtx, issueKey, jira.Status{Name: originalStatus}); err != nil {
 			jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", originalStatus, "error", err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)

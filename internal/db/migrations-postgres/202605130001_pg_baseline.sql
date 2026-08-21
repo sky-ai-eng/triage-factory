@@ -790,28 +790,39 @@ CREATE TABLE public.events_catalog (
 CREATE TABLE public.jira_project_status_rules (
     team_id uuid NOT NULL,
     project_key text NOT NULL,
-    pickup_members text[] DEFAULT '{}'::text[] NOT NULL,
-    in_progress_members text[] DEFAULT '{}'::text[] NOT NULL,
-    in_progress_canonical text,
-    done_members text[] DEFAULT '{}'::text[] NOT NULL,
-    done_canonical text,
+    -- Members are jsonb arrays of {"id","name"} status refs, and each
+    -- canonical is one such object. The id is the identity: a Jira
+    -- workflow references the status entity, so an id survives a rename
+    -- and a name does not — which is what keeps the discovery JQL and
+    -- the claim/complete transitions matching. The name is the display
+    -- snapshot taken when the rule was saved.
+    pickup_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_progress_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_progress_canonical jsonb,
+    done_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    done_canonical jsonb,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- Mirror of the SQLite CHECKs: every persisted row is fully
-    -- configured. HTTP handler is the user-facing gate; these are
-    -- defense-in-depth against any other write path (admin UI in
-    -- multi mode, direct SQL, restore). "canonical is in members"
-    -- stays in the HTTP validator because PG CHECK can't have
+    -- Mirror of the SQLite CHECKs: a persisted row is complete-or-empty
+    -- per rule. The row is the team's commitment to WATCH the project;
+    -- whether it is ARMED (all three rules complete) is a separate
+    -- question it may answer "not yet" to, so an unmapped project is
+    -- storable and mapping it is the step after watching it. What stays
+    -- bound is members-and-canonical on the two write-target rules — the
+    -- canonical is the status TF transitions a ticket INTO, so members
+    -- without one is a rule that cannot be executed. Pickup has no
+    -- canonical column, so empty members is the whole of "unset" and it
+    -- carries no constraint at all. The HTTP handler is the user-facing
+    -- gate; these are defense-in-depth against any other write path
+    -- (admin UI in multi mode, direct SQL, restore). "canonical is in
+    -- members" stays in the HTTP validator because PG CHECK can't have
     -- subqueries.
-    CONSTRAINT jpsr_pickup_populated CHECK (
-        cardinality(pickup_members) > 0
+    CONSTRAINT jpsr_in_progress_complete_or_empty CHECK (
+        (jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL)
+        OR (jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL)
     ),
-    CONSTRAINT jpsr_in_progress_populated CHECK (
-        cardinality(in_progress_members) > 0
-        AND in_progress_canonical IS NOT NULL AND in_progress_canonical <> ''
-    ),
-    CONSTRAINT jpsr_done_populated CHECK (
-        cardinality(done_members) > 0
-        AND done_canonical IS NOT NULL AND done_canonical <> ''
+    CONSTRAINT jpsr_done_complete_or_empty CHECK (
+        (jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)
+        OR (jsonb_array_length(done_members) > 0 AND done_canonical IS NOT NULL)
     )
 );
 

@@ -128,7 +128,7 @@ func (r *Router) reconcileOrgTerminalEntities(ctx context.Context, orgID string)
 // close was still failing would hide the remaining tasks from the next pass
 // and strand exactly what the sweep exists to clear. Same ordering, same
 // reason, as the close phase's (see HandleEvent).
-func (r *Router) reconcileTerminalEntity(ctx context.Context, orgID string, entity domain.Entity, doneByProject map[string][]string) {
+func (r *Router) reconcileTerminalEntity(ctx context.Context, orgID string, entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef) {
 	if !snapshotIsTerminal(entity, doneByProject) {
 		// A Jira candidate whose status is done in some OTHER project. The
 		// store's Jira filter is the flat union across projects; this is the
@@ -184,7 +184,7 @@ func (r *Router) reconcileTerminalEntity(ctx context.Context, orgID string, enti
 // has no configured rules is never terminal, matching the tracker's behavior
 // for a project the user removed from settings while its entities were still
 // active.
-func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]string) bool {
+func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef) bool {
 	switch entity.Source {
 	case "github":
 		var snap domain.PRSnapshot
@@ -197,12 +197,7 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]string)
 		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.Status == "" {
 			return false
 		}
-		for _, done := range doneByProject[jiraProjectKey(entity.SourceID)] {
-			if done == snap.Status {
-				return true
-			}
-		}
-		return false
+		return domain.ContainsStatus(doneByProject[jiraProjectKey(entity.SourceID)], snap.StatusRef())
 	default:
 		// Sources with no poller-owned terminal notion (Slack threads) are
 		// not the sweep's business — the store never surfaces them either.
@@ -221,8 +216,8 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]string)
 // Nil store (test wiring that never passes one) or a read failure yields an
 // empty map: no Jira entity is then treated as terminal, so the sweep degrades
 // to GitHub-only rather than guessing at a status vocabulary it couldn't load.
-func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) map[string][]string {
-	out := map[string][]string{}
+func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) map[string][]domain.JiraStatusRef {
+	out := map[string][]domain.JiraStatusRef{}
 	if r.jiraRules == nil {
 		return out
 	}
@@ -234,11 +229,12 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 	for _, rule := range rules {
 		seen := map[string]bool{}
 		for _, existing := range out[rule.ProjectKey] {
-			seen[existing] = true
+			seen[domain.JiraStatusDedupKey(existing)] = true
 		}
 		for _, done := range rule.DoneMembers {
-			if done != "" && !seen[done] {
-				seen[done] = true
+			key := domain.JiraStatusDedupKey(done)
+			if key != "" && !seen[key] {
+				seen[key] = true
 				out[rule.ProjectKey] = append(out[rule.ProjectKey], done)
 			}
 		}
@@ -250,13 +246,14 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 // flat list the candidate read narrows on. It is only ever a superset filter —
 // snapshotIsTerminal re-checks each row against its own project — so collapsing
 // the per-project structure here is safe in the one direction it is used.
-func unionValues(byKey map[string][]string) []string {
+func unionValues(byKey map[string][]domain.JiraStatusRef) []domain.JiraStatusRef {
 	seen := map[string]bool{}
-	out := make([]string, 0, len(byKey))
+	out := make([]domain.JiraStatusRef, 0, len(byKey))
 	for _, values := range byKey {
 		for _, v := range values {
-			if !seen[v] {
-				seen[v] = true
+			key := domain.JiraStatusDedupKey(v)
+			if key != "" && !seen[key] {
+				seen[key] = true
 				out = append(out, v)
 			}
 		}

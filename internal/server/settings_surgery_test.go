@@ -268,9 +268,9 @@ func TestTeamSettingsPatch_RejectsJiraProjects(t *testing.T) {
 // contract: the body IS the desired set, the GET echoes it, and a key absent
 // from a later PUT is untracked.
 func TestTeamJiraProjectsPut_ReplaceSetRoundTrip(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
+	// Adding a key is gated against the org's live catalog, so the workspace is
+	// connected to one holding both projects.
+	s, _ := newServerWithJiraCatalog(t, "SKY", "OPS")
 
 	two := map[string]any{"jira_projects": []map[string]any{
 		{"key": "sky", "pickup": validPickup(), "in_progress": validInProgress(), "done": validDone()},

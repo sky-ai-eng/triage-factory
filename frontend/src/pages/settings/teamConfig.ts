@@ -13,7 +13,7 @@
 // one slice (e.g. Settings' change-aware save) write just that one.
 
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
-import type { JiraStatusRuleValue } from '../../components/JiraStatusRule'
+import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
 import type { SlackChannelsResponse } from '../../types'
 
@@ -137,11 +137,26 @@ export const emptyProject = (key = ''): JiraProjectConfig => ({
   done: { members: [] },
 })
 
-// projectIsComplete is the per-project validity gate: a tracked project
-// needs a non-empty key and fully-populated pickup/in-progress/done rules
-// (in-progress + done also need a canonical write target). Mirrors the
-// backend's validateProjectRules so the Save button blocks before a 400.
-export const projectIsComplete = (p: JiraProjectConfig): boolean =>
+/** ruleIsIdentified reports whether every status in a rule carries an id.
+ *
+ *  Only an identified rule can be WRITTEN: the PUT takes ids, so a rule stored
+ *  before statuses were identified — names, no ids — has nothing to send. Such
+ *  a rule is left out of the body instead, and the server keeps what it has.
+ *  It becomes identified the first time someone edits it, because editing means
+ *  picking from a freshly fetched status list. */
+export const ruleIsIdentified = (r: JiraStatusRuleValue): boolean =>
+  r.members.every((m) => !!m.id) && (!r.canonical || !!r.canonical.id)
+
+// projectIsArmed reports whether TF can actually poll this project: a
+// non-empty key and fully-populated pickup/in-progress/done rules (in-progress
+// and done also need a canonical write target). Mirrors the backend's
+// JiraProjectStatusRules.Armed.
+//
+// Armed is NOT the same question as valid. A project is WATCHED the moment it
+// is in the tracked set, and mapping its workflow's statuses is the step after
+// that — so an unarmed project saves fine and simply contributes nothing to
+// the discovery JQL until it is mapped.
+export const projectIsArmed = (p: JiraProjectConfig): boolean =>
   p.key.trim() !== '' &&
   p.pickup.members.length > 0 &&
   p.in_progress.members.length > 0 &&
@@ -149,14 +164,81 @@ export const projectIsComplete = (p: JiraProjectConfig): boolean =>
   p.done.members.length > 0 &&
   !!p.done.canonical
 
+// projectRulesValid mirrors the backend's validateProjectRules: each rule is
+// independently complete-or-empty, and in-progress/done bind their members and
+// their canonical together — the canonical is the status TF transitions a
+// ticket INTO, so members with no write target is a rule that cannot be
+// executed, and a write target that isn't one of them is a rule that would
+// fail at transition time. This is what decides whether a save can go through.
+export const projectRulesValid = (p: JiraProjectConfig): boolean =>
+  [p.in_progress, p.done].every(
+    (r) =>
+      r.members.length > 0 === !!r.canonical &&
+      (!r.canonical ||
+        r.members.some((m) =>
+          m.id && r.canonical?.id ? m.id === r.canonical.id : m.name === r.canonical?.name,
+        )),
+  )
+
+/** sameStatus compares two refs the way the server does: ids decide when both
+ *  carry one, names otherwise. */
+const sameStatus = (a: JiraStatusRef, b: JiraStatusRef): boolean =>
+  a.id && b.id ? a.id === b.id : !!a.name && a.name === b.name
+
+/** unresolvableStatuses returns the statuses this project's rules name that
+ *  its live workflow no longer has — a status deleted or retired in Jira since
+ *  the rule was armed.
+ *
+ *  Nothing repairs these automatically. A stored rule is the team's, and a
+ *  status vanishing upstream is a decision someone made in Jira that TF has no
+ *  standing to reinterpret: dropping the member silently would change what
+ *  work the team sees, and re-pointing it at a same-named status would rewrite
+ *  their configuration on a string match. So they are reported here and
+ *  removed by hand.
+ *
+ *  Returns [] when the workflow has not been fetched, since "no statuses
+ *  loaded" is not evidence that any of them are gone. */
+export function unresolvableStatuses(
+  p: JiraProjectConfig,
+  allStatuses: JiraStatusRef[],
+): JiraStatusRef[] {
+  if (allStatuses.length === 0) return []
+  const out: JiraStatusRef[] = []
+  const seen = new Set<string>()
+  for (const rule of [p.pickup, p.in_progress, p.done]) {
+    for (const ref of [...rule.members, ...(rule.canonical ? [rule.canonical] : [])]) {
+      const dedup = ref.id || ref.name
+      if (!dedup || seen.has(dedup)) continue
+      if (!allStatuses.some((s) => sameStatus(s, ref))) {
+        seen.add(dedup)
+        out.push(ref)
+      }
+    }
+  }
+  return out
+}
+
+/** dropStatus removes one status from every rule of a project, clearing a
+ *  canonical that pointed at it. Clearing the canonical leaves the rule
+ *  incomplete on purpose — a write target is a decision, and picking a
+ *  replacement is the team's, not a default this can guess. */
+export function dropStatus(p: JiraProjectConfig, status: JiraStatusRef): JiraProjectConfig {
+  const strip = (r: JiraStatusRuleValue): JiraStatusRuleValue => ({
+    members: r.members.filter((m) => !sameStatus(m, status)),
+    canonical: r.canonical && sameStatus(r.canonical, status) ? null : r.canonical,
+  })
+  return { ...p, pickup: strip(p.pickup), in_progress: strip(p.in_progress), done: strip(p.done) }
+}
+
 // teamProjectsBlocked reports whether the team's Jira project rules should
 // block a save. Zero tracked projects is a valid choice — a Jira-connected
-// org can still have a team that tracks no Jira project — so it does NOT
-// block; only a partially-filled project (a key with incomplete rules) does,
-// since that can't be persisted. Disconnected Jira never blocks (no rules).
+// org can still have a team that tracks no Jira project — and so is a watched
+// project nobody has mapped yet, so neither blocks. Only a rule the server
+// would reject does: members with no write target, or a write target that is
+// not one of them. Disconnected Jira never blocks (no rules).
 export function teamProjectsBlocked(projects: JiraProjectConfig[], connected: boolean): boolean {
   if (!connected) return false
-  return projects.some((p) => p.key.trim() !== '' && !projectIsComplete(p))
+  return projects.some((p) => p.key.trim() !== '' && !projectRulesValid(p))
 }
 
 // emptyTeamConfig leaves repos/github_groups undefined (unloaded) — a save
@@ -233,6 +315,13 @@ export async function fetchTeamGitHubGroups(teamId: string): Promise<GitHubGroup
 
 export type SaveResult = { ok: true; warning?: string } | { ok: false; error: string }
 
+// JiraProjectsSaveResult carries the stored set back, because the PUT resolves
+// status display names server-side — so what came back is not necessarily what
+// was sent, and the caller should render the former.
+export type JiraProjectsSaveResult =
+  | { ok: true; projects: JiraProjectConfig[] }
+  | { ok: false; error: string }
+
 // saveTeamSettings persists the team settings row via
 // PATCH /api/teams/{id}/settings. `warning` carries the backend's model-cap
 // clamp notice on an otherwise-successful save.
@@ -271,6 +360,20 @@ export async function saveTeamSettings(
   }
 }
 
+// jiraRuleWrite renders one rule for the PUT, which takes status IDS and
+// resolves the display names itself. It returns undefined for a rule that
+// cannot be expressed in ids — one stored before statuses were identified — and
+// the caller omits the key entirely, which is how the server is told to keep
+// what it already has rather than to clear it.
+function jiraRuleWrite(
+  r: JiraStatusRuleValue,
+  withCanonical: boolean,
+): Record<string, unknown> | undefined {
+  if (!ruleIsIdentified(r)) return undefined
+  const member_ids = r.members.map((m: JiraStatusRef) => m.id)
+  return withCanonical ? { member_ids, canonical_id: r.canonical?.id ?? '' } : { member_ids }
+}
+
 // saveTeamJiraProjects persists the tracked Jira projects + their status rules
 // via PUT /api/teams/{id}/jira-projects — a full replace-set, like the repos
 // and github-groups siblings. Empty-keyed projects are dropped first (a blank
@@ -278,17 +381,36 @@ export async function saveTeamSettings(
 export async function saveTeamJiraProjects(
   teamId: string,
   projects: JiraProjectConfig[],
-): Promise<SaveResult> {
+): Promise<JiraProjectsSaveResult> {
   const jira_projects = projects
     .map((p) => ({ ...p, key: p.key.trim() }))
     .filter((p) => p.key !== '')
-  try {
-    await apiFetch(`${teamPath(teamId)}/jira-projects`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jira_projects }),
+    .map((p) => {
+      // A rule that cannot be expressed in ids is OMITTED, never sent empty:
+      // absent means "keep the stored one" and empty means "clear it", and only
+      // the first is right for a rule this client never touched.
+      const body: Record<string, unknown> = { key: p.key }
+      const pickup = jiraRuleWrite(p.pickup, false)
+      if (pickup) body.pickup = pickup
+      const inProgress = jiraRuleWrite(p.in_progress, true)
+      if (inProgress) body.in_progress = inProgress
+      const done = jiraRuleWrite(p.done, true)
+      if (done) body.done = done
+      return body
     })
-    return { ok: true }
+  try {
+    // The response is the set AS STORED, and adopting it is not a nicety: the
+    // server resolves every status display name from Jira on the way in, so
+    // this is where a name renamed upstream since the last save refreshes.
+    const body = await apiJSON<{ jira_projects?: JiraProjectConfig[] }>(
+      `${teamPath(teamId)}/jira-projects`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jira_projects }),
+      },
+    )
+    return { ok: true, projects: body.jira_projects ?? [] }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the Jira projects.') }
   }

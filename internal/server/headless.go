@@ -441,19 +441,32 @@ func (s *Server) validateJiraDCIdentity(ctx context.Context, host, pat string) *
 
 // headlessJiraRules expands the single global status mapping into one
 // JiraProjectStatusRules row per tracked project (the accepted v1
-// simplification vs. per-project parity). The table's CHECK constraints want a
-// non-empty pickup set + non-empty members + canonical for the in-progress and
-// done write targets — single values satisfy them.
+// simplification vs. per-project parity). The table's CHECK constraints want
+// members and canonical together on the in-progress and done write targets —
+// single values satisfy them.
+//
+// The statuses come from the operator's environment as NAMES, so the rows land
+// name-only, with no status ids. That is a supported stored shape: the poller
+// matches on the name and the ids fill if the team ever saves the rules through
+// the API. Resolving ids here would mean a Jira round trip inside boot, for a
+// path whose whole point is provisioning without one.
 func headlessJiraRules(cfg headlessConfig) []domain.JiraProjectStatusRules {
+	named := func(names ...string) []domain.JiraStatusRef {
+		refs := make([]domain.JiraStatusRef, 0, len(names))
+		for _, n := range names {
+			refs = append(refs, domain.JiraStatusRef{Name: n})
+		}
+		return refs
+	}
 	rules := make([]domain.JiraProjectStatusRules, 0, len(cfg.jiraProjects))
 	for _, key := range cfg.jiraProjects {
 		rules = append(rules, domain.JiraProjectStatusRules{
 			ProjectKey:          key,
-			PickupMembers:       cfg.jiraPickupStatuses,
-			InProgressMembers:   []string{cfg.jiraInProgressStatus},
-			InProgressCanonical: cfg.jiraInProgressStatus,
-			DoneMembers:         []string{cfg.jiraDoneStatus},
-			DoneCanonical:       cfg.jiraDoneStatus,
+			PickupMembers:       named(cfg.jiraPickupStatuses...),
+			InProgressMembers:   named(cfg.jiraInProgressStatus),
+			InProgressCanonical: domain.JiraStatusRef{Name: cfg.jiraInProgressStatus},
+			DoneMembers:         named(cfg.jiraDoneStatus),
+			DoneCanonical:       domain.JiraStatusRef{Name: cfg.jiraDoneStatus},
 		})
 	}
 	return rules

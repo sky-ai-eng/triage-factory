@@ -3,7 +3,6 @@ package sqlite
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -93,23 +92,31 @@ func scanJiraStatusRules(rows *sql.Rows, err error) ([]domain.JiraProjectStatusR
 		if err := rows.Scan(&r.TeamID, &r.ProjectKey, &pickupJSON, &inProgressJSON, &inProgressCanon, &doneJSON, &doneCanon); err != nil {
 			return nil, fmt.Errorf("scan jira_project_status_rules: %w", err)
 		}
-		pickup, err := unmarshalStringSlice(pickupJSON)
+		pickup, err := domain.UnmarshalJiraStatusRefs(pickupJSON)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal pickup_members for %s: %w", r.ProjectKey, err)
 		}
-		inProgress, err := unmarshalStringSlice(inProgressJSON)
+		inProgress, err := domain.UnmarshalJiraStatusRefs(inProgressJSON)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal in_progress_members for %s: %w", r.ProjectKey, err)
 		}
-		done, err := unmarshalStringSlice(doneJSON)
+		done, err := domain.UnmarshalJiraStatusRefs(doneJSON)
 		if err != nil {
 			return nil, fmt.Errorf("unmarshal done_members for %s: %w", r.ProjectKey, err)
 		}
+		inProgressCanonical, err := domain.UnmarshalJiraStatusRef(inProgressCanon.String)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal in_progress_canonical for %s: %w", r.ProjectKey, err)
+		}
+		doneCanonical, err := domain.UnmarshalJiraStatusRef(doneCanon.String)
+		if err != nil {
+			return nil, fmt.Errorf("unmarshal done_canonical for %s: %w", r.ProjectKey, err)
+		}
 		r.PickupMembers = pickup
 		r.InProgressMembers = inProgress
-		r.InProgressCanonical = inProgressCanon.String
+		r.InProgressCanonical = inProgressCanonical
 		r.DoneMembers = done
-		r.DoneCanonical = doneCanon.String
+		r.DoneCanonical = doneCanonical
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -127,17 +134,25 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
 		for _, r := range rules {
-			pickupJSON, err := marshalJSONArray(r.PickupMembers)
+			pickupJSON, err := domain.MarshalJiraStatusRefs(r.PickupMembers)
 			if err != nil {
 				return fmt.Errorf("marshal pickup_members for %s: %w", r.ProjectKey, err)
 			}
-			inProgressJSON, err := marshalJSONArray(r.InProgressMembers)
+			inProgressJSON, err := domain.MarshalJiraStatusRefs(r.InProgressMembers)
 			if err != nil {
 				return fmt.Errorf("marshal in_progress_members for %s: %w", r.ProjectKey, err)
 			}
-			doneJSON, err := marshalJSONArray(r.DoneMembers)
+			doneJSON, err := domain.MarshalJiraStatusRefs(r.DoneMembers)
 			if err != nil {
 				return fmt.Errorf("marshal done_members for %s: %w", r.ProjectKey, err)
+			}
+			inProgressCanonJSON, err := domain.MarshalJiraStatusRef(r.InProgressCanonical)
+			if err != nil {
+				return fmt.Errorf("marshal in_progress_canonical for %s: %w", r.ProjectKey, err)
+			}
+			doneCanonJSON, err := domain.MarshalJiraStatusRef(r.DoneCanonical)
+			if err != nil {
+				return fmt.Errorf("marshal done_canonical for %s: %w", r.ProjectKey, err)
 			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO jira_project_status_rules (
@@ -154,8 +169,8 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 					updated_at = CURRENT_TIMESTAMP
 			`,
 				teamID, r.ProjectKey,
-				pickupJSON, inProgressJSON, nullStringValue(r.InProgressCanonical),
-				doneJSON, nullStringValue(r.DoneCanonical),
+				pickupJSON, inProgressJSON, nullStringValue(inProgressCanonJSON),
+				doneJSON, nullStringValue(doneCanonJSON),
 			); err != nil {
 				return fmt.Errorf("upsert jira_project_status_rules[%s]: %w", r.ProjectKey, err)
 			}
@@ -194,18 +209,4 @@ func (s *jiraStatusRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 		}
 		return nil
 	})
-}
-
-func unmarshalStringSlice(s string) ([]string, error) {
-	if s == "" {
-		return []string{}, nil
-	}
-	out := []string{}
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil, err
-	}
-	if out == nil {
-		out = []string{}
-	}
-	return out, nil
 }

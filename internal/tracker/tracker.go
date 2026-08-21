@@ -1000,9 +1000,14 @@ func (t *Tracker) backfillReviewRequested(ctx context.Context, entityID string, 
 // but kept independent so the tracker doesn't depend on internal/config
 // — call sites in the poller manager convert at the boundary.
 type JiraProjectRules struct {
-	Key           string
-	PickupMembers []string
-	DoneMembers   []string
+	Key string
+	// The status sets discovery queries on. They are refs — id plus the display
+	// name captured with it — because the two uses want different halves: the
+	// JQL is built from ids, which survive a rename in Jira, while classifying
+	// an issue the query returned compares against the name its snapshot
+	// records.
+	PickupMembers []domain.JiraStatusRef
+	DoneMembers   []domain.JiraStatusRef
 }
 
 // JiraRules is a slice of per-project rules with lookup helpers.
@@ -1021,21 +1026,19 @@ func (r JiraRules) ForKey(key string) *JiraProjectRules {
 	return nil
 }
 
-// AllDoneMembers returns the deduplicated union of every project's
-// DoneMembers. Useful for subtask classification when the parent and
-// subtasks may live in different projects.
-func (r JiraRules) AllDoneMembers() []string {
-	return r.unionMembers(func(p JiraProjectRules) []string { return p.DoneMembers })
-}
-
-func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
+// AllDoneMembers returns the deduplicated union of every project's DoneMembers.
+// Useful for subtask classification when the parent and subtasks may live in
+// different projects — a subtask arrives inlined in the search response, and it
+// carries the same status object the parent does, id included.
+func (r JiraRules) AllDoneMembers() []domain.JiraStatusRef {
 	seen := map[string]bool{}
-	out := make([]string, 0)
+	out := make([]domain.JiraStatusRef, 0)
 	for _, p := range r {
-		for _, m := range pick(p) {
-			if !seen[m] {
-				seen[m] = true
-				out = append(out, m)
+		for _, ref := range p.DoneMembers {
+			key := domain.JiraStatusDedupKey(ref)
+			if key != "" && !seen[key] {
+				seen[key] = true
+				out = append(out, ref)
 			}
 		}
 	}
@@ -1057,7 +1060,7 @@ func (r JiraRules) unionMembers(pick func(JiraProjectRules) []string) []string {
 // "done" word (e.g. OLD-1 transitioning to "Resolved" when NEW project
 // also uses "Resolved" as Done) — emits a spurious jira:issue:completed
 // for an entity whose actual workflow has nothing to do with NEW's.
-func (r JiraRules) doneMembersForKey(issueKey string) []string {
+func (r JiraRules) doneMembersForKey(issueKey string) []domain.JiraStatusRef {
 	if rule := r.ForKey(extractProject(issueKey)); rule != nil {
 		return rule.DoneMembers
 	}
@@ -1088,12 +1091,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		if rule == nil {
 			return false
 		}
-		for _, d := range rule.DoneMembers {
-			if d == snap.Status {
-				return true
-			}
-		}
-		return false
+		return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
 	}
 	// Phase 1: Discovery
 	discovered, err := t.discoverJira(ctx, client, baseURL, projects)
@@ -1558,6 +1556,41 @@ func jiraReadIsStale(stored, fetched domain.JiraSnapshot) (storedAt, fetchedAt t
 	return storedAt, fetchedAt, fetchedAt.Before(storedAt)
 }
 
+// jiraStatusTerms renders a status set as the inside of a JQL `IN (...)` list,
+// or "" when the set contributes nothing.
+//
+// A numeric id goes in bare, which is how JQL is told to read a term as a
+// status id rather than a name — and matching on the id is what keeps a query
+// right after someone renames the status in Jira. A ref with no usable id
+// falls back to its quoted name, which is all a rule armed before statuses
+// were identified has to offer. The all-digits test is the guard on that: an
+// id that isn't a number would be read as a name if written bare, silently
+// matching nothing, so it takes the name path instead.
+func jiraStatusTerms(refs []domain.JiraStatusRef) string {
+	terms := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		switch {
+		case isJiraStatusID(ref.ID):
+			terms = append(terms, ref.ID)
+		case ref.Name != "":
+			terms = append(terms, fmt.Sprintf("%q", ref.Name))
+		}
+	}
+	return strings.Join(terms, ", ")
+}
+
+func isJiraStatusID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // discoverJira runs JQL queries to find new issues. Each project gets
 // its own JQL pair — one Pickup query against the project's
 // PickupMembers and one assigned-to-me query that excludes the
@@ -1581,10 +1614,17 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		trace.WithAttributes(telemetry.Count(len(projects))))
 	defer span.End()
 
+	// build renders the JQL from a status set, so a query that Jira rejects can
+	// be rendered again from a narrower one; members is the set the live jql was
+	// built from. The pair is set only where narrowing is SOUND, which is why
+	// the assigned-to-me query leaves it nil — see salvageJiraQuery.
 	type queryWithDone struct {
+		projectKey            string
 		jql                   string
-		doneMembers           []string // for subtask classification on issues returned by this query
-		assignedToCurrentUser bool     // this query's arrival is itself an assignment signal
+		build                 func([]domain.JiraStatusRef) string
+		members               []domain.JiraStatusRef
+		doneMembers           []domain.JiraStatusRef // for subtask classification on issues returned by this query
+		assignedToCurrentUser bool                   // this query's arrival is itself an assignment signal
 	}
 	var queries []queryWithDone
 
@@ -1595,15 +1635,19 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			continue
 		}
 
-		if len(p.PickupMembers) > 0 {
-			quoted := make([]string, len(p.PickupMembers))
-			for i, s := range p.PickupMembers {
-				quoted[i] = fmt.Sprintf("%q", s)
+		// An empty pickup set yields no query at all rather than an unfiltered
+		// one: "no statuses to pick up from" must never widen into "every
+		// unassigned ticket in the project".
+		pickupJQL := func(members []domain.JiraStatusRef) string {
+			terms := jiraStatusTerms(members)
+			if terms == "" {
+				return ""
 			}
+			return fmt.Sprintf(`project = %q AND status IN (%s) AND assignee IS EMPTY`, p.Key, terms)
+		}
+		if jql := pickupJQL(p.PickupMembers); jql != "" {
 			queries = append(queries, queryWithDone{
-				jql: fmt.Sprintf(
-					`project = %q AND status IN (%s) AND assignee IS EMPTY`,
-					p.Key, strings.Join(quoted, ", ")),
+				projectKey: p.Key, jql: jql, build: pickupJQL, members: p.PickupMembers,
 				doneMembers: allDone,
 			})
 		}
@@ -1614,16 +1658,20 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// hit this in practice), the NOT IN clause is dropped entirely
 		// rather than falling back to a hardcoded list that would
 		// contradict the user's workflow.
-		assignedJQL := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
-		if len(p.DoneMembers) > 0 {
-			quoted := make([]string, len(p.DoneMembers))
-			for i, s := range p.DoneMembers {
-				quoted[i] = fmt.Sprintf("%q", s)
+		assignedJQL := func(members []domain.JiraStatusRef) string {
+			jql := fmt.Sprintf(`project = %q AND assignee = currentUser()`, p.Key)
+			if done := jiraStatusTerms(members); done != "" {
+				jql += fmt.Sprintf(` AND status NOT IN (%s)`, done)
 			}
-			assignedJQL += fmt.Sprintf(` AND status NOT IN (%s)`, strings.Join(quoted, ", "))
+			return jql
 		}
+		// No build/members: this query EXCLUDES its status set, so narrowing it
+		// would widen the result rather than shrink it. salvageJiraQuery says
+		// why that is unsound even though the members here are just as capable
+		// of naming a status Jira has deleted.
 		queries = append(queries, queryWithDone{
-			jql: assignedJQL, doneMembers: allDone, assignedToCurrentUser: true,
+			projectKey: p.Key, jql: assignedJQL(p.DoneMembers),
+			doneMembers: allDone, assignedToCurrentUser: true,
 		})
 	}
 
@@ -1637,15 +1685,30 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	// DefaultSearchFields.
 	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
 
-	failed := 0
+	// Live workflows, fetched only when a query has already failed and cached
+	// for the rest of the cycle so two failed queries on one project cost one
+	// call. Steady state never touches this.
+	liveStatuses := map[string][]domain.JiraStatusRef{}
+
+	failed, salvaged := 0, 0
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
+		if err != nil && q.build != nil {
+			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectKey, q.members, q.build, liveStatuses); jql != "" {
+				trackerLog.WarnContext(ctx, "jira discovery query rebuilt without statuses the workflow no longer has",
+					"project", q.projectKey, "dropped", domain.JiraStatusNames(dropped), "error", err)
+				issues, err = client.SearchIssues(ctx, jql, fields, 100)
+				if err == nil {
+					salvaged++
+				}
+			}
+		}
 		if err != nil {
 			// One project's query failing must not sink the others, so
 			// this continues — which means the caller gets a short result
 			// with no indication why. The outcome below is that indication.
 			failed++
-			trackerLog.ErrorContext(ctx, "jira discovery query failed", "error", err)
+			trackerLog.ErrorContext(ctx, "jira discovery query failed", "project", q.projectKey, "error", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1657,11 +1720,80 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			}
 		}
 	}
-	if failed > 0 {
-		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed))
+	if failed > 0 || salvaged > 0 {
+		// TODO(TFAC-878): a log line and this span attribute are the only trace.
+		// A salvaged query keeps the project producing work, but its rules still
+		// name a status Jira does not have, and the settings board is the only
+		// place that says so — nobody who is not looking at it ever learns.
+		// Surfacing a condition nobody is watching needs the durable
+		// notification channel.
+		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed+salvaged))
 	}
 
 	return all, nil
+}
+
+// salvageJiraQuery rebuilds a discovery query that Jira rejected, without the
+// statuses the project's workflow no longer has.
+//
+// This is the rare path and it is deliberately not a pre-check: JQL validates
+// status terms against Jira's global list, so a status merely retired from
+// this project's workflow still makes a valid query, and only one deleted
+// outright makes an invalid one. Fetching every project's workflow on every
+// cycle to guard against that would be a call per project per poll for a
+// condition that almost never holds — so the workflow is read only once a
+// query has already failed, and cached in live for the rest of the cycle.
+//
+// Only an INCLUSION set may be salvaged this way, and callers enforce that by
+// passing build only for those. Narrowing a `status IN (…)` set shrinks the
+// result; narrowing a `status NOT IN (…)` set widens it — and the filter here
+// is deliberately broader than the condition that broke the query. JQL rejects
+// a status deleted from the instance, but this drops every status missing from
+// the PROJECT's workflow, and an issue can sit in a status a workflow-scheme
+// change retired. Dropping one of those from an exclusion set would hand back
+// finished tickets as new work; dropping it from an inclusion set only costs
+// the tickets that status holds, which is the trade this exists to make.
+//
+// Returns an empty jql when nothing can be salvaged: the workflow is
+// unreachable, every member is still live (so the failure is something else
+// entirely and rerunning the same query would only repeat it), or nothing at
+// all survives — an inclusion set narrowed to empty is an unfiltered query,
+// never a narrower one. The stored rule is never edited: a status that
+// vanished upstream is the team's to remove, and the settings board is where
+// they are told.
+func (t *Tracker) salvageJiraQuery(
+	ctx context.Context, client *jiraclient.Client,
+	projectKey string, members []domain.JiraStatusRef,
+	build func([]domain.JiraStatusRef) string,
+	live map[string][]domain.JiraStatusRef,
+) (jql string, dropped []domain.JiraStatusRef) {
+	known, cached := live[projectKey]
+	if !cached {
+		statuses, err := client.ProjectStatuses(ctx, projectKey)
+		if err != nil {
+			trackerLog.WarnContext(ctx, "jira workflow read failed; cannot tell whether the query names a dead status",
+				"project", projectKey, "error", err)
+			return "", nil
+		}
+		known = make([]domain.JiraStatusRef, 0, len(statuses))
+		for _, st := range statuses {
+			known = append(known, domain.JiraStatusRef{ID: st.ID, Name: st.Name})
+		}
+		live[projectKey] = known
+	}
+
+	surviving := make([]domain.JiraStatusRef, 0, len(members))
+	for _, m := range members {
+		if domain.ContainsStatus(known, m) {
+			surviving = append(surviving, m)
+		} else {
+			dropped = append(dropped, m)
+		}
+	}
+	if len(dropped) == 0 || len(surviving) == 0 {
+		return "", nil
+	}
+	return build(surviving), dropped
 }
 
 // batchFetchJira fetches current state for tracked Jira issues. Description
@@ -1761,7 +1893,7 @@ type jiraIssueState struct {
 // separately; the snapshot itself only carries fields that DiffJiraSnapshots
 // compares. doneStatuses is the user's configured Done.Members set, used
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
-func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string) jiraIssueState {
+func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		Key:     issue.Key,
 		Summary: issue.Fields.Summary,
@@ -1769,6 +1901,7 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 	}
 	if issue.Fields.Status != nil {
 		snap.Status = issue.Fields.Status.Name
+		snap.StatusID = issue.Fields.Status.ID
 	}
 	if issue.Fields.Assignee != nil {
 		snap.Assignee = issue.Fields.Assignee.DisplayName
@@ -1816,21 +1949,17 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []string)
 // is counted as open — conservative default: better to show a parent as
 // "has open subtasks" and suppress task creation than to wrongly surface
 // it as atomic when we couldn't classify.
-func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []string) int {
+func countOpenSubtasks(issue jiraclient.Issue, doneStatuses []domain.JiraStatusRef) int {
 	if len(issue.Fields.Subtasks) == 0 {
 		return 0
 	}
-	done := make(map[string]struct{}, len(doneStatuses))
-	for _, s := range doneStatuses {
-		done[s] = struct{}{}
-	}
 	open := 0
 	for _, sub := range issue.Fields.Subtasks {
-		name := ""
+		var ref domain.JiraStatusRef
 		if sub.Fields.Status != nil {
-			name = sub.Fields.Status.Name
+			ref = domain.JiraStatusRef{ID: sub.Fields.Status.ID, Name: sub.Fields.Status.Name}
 		}
-		if _, ok := done[name]; !ok {
+		if !domain.ContainsStatus(doneStatuses, ref) {
 			open++
 		}
 	}

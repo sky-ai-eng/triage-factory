@@ -884,19 +884,19 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		input := []domain.JiraProjectStatusRules{
 			{
 				ProjectKey:          "SKY",
-				PickupMembers:       []string{"To Do", "Backlog"},
-				InProgressMembers:   []string{"In Progress"},
-				InProgressCanonical: "In Progress",
-				DoneMembers:         []string{"Done"},
-				DoneCanonical:       "Done",
+				PickupMembers:       jiraRefs("To Do", "Backlog"),
+				InProgressMembers:   jiraRefs("In Progress"),
+				InProgressCanonical: jiraRef("In Progress"),
+				DoneMembers:         jiraRefs("Done"),
+				DoneCanonical:       jiraRef("Done"),
 			},
 			{
 				ProjectKey:          "ENG",
-				PickupMembers:       []string{"Open"},
-				InProgressMembers:   []string{"Doing"},
-				InProgressCanonical: "Doing",
-				DoneMembers:         []string{"Closed"},
-				DoneCanonical:       "Closed",
+				PickupMembers:       jiraRefs("Open"),
+				InProgressMembers:   jiraRefs("Doing"),
+				InProgressCanonical: jiraRef("Doing"),
+				DoneMembers:         jiraRefs("Closed"),
+				DoneCanonical:       jiraRef("Closed"),
 			},
 		}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
@@ -928,9 +928,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// TracksProjectSystem answers the router gate.
 		stores, ids := factory(t)
 		input := []domain.JiraProjectStatusRules{{
-			ProjectKey: "SKY", PickupMembers: []string{"To Do"},
-			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-			DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, input); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -981,14 +981,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		stores, ids := factory(t)
 		two := []domain.JiraProjectStatusRules{
 			{
-				ProjectKey: "SKY", PickupMembers: []string{"To Do"},
-				InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-				DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+				ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+				InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+				DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 			},
 			{
-				ProjectKey: "ENG", PickupMembers: []string{"Open"},
-				InProgressMembers: []string{"Doing"}, InProgressCanonical: "Doing",
-				DoneMembers: []string{"Closed"}, DoneCanonical: "Closed",
+				ProjectKey: "ENG", PickupMembers: jiraRefs("Open"),
+				InProgressMembers: jiraRefs("Doing"), InProgressCanonical: jiraRef("Doing"),
+				DoneMembers: jiraRefs("Closed"), DoneCanonical: jiraRef("Closed"),
 			},
 		}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, two); err != nil {
@@ -1010,9 +1010,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("JiraStatusRules_ReplaceForTeam_EmptyClearsAll", func(t *testing.T) {
 		stores, ids := factory(t)
 		seed := []domain.JiraProjectStatusRules{{
-			ProjectKey: "SKY", PickupMembers: []string{"To Do"},
-			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-			DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, seed); err != nil {
 			t.Fatalf("seed ReplaceForTeam: %v", err)
@@ -1041,17 +1041,17 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// Seed a baseline rule so we can prove it survives the
 		// refused call.
 		seed := []domain.JiraProjectStatusRules{{
-			ProjectKey: "SKY", PickupMembers: []string{"To Do"},
-			InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-			DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 		}}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, seed); err != nil {
 			t.Fatalf("seed ReplaceForTeam: %v", err)
 		}
 		bad := []domain.JiraProjectStatusRules{{
-			ProjectKey: "", PickupMembers: []string{"x"},
-			InProgressMembers: []string{"y"}, InProgressCanonical: "y",
-			DoneMembers: []string{"z"}, DoneCanonical: "z",
+			ProjectKey: "", PickupMembers: jiraRefs("x"),
+			InProgressMembers: jiraRefs("y"), InProgressCanonical: jiraRef("y"),
+			DoneMembers: jiraRefs("z"), DoneCanonical: jiraRef("z"),
 		}}
 		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, bad); err == nil {
 			t.Error("ReplaceForTeam accepted empty ProjectKey; expected error")
@@ -1371,6 +1371,22 @@ func sortGroups(groups []domain.TeamGitHubGroup) {
 		}
 		return groups[i].TeamSlug < groups[j].TeamSlug
 	})
+}
+
+// jiraRef builds one status ref the way a rule armed through the API carries
+// it: an id, which is the identity, plus the display name resolved for it. The
+// id is derived from the name so a test can name a status once and get the same
+// ref every time.
+func jiraRef(name string) domain.JiraStatusRef {
+	return domain.JiraStatusRef{ID: "st-" + name, Name: name}
+}
+
+func jiraRefs(names ...string) []domain.JiraStatusRef {
+	refs := make([]domain.JiraStatusRef, 0, len(names))
+	for _, n := range names {
+		refs = append(refs, jiraRef(n))
+	}
+	return refs
 }
 
 func sortRulesByKey(rules []domain.JiraProjectStatusRules) {

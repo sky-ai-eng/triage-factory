@@ -47,7 +47,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
@@ -92,7 +92,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
@@ -222,7 +222,7 @@ func TestRefreshJira_RecentlyAnsweredKeyIsNotConfirmed(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	// FindOrCreate stamps last_polled_at at creation, so this entity reads as
 	// freshly answered — no backdating.
@@ -253,7 +253,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)

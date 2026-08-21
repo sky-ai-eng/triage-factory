@@ -1090,6 +1090,12 @@ func (s *Server) routes() {
 	// per the mutating-verb convention (route_auth_test enforces GET ≠
 	// apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
+	// The Jira project picker's candidates. A proxy list — the rows come from
+	// Jira live, which is what a catalog of dozens behind one org credential
+	// is worth — so total_count is null and page_token wraps the upstream
+	// offset. Its GitHub sibling reads a mirror instead; see the handler for
+	// why the two differ.
+	s.apiMutating("POST /api/jira/projects/list", s.handleJiraProjectsList)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two

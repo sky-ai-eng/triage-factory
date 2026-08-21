@@ -1,22 +1,39 @@
-interface JiraStatus {
+/** JiraStatusRef is one workflow status as the API speaks it: the id the rules
+ *  are keyed on, and the display name the SERVER resolved for that id.
+ *
+ *  The id is the identity. A Jira workflow references the status entity, so an
+ *  id survives a rename and a name does not — which is why the write path sends
+ *  ids and never names, and why a name that appears here is always one Jira
+ *  gave us, as of the rule's last save. A ref carrying a name and no id is a
+ *  rule stored before statuses were identified; it renders and polls fine, and
+ *  gains its id when that rule is next saved. */
+export interface JiraStatusRef {
   id: string
   name: string
 }
 
 export interface JiraStatusRuleValue {
-  members: string[]
-  canonical?: string
+  members: JiraStatusRef[]
+  /** The status TF transitions a ticket INTO. Always one of `members`. Null on
+   *  a rule nobody has mapped yet, which is a valid saved state. */
+  canonical?: JiraStatusRef | null
 }
 
 interface Props {
   label: string
   description: string
-  allStatuses: JiraStatus[]
+  allStatuses: JiraStatusRef[]
   value: JiraStatusRuleValue
   onChange: (next: JiraStatusRuleValue) => void
   requireCanonical: boolean
   canonicalPrompt?: string
 }
+
+/** sameStatus compares two refs the way the server does: ids decide when both
+ *  carry one, names otherwise — which is what lets a legacy name-only member
+ *  still match the status it names in the freshly-fetched list. */
+const sameStatus = (a: JiraStatusRef, b: JiraStatusRef): boolean =>
+  a.id && b.id ? a.id === b.id : !!a.name && a.name === b.name
 
 export default function JiraStatusRule({
   label,
@@ -27,16 +44,38 @@ export default function JiraStatusRule({
   requireCanonical,
   canonicalPrompt,
 }: Props) {
-  const toggle = (name: string) => {
-    if (value.members.includes(name)) {
-      const nextMembers = value.members.filter((n) => n !== name)
-      const nextCanonical = value.canonical === name ? undefined : value.canonical
-      onChange({ members: nextMembers, canonical: nextCanonical })
-    } else {
-      const nextMembers = [...value.members, name]
+  const isMember = (status: JiraStatusRef) => value.members.some((m) => sameStatus(m, status))
+
+  /** identify re-points a stored ref at the freshly-fetched status it names, so
+   *  a member carried over from a rule written before statuses had ids gains
+   *  one without being clicked.
+   *
+   *  This is what makes "editing a rule identifies it" true. Only the status a
+   *  click touches arrives with an id of its own; every other member is carried
+   *  over verbatim, and the write path can send a rule only when EVERY member
+   *  has an id — so one untouched name-only member would have silently held the
+   *  whole rule back and reverted the edit on the next load. A ref the list
+   *  cannot resolve is left exactly as it is: the board flags it as missing
+   *  from the workflow, which is a thing to be told, not to be quietly fixed. */
+  const identify = (ref: JiraStatusRef): JiraStatusRef =>
+    allStatuses.find((s) => sameStatus(s, ref)) ?? ref
+
+  const emit = (members: JiraStatusRef[], canonical: JiraStatusRef | null | undefined) =>
+    onChange({ members: members.map(identify), canonical: canonical && identify(canonical) })
+
+  const toggle = (status: JiraStatusRef) => {
+    if (isMember(status)) {
+      const nextMembers = value.members.filter((m) => !sameStatus(m, status))
       const nextCanonical =
-        requireCanonical && !value.canonical && value.members.length === 0 ? name : value.canonical
-      onChange({ members: nextMembers, canonical: nextCanonical })
+        value.canonical && sameStatus(value.canonical, status) ? null : value.canonical
+      emit(nextMembers, nextCanonical)
+    } else {
+      const nextMembers = [...value.members, status]
+      const nextCanonical =
+        requireCanonical && !value.canonical && value.members.length === 0
+          ? status
+          : value.canonical
+      emit(nextMembers, nextCanonical)
     }
   }
 
@@ -55,12 +94,12 @@ export default function JiraStatusRule({
               {canonicalPrompt || 'Write to'}
             </span>
             <select
-              value={value.canonical || ''}
+              value={value.canonical?.id || value.canonical?.name || ''}
               onChange={(e) =>
-                onChange({
-                  members: value.members,
-                  canonical: e.target.value || undefined,
-                })
+                emit(
+                  value.members,
+                  value.members.find((m) => (m.id || m.name) === e.target.value) ?? null,
+                )
               }
               disabled={value.members.length === 0}
               className={`bg-white/50 border rounded-lg px-2 py-1 text-[12px] text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
@@ -69,8 +108,8 @@ export default function JiraStatusRule({
             >
               <option value="">{value.members.length === 0 ? 'pick below' : 'choose…'}</option>
               {value.members.map((m) => (
-                <option key={m} value={m}>
-                  {m}
+                <option key={m.id || m.name} value={m.id || m.name}>
+                  {m.name}
                 </option>
               ))}
             </select>
@@ -80,13 +119,14 @@ export default function JiraStatusRule({
 
       <div className="flex flex-wrap gap-1.5">
         {allStatuses.map((s) => {
-          const selected = value.members.includes(s.name)
-          const isCanonical = requireCanonical && value.canonical === s.name
+          const selected = isMember(s)
+          const isCanonical =
+            requireCanonical && !!value.canonical && sameStatus(value.canonical, s)
           return (
             <button
-              key={s.id}
+              key={s.id || s.name}
               type="button"
-              onClick={() => toggle(s.name)}
+              onClick={() => toggle(s)}
               className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
                 selected
                   ? isCanonical

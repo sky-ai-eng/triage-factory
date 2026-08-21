@@ -339,6 +339,12 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // it is treated as terminal for the purpose of emitting
 // jira:issue:completed.
 //
+// Status comparisons go through JiraStatusRef.SameStatus, so a status renamed
+// in Jira is not a transition: the id is unchanged, no status-change event is
+// emitted, and the snapshot simply stores the new spelling. Metadata and the
+// dedup_key stay names — they are the vocabulary a user writes predicates in,
+// and the name is what a reader of the event sees.
+//
 // The actor-identity fields on emitted metadata
 // (Assignee/AssigneeAccountID, Reporter/ReporterAccountID,
 // Commenter/CommenterAccountID) are copied verbatim from the snapshot.
@@ -349,14 +355,9 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // comment list), so those fields land empty in metadata; rules that
 // scope on reporter_in / commenter_in degrade to "no match" naturally
 // until that plumbing arrives.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []string) []domain.Event {
-	terminal := func(s string) bool {
-		for _, d := range doneStatuses {
-			if d == s {
-				return true
-			}
-		}
-		return false
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []domain.JiraStatusRef) []domain.Event {
+	terminal := func(snap domain.JiraSnapshot) bool {
+		return domain.ContainsStatus(doneStatuses, snap.StatusRef())
 	}
 	now := time.Now()
 	eid := &entityID
@@ -373,7 +374,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 
 	if prev.Key == "" {
 		// First discovery — emit the matching initial event.
-		if terminal(curr.Status) {
+		if terminal(curr) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: extractProject(curr.Key),
@@ -407,13 +408,13 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	project := extractProject(curr.Key)
 
 	// Status change — dedup_key = new status name.
-	if prev.Status != curr.Status && curr.Status != "" {
+	if !prev.StatusRef().SameStatus(curr.StatusRef()) && curr.Status != "" {
 		emit(domain.EventJiraIssueStatusChanged, curr.Status, events.JiraIssueStatusChangedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project, IssueType: curr.IssueType,
 			OldStatus: prev.Status, NewStatus: curr.Status, Priority: curr.Priority,
 		})
-		if terminal(curr.Status) {
+		if terminal(curr) {
 			emit(domain.EventJiraIssueCompleted, "", events.JiraIssueCompletedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 				IssueKey: curr.Key, Project: project,
@@ -469,7 +470,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	// event runs the same task-creation routing as a fresh assignment.
 	// Only fires on the downward transition — if the parent genuinely
 	// never had subtasks, this condition is never true.
-	if prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount == 0 && !terminal(curr.Status) {
+	if prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount == 0 && !terminal(curr) {
 		emit(domain.EventJiraIssueBecameAtomic, "", events.JiraIssueBecameAtomicMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
 			IssueKey: curr.Key, Project: project,

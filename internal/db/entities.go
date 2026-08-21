@@ -323,12 +323,18 @@ type EntityStore interface {
 	//     applies at discovery.
 	//   - jira: a superset. Terminality is per-project configuration —
 	//     jira_project_status_rules' done statuses — so this filters on
-	//     jiraDoneStatuses, the caller's FLAT UNION across projects, and
-	//     the caller re-checks each row against its own project's set.
-	//     Union membership alone would over-close (a status that is done in
-	//     one project but live in another), which is why the decision stays
-	//     with the caller and this is only a narrowing read. An empty
-	//     jiraDoneStatuses excludes Jira entirely.
+	//     jiraDone, the caller's FLAT UNION across projects, and the caller
+	//     re-checks each row against its own project's set. Union membership
+	//     alone would over-close (a status that is done in one project but
+	//     live in another), which is why the decision stays with the caller
+	//     and this is only a narrowing read. An empty jiraDone excludes Jira
+	//     entirely.
+	//
+	//     A ref matches on EITHER half: its id against the snapshot's
+	//     status_id, or its name against the snapshot's status. Both arms are
+	//     required because either side may be missing one — a rule seeded from
+	//     the headless env vars carries no ids, and a snapshot captured before
+	//     status ids were recorded carries none until its next poll refresh.
 	//
 	// Rows with no stored snapshot never match — an unseeded stub has said
 	// nothing about whether its subject is finished. limit caps the batch
@@ -337,7 +343,7 @@ type EntityStore interface {
 	// later passes. System-only (admin pool): the sweep is a background
 	// job with no JWT claims, and the invariant it enforces is org-wide.
 	// org_id stays in the WHERE clause as defense in depth.
-	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error)
+	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error)
 
 	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)

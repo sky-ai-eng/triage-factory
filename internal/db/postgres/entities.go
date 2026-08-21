@@ -247,21 +247,31 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // NULL for a missing key or an empty object — COALESCE makes those a plain
 // non-match rather than a NULL-propagating predicate, and the IS NOT NULL
 // guard skips rows that never stored a snapshot at all.
-func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDoneStatuses []string, limit int) ([]domain.Entity, error) {
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error) {
 	args := []any{orgID}
-	// The Jira arm is omitted rather than emitted empty: `IN ()` is a
-	// syntax error, and "no configured done status" genuinely means no Jira
-	// entity can be terminal. Statuses are free-form user-configured text,
-	// so they bind as placeholders rather than riding an array literal.
-	jiraArm := ""
-	if len(jiraDoneStatuses) > 0 {
-		placeholders := make([]string, len(jiraDoneStatuses))
-		for i, status := range jiraDoneStatuses {
-			args = append(args, status)
+	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
+	// error, and a ref set with no ids (or no names) genuinely has nothing to
+	// match on that side. With neither, no Jira entity can be terminal. Both
+	// halves are user-configured text, so they bind as placeholders rather
+	// than riding an array literal.
+	arm := func(key string, values []string) string {
+		placeholders := make([]string, len(values))
+		for i, v := range values {
+			args = append(args, v)
 			placeholders[i] = "$" + strconv.Itoa(len(args))
 		}
-		jiraArm = ` OR (source = 'jira' AND snapshot_json->>'status' IN (` +
-			strings.Join(placeholders, ", ") + `))`
+		return `snapshot_json->>'` + key + `' IN (` + strings.Join(placeholders, ", ") + `)`
+	}
+	var matches []string
+	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
+		matches = append(matches, arm("status_id", ids))
+	}
+	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
+		matches = append(matches, arm("status", names))
+	}
+	jiraArm := ""
+	if len(matches) > 0 {
+		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
 	}
 	limitClause := ""
 	if limit > 0 {

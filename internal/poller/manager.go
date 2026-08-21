@@ -1203,6 +1203,17 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		span.SetAttributes(telemetry.Outcome("unconfigured"))
 		return
 	}
+	// Only ARMED projects can be polled: the discovery JQL is built from
+	// pickup and done members, so a watched-but-unmapped project has nothing
+	// to ask about. That already fell out of the merge below producing empty
+	// member sets, but "the cycle ran and asked nothing" and "the cycle
+	// declined to run" are different facts and only one of them is true — so
+	// the skip is stated here rather than left to emerge downstream.
+	projects := toTrackerJiraRules(rules)
+	if len(projects) == 0 {
+		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+		return
+	}
 	baseURL := orgSet.JiraBaseURL
 	if baseURL == "" {
 		baseURL = creds.JiraURL
@@ -1219,7 +1230,6 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		m.reportError("jira", orgID, cerr)
 		return
 	}
-	projects := toTrackerJiraRules(rules)
 	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, client, baseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")
 		jiraLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", err)
@@ -1234,11 +1244,19 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 // a project two teams both track is polled once (entities are org-shared:
 // one row per Jira issue regardless of how many teams track its project).
 //
-// PickupMembers / DoneMembers are Jira *workflow status names* ("To Do",
-// "Backlog", "Done"), NOT people or teams — they drive the discovery JQL
-// (which statuses count as available-for-pickup vs terminal). When several
-// teams track the same project_key with divergent status sets, those sets
-// are MERGED (set-union, first-seen order preserved): the most-permissive
+// Unarmed rows are dropped first. A team may WATCH a project before mapping
+// its workflow's statuses, and such a row carries no members to build a JQL
+// from; including it would put a project key in the merged view that
+// contributes nothing to either query. So a project reaches the tracker only
+// through a team that has actually armed it — and one team's unmapped row
+// cannot dilute another team's armed one, because the merge below unions
+// members and an unarmed row would contribute none.
+//
+// PickupMembers / DoneMembers are Jira *workflow statuses* ("To Do",
+// "Backlog", "Done" — each an id plus the name captured with it), NOT people
+// or teams: they drive the discovery JQL, which asks by id so a rename in Jira
+// cannot silently stop matching. When several teams track the same project_key
+// with divergent status sets, those sets are MERGED (set-union, first-seen order preserved): the most-permissive
 // interpretation for discovery + terminal detection, so no team's
 // pickup-able issue is missed and any team's notion of "done" closes the
 // shared entity. Team-specific scoping lives downstream in the router
@@ -1247,21 +1265,24 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 // (project_key, team_id), so the merged output is deterministic.
 func toTrackerJiraRules(rules []domain.JiraProjectStatusRules) tracker.JiraRules {
 	type merged struct {
-		pickup, done         []string
+		pickup, done         []domain.JiraStatusRef
 		pickupSeen, doneSeen map[string]bool
 	}
 	byKey := map[string]*merged{}
 	order := make([]string, 0, len(rules))
-	addUnique := func(dst []string, seen map[string]bool, src []string) []string {
-		for _, s := range src {
-			if !seen[s] {
-				seen[s] = true
-				dst = append(dst, s)
+	addUnique := func(dst []domain.JiraStatusRef, seen map[string]bool, src []domain.JiraStatusRef) []domain.JiraStatusRef {
+		for _, ref := range src {
+			if key := domain.JiraStatusDedupKey(ref); !seen[key] {
+				seen[key] = true
+				dst = append(dst, ref)
 			}
 		}
 		return dst
 	}
 	for _, p := range rules {
+		if !p.Armed() {
+			continue
+		}
 		m := byKey[p.ProjectKey]
 		if m == nil {
 			m = &merged{pickupSeen: map[string]bool{}, doneSeen: map[string]bool{}}

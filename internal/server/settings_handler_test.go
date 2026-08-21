@@ -47,95 +47,106 @@ func TestDefaultedCloneProtocolView_ModeAware(t *testing.T) {
 
 // --- Unit tests: validateProjectRules --------------------------------------
 //
-// Every persisted project must be fully configured. Partial saves aren't a
-// supported state — the FE prevents them, this handler rejects them, and the
-// jpsr_*_populated CHECK constraints catch any path that slips past both.
-// These unit tests cover the per-project invariant directly:
-//   - Pickup: members required, canonical must be empty (TF never writes).
-//   - InProgress/Done: members + canonical required, canonical ∈ members.
+// A stored project is the team's commitment to WATCH it; being ARMED — all
+// three rules complete — is the later state reached by mapping the workflow's
+// statuses. So each rule is independently complete-or-empty, and what is
+// refused is a rule that cannot be executed: members with no write target, or a
+// write target that is not one of them. The jpsr_*_complete_or_empty CHECK
+// constraints are the DB-level mirror of the first half.
 
-func validProject(key string) jiraProjectConfig {
-	return jiraProjectConfig{
-		Key:        key,
-		Pickup:     jiraStatusRule{Members: []string{"To Do"}},
-		InProgress: jiraStatusRule{Members: []string{"In Progress"}, Canonical: "In Progress"},
-		Done:       jiraStatusRule{Members: []string{"Done"}, Canonical: "Done"},
-	}
-}
-
-// validProjectRule returns the same project as validProject but in
-// the domain shape stored by JiraStatusRulesStore. Used by tests that
-// seed rules directly through the store (rather than the handler).
-func validProjectRule(key string) domain.JiraProjectStatusRules {
+func validProject(key string) domain.JiraProjectStatusRules {
 	return domain.JiraProjectStatusRules{
 		ProjectKey:          key,
-		PickupMembers:       []string{"To Do"},
-		InProgressMembers:   []string{"In Progress"},
-		InProgressCanonical: "In Progress",
-		DoneMembers:         []string{"Done"},
-		DoneCanonical:       "Done",
+		PickupMembers:       []domain.JiraStatusRef{{ID: statusToDoID, Name: "To Do"}},
+		InProgressMembers:   []domain.JiraStatusRef{{ID: statusInProgressID, Name: "In Progress"}},
+		InProgressCanonical: domain.JiraStatusRef{ID: statusInProgressID, Name: "In Progress"},
+		DoneMembers:         []domain.JiraStatusRef{{ID: statusDoneID, Name: "Done"}},
+		DoneCanonical:       domain.JiraStatusRef{ID: statusDoneID, Name: "Done"},
 	}
 }
+
+// validProjectRule is validProject under the name the tests that seed the
+// store directly (rather than going through the handler) call it by.
+func validProjectRule(key string) domain.JiraProjectStatusRules { return validProject(key) }
 
 func TestValidateProjectRules_Valid(t *testing.T) {
 	if err := validateProjectRules(validProject("SKY")); err != nil {
-		t.Fatalf("fully-configured project should be valid, got: %v", err)
+		t.Fatalf("fully-armed project should be valid, got: %v", err)
 	}
 }
 
-func TestValidateProjectRules_PickupEmptyMembers_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.Pickup.Members = nil
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "pickup members are required") {
-		t.Errorf("empty pickup members should be rejected, got: %v", err)
+func TestValidateProjectRules_NoRulesAtAll_Valid(t *testing.T) {
+	// Watched, unarmed: the state a project lands in when it is picked from the
+	// catalog and nobody has mapped its statuses yet.
+	if err := validateProjectRules(domain.JiraProjectStatusRules{ProjectKey: "SKY"}); err != nil {
+		t.Fatalf("watched-but-unmapped project should be valid, got: %v", err)
 	}
 }
 
-func TestValidateProjectRules_PickupCanonicalSet_Rejected(t *testing.T) {
+func TestValidateProjectRules_PickupOnly_Valid(t *testing.T) {
+	// Each rule is independently complete-or-empty, so a half-finished mapping
+	// persists instead of forcing the whole workflow to be mapped at once.
 	p := validProject("SKY")
-	p.Pickup.Canonical = "To Do"
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "pickup canonical must be empty") {
-		t.Errorf("pickup canonical should be rejected, got: %v", err)
-	}
-}
-
-func TestValidateProjectRules_InProgressEmptyMembers_Rejected(t *testing.T) {
-	p := validProject("SKY")
-	p.InProgress.Members = nil
-	p.InProgress.Canonical = ""
-	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "in_progress members are required") {
-		t.Errorf("empty in_progress members should be rejected, got: %v", err)
+	p.InProgressMembers, p.InProgressCanonical = nil, domain.JiraStatusRef{}
+	p.DoneMembers, p.DoneCanonical = nil, domain.JiraStatusRef{}
+	if err := validateProjectRules(p); err != nil {
+		t.Fatalf("pickup-only project should be valid, got: %v", err)
 	}
 }
 
 func TestValidateProjectRules_InProgressMissingCanonical_Rejected(t *testing.T) {
 	p := validProject("SKY")
-	p.InProgress.Canonical = ""
+	p.InProgressCanonical = domain.JiraStatusRef{}
 	err := validateProjectRules(p)
 	if err == nil || !strings.Contains(err.Error(), "in_progress canonical is required") {
 		t.Errorf("missing in_progress canonical should be rejected, got: %v", err)
 	}
 }
 
+func TestValidateProjectRules_InProgressCanonicalWithoutMembers_Rejected(t *testing.T) {
+	p := validProject("SKY")
+	p.InProgressMembers = nil
+	err := validateProjectRules(p)
+	if err == nil || !strings.Contains(err.Error(), "in_progress members are required") {
+		t.Errorf("canonical with no members should be rejected, got: %v", err)
+	}
+}
+
 func TestValidateProjectRules_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
 	p := validProject("SKY")
-	p.InProgress.Canonical = "Doing" // not in Members
+	p.InProgressCanonical = domain.JiraStatusRef{ID: "10009", Name: "Doing"}
 	err := validateProjectRules(p)
 	if err == nil || !strings.Contains(err.Error(), "not in members") {
 		t.Errorf("canonical-not-in-members should be rejected, got: %v", err)
 	}
 }
 
-func TestValidateProjectRules_DoneEmptyMembers_Rejected(t *testing.T) {
+func TestValidateProjectRules_DoneMissingCanonical_Rejected(t *testing.T) {
 	p := validProject("SKY")
-	p.Done.Members = nil
-	p.Done.Canonical = ""
+	p.DoneCanonical = domain.JiraStatusRef{}
 	err := validateProjectRules(p)
-	if err == nil || !strings.Contains(err.Error(), "done members are required") {
-		t.Errorf("empty done members should be rejected, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "done canonical is required") {
+		t.Errorf("missing done canonical should be rejected, got: %v", err)
+	}
+}
+
+func TestValidateProjectRules_LegacyNameOnlyRow_Valid(t *testing.T) {
+	// A row written before statuses were identified carries names and no ids.
+	// It is live data, not a migration that has not run, so it stays valid —
+	// the canonical matches its member by name.
+	p := domain.JiraProjectStatusRules{
+		ProjectKey:          "SKY",
+		PickupMembers:       []domain.JiraStatusRef{{Name: "To Do"}},
+		InProgressMembers:   []domain.JiraStatusRef{{Name: "In Progress"}},
+		InProgressCanonical: domain.JiraStatusRef{Name: "In Progress"},
+		DoneMembers:         []domain.JiraStatusRef{{Name: "Done"}},
+		DoneCanonical:       domain.JiraStatusRef{Name: "Done"},
+	}
+	if err := validateProjectRules(p); err != nil {
+		t.Fatalf("legacy name-only row should stay valid, got: %v", err)
+	}
+	if !p.Armed() {
+		t.Error("legacy name-only row should still read as armed")
 	}
 }
 
@@ -184,36 +195,42 @@ func TestJiraProjectKeyRe(t *testing.T) {
 // those invariants are covered by the unit tests above.
 
 // teamProjectsBodyWith builds a replace-set body carrying a single project, to
-// exercise validation of that project's rules through the jira-projects PUT.
-func teamProjectsBodyWith(key string, pickup, inProgress, done jiraStatusRule) map[string]any {
-	return map[string]any{
-		"jira_projects": []map[string]any{
-			{
-				"key":         key,
-				"pickup":      pickup,
-				"in_progress": inProgress,
-				"done":        done,
-			},
-		},
+// exercise one project's rules through the jira-projects PUT. The rules are
+// written the way the wire takes them: status IDS, with the display names
+// resolved server-side.
+func teamProjectsBodyWith(key string, pickup, inProgress, done map[string]any) map[string]any {
+	project := map[string]any{"key": key}
+	if pickup != nil {
+		project["pickup"] = pickup
 	}
+	if inProgress != nil {
+		project["in_progress"] = inProgress
+	}
+	if done != nil {
+		project["done"] = done
+	}
+	return map[string]any{"jira_projects": []map[string]any{project}}
 }
 
-func validInProgress() jiraStatusRule {
-	return jiraStatusRule{Members: []string{"In Progress"}, Canonical: "In Progress"}
+func validPickup() map[string]any {
+	return map[string]any{"member_ids": []string{statusToDoID}}
 }
 
-func validDone() jiraStatusRule {
-	return jiraStatusRule{Members: []string{"Done"}, Canonical: "Done"}
+func validInProgress() map[string]any {
+	return map[string]any{"member_ids": []string{statusInProgressID}, "canonical_id": statusInProgressID}
 }
 
-func validPickup() jiraStatusRule {
-	return jiraStatusRule{Members: []string{"To Do"}}
+func validDone() map[string]any {
+	return map[string]any{"member_ids": []string{statusDoneID}, "canonical_id": statusDoneID}
 }
 
-func TestTeamJiraProjectsPut_PickupCanonical_Rejected(t *testing.T) {
-	s := newTestServer(t)
+func TestTeamJiraProjectsPut_PickupCanonicalID_Refused(t *testing.T) {
+	// Pickup has no write target — TF never transitions a ticket back into it —
+	// so the field does not exist on that rule's shape and the strict decode is
+	// what says so.
+	s, _ := newServerWithJiraCatalog(t, "SKY")
 	body := teamProjectsBodyWith("SKY",
-		jiraStatusRule{Members: []string{"To Do"}, Canonical: "To Do"},
+		map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusToDoID},
 		validInProgress(),
 		validDone(),
 	)
@@ -222,16 +239,18 @@ func TestTeamJiraProjectsPut_PickupCanonical_Rejected(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical must be empty") {
-		t.Errorf("error should mention pickup canonical invariant, got: %q", msg)
+	if msg := firstErrorMessage(t, rec); !strings.Contains(msg, "canonical_id") {
+		t.Errorf("error should name the field that does not belong on pickup, got: %q", msg)
 	}
 }
 
 func TestTeamJiraProjectsPut_InProgressCanonicalNotInMembers_Rejected(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newServerWithJiraCatalog(t, "SKY")
 	body := teamProjectsBodyWith("SKY",
 		validPickup(),
-		jiraStatusRule{Members: []string{"In Progress"}, Canonical: "Doing"},
+		// A real status of this project's workflow, but not one of the members
+		// it was chosen from.
+		map[string]any{"member_ids": []string{statusInProgressID}, "canonical_id": statusDoneID},
 		validDone(),
 	)
 	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
@@ -246,10 +265,10 @@ func TestTeamJiraProjectsPut_InProgressCanonicalNotInMembers_Rejected(t *testing
 }
 
 func TestTeamJiraProjectsPut_InProgressMembersWithoutCanonical_Rejected(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newServerWithJiraCatalog(t, "SKY")
 	body := teamProjectsBodyWith("SKY",
 		validPickup(),
-		jiraStatusRule{Members: []string{"In Progress"}},
+		map[string]any{"member_ids": []string{statusInProgressID}},
 		validDone(),
 	)
 	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
@@ -264,11 +283,11 @@ func TestTeamJiraProjectsPut_InProgressMembersWithoutCanonical_Rejected(t *testi
 }
 
 func TestTeamJiraProjectsPut_DoneCanonicalNotInMembers_Rejected(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newServerWithJiraCatalog(t, "SKY")
 	body := teamProjectsBodyWith("SKY",
 		validPickup(),
 		validInProgress(),
-		jiraStatusRule{Members: []string{"Resolved", "Verified"}, Canonical: "Done"},
+		map[string]any{"member_ids": []string{statusToDoID}, "canonical_id": statusDoneID},
 	)
 	rec := doJSON(t, s, http.MethodPut, teamJiraProjectsPath("default"), body)
 
@@ -294,19 +313,19 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	rules := []domain.JiraProjectStatusRules{
 		{
 			ProjectKey:          "SKY",
-			PickupMembers:       []string{"Backlog", "Selected"},
-			InProgressMembers:   []string{"In Progress"},
-			InProgressCanonical: "In Progress",
-			DoneMembers:         []string{"Done"},
-			DoneCanonical:       "Done",
+			PickupMembers:       jiraRefs("Backlog", "Selected"),
+			InProgressMembers:   jiraRefs("In Progress"),
+			InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers:         jiraRefs("Done"),
+			DoneCanonical:       jiraRef("Done"),
 		},
 		{
 			ProjectKey:          "OPS",
-			PickupMembers:       []string{"New", "Triage"},
-			InProgressMembers:   []string{"Active"},
-			InProgressCanonical: "Active",
-			DoneMembers:         []string{"Resolved", "Verified"},
-			DoneCanonical:       "Resolved",
+			PickupMembers:       jiraRefs("New", "Triage"),
+			InProgressMembers:   jiraRefs("Active"),
+			InProgressCanonical: jiraRef("Active"),
+			DoneMembers:         jiraRefs("Resolved", "Verified"),
+			DoneCanonical:       jiraRef("Resolved"),
 		},
 	}
 	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, rules); err != nil {
@@ -316,17 +335,17 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || r.InProgressCanonical != "In Progress" || !r.PickupContains("Backlog") {
+	if r := domain.RuleForProject(got, "SKY"); r == nil || r.InProgressCanonical.Name != "In Progress" || !r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY rules round-trip: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical != "Resolved" || !r.PickupContains("Triage") {
+	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" || !r.PickupContains(jiraRef("Triage")) {
 		t.Errorf("OPS rules round-trip: %+v", r)
 	}
 
 	// Edit only SKY's rules; OPS must stay untouched.
 	for i, p := range rules {
 		if p.ProjectKey == "SKY" {
-			rules[i].PickupMembers = []string{"Ready"}
+			rules[i].PickupMembers = jiraRefs("Ready")
 		}
 	}
 	if err := s.jiraRules.ReplaceForTeam(ctx, teamID, rules); err != nil {
@@ -336,10 +355,10 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
-	if r := domain.RuleForProject(got, "SKY"); r == nil || !r.PickupContains("Ready") || r.PickupContains("Backlog") {
+	if r := domain.RuleForProject(got, "SKY"); r == nil || !r.PickupContains(jiraRef("Ready")) || r.PickupContains(jiraRef("Backlog")) {
 		t.Errorf("SKY edit didn't apply: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || !r.PickupContains("Triage") || r.DoneCanonical != "Resolved" {
+	if r := domain.RuleForProject(got, "OPS"); r == nil || !r.PickupContains(jiraRef("Triage")) || r.DoneCanonical.Name != "Resolved" {
 		t.Errorf("OPS untouched check failed: %+v", r)
 	}
 
@@ -360,7 +379,7 @@ func TestSettingsPatch_PerProjectRules_RoundTrip(t *testing.T) {
 	if r := domain.RuleForProject(got, "SKY"); r != nil {
 		t.Errorf("SKY rules should be gone after drop, got: %+v", r)
 	}
-	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical != "Resolved" {
+	if r := domain.RuleForProject(got, "OPS"); r == nil || r.DoneCanonical.Name != "Resolved" {
 		t.Errorf("OPS rules should persist after dropping SKY: %+v", r)
 	}
 }

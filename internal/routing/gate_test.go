@@ -247,14 +247,14 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	teamB := seedGateTeam(t, dbh, "team-b")
 
 	skyRule := []domain.JiraProjectStatusRules{{
-		ProjectKey: "SKY", PickupMembers: []string{"To Do"},
-		InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-		DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+		ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+		InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 	}}
 	opsRule := []domain.JiraProjectStatusRules{{
-		ProjectKey: "OPS", PickupMembers: []string{"To Do"},
-		InProgressMembers: []string{"In Progress"}, InProgressCanonical: "In Progress",
-		DoneMembers: []string{"Done"}, DoneCanonical: "Done",
+		ProjectKey: "OPS", PickupMembers: jiraRefs("To Do"),
+		InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+		DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
 	}}
 	if err := st.JiraStatusRules.ReplaceForTeam(ctx, teamA, skyRule); err != nil {
 		t.Fatalf("teamA track SKY: %v", err)

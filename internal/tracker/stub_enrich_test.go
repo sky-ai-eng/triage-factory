@@ -159,7 +159,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 		{
 			name:      "terminal stub enriched and closed, no events",
 			status:    "Done",
-			projects:  JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}},
+			projects:  JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}},
 			wantState: "closed",
 		},
 	}

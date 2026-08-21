@@ -45,7 +45,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	projects := JiraRules{{Key: "SKY", DoneMembers: []string{"Done"}}}
+	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
 	emitted, err := tr.RefreshJira(ctx, client, srv.URL, projects)
 	if err != nil {
