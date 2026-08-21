@@ -408,6 +408,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// tf_app holds no write grant and the writers are delegate goroutines
 		// with no JWT-claims context.
 		Permissions: newPermissionStore(app, admin),
+		// OrgEventSources is split-pool: the request path reads and writes
+		// through the app pool under RLS (member SELECT, admin write), and
+		// the ...System read runs on the admin pool for the router and the
+		// poller, neither of which carries request claims.
+		OrgEventSources: newOrgEventSourceStore(app, admin),
 		// PollReadiness is admin-pool only: callers already hold an
 		// authorized orgID (session claims or system context) by the time
 		// they reach it, same admin-only shape as Instances. Org-scoped
@@ -516,6 +521,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Instances:                newInstanceStore(tx),
 		StagedInjections:         newStagedInjectionStore(tx),
 		ConversationPendingInput: newConversationPendingInputStore(tx),
+		OrgEventSources:          newOrgEventSourceStore(tx, tx),
 		Ext:                      db.BuildStoreExtensions("postgres", tx, tx),
 	}
 }

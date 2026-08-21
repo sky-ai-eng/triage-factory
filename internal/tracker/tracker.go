@@ -364,10 +364,15 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		entity domain.Entity
 		snap   domain.PRSnapshot
 		nodeID string
-		// seed marks a snapshot-less stub being enriched this cycle. Phase 3
+		// seed marks a snapshot-less entity being enriched this cycle. Phase 3
 		// populates it like the discovery create-branch (snapshot + title,
 		// close if terminal) WITHOUT diffing, so we don't synthesize events for
 		// state that predates our tracking. See resolveStubNodeID + TFAC-513 §3.
+		//
+		// Two things land here. A stub created outside the poller, which never
+		// had a snapshot; and an entity whose snapshot an org admin's
+		// event-source pause cleared, which is the same situation for the same
+		// reason — the state it holds predates the tracking that resumed.
 		seed bool
 	}
 	var openItems, terminalItems []entityWithSnap
@@ -379,14 +384,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			_ = json.Unmarshal([]byte(e.SnapshotJSON), &snap)
 		}
 		if snap.NodeID == "" {
-			// Snapshot-less stub — created outside the poller (e.g. exec-touch
-			// FindOrCreate, TFAC-513 §2), so it never carried a node_id. Pre-fix
-			// this `continue` skipped it forever (discovery only seeds open PRs
-			// in configured repos). Resolve the node_id via a cheap REST read
-			// and route it into the refresh batch as a seed; Phase 3 enriches it
-			// quietly. Unresolvable this cycle (bad shape / unreachable PR) →
-			// skip and retry next cycle (one extra fetch per stub until it
-			// carries a node_id). TFAC-513 §3.
+			// No stored snapshot, so no node_id either: a stub created outside
+			// the poller (e.g. exec-touch FindOrCreate, TFAC-513 §2), or an
+			// entity whose snapshot was cleared when an org admin paused this
+			// source. Resolve the node_id via a cheap REST read and route it
+			// into the refresh batch as a seed; Phase 3 enriches it quietly.
+			// Unresolvable this cycle (bad shape / unreachable PR) → skip and
+			// retry next cycle (one extra fetch per row until it carries a
+			// node_id). TFAC-513 §3.
 			nodeID, terminal, ok := t.resolveStubNodeID(ctx, client, e)
 			if !ok {
 				continue
@@ -534,12 +539,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		newSnap.NodeID = item.nodeID
 
 		if item.seed {
-			// Quiet-seed a snapshot-less stub (TFAC-513 §3): populate it like the
+			// Quiet-seed a snapshot-less entity (TFAC-513 §3): populate it like the
 			// discovery create-branch — snapshot + title, close if terminal — and
 			// emit NOTHING. DiffPRSnapshots already suppresses non-terminal first-
 			// discovery events, but seeding without diffing also keeps a terminal
-			// stub from emitting a merged/closed event for a PR that closed before
-			// we tracked it. The next cycle diffs against this seed normally.
+			// row from emitting a merged/closed event for a PR that closed before
+			// we tracked it — or, after an event-source pause, for one that merged
+			// while the org had the source turned off. The next cycle diffs
+			// against this seed normally.
 			snapJSON, _ := json.Marshal(newSnap)
 			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, item.entity.ID, string(snapJSON), item.entity.PollSeq); err != nil {
 				trackerLog.ErrorContext(ctx, "seed stub snapshot failed", "source_id", item.entity.SourceID, "error", err)
@@ -1190,14 +1197,16 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		newSnap := newState.Snap
 
 		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
-			// Quiet-seed a snapshot-less stub (TFAC-513 §3): created outside the
-			// poller (exec-touch FindOrCreate, §2), it has no prior snapshot.
+			// Quiet-seed a snapshot-less row (TFAC-513 §3): a stub created
+			// outside the poller (exec-touch FindOrCreate, §2), or an entity
+			// whose snapshot was cleared when an org admin paused this source.
 			// DiffJiraSnapshots' prev.Key=="" branch would synthesize an initial
 			// assigned/available/completed event for state that predates our
-			// tracking — spuriously minting a task. Seed it like the discovery
+			// tracking — spuriously minting a task, and after a pause minting
+			// one per known issue at once. Seed it like the discovery
 			// create-branch (snapshot + title, close if terminal) WITHOUT
 			// diffing instead. Normal discovery seeds in Phase 1, so this only
-			// ever fires for stubs. Description isn't carried by batchFetchJira;
+			// ever fires for rows that arrived without one. Description isn't carried by batchFetchJira;
 			// a rediscovered stub picks it up from Phase 1's else-branch,
 			// otherwise it fills in on a later discovery pass.
 			snapJSON, _ := json.Marshal(newSnap)

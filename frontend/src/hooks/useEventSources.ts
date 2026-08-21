@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiJSON } from '../lib/apiClient'
+import { setWsSourcesInvalidator } from './useWebSocket'
 import { useApiOrgId } from './useApiOrgId'
 
 /** The closed vocabulary GET /api/orgs/{org}/sources answers with. Each value
  *  names a different thing the reader can do about it: `unconfigured` is
- *  theirs to fix, `unlicensed` is an org admin's, `wip` is nobody's. */
-export type EventSourceState = 'available' | 'unconfigured' | 'unlicensed' | 'wip'
+ *  theirs to fix, `disabled` is an org admin's to undo, `unlicensed` is a
+ *  purchasing decision, `wip` is nobody's. */
+export type EventSourceState = 'available' | 'unconfigured' | 'disabled' | 'unlicensed' | 'wip'
 
 export interface EventSourceAvailability {
   kind: string
@@ -69,8 +71,13 @@ function load(orgId: string): Promise<void> {
 
 /** Drop the cached availability and refetch for any mounted subscriber. Call
  *  after a change that can move a source — binding or unbinding a credential,
- *  connecting a workspace. Pass an orgId to invalidate just that org; omit it
- *  to invalidate every org this page has read. */
+ *  connecting a workspace, an org admin pausing or resuming one. Pass an orgId
+ *  to invalidate just that org; omit it to invalidate every org this page has
+ *  read.
+ *
+ *  The `sources_updated` websocket ping lands here too: the server sends it
+ *  payload-free and org-scoped, and the refetch through the REST read is what
+ *  carries the scoping. */
 export function invalidateEventSources(orgId?: string): void {
   const targets = orgId ? [orgId] : [...cache.keys(), ...inFlight.keys()]
   for (const id of new Set(targets)) {
@@ -85,6 +92,12 @@ export function invalidateEventSources(orgId?: string): void {
   // this function knowing which orgs are on screen.
   notify()
 }
+
+// Answer the server's `sources_updated` ping by dropping every cached org.
+// Registered at module load, alongside the cache it clears: a page that never
+// read availability never loaded this module, and has nothing stale to drop.
+// The ping carries no payload — the REST refetch is what carries the scoping.
+setWsSourcesInvalidator(() => invalidateEventSources())
 
 export interface UseEventSources {
   /** Every source this deployment can report on for the org, in wire order.

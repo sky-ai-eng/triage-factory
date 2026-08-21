@@ -48,6 +48,7 @@ import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import { inputClass } from '../primitives'
 import JiraAccessGroup from '../JiraAccessGroup'
+import EventSourcesGroup from '../EventSourcesGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
@@ -616,6 +617,15 @@ export default function OrgSettings({
           <SlackWorkspacesCard orgId={orgId} />
         </SettingsSection>
       )}
+
+      {/* ── Event sources ── Which sources may produce events for the org.
+          An action section: each switch commits inline through
+          PATCH /api/orgs/{org}/sources/{kind}, so there is no Save footer.
+          canEdit is unconditional because this whole group renders only for an
+          org admin (multi) or N=1 (local) — the same gate the route applies. */}
+      <SettingsSection title="Event sources" summary="Which sources create tasks">
+        <EventSourcesGroup orgId={orgId} canEdit />
+      </SettingsSection>
 
       {/* ── Jira polling (only once connected) ── */}
       {draft.jiraConnected && (

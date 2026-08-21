@@ -1,18 +1,19 @@
 // Package eventsource answers one question, per org: which event sources can
 // actually reach this organization, and when one cannot, why not.
 //
-// The answer is DERIVED on every read and never stored. Every way a source can
-// be off already exists and is meaningful somewhere else — the credential is
-// unbound, the workspace was disconnected, the licence lapsed, the source has
-// not shipped — so mirroring one of those into a stored flag would be one more
-// way to be off, free to disagree with the fact it copies. Nothing here has a
-// setter.
+// The answer is DERIVED on every read. Every CAPABILITY way a source can be off
+// already exists and is meaningful somewhere else — the credential is unbound,
+// the workspace was disconnected, the licence lapsed, the source has not
+// shipped — so mirroring one of those into a stored flag would be one more way
+// to be off, free to disagree with the fact it copies. None of them is stored
+// here, and nothing here sets one.
 //
-// TODO(TFAC-882): an org admin cannot pause a source without unbinding its
-// credential, which also cuts the agent's own access to it. What that wants is
-// not a mirror of anything above but a deliberate control of its own: a fifth
-// state resolved here ahead of the probes, a drop in the router, and a skip in
-// both poll cycles. Every consumer of State picks it up unchanged.
+// The one stored input is POLICY, not capability: an org admin's deliberate
+// pause (org_event_sources.disabled), read ahead of the probes below. It
+// mirrors nothing — before it existed the only way to stop a source producing
+// events was to unbind its credential, which also cut the agent's own access to
+// the ticket it was working on. It is read here rather than checked by each
+// consumer so that a source registered from outside core gets it for free.
 //
 // Its readers want different slices of the same derivation: the org
 // availability read hands the whole vocabulary to the UI, an event-handler
@@ -70,8 +71,13 @@ func KindOf(eventType string) string {
 	return eventType
 }
 
-// State is a source's answer for one org — a closed vocabulary of four values,
+// State is a source's answer for one org — a closed vocabulary of five values,
 // each naming a different thing the reader can do about it.
+//
+// `disabled` joins the vocabulary rather than riding alongside it as a second
+// boolean, even though capability and policy really are different facts. Every
+// consumer keys on `state == available`, and a consumer that forgot to check a
+// second field would silently ignore the pause. One field cannot be forgotten.
 type State string
 
 const (
@@ -81,6 +87,10 @@ const (
 	// missing. The one state a reader can fix themselves, or ask an org admin
 	// to.
 	StateUnconfigured State = "unconfigured"
+	// StateDisabled — an org admin paused it. The credential (if any) is
+	// untouched, so agent access to the source is unaffected; only event
+	// production stops.
+	StateDisabled State = "disabled"
 	// StateUnlicensed — the entitlement is absent. Not the reader's to fix.
 	StateUnlicensed State = "unlicensed"
 	// StateWIP — TF has not shipped this source. Nobody's to fix.
@@ -260,17 +270,44 @@ func StateFor(ctx context.Context, tx db.TxStores, orgID, kind string) (State, b
 	return st, true, nil
 }
 
+// Declared reports whether kind is a source this deployment can report on at
+// all — a built-in, a declared-but-unbuilt source, or one registered from
+// outside core and not omitted by run mode.
+//
+// It is the vocabulary membership test, and it reads nothing: the admin write
+// surface needs to answer "is this even an address" before it stores a policy
+// against it, and a source's STATE is not the question there. A kind this build
+// does not carry is a 404, not a silently stored row.
+func Declared(kind string) bool {
+	return slices.ContainsFunc(declarations(), func(d declaration) bool { return d.kind == kind })
+}
+
 // resolver carries one pass's shared reads. The github and jira answers are
 // both cut from the same credential bundle, so it is loaded lazily and at most
-// once — a pass that resolves neither never touches the secret store.
+// once — a pass that resolves neither never touches the secret store. The org's
+// paused-source set is loaded the same way, once for the whole pass however
+// many sources it answers for.
 type resolver struct {
 	tx    db.TxStores
 	orgID string
 
 	creds       auth.Credentials
 	credsLoaded bool
+
+	paused       map[string]bool
+	pausedLoaded bool
 }
 
+// state resolves one declaration, applying the vocabulary's precedence:
+//
+//	wip > unlicensed > disabled > unconfigured > available
+//
+// Least-fixable first. `disabled` outranks `unconfigured` because telling a
+// reader to go bind a credential for a source an admin deliberately turned off
+// sends them to do useless work. It does NOT outrank `unlicensed` or `wip`,
+// which is why the probe still runs for a paused source: a registered source's
+// licence is a fact only its own probe holds, and re-enabling a source nobody
+// is entitled to would change nothing.
 func (r *resolver) state(ctx context.Context, d declaration) (State, error) {
 	if d.probe == nil {
 		return StateWIP, nil
@@ -279,7 +316,37 @@ func (r *resolver) state(ctx context.Context, d declaration) (State, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
 	}
+	if st == StateUnlicensed {
+		return st, nil
+	}
+	paused, err := r.pausedKinds(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
+	}
+	if paused[d.kind] {
+		return StateDisabled, nil
+	}
 	return st, nil
+}
+
+// pausedKinds loads the org's admin-paused sources once per pass. A read
+// failure is returned rather than answered as "nothing is paused": reporting a
+// paused source available is the one wrong answer that lets events through
+// after an admin turned them off.
+func (r *resolver) pausedKinds(ctx context.Context) (map[string]bool, error) {
+	if r.pausedLoaded {
+		return r.paused, nil
+	}
+	kinds, err := r.tx.OrgEventSources.ListDisabled(ctx, r.orgID)
+	if err != nil {
+		return nil, err
+	}
+	r.paused = make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		r.paused[k] = true
+	}
+	r.pausedLoaded = true
+	return r.paused, nil
 }
 
 // credentials loads the org's integration bundle once per pass.

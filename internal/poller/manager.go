@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -64,6 +65,14 @@ type Manager struct {
 	// That is the same gate the tracker, the drain worker and the sweeper sit
 	// behind, so no second mechanism is introduced for this one pass.
 	ReconcileGrant func(ctx context.Context, orgID string) error
+
+	// EventSources reads the org's declared per-source policy — today, whether
+	// an org admin has paused a source. nil disables the skip (tests, and any
+	// embedder that hasn't wired it), which costs API calls and nothing else:
+	// the router drops a paused source's events at the single funnel every
+	// producer crosses, so a poller that forgets to skip wastes a request
+	// rather than leaking an event.
+	EventSources db.OrgEventSourceStore
 
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
@@ -149,6 +158,22 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 // allocation is fine.
 func (m *Manager) trackerForOrg(orgID string) *tracker.Tracker {
 	return tracker.New(m.database, m.pub, m.tasks, m.entities, m.repos, m.eventQueue, orgID)
+}
+
+// sourcePaused reports whether an org admin has turned this source off. A read
+// failure answers false and polls: the skip is an API-budget optimization, not
+// the enforcement point, so a transient database blip must cost one wasted
+// cycle rather than stop polling for every tenant.
+func (m *Manager) sourcePaused(ctx context.Context, source, orgID string) bool {
+	if m.EventSources == nil {
+		return false
+	}
+	kinds, err := m.EventSources.ListDisabledSystem(ctx, orgID)
+	if err != nil {
+		pollerLog.WarnContext(ctx, "read event-source policy failed; polling anyway", "source", source, "org", orgID, "error", err)
+		return false
+	}
+	return slices.Contains(kinds, source)
 }
 
 // reviewerResolver builds the per-cycle TF-known reviewer resolver.
@@ -479,6 +504,16 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	ctx, span := tracer.Start(ctx, "poll.github.org",
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
+
+	// An org admin turned GitHub off. An anticipated outcome, not an error —
+	// the same posture as the no_repos skip below and the Jira twin's
+	// unconfigured one. It is here to stop spending the API budget on a source
+	// nothing will route; the drop that makes the pause correct is the
+	// router's, at the single funnel every producer crosses.
+	if m.sourcePaused(ctx, "github", orgID) {
+		span.SetAttributes(telemetry.Outcome("disabled"))
+		return
+	}
 
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org
@@ -1181,6 +1216,15 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// keeps this slot, so a likely-persistent auth failure backs off to the
 	// org's own cadence instead of hammering every base tick.
 	m.schedulePoll("jira", orgID, now.Add(clampPollInterval(orgSet.JiraPollInterval)))
+	// An org admin turned Jira off. Checked after the slot reservation above so
+	// a paused org falls back to its own cadence rather than being re-examined
+	// every base tick, and before the credential load because a paused source
+	// has no reason to touch the secret store. Same posture as the unconfigured
+	// skip below: an anticipated outcome, never an error.
+	if m.sourcePaused(ctx, "jira", orgID) {
+		span.SetAttributes(telemetry.Outcome("disabled"))
+		return
+	}
 	creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
 	if lerr != nil {
 		span.SetStatus(codes.Error, "load creds")

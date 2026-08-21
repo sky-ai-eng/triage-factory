@@ -1,10 +1,15 @@
 package server
 
 import (
+	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // orgSourcesResponse is the org's event-source availability — a singleton
@@ -53,4 +58,160 @@ func (s *Server) handleOrgSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, orgSourcesResponse{Sources: sources})
+}
+
+// handleOrgSource serves one source's answer — the same element the list
+// answers with, at its own address. It exists because the PATCH below does: a
+// PATCHable address that cannot be read is a hole, and `sources` is a
+// collection with fixed membership rather than a singleton.
+//
+// A kind outside this deployment's vocabulary is a 404. There is no such
+// resource here — not a source reported off, which would be a claim about an
+// org's setup that nobody made.
+//
+// GET /api/orgs/{org_id}/sources/{kind}
+func (s *Server) handleOrgSource(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	kind := r.PathValue("kind")
+
+	var (
+		state eventsource.State
+		known bool
+	)
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		state, known, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
+		return e
+	}); err != nil {
+		internalError(w, "sources", err)
+		return
+	}
+	if !known {
+		notFound(w, "source")
+		return
+	}
+	writeJSON(w, http.StatusOK, eventsource.Source{Kind: kind, State: state})
+}
+
+// orgSourcePatch is the PATCH body. json.RawMessage rather than *bool so an
+// absent field and an explicit null are distinguishable: absent means the
+// caller named no field to write, which must not answer "updated".
+type orgSourcePatch struct {
+	Disabled json.RawMessage `json:"disabled,omitempty"`
+}
+
+// handleOrgSourcePatch turns one source's event production off or back on for
+// the whole org.
+//
+// This is the non-destructive half of a pair whose other half already existed.
+// Unbinding the credential (DELETE …/jira/access/credential) stopped events by
+// removing the org's ability to reach Jira at all — which also removed the
+// running agent's ability to read or comment on the ticket it was working, and
+// priced an undo at "go find the API token again". This route stops event
+// INGESTION and nothing else: the credential stays bound, `tfac exec jira`
+// keeps working, and re-enabling is one more PATCH. The destructive action
+// keeps its current meaning; it is just no longer the only one.
+//
+// Org admin, not team admin. CLAUDE.md's org-wide-write rule admits a team
+// admin of a team whose tracked set contains the subject — but a source is in
+// nobody's tracked set, and pausing one lands on every team in the org. The
+// binding argument is symmetry: unbinding the credential is RequireOrgAdmin, so
+// a team-admin gate here would be a way for a team admin to reach an org-admin
+// effect.
+//
+// Forward-only, like every other tracking change: existing tasks, in-flight
+// runs and authored handlers are untouched. A handler whose source went dark
+// renders inert and explained rather than being hidden or deleted, because a
+// task is durable work that may have an open PR and agent memory behind it.
+//
+// PATCH /api/orgs/{org_id}/sources/{kind}
+func (s *Server) handleOrgSourcePatch(w http.ResponseWriter, r *http.Request) {
+	orgID, userID, ok := s.az.RequireOrgAdmin(w, r)
+	if !ok {
+		return
+	}
+	kind := r.PathValue("kind")
+	// The vocabulary check runs before the body decode and reads nothing: a
+	// kind this build does not carry is not an address, so there is no row to
+	// store against it and no state to report for it.
+	if !eventsource.Declared(kind) {
+		notFound(w, "source")
+		return
+	}
+
+	var req orgSourcePatch
+	if !httpx.DecodeJSONStrict(w, r, &req) {
+		return
+	}
+	if req.Disabled == nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason:  httpx.ReasonMissingField,
+			Message: "no fields to update: provide disabled",
+			Field:   "disabled",
+		})
+		return
+	}
+	var disabled bool
+	if err := json.Unmarshal(req.Disabled, &disabled); err != nil {
+		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: "disabled must be true or false", Field: "disabled",
+		})
+		return
+	}
+
+	var state eventsource.State
+	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if _, err := tx.OrgEventSources.SetDisabled(r.Context(), orgID, kind, disabled, userID); err != nil {
+			return fmt.Errorf("set event source policy: %w", err)
+		}
+		// Clearing the snapshots is what makes re-enabling safe, and it belongs
+		// in this transaction rather than after it: a pause that commits
+		// without its clear leaves the org armed to emit a burst of stale
+		// transitions the moment it is turned back on, and nothing later
+		// notices. See EntityStore.ClearSnapshotsForSourceSystem.
+		if disabled {
+			cleared, err := tx.Entities.ClearSnapshotsForSourceSystem(r.Context(), orgID, kind)
+			if err != nil {
+				return fmt.Errorf("clear %s snapshots: %w", kind, err)
+			}
+			serverLog.Info("event source disabled; cleared tracker snapshots",
+				"org", orgID, "source", kind, "entities", cleared)
+		}
+		action := domain.AccessActionEventSourceEnabled
+		if disabled {
+			action = domain.AccessActionEventSourceDisabled
+		}
+		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      action,
+			DetailJSON:  domain.AccessDetailEventSource(kind),
+		}); err != nil {
+			return fmt.Errorf("record access change: %w", err)
+		}
+		// Read the answer back through the same derivation every other reader
+		// uses, in the same transaction as the write. The stored flag is one
+		// input of five — a paused source that is also unlicensed still reports
+		// unlicensed — so echoing the request's own boolean back as a state
+		// would be a different answer than the next GET gives.
+		var e error
+		state, _, e = eventsource.StateFor(r.Context(), tx, orgID, kind)
+		return e
+	}); err != nil {
+		internalError(w, "sources", err)
+		return
+	}
+
+	if s.onSourcesChanged != nil {
+		s.onSourcesChanged(orgID, kind)
+	}
+	// Payload-free invalidation ping, the cheap default: the client refetches
+	// through the REST read, which carries the scoping. Org-scoped because
+	// availability is — every member of the org renders it.
+	if s.ws != nil {
+		s.ws.Broadcast(websocket.Event{Type: "sources_updated", OrgID: orgID, Data: map[string]any{}})
+	}
+	writeJSON(w, http.StatusOK, eventsource.Source{Kind: kind, State: state})
 }

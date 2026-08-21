@@ -176,6 +176,22 @@ describe('useEventSources', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
+  it('treats an admin-paused source as one no handler can fire on', async () => {
+    // `disabled` is the fifth state, and it joins the vocabulary rather than
+    // riding alongside as a second boolean precisely so a consumer keyed on
+    // `available` cannot forget it.
+    stubSources(() => [
+      { kind: 'github', state: 'available' },
+      { kind: 'jira', state: 'disabled' },
+    ])
+    const { result } = renderHook(() => useEventSources())
+
+    await waitFor(() => expect(result.current.loaded).toBe(true))
+    expect(result.current.stateOf('jira')).toBe('disabled')
+    expect(result.current.canProduce('jira')).toBe(false)
+    expect(result.current.canProduce('github')).toBe(true)
+  })
+
   it('picks up a source that just became available', async () => {
     let answer = configured
     const fetchMock = stubSources(() => answer)

@@ -28,6 +28,18 @@ export function setWsAuthCloseHandler(fn: AuthCloseHandler | null) {
   authCloseHandler = fn
 }
 
+// --- Event-source availability bridge ---
+// The `sources_updated` ping is payload-free and org-scoped, and what it
+// invalidates is the availability cache in useEventSources. Registered here
+// rather than imported, for the reason the auth bridge above is: this module is
+// the socket, and importing the cache would close a cycle through
+// useApiOrgId → AuthContext → here. The cache registers itself when it loads,
+// which is exactly when there is something stale to drop.
+let sourcesInvalidator: (() => void) | null = null
+export function setWsSourcesInvalidator(fn: (() => void) | null) {
+  sourcesInvalidator = fn
+}
+
 // --- Presence (TFAC-392) ---
 // We report, over the same socket, whether this tab is on an answer-capable
 // surface (the board or a run's detail page) AND focused. The backend uses it
@@ -154,6 +166,15 @@ function ensureConnected() {
             })
           }
         }
+      }
+      // Event-source availability changed for the org this socket is scoped
+      // to — an admin paused or resumed a source, or a credential moved. The
+      // ping is payload-free by design (the cheap default): the handler drops
+      // the cached answer and whoever is rendering refetches through the REST
+      // read, which is what carries the scoping.
+      if (event.type === 'sources_updated') {
+        sourcesInvalidator?.()
+        return
       }
       for (const fn of listeners) {
         fn(event)

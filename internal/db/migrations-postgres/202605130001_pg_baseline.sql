@@ -8379,6 +8379,74 @@ REVOKE ALL ON public.poll_readiness FROM PUBLIC;
 REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 
 
+-- org_event_sources: declared per-(org, source) POLICY — today, whether an org
+-- admin has paused a source's event production without unbinding its
+-- credential, so `tfac exec jira` and an in-flight agent keep working while
+-- nothing new mints tasks.
+--
+-- Its own table, not a column on org_settings, for two reasons. The source
+-- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source
+-- outside core declare itself), so a column per source would make every new
+-- source a DDL change in both dialects and would leave a source core holds no
+-- symbol for with nowhere to record the fact. And org_settings is a whole-row
+-- read-modify-write behind a `version` optimistic-concurrency token, whose
+-- consequence this schema already records at github_credential_class: a
+-- surgical single-column write from a different surface either fights that
+-- token or mints a second bypass of it.
+--
+-- Not poll_readiness either, though that table is keyed (org_id, source) too:
+-- its rows are OBSERVED RUNTIME STATE, written by the poll tracker and pruned
+-- when an org stops polling. This is declared admin policy, and a prune of
+-- bookkeeping that silently re-enabled a source is a bad failure mode to design
+-- in.
+--
+-- `disabled` is an explicit column rather than presence-is-off. A bare
+-- disabled-sources table would be tighter for this one fact, but the row is
+-- expected to grow (the per-(org, source) integration settings currently spread
+-- across org_settings land here later), and the moment a row exists for a
+-- configuration reason "row present" stops meaning "off". With more than one
+-- fact on the row, an ABSENT row reads honestly as "no per-source overrides
+-- recorded" — which is what every deployment has until an admin opts in, so the
+-- derivation stays byte-identical to a build without this table.
+--
+-- kind carries no foreign key on purpose: the vocabulary is a registry, not a
+-- table, so a row naming a source this build does not carry is inert (nothing
+-- resolves it) rather than invalid. disabled_by carries none either — the
+-- who-did-what trail lives in access_changes, and a departed admin's deletion
+-- must not quietly rewrite the org's policy.
+CREATE TABLE public.org_event_sources (
+    org_id      uuid NOT NULL,
+    kind        text NOT NULL,
+    disabled    boolean DEFAULT false NOT NULL,
+    disabled_at timestamp with time zone,
+    disabled_by uuid
+);
+
+ALTER TABLE ONLY public.org_event_sources
+    ADD CONSTRAINT org_event_sources_pkey PRIMARY KEY (org_id, kind);
+
+ALTER TABLE ONLY public.org_event_sources
+    ADD CONSTRAINT org_event_sources_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE public.org_event_sources ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT, admin write — the same split as org_settings, and here RLS
+-- really can express the write gate (a source belongs to no team, so the
+-- org-wide-mutation rule reduces to plain org admin). The handler's
+-- RequireOrgAdmin is still the enforcement point callers see; this is the
+-- backstop underneath it. A member must be able to READ it, because that is
+-- what renders why their own event handler is sitting inert.
+CREATE POLICY org_event_sources_select ON public.org_event_sources FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY org_event_sources_insert ON public.org_event_sources FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_event_sources_update ON public.org_event_sources FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_event_sources_delete ON public.org_event_sources FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+REVOKE ALL ON public.org_event_sources FROM PUBLIC;
+REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
+
+
 -- placement_overrides (TFAC-587, spec §6.1): human intent that wins over the
 -- computed capacity-weighted rendezvous order for a single placement key — a
 -- manual pin, or a hot-key replica count, and nothing else (drain lives on

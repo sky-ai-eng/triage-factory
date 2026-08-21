@@ -425,6 +425,13 @@ type Stores struct {
 	// grant).
 	Permissions PermissionStore
 
+	// OrgEventSources owns the org_event_sources table — declared per-(org,
+	// source) policy, which today is whether an org admin has paused the
+	// source's event production. Split-pool in Postgres: member-readable /
+	// admin-writable through the app pool under RLS, with ...System reads on
+	// the admin pool for the router and the poller.
+	OrgEventSources OrgEventSourceStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as
@@ -528,6 +535,7 @@ type TxStores struct {
 	Instances                InstanceStore
 	ConversationPendingInput ConversationPendingInputStore
 	Permissions              PermissionStore
+	OrgEventSources          OrgEventSourceStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

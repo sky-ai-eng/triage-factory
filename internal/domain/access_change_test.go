@@ -18,6 +18,8 @@ var allAccessActions = []string{
 	AccessActionInviteRevoked,
 	AccessActionCredentialSet,
 	AccessActionCredentialRemoved,
+	AccessActionEventSourceDisabled,
+	AccessActionEventSourceEnabled,
 	AccessActionSSOConnectionCreated,
 	AccessActionSSOConnectionEnabled,
 	AccessActionSSOConnectionDisabled,

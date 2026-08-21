@@ -24,6 +24,9 @@ import (
 //	"cred_request"        → the brain's sealed-credential-bundle
 //	                        provisioner (TFAC-614), holder-gated exactly
 //	                        like "trigger"/"pollsoon"
+//	"sources_changed"     → the brain's event-source policy cache + poll
+//	                        re-due after an admin paused or resumed a
+//	                        source, holder-gated the same way
 //
 // Uses wsbackplane.DirectDSN (TF_DATABASE_DIRECT_URL falling back to
 // TF_DATABASE_URL) — LISTEN needs a session-scoped connection that
@@ -68,7 +71,7 @@ func (a *App) dispatchCtl(payload string) {
 		if a.spawner != nil {
 			a.spawner.HandleCtlNotification(payload)
 		}
-	case "trigger", "pollsoon", "cred_request", "curator_cred_request":
+	case "trigger", "pollsoon", "cred_request", "curator_cred_request", "sources_changed":
 		var msg ctlbus.Message
 		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 			appLog.Warn("tf_ctl: malformed relay message; dropping", "error", err)
