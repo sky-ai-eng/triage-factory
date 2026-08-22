@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -748,12 +749,13 @@ func (s *Server) firstStepConversationID(ctx context.Context, orgID, userID, blu
 }
 
 // writeDelegateSpawnError maps a spawner.Delegate failure to its status: a
-// bad or missing blueprint reference is the caller's fault (422 — the body
-// was well-formed, the object it names can't back a run), anything else is a
-// spawn/DB fault (500, logged + redacted). Shared by the delegate route and
-// the factory drag-to-delegate so the two gestures fail identically.
+// bad or missing blueprint reference and a model the org/team cannot run are
+// the request's fault (422 — the body was well-formed, but what it asks for
+// can't back a run), anything else is a spawn/DB fault (500, logged +
+// redacted). Shared by the delegate route and the factory drag-to-delegate so
+// the two gestures fail identically.
 //
-// Both arms carry reason SPAWN_FAILED: every caller reaches here only after
+// Every arm carries reason SPAWN_FAILED: every caller reaches here only after
 // the agent claim stamped, and the reason — not the status — is what tells
 // a client the claim survived. The pre-claim failure paths in these handlers
 // answer plain INTERNAL 500s, so without the distinct reason a client could
@@ -765,6 +767,23 @@ func writeDelegateSpawnError(w http.ResponseWriter, err error) {
 			Reason:  httpx.ReasonSpawnFailed,
 			Message: err.Error(),
 			Field:   "blueprint_id",
+		})
+		return
+	}
+	// The model's provider is unconnected, or restricted for this team. The
+	// message is the entire value of the refusal — it names the provider and
+	// where an admin connects it — so it goes out verbatim rather than through
+	// the 500 arm's redaction, which exists for errors that can carry driver
+	// and upstream strings. These carry a provider display name and a model
+	// key, both TF's own.
+	//
+	// No `field`: nothing in the body is wrong. The caller asked to run a task
+	// and the answer depends on the org's credentials and the team's
+	// restriction, neither of which they sent.
+	if errors.Is(err, modelaccess.ErrProviderUnconfigured) || errors.Is(err, modelaccess.ErrProviderRestricted) {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonSpawnFailed,
+			Message: err.Error(),
 		})
 		return
 	}

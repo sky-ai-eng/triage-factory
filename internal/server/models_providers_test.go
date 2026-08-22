@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -13,9 +14,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // teamModelsPath / teamProvidersPath address one team's catalog and the
@@ -36,8 +41,9 @@ func modelKeyOn(t *testing.T, provider string) string {
 	return ""
 }
 
-// connectOrgProviders marks the local org as holding the named credentials, by
-// the settings refs that are the record of what is bound.
+// connectOrgProviders sets which credentials the local org holds, by the
+// settings refs that are the record of what is bound. Both directions: a false
+// clears the ref, which is what disconnecting a provider does.
 func connectOrgProviders(t *testing.T, s *Server, anthropic, bedrock bool) {
 	t.Helper()
 	ctx := context.Background()
@@ -45,9 +51,11 @@ func connectOrgProviders(t *testing.T, s *Server, anthropic, bedrock bool) {
 	if err != nil {
 		t.Fatalf("get org settings: %v", err)
 	}
+	set.AnthropicAPIKeyRef = ""
 	if anthropic {
 		set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 	}
+	set.BedrockCredentialsRef = ""
 	if bedrock {
 		set.BedrockCredentialsRef = "aws_bearer_token_bedrock"
 	}
@@ -346,4 +354,89 @@ func TestTeamProviders_GatesAndScope_Postgres(t *testing.T) {
 			t.Errorf("PUT on an archived team = 200, want a refusal (body: %s)", rec.Body.String())
 		}
 	})
+}
+
+// A manual delegation refused for its model's provider answers 422 with the
+// refusal itself — the provider to connect and where. The 500 arm beside it
+// redacts its message in multi mode, so landing there would strip exactly the
+// text this refusal exists to deliver; the status is what distinguishes them.
+//
+// The model here is a step's pin, saved while its provider was connected and
+// disconnected afterwards. That is the case no save-time check can catch, and
+// the reason the dispatch gate exists.
+func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, websocket.NewHub(), domain.ModelSonnet))
+
+	const (
+		eventType   = "github:pr:opened"
+		promptID    = "p-provider-refusal"
+		blueprintID = "bp-provider-refusal"
+		taskID      = "00000000-0000-4000-8000-0000000009c1"
+	)
+	bedrockModel := modelKeyOn(t, modelcatalog.ProviderBedrock)
+	if _, err := s.db.Exec(
+		`INSERT INTO prompts (id, name, body, model, source, creator_user_id) VALUES (?, 'Refusal', 'do the thing', ?, 'user', ?)`,
+		promptID, bedrockModel, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("seed prompt: %v", err)
+	}
+	if _, err := s.blueprints.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Blueprint{
+		ID: blueprintID, Name: "Refusal", Source: "user", TeamID: runmode.LocalDefaultTeamID,
+	}); err != nil {
+		t.Fatalf("seed blueprint: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO blueprint_steps (blueprint_id, step_index, step_prompt_id) VALUES (?, 0, ?)`,
+		blueprintID, promptID); err != nil {
+		t.Fatalf("seed blueprint step: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO entities (id, source, source_id, kind, state)
+		 VALUES ('e_prov', 'github', 'sky/repo#prov', 'pr', 'active')`); err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_prov', 'e_prov', ?, '')`,
+		eventType); err != nil {
+		t.Fatalf("seed event: %v", err)
+	}
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		 VALUES (?, 'e_prov', ?, 'ev_prov', 'queued')`, taskID, eventType); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	// The org holds Anthropic only — the step's pinned provider is gone.
+	connectOrgProviders(t, s, true, false)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
+		"hesitation_ms": 0,
+		"blueprint_id":  blueprintID,
+	})
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("delegate = %d, want 422 (the refusal is the request's fault, not a spawn fault); body=%s", rec.Code, rec.Body.String())
+	}
+	// SPAWN_FAILED, like the other 422 arm: the claim stamped before Delegate
+	// ran, and the reason is what tells the client it survived. No field —
+	// nothing the caller sent is wrong.
+	assertFirstError(t, rec, "SPAWN_FAILED", "")
+	body := rec.Body.String()
+	for _, want := range []string{modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock), bedrockModel, "Settings"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refusal does not carry %q — the message is the whole point of it: %s", want, body)
+		}
+	}
+
+	// Reconnecting the provider makes the same gesture work: the refusal was
+	// about the credential, and it left nothing behind.
+	connectOrgProviders(t, s, true, true)
+	again := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/delegate", map[string]any{
+		"hesitation_ms": 0,
+		"blueprint_id":  blueprintID,
+	})
+	if again.Code != http.StatusOK {
+		t.Fatalf("delegate after reconnecting = %d, want 200; body=%s", again.Code, again.Body.String())
+	}
 }

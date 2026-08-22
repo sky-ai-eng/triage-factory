@@ -1856,6 +1856,21 @@ CREATE TABLE public.team_settings (
     -- forward migration) because multi-mode / Postgres is net-new and unshipped;
     -- the SQLite tree carries 202607270001_team_base_branch_push_policy.sql.
     base_branch_push_policy text DEFAULT 'never'::text NOT NULL,
+    -- Which inference providers this team may spend against, as modelcatalog
+    -- provider ids. Empty (the default) is no restriction — every provider the
+    -- org configured; absent and "all of them" therefore store the same value,
+    -- which is correct, since an admin who has narrowed nothing has narrowed
+    -- nothing and a team whose restriction happened to name every provider
+    -- would silently become restricted the day the org connects a third. An org
+    -- admin's decision, not the team's: the team-settings write path
+    -- round-trips this column untouched and only the admin-pool
+    -- SetAllowedProvidersSystem changes it (an org admin restricting a team
+    -- need not be a member of it). NOT NULL with a literal DEFAULT so partial
+    -- upserts materialize it without the writer naming the column. Rolled into
+    -- the baseline (not a forward migration) because multi-mode / Postgres is
+    -- net-new and unshipped; the SQLite tree, which HAS shipped, carries
+    -- 202608250001_team_allowed_providers.sql.
+    allowed_providers text[] DEFAULT '{}'::text[] NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
