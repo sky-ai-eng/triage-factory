@@ -3,6 +3,7 @@ package projectclassify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -154,5 +155,56 @@ func TestRun_NoModelSkipsTheCycle(t *testing.T) {
 	}
 	if !warned {
 		t.Errorf("no WARN naming the skip; records = %+v", logs.recorded())
+	}
+}
+
+// TestRun_ModelResolutionFailureIsACycleFailure is the other side of the skip
+// above: a resolver that fails because the settings row could not be read has
+// told us nothing about whether the org picked a model, so the cycle reports as
+// failed rather than quietly as unconfigured — the same treatment the two reads
+// before it get. A wedged database surfacing as "nobody picked a model" sends
+// whoever is looking to the wrong settings page.
+func TestRun_ModelResolutionFailureIsACycleFailure(t *testing.T) {
+	isolateHome(t)
+	database := newTestDB(t)
+	stores := sqlitestore.New(database)
+	if _, err := stores.Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{ID: "p1", Name: "P1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "T", "https://x/1"); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &captureHandler{}
+	prev := classifyLog
+	classifyLog = slog.New(logs)
+	t.Cleanup(func() { classifyLog = prev })
+
+	r := NewRunner(stores.Entities, stores.Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil,
+		func(context.Context, string) (string, error) {
+			return "", errors.New("read org settings: db down")
+		})
+	var votes int32
+	r.stage1Fn = func(context.Context, string, votePrompt, string) (int, string, error) {
+		atomic.AddInt32(&votes, 1)
+		return 0, "", nil
+	}
+
+	r.run(context.Background())
+
+	if got := atomic.LoadInt32(&votes); got != 0 {
+		t.Errorf("stage1Fn called %d times; want 0 — an unresolved model must not vote", got)
+	}
+	var errored bool
+	for _, rec := range logs.recorded() {
+		if rec.Level == slog.LevelWarn && strings.Contains(rec.Message, "skipping classification cycle") {
+			t.Error("a failed read logged as the configuration skip; the two are different events")
+		}
+		if rec.Level == slog.LevelError {
+			errored = true
+		}
+	}
+	if !errored {
+		t.Errorf("no Error naming the failure; records = %+v", logs.recorded())
 	}
 }

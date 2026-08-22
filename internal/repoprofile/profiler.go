@@ -230,8 +230,10 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 
 	// A cycle with no usable background-jobs model has no profile it can write,
 	// so it skips before spending a single GitHub call on doc fetches — and
-	// never substitutes a model of TF's choosing. WARN, not Error: the remedy is
-	// an org admin picking a model, and the next cycle asks again.
+	// never substitutes a model of TF's choosing. WARN rather than the error
+	// return above, because every failure this can produce is an unusable
+	// setting (ErrNoModel) whose remedy is an org admin picking a model: the
+	// read that could have failed as a fault already did so, one statement up.
 	model, err := systemllm.ModelForSettings(orgSet)
 	if err != nil {
 		repoprofileLog.Warn("skipping repo-profiling cycle", "org", orgID, "error", err)

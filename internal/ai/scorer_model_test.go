@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -142,5 +143,47 @@ func TestRun_NoModelSkipsTheCycle(t *testing.T) {
 	}
 	if !warned {
 		t.Errorf("no WARN naming the skip; records = %+v", logs.recorded())
+	}
+}
+
+// TestRun_ModelResolutionFailureIsACycleFailure is the other side of the skip
+// above: a resolver that fails because the settings row could not be read has
+// told us nothing about whether the org picked a model, so the cycle must report as
+// failed rather than quietly as unconfigured. Same treatment the cycle's other
+// failed reads get — Error, and the error callback fires — because a wedged
+// database surfacing as "nobody picked a model" sends whoever is looking to the
+// wrong settings page.
+func TestRun_ModelResolutionFailureIsACycleFailure(t *testing.T) {
+	logs := &captureHandler{}
+	prev := aiLog
+	aiLog = slog.New(logs)
+	t.Cleanup(func() { aiLog = prev })
+
+	store := &stubScoreStore{tasks: []domain.Task{{ID: "t-1"}}}
+	var reported error
+	r := NewRunner(store, nil, "org-x", nil, nil, nil, nil,
+		func(context.Context, string) (string, error) {
+			return "", errors.New("read org settings: db down")
+		},
+		RunnerCallbacks{OnError: func(_ string, err error) { reported = err }})
+
+	var scored int32
+	r.scoreFn = func(context.Context, []TaskInput, string, string, agentproc.SecretsReader) ([]TaskScore, error) {
+		atomic.AddInt32(&scored, 1)
+		return nil, nil
+	}
+
+	r.run(context.Background())
+
+	if got := atomic.LoadInt32(&scored); got != 0 {
+		t.Errorf("scoreFn called %d times; want 0 — an unresolved model must not score", got)
+	}
+	if reported == nil {
+		t.Error("OnError did not fire; a failed settings read is a failed cycle, not a configuration state")
+	}
+	for _, rec := range logs.recorded() {
+		if rec.Level == slog.LevelWarn && strings.Contains(rec.Message, "skipping scoring cycle") {
+			t.Error("a failed read logged as the configuration skip; the two are different events")
+		}
 	}
 }

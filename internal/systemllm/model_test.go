@@ -122,6 +122,11 @@ func TestModelForSettings_Refusals(t *testing.T) {
 // paths: a read that fails and a reader that was never wired both answer with an
 // error rather than a model, because a resolver that guesses is the shipped
 // fallback this package exists to not have.
+//
+// Neither is ErrNoModel, and that separation is load-bearing: callers quiet
+// ErrNoModel down to a WARN-and-skip because an org that has not picked is not a
+// failure, and an unreadable settings row reported that way would be a wedged
+// database showing up as a configuration state nobody can act on.
 func TestNewModelFunc(t *testing.T) {
 	ctx := context.Background()
 	set := bothConnected()
@@ -137,23 +142,35 @@ func TestNewModelFunc(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed read is not a resolved model", func(t *testing.T) {
-		_, err := NewModelFunc(settingsReader{err: errors.New("db down")}).Resolve(ctx, "org-1")
+	t.Run("a failed read is a fault, not an unusable setting", func(t *testing.T) {
+		cause := errors.New("db down")
+		_, err := NewModelFunc(settingsReader{err: cause}).Resolve(ctx, "org-1")
+		if !errors.Is(err, cause) {
+			t.Fatalf("err = %v, want the read failure preserved", err)
+		}
+		if errors.Is(err, ErrNoModel) {
+			t.Error("a failed read reported as ErrNoModel; callers would log a wedged database as an org that has not picked")
+		}
+	})
+
+	t.Run("an unwired reader fails closed as a fault", func(t *testing.T) {
+		_, err := NewModelFunc(nil).Resolve(ctx, "org-1")
 		if err == nil {
 			t.Fatal("expected an error")
 		}
-	})
-
-	t.Run("an unwired reader fails closed", func(t *testing.T) {
-		if _, err := NewModelFunc(nil).Resolve(ctx, "org-1"); !errors.Is(err, ErrNoModel) {
-			t.Errorf("err = %v, want ErrNoModel", err)
+		if errors.Is(err, ErrNoModel) {
+			t.Error("an unwired reader reported as ErrNoModel; it is a caller bug, not configuration")
 		}
 	})
 
-	t.Run("a nil resolver fails closed", func(t *testing.T) {
+	t.Run("a nil resolver fails closed as a fault", func(t *testing.T) {
 		var f ModelFunc
-		if _, err := f.Resolve(ctx, "org-1"); !errors.Is(err, ErrNoModel) {
-			t.Errorf("err = %v, want ErrNoModel", err)
+		_, err := f.Resolve(ctx, "org-1")
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if errors.Is(err, ErrNoModel) {
+			t.Error("a nil resolver reported as ErrNoModel; it is a caller bug, not configuration")
 		}
 	})
 }

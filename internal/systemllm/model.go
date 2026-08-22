@@ -28,6 +28,12 @@ type OrgSettingsReader interface {
 // It is the ONLY answer to those cases. TF ships no fallback model, so there is
 // nothing to substitute — a job that gets this error skips its cycle and says
 // so, and the next cycle asks again.
+//
+// It says the SETTING is unusable, and nothing else does. A resolver can also
+// fail because the settings row could not be read, or because nothing was wired
+// to read it with; those are faults rather than configuration, they do not wrap
+// this, and a caller must not quiet them down to the same skip — an unreadable
+// row is a cycle that failed, not an org that has not picked.
 var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 
 // ModelForSettings resolves the model this org's system jobs — the scorer, the
@@ -62,12 +68,16 @@ func ModelForSettings(set domain.OrgSettings) (string, error) {
 // row itself, for the clone protocol, and calls ModelForSettings on that read).
 type ModelFunc func(ctx context.Context, orgID string) (string, error)
 
-// Resolve calls f, answering ErrNoModel for a nil one. Fail-closed on purpose:
-// an unwired resolver is a caller bug, and the alternative — treating nil as
-// "any model will do" — is the shipped fallback this package exists to not have.
+// Resolve calls f, erroring for a nil one. Fail-closed on purpose: the
+// alternative — treating nil as "any model will do" — is the shipped fallback
+// this package exists to not have.
+//
+// The error deliberately does NOT wrap ErrNoModel. An unwired resolver is a
+// caller bug, not an org that has not picked a model, and the two are logged
+// differently by every caller.
 func (f ModelFunc) Resolve(ctx context.Context, orgID string) (string, error) {
 	if f == nil {
-		return "", fmt.Errorf("%w: no background jobs model resolver is wired for org %s", ErrNoModel, orgID)
+		return "", fmt.Errorf("systemllm: no background jobs model resolver is wired for org %s", orgID)
 	}
 	return f(ctx, orgID)
 }
@@ -76,10 +86,14 @@ func (f ModelFunc) Resolve(ctx context.Context, orgID string) (string, error) {
 // than cached: an admin who changes the model expects the next cycle to use it,
 // and one settings read next to a batch of LLM calls costs nothing worth
 // keeping a cache coherent for.
+//
+// Neither failure here wraps ErrNoModel — an unreadable row and an unwired
+// reader are faults, and only the value the row carries can make the setting
+// unusable.
 func NewModelFunc(orgs OrgSettingsReader) ModelFunc {
 	return func(ctx context.Context, orgID string) (string, error) {
 		if orgs == nil {
-			return "", fmt.Errorf("%w: no org-settings reader is wired for org %s", ErrNoModel, orgID)
+			return "", fmt.Errorf("systemllm: no org-settings reader is wired for org %s", orgID)
 		}
 		set, err := orgs.GetSettingsSystem(ctx, orgID)
 		if err != nil {

@@ -2,6 +2,7 @@ package projectclassify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -168,16 +169,26 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	// Resolve the org's background-jobs model before any vote is cast. A cycle
-	// with no usable one can classify nothing, so it skips — leaving
-	// classified_at NULL, exactly as an all-errored entity does, so the entities
-	// resurface once a model is picked. It never substitutes one of TF's
-	// choosing. WARN, not Error: the remedy is an org admin picking a model, and
-	// the next cycle asks again.
+	// Resolve the org's background-jobs model before any vote is cast. Either way
+	// this cycle classifies nothing — it never substitutes a model of TF's
+	// choosing — and either way classified_at stays NULL, exactly as it does for
+	// an all-errored entity, so everything resurfaces next cycle.
+	//
+	// The two reasons it can fail are not the same event. An unusable SETTING is
+	// a configuration state whose remedy is an org admin picking a model: WARN,
+	// and the next cycle asks again. Anything else — the settings row could not
+	// be read, nothing was wired to read it with — is a failed cycle, and gets
+	// what the two reads above it get, so a wedged database is not quietly
+	// reported as an org that has not chosen.
 	model, err := r.models.Resolve(ctx, r.orgID)
-	if err != nil {
+	switch {
+	case errors.Is(err, systemllm.ErrNoModel):
 		span.SetAttributes(telemetry.Outcome("no_model"))
 		classifyLog.WarnContext(ctx, "skipping classification cycle", "org", r.orgID, "error", err)
+		return
+	case err != nil:
+		span.SetStatus(codes.Error, "resolve background jobs model")
+		classifyLog.ErrorContext(ctx, "resolve background jobs model failed", "org", r.orgID, "error", err)
 		return
 	}
 

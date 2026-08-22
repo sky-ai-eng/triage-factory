@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -216,15 +217,27 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	// Resolve the org's background-jobs model before anything is claimed. A
-	// cycle with no usable one has no work it can do, so it skips rather than
-	// marking tasks in-progress it would immediately have to reset — and it
-	// never substitutes a model of TF's choosing. WARN, not Error: the remedy is
-	// an org admin picking a model, and the next cycle asks again.
+	// Resolve the org's background-jobs model before anything is claimed. Either
+	// way this cycle scores nothing — it never substitutes a model of TF's
+	// choosing — and either way it skips before MarkScoring, so no task is
+	// claimed only to be reset.
+	//
+	// The two reasons it can fail are not the same event. An unusable SETTING is
+	// a configuration state whose remedy is an org admin picking a model: WARN,
+	// no error callback, and the next cycle asks again. Anything else — the
+	// settings row could not be read, nothing was wired to read it with — is a
+	// failed cycle, and gets what every other failed read here gets, so a
+	// wedged database is not quietly reported as an org that has not chosen.
 	model, err := r.models.Resolve(ctx, r.orgID)
-	if err != nil {
+	switch {
+	case errors.Is(err, systemllm.ErrNoModel):
 		span.SetAttributes(telemetry.Outcome("no_model"))
 		aiLog.WarnContext(ctx, "skipping scoring cycle", "org", r.orgID, "error", err)
+		return
+	case err != nil:
+		span.SetStatus(codes.Error, "resolve background jobs model")
+		aiLog.ErrorContext(ctx, "resolve background jobs model failed", "org", r.orgID, "error", err)
+		r.reportError(err)
 		return
 	}
 
