@@ -59,7 +59,7 @@ func (w *waitEntities) listCallCount() int {
 // triggered runner exits on the empty unclassified list before any project
 // read. Callers defer m.Stop() to tear down the lazily-started runner.
 func newWaitManager(w *waitEntities) *Manager {
-	return NewManager(w, nil, nil, nil, nil, nil)
+	return NewManager(w, nil, nil, nil, nil, nil, fixedModel)
 }
 
 const waitOrg = runmode.LocalDefaultOrgID

@@ -38,7 +38,7 @@ func TestRun_RescoresCrashResidue(t *testing.T) {
 	}
 
 	var completed []string
-	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
 		OnScoringCompleted: func(_ context.Context, _ string, ids []string) { completed = ids },
 	})
 	r.scoreFn = stubScoreFn(0.8)
@@ -81,13 +81,13 @@ func TestRun_DoesNotResetItsOwnClaims(t *testing.T) {
 	seedScoringTasks(t, database, 3)
 
 	rec := &callOrderScoreStore{ScoreStore: stores.Scores}
-	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	// Observe the DB mid-cycle: by the time the batch is scored the rows
 	// are claimed, and nothing may have reset them since.
 	var claimedDuringScoring int
-	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
+	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID, model string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
 		claimedDuringScoring = countByScoringStatus(t, database, "in_progress")
-		return stubScoreFn(0.8)(ctx, tasks, orgID, secrets)
+		return stubScoreFn(0.8)(ctx, tasks, orgID, model, secrets)
 	}
 
 	r.run(ctx)
@@ -122,7 +122,7 @@ func TestRun_ResetFailureStillScores(t *testing.T) {
 	ids := seedScoringTasks(t, database, 1)
 
 	rec := &callOrderScoreStore{ScoreStore: stores.Scores, resetErr: fmt.Errorf("simulated store failure")}
-	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	r.scoreFn = stubScoreFn(0.8)
 
 	r.run(ctx)
@@ -156,7 +156,7 @@ func TestRun_DrainsOwedReDerivesAtCycleStart(t *testing.T) {
 	// The re-derive pass, as the router implements it: evaluate, then
 	// discharge what was evaluated.
 	var drained [][]string
-	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
 		OnReDeriveOwed: func(ctx context.Context, orgID string, ids []string) {
 			drained = append(drained, ids)
 			if err := stores.Scores.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
@@ -192,7 +192,7 @@ func TestRun_OwedDrainPrecedesThisCyclesScores(t *testing.T) {
 	seedScoringTasks(t, database, 2)
 
 	rec := &callOrderScoreStore{ScoreStore: stores.Scores}
-	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
 		OnReDeriveOwed: func(context.Context, string, []string) {},
 	})
 	r.scoreFn = stubScoreFn(0.8)
@@ -244,7 +244,7 @@ func TestRun_StaleScoringAndOwedReDeriveCoexist(t *testing.T) {
 
 	var drained []string
 	var scoredInCycle []string
-	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+	r := NewRunner(stores.Scores, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
 		OnReDeriveOwed: func(ctx context.Context, orgID string, ids []string) {
 			drained = append(drained, ids...)
 			if err := stores.Scores.ClearReDeriveOwed(ctx, orgID, ids); err != nil {
@@ -286,7 +286,7 @@ func TestRun_OwedDrainFailureStillScores(t *testing.T) {
 
 	rec := &callOrderScoreStore{ScoreStore: stores.Scores, owedErr: fmt.Errorf("simulated store failure")}
 	drained := false
-	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, RunnerCallbacks{
+	r := NewRunner(rec, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel, RunnerCallbacks{
 		OnReDeriveOwed: func(context.Context, string, []string) { drained = true },
 	})
 	r.scoreFn = stubScoreFn(0.8)
@@ -304,7 +304,7 @@ func TestRun_OwedDrainFailureStillScores(t *testing.T) {
 // stubScoreFn returns a batch scorer that scores every input with the
 // given autonomy suitability. No subprocess, no model call.
 func stubScoreFn(autonomy float64) batchScoreFn {
-	return func(_ context.Context, tasks []TaskInput, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
+	return func(_ context.Context, tasks []TaskInput, _, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
 		out := make([]TaskScore, len(tasks))
 		for i, in := range tasks {
 			out[i] = TaskScore{

@@ -13,13 +13,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
-
-// defaultBedrockHaikuModel is used when a Bedrock-configured org has not set
-// bedrock_model_id (the ANTHROPIC_MODEL override). Same inference-profile id
-// shape the Claude Code Bedrock docs recommend.
-const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 
 // completeDirect calls the org's configured Anthropic/Bedrock provider
 // directly from this process — no subprocess, no sandbox — through
@@ -28,16 +24,9 @@ const defaultBedrockHaikuModel = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*CompleteResult, error) {
 	// Fail fast on a caller bug (a job that never populated the multi-mode
 	// prompt split) rather than letting the provider reject an empty
-	// system/user turn with a far less actionable error. DirectModel is
-	// required regardless of provider: besides being the Anthropic-direct
-	// request model, it doubles as the cost-accounting key below, and a
-	// Bedrock org's request model is whatever inference-profile id or ARN it
-	// configured — a string no pricing snapshot can be expected to carry.
+	// system/user turn with a far less actionable error.
 	if opts.SystemPrompt == "" || opts.UserMessage == "" {
 		return nil, errors.New("systemllm: SystemPrompt and UserMessage are both required in multi mode")
-	}
-	if opts.DirectModel == "" {
-		return nil, errors.New("systemllm: DirectModel is required in multi mode")
 	}
 
 	startedAt := time.Now().UTC()
@@ -52,14 +41,13 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	}
 
 	// Map the env map onto provider credentials before anything else reads it,
-	// so the request model, the breaker key, and the span attribute are all
-	// derived from one decision about which provider this org is on rather
-	// than three that have to agree.
-	pc, err := mapDirectCreds(creds, opts.DirectModel)
+	// so the breaker key and the span attribute are both derived from one
+	// decision about which provider this org is on rather than two that have to
+	// agree.
+	pc, err := mapDirectCreds(creds, opts.Model)
 	if err != nil {
 		return nil, err
 	}
-	model := requestModel(pc, creds, opts.DirectModel)
 
 	// Pre-flight circuit-breaker check (see breaker.go): if this same
 	// upstream provider recently failed with a transient error and its
@@ -94,7 +82,7 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	temperature := opts.Temperature
 	completion, callErr := client.Stream(ctx, inference.Request{
 		Provider:     pc.Provider,
-		Model:        model,
+		Model:        opts.Model,
 		SystemPrompt: opts.SystemPrompt,
 		// One synthetic user row carrying the data being triaged. These jobs
 		// have no conversation and no transcript; the row exists because
@@ -111,7 +99,7 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	r.breaker.recordResult(provider, isTransientFailure(ctx, callErr))
 
 	durationMs := int(time.Since(startedAt).Milliseconds())
-	r.recordDirectCall(ctx, opts, model, startedAt, durationMs, completion, callErr)
+	r.recordDirectCall(ctx, opts, startedAt, durationMs, completion, callErr)
 
 	if callErr != nil {
 		// inference renders the provider's own message, the wrapped cause and
@@ -130,33 +118,30 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 // inference.ProviderCredentialsFromEnv consumes, so the provider branch is
 // unchanged either way.
 //
-// The model passed to either is empty on purpose. A model selects the provider
-// for a run the user configured, but these jobs are pinned by TF to one small
-// model that exists in every provider's vocabulary under a different spelling,
-// so their provider is whatever the org configured — and requestModel below
-// re-derives the right spelling from the credentials that resolution returned.
-// Naming the Anthropic spelling here would refuse to run the background jobs on
-// a Bedrock-only org.
+// The org's background-jobs model is the provider selector, exactly as a run's
+// model is: the catalog names the provider each key is reached through, so a
+// Bedrock key resolves Bedrock material and an Anthropic key resolves Anthropic
+// material, whichever else the org happens to hold. That is what lets a
+// Bedrock-only org run these jobs at all, and it is why nothing below has to
+// re-derive a spelling for the model the caller already chose.
 func resolveDirectCreds(ctx context.Context, opts CompleteOptions) (map[string]string, error) {
 	if opts.LLMResolver != nil {
-		return opts.LLMResolver(ctx, opts.OrgID, "")
+		return opts.LLMResolver(ctx, opts.OrgID, opts.Model)
 	}
-	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID, "")
+	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID, opts.Model)
 }
 
-// mapDirectCreds resolves the env map onto provider credentials. The key's
-// whitelist names BOTH models this call could request, because which one it
-// will is a consequence of the provider the mapping picks — so the mapping
-// decides that once and requestModel reads its answer, rather than a second
-// copy of the precedence rules deciding it in parallel. A key allowed to serve
-// a model nobody asks for costs nothing; one missing the model actually
-// requested fails the call.
-func mapDirectCreds(creds map[string]string, pinnedModel string) (inference.ProviderCredentials, error) {
-	models := []string{pinnedModel}
-	if bedrock := bedrockModel(creds); bedrock != pinnedModel {
-		models = append(models, bedrock)
-	}
-	pc, err := inference.ProviderCredentialsFromEnv(creds, models)
+// mapDirectCreds resolves the env map onto provider credentials, whitelisting
+// the one model this call requests — bifrost reads an empty whitelist as "no
+// models", and a key missing the model actually requested fails the call.
+//
+// It also refuses credentials for a provider other than the one the catalog
+// says serves this model. Resolution already selects the provider from the
+// model, so a mismatch is not a configuration an admin can be in — it is a bug
+// upstream of here, and sending the model anyway would buy a request from a
+// provider nobody chose.
+func mapDirectCreds(creds map[string]string, model string) (inference.ProviderCredentials, error) {
+	pc, err := inference.ProviderCredentialsFromEnv(creds, []string{model})
 	if err != nil {
 		// ResolveCredentialsForBundle already returns
 		// ErrNoCredentialsConfigured for an org with nothing configured in
@@ -164,18 +149,12 @@ func mapDirectCreds(creds map[string]string, pinnedModel string) (inference.Prov
 		// that returned an empty map still does.
 		return inference.ProviderCredentials{}, fmt.Errorf("systemllm: %w", err)
 	}
-	return pc, nil
-}
-
-// requestModel picks the model the request carries: an Anthropic org sends
-// the caller's pinned model id verbatim, a Bedrock org sends its own
-// (bedrock_model_id override, else the pinned Haiku inference profile). The
-// pinned id remains the cost-accounting key either way.
-func requestModel(pc inference.ProviderCredentials, creds map[string]string, pinnedModel string) string {
-	if pc.Provider == inference.ProviderBedrock {
-		return bedrockModel(creds)
+	if want, ok := modelcatalog.ProviderFor(model); ok && want != string(pc.Provider) {
+		return inference.ProviderCredentials{}, fmt.Errorf(
+			"systemllm: model %q is served by %s but the resolved credentials are %s",
+			model, modelcatalog.ProviderDisplayName(want), pc.Provider)
 	}
-	return pinnedModel
+	return pc, nil
 }
 
 // newDirectClient builds the per-call inference client. The release closure
@@ -196,35 +175,32 @@ func newDirectClient(pc inference.ProviderCredentials) (*inference.Client, func(
 // call produced (a completion, an error, or both zero) and hands them to
 // RecordDirect. Isolated from completeDirect's control flow so a recording
 // bug can't affect the returned result either way.
-func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, model string, startedAt time.Time, durationMs int, completion *inference.Completion, callErr error) {
+func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, startedAt time.Time, durationMs int, completion *inference.Completion, callErr error) {
 	var usage DirectUsage
 	var traceID string
 	var costUSD float64
 	if completion != nil {
 		usage = DirectUsageFrom(completion.Usage)
 		traceID = completion.ID
-		// Priced on opts.DirectModel (the pinned Anthropic model id), NOT the
-		// resolved request model: a Bedrock org's model is an
-		// inference-profile id or ARN it configured, and an org-specific one
-		// is a string no snapshot carries — which would record $0 for every
-		// call it ever makes. All three system jobs are pinned to one tier
-		// (Haiku), so DirectModel prices them all no matter which concrete
-		// endpoint served the request.
+		// Priced on the model that was requested, which is also the model the
+		// row records: the knob is a catalog key, and the catalog only offers
+		// keys the pricing datasheet carries a row for, so the ledger prices
+		// what actually ran.
 		//
 		// A model the vendored datasheet doesn't carry still records $0, but
 		// says so: a silent zero in the accounting table is indistinguishable
 		// from a genuinely free call.
-		cost, ok := inference.CostForUsage(opts.DirectModel, completion.Usage)
+		cost, ok := inference.CostForUsage(opts.Model, completion.Usage)
 		if !ok {
 			log.Warn("no pricing entry for system job model; recording zero cost",
-				"job", opts.Job, "org", opts.OrgID, "model", opts.DirectModel)
+				"job", opts.Job, "org", opts.OrgID, "model", opts.Model)
 		}
 		costUSD = cost
 	}
 	r.RecordDirect(ctx, Call{
 		OrgID:     opts.OrgID,
 		Job:       opts.Job,
-		Model:     model,
+		Model:     opts.Model,
 		StartedAt: startedAt,
 		Metadata:  opts.Metadata,
 	}, traceID, usage, costUSD, durationMs, callErr != nil)
@@ -309,14 +285,4 @@ func providerKey(pc inference.ProviderCredentials) string {
 // entry instead of silently splitting into two.
 func normalizeProviderURL(raw string) string {
 	return strings.TrimRight(strings.ToLower(strings.TrimSpace(raw)), "/")
-}
-
-// bedrockModel returns the org's configured bedrock_model_id override
-// (surfaced as ANTHROPIC_MODEL by resolveCredentials) or the pinned Haiku
-// inference-profile default.
-func bedrockModel(creds map[string]string) string {
-	if model := creds["ANTHROPIC_MODEL"]; model != "" {
-		return model
-	}
-	return defaultBedrockHaikuModel
 }

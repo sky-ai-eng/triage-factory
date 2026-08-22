@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -40,8 +41,7 @@ func TestComplete_LocalMode_DelegatesToSubprocess(t *testing.T) {
 		Message:      "combined local prompt",
 		SystemPrompt: "should be ignored in local mode",
 		UserMessage:  "should be ignored in local mode",
-		Model:        "haiku",
-		DirectModel:  "claude-haiku-4-5-20251001",
+		Model:        domain.ModelHaiku,
 		TraceID:      "classify-stage1",
 		Secrets:      nil,
 	})
@@ -51,8 +51,8 @@ func TestComplete_LocalMode_DelegatesToSubprocess(t *testing.T) {
 	if !called {
 		t.Fatal("expected the local (agentproc.Run) seam to be invoked")
 	}
-	if gotOpts.Model != "haiku" {
-		t.Errorf("Model = %q, want the CLI alias %q", gotOpts.Model, "haiku")
+	if gotOpts.Model != domain.ModelHaiku {
+		t.Errorf("Model = %q, want the org's background-jobs model %q — the concrete id the CLI accepts", gotOpts.Model, domain.ModelHaiku)
 	}
 	if gotOpts.Message != "combined local prompt" {
 		t.Errorf("Message = %q, want the combined prompt", gotOpts.Message)
@@ -72,7 +72,7 @@ func TestComplete_LocalMode_DelegatesToSubprocess(t *testing.T) {
 }
 
 // TestComplete_LocalMode_ErrorIncludesStderr pins the diagnostic contract a
-// caller lost when scoreBatch/runHaiku/profileBatch stopped formatting
+// caller lost when scoreBatch/runVote/profileBatch stopped formatting
 // stderr into their own error messages: Complete folds it in for them.
 func TestComplete_LocalMode_ErrorIncludesStderr(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -84,7 +84,7 @@ func TestComplete_LocalMode_ErrorIncludesStderr(t *testing.T) {
 	t.Cleanup(func() { runLocal = orig })
 
 	r := NewRecorder(nil)
-	_, err := r.Complete(context.Background(), CompleteOptions{Job: JobScorer, Model: "haiku"})
+	_, err := r.Complete(context.Background(), CompleteOptions{Job: JobScorer, Model: domain.ModelHaiku})
 	if err == nil {
 		t.Fatal("expected an error")
 	}

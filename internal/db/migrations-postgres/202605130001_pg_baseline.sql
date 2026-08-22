@@ -954,6 +954,27 @@ CREATE TABLE public.org_settings (
     -- future families be added with zero DDL; a richer provider/model split stays
     -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
+    -- The model the three headless system jobs — scorer, project classifier,
+    -- repo profiler — run on. One knob for all three: they are the same kind of
+    -- work (short, toolless, no transcript) bought from the same budget, so a
+    -- per-job column would be three ways to answer one question.
+    --
+    -- A modelcatalog key, validated app-side against the catalog and against the
+    -- providers the org has connected — not CHECK-constrained, the
+    -- max_llm_model_tier precedent above: the accepted set is the build's
+    -- catalog, which changes with the binary rather than with the schema.
+    --
+    -- NOT NULL with an EMPTY default, and the empty string is the load-bearing
+    -- part: it means the org has not picked yet, and until it does those jobs
+    -- skip their cycles. TF ships no fallback model, so a default here would be
+    -- a model nobody chose being bought with somebody's money. A fresh org is
+    -- therefore forced through the setup pick. The SQLite tree defaults to
+    -- 'claude-haiku-4-5-20251001' instead (202608260001_org_background_jobs_model.sql):
+    -- local mode is single-user and zero-configuration, with no setup step to
+    -- make someone choose. Rolled into the baseline (not a forward migration)
+    -- because multi-mode / Postgres is net-new and unshipped, so there are no
+    -- existing rows to seed.
+    background_jobs_model text DEFAULT ''::text NOT NULL,
     -- Org-wide daily LLM spend cap (TFAC-477). NULL = no cap; the app layer also
     -- treats 0 as "no cap". When the org's spend for the current UTC calendar day
     -- (summed across every category — autonomous + manual + curator + system

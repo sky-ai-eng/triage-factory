@@ -100,6 +100,7 @@ func (s *orgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain
 // though the row it comes from is now two tables.
 const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+	       background_jobs_model,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 	       github_credential_class, version`
 
@@ -262,6 +263,7 @@ const orgSettingsConflictUpdate = `
 			anthropic_api_key_ref = excluded.anthropic_api_key_ref,
 			bedrock_credentials_ref = excluded.bedrock_credentials_ref,
 			max_llm_model_tier = excluded.max_llm_model_tier,
+			background_jobs_model = excluded.background_jobs_model,
 			max_daily_cost_usd = excluded.max_daily_cost_usd,
 			max_concurrent_runs = excluded.max_concurrent_runs,
 			marketplace_enabled = excluded.marketplace_enabled,
@@ -285,6 +287,9 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 		nullStringValue(u.AnthropicAPIKeyRef),
 		nullStringValue(u.BedrockCredentialsRef),
 		nullStringValue(u.MaxLLMModelTier),
+		// Plain string, not nullStringValue: the column is NOT NULL and "" is
+		// the org's own "not picked yet" rather than an absent value.
+		u.BackgroundJobsModel,
 		nullFloatValue(u.MaxDailyCostUSD),
 		nullIntValue(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
@@ -303,9 +308,10 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 		INSERT INTO org_settings (
 			org_id, github_clone_protocol,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
+			background_jobs_model,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
@@ -328,6 +334,7 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			anthropic_api_key_ref = ?,
 			bedrock_credentials_ref = ?,
 			max_llm_model_tier = ?,
+			background_jobs_model = ?,
 			max_daily_cost_usd = ?,
 			max_concurrent_runs = ?,
 			marketplace_enabled = ?,

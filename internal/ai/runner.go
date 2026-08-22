@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -80,6 +81,7 @@ type Runner struct {
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests → Run's built-in resolution).
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited); captured by scoreFn.
+	models     systemllm.ModelFunc     // resolves the org's background-jobs model; a cycle with no usable one skips.
 	callbacks  RunnerCallbacks
 
 	// scoreFn scores one batch. The unit-test seam (replaces a direct
@@ -95,7 +97,7 @@ type Runner struct {
 	running  bool
 }
 
-func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Runner {
+func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, models systemllm.ModelFunc, callbacks RunnerCallbacks) *Runner {
 	r := &Runner{
 		scores:     scores,
 		entities:   entities,
@@ -104,12 +106,13 @@ func NewRunner(scores db.ScoreStore, entities db.EntityStore, orgID string, secr
 		llmResolve: llmResolve,
 		recorder:   recorder,
 		limiter:    limiter,
+		models:     models,
 		callbacks:  callbacks,
 		trigger:    make(chan struct{}, 1),
 		stop:       make(chan struct{}),
 	}
-	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
-		return scoreBatch(ctx, tasks, orgID, secrets, llmResolve, recorder, limiter)
+	r.scoreFn = func(ctx context.Context, tasks []TaskInput, orgID, model string, secrets agentproc.SecretsReader) ([]TaskScore, error) {
+		return scoreBatch(ctx, tasks, orgID, model, secrets, llmResolve, recorder, limiter)
 	}
 	return r
 }
@@ -214,7 +217,31 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	aiLog.InfoContext(ctx, "scoring unscored tasks", "count", len(tasks))
+	// Resolve the org's background-jobs model before anything is claimed. Either
+	// way this cycle scores nothing — it never substitutes a model of TF's
+	// choosing — and either way it skips before MarkScoring, so no task is
+	// claimed only to be reset.
+	//
+	// The two reasons it can fail are not the same event. An unusable SETTING is
+	// a configuration state whose remedy is an org admin picking a model: WARN,
+	// no error callback, and the next cycle asks again. Anything else — the
+	// settings row could not be read, nothing was wired to read it with — is a
+	// failed cycle, and gets what every other failed read here gets, so a
+	// wedged database is not quietly reported as an org that has not chosen.
+	model, err := r.models.Resolve(ctx, r.orgID)
+	switch {
+	case errors.Is(err, systemllm.ErrNoModel):
+		span.SetAttributes(telemetry.Outcome("no_model"))
+		aiLog.WarnContext(ctx, "skipping scoring cycle", "org", r.orgID, "error", err)
+		return
+	case err != nil:
+		span.SetStatus(codes.Error, "resolve background jobs model")
+		aiLog.ErrorContext(ctx, "resolve background jobs model failed", "org", r.orgID, "error", err)
+		r.reportError(err)
+		return
+	}
+
+	aiLog.InfoContext(ctx, "scoring unscored tasks", "count", len(tasks), "model", model)
 
 	// Collect task IDs for callbacks
 	taskIDs := make([]string, len(tasks))
@@ -231,7 +258,7 @@ func (r *Runner) run(ctx context.Context) {
 		r.callbacks.OnScoringStarted(r.orgID, taskIDs)
 	}
 
-	scores, skippedTasks, err := r.scoreTasks(ctx, tasks)
+	scores, skippedTasks, err := r.scoreTasks(ctx, tasks, model)
 	if err != nil {
 		span.SetStatus(codes.Error, "score tasks")
 		aiLog.ErrorContext(ctx, "scoring failed", "error", err)

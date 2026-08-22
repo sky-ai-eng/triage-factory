@@ -14,6 +14,16 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
+// testModel is the background-jobs model these tests resolve to, and fixedModel
+// is the systemllm.ModelFunc that hands it out. The value is a real catalog key
+// so a stub can't pass where the production resolver would refuse; nothing in
+// these tests calls a provider with it.
+const testModel = domain.ModelHaiku
+
+var fixedModel systemllm.ModelFunc = func(context.Context, string) (string, error) {
+	return testModel, nil
+}
+
 // captureHandler is a minimal slog.Handler that records emitted entries so a
 // test can assert exactly what — and how often — a code path logged. Mirrors
 // internal/github/client_test.go's helper of the same name/shape.
@@ -47,10 +57,10 @@ func (h *captureHandler) recorded() []slog.Record {
 func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 	// nil stores/secrets/recorder/limiter: scoreTasks skips description
 	// loading when entities is nil and never touches the others on this path.
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 
 	var calls int32
-	r.scoreFn = func(_ context.Context, tasks []TaskInput, orgID string, _ agentproc.SecretsReader) ([]TaskScore, error) {
+	r.scoreFn = func(_ context.Context, tasks []TaskInput, orgID, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
 		atomic.AddInt32(&calls, 1)
 		if orgID != "org-x" {
 			t.Errorf("scoreFn orgID = %q; want org-x (the Runner's org must thread through)", orgID)
@@ -75,7 +85,7 @@ func TestScoreTasks_BatchesAndCountsSkips(t *testing.T) {
 	}
 	tasks[12].ID = "fail-me"
 
-	scores, skipped, err := r.scoreTasks(context.Background(), tasks)
+	scores, skipped, err := r.scoreTasks(context.Background(), tasks, testModel)
 	if err != nil {
 		t.Fatalf("scoreTasks: %v", err)
 	}
@@ -102,13 +112,13 @@ func TestScoreTasks_ProviderBackoff_LogsQuietly(t *testing.T) {
 	aiLog = slog.New(logs)
 	t.Cleanup(func() { aiLog = prev })
 
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
-	r.scoreFn = func(context.Context, []TaskInput, string, agentproc.SecretsReader) ([]TaskScore, error) {
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
+	r.scoreFn = func(context.Context, []TaskInput, string, string, agentproc.SecretsReader) ([]TaskScore, error) {
 		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
 	}
 
 	tasks := []domain.Task{{ID: "t-1"}}
-	_, skipped, err := r.scoreTasks(context.Background(), tasks)
+	_, skipped, err := r.scoreTasks(context.Background(), tasks, testModel)
 	if err != nil {
 		t.Fatalf("scoreTasks: %v", err)
 	}
@@ -128,7 +138,7 @@ func TestScoreTasks_ProviderBackoff_LogsQuietly(t *testing.T) {
 // TestRunner_StopIdempotent pins that Stop is safe to call more than once
 // (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
 func TestRunner_StopIdempotent(t *testing.T) {
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	r.Start()
 	r.Stop()
 	r.Stop() // must not panic
@@ -184,9 +194,9 @@ func TestRun_OnScoringCompletedReceivesOnlyFreshlyScored(t *testing.T) {
 	allTasks[12].ID = "fail-me" // poisons the second batch (indices 10-19)
 
 	store := &stubScoreStore{tasks: allTasks}
-	r := NewRunner(store, nil, "org-y", nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(store, nil, "org-y", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 
-	r.scoreFn = func(_ context.Context, tasks []TaskInput, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
+	r.scoreFn = func(_ context.Context, tasks []TaskInput, _, _ string, _ agentproc.SecretsReader) ([]TaskScore, error) {
 		for _, in := range tasks {
 			if in.ID == "fail-me" {
 				return nil, errors.New("simulated batch failure")
@@ -239,13 +249,13 @@ func TestRun_OnScoringCompletedReceivesOnlyFreshlyScored(t *testing.T) {
 // TestScoreTasks_EmptyReturnsZero pins the early-out: no tasks means no scoreFn
 // calls and a clean zero result.
 func TestScoreTasks_EmptyReturnsZero(t *testing.T) {
-	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, RunnerCallbacks{})
+	r := NewRunner(nil, nil, "org-x", nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	var calls int32
-	r.scoreFn = func(context.Context, []TaskInput, string, agentproc.SecretsReader) ([]TaskScore, error) {
+	r.scoreFn = func(context.Context, []TaskInput, string, string, agentproc.SecretsReader) ([]TaskScore, error) {
 		atomic.AddInt32(&calls, 1)
 		return nil, nil
 	}
-	scores, skipped, err := r.scoreTasks(context.Background(), nil)
+	scores, skipped, err := r.scoreTasks(context.Background(), nil, testModel)
 	if err != nil || skipped != 0 || len(scores) != 0 {
 		t.Errorf("scoreTasks(nil) = (%v, %d, %v); want (nil, 0, nil)", scores, skipped, err)
 	}

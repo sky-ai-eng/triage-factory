@@ -15,6 +15,17 @@ import (
 // is what a partial write materializes a row from.
 const DefaultModel = ModelSonnet
 
+// LocalBackgroundJobsModel is the background-jobs model a local install starts
+// with. Local mode is a single-user, zero-configuration first run, so its knob
+// arrives already filled in — the SQLite org_settings column carries this value
+// as its DEFAULT, which is what materializes it both for a fresh tenant and for
+// a row that predates the column. Multi mode has no such default: an org there
+// picks its model during setup, and until it does its background jobs skip.
+//
+// It is a pre-fill, not a fallback. Nothing resolves to it at job time; the only
+// thing that reads it is the schema.
+const LocalBackgroundJobsModel = ModelHaiku
+
 // DefaultBranchTemplate is the branch-name convention suggested to delegated
 // agents as envelope guidance (not enforced). The literal "<ticket-id>" is
 // substituted with the conversation's ticket id at prompt-render time.
@@ -173,6 +184,22 @@ type OrgSettings struct {
 	// picked without claiming any is better than another, which is the claim a
 	// ceiling has to make and the catalog declines to.
 	MaxLLMModelTier string
+
+	// BackgroundJobsModel is the model the three headless system jobs — the
+	// scorer, the project classifier and the repo profiler — run on. A catalog
+	// key (internal/modelcatalog), validated on write against the catalog and
+	// against the providers the org has connected.
+	//
+	// One knob for all three, org-level: they are the same kind of work (short,
+	// toolless, no transcript) bought from the same budget, and a per-job knob
+	// would be three ways to answer one question.
+	//
+	// "" is unset, and unset means the jobs do not run: there is no shipped
+	// fallback model anywhere in TF, so a job with no model skips its cycle and
+	// says so rather than spending someone's money on a model nobody chose.
+	// Local installs are pre-filled by the column default (see
+	// LocalBackgroundJobsModel); a multi-mode org picks one during setup.
+	BackgroundJobsModel string
 
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
 	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
