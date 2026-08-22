@@ -124,19 +124,26 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 // model. Every outcome of an attempt that DID reach the wire comes back as a
 // Result, including the failures.
 //
-// The transport follows the mode, exactly as systemllm.Complete's does and for
-// its reason rather than a delegated run's: what varies is whether this process
-// can assemble a request out of the org's credentials at all. Multi always can
-// — every org there brings its own material and the store is readable in
-// process. Local may not, because a Claude Code subscription has no key, and
-// the subprocess is the only thing that can authenticate one.
+// What actually varies is the RUNTIME, and the two paths here are the two
+// conversation runtimes' own machinery: the direct one is inference.New over a
+// resolved env map, which is what agentloop.EnvCredentials builds per call for
+// the native engine, and the SDK one is agentproc.Run. So a probe spends its
+// request through the same client a delegated run does, and tests the
+// credential path that run will take rather than a parallel one.
 //
-// The two paths are the same machinery the two conversation runtimes use: the
-// direct one is inference.New over a resolved env map, which is what
-// agentloop.EnvCredentials builds per call, and the SDK one is agentproc.Run.
-// The selector is deliberately NOT that ratchet. It is a conversations column
-// stamped at mint, and a probe has no conversation — it is one (org, model)
-// question — so the mode is what is knowable here.
+// It selects on the mode because the mode is what settles the runtime: the
+// dialect IS the mode, and the enqueue stamps the ratchet per dialect —
+// Postgres mints delegations 'native', SQLite mints them 'sdk'. Reading
+// runmode rather than the column is not a shortcut around that, it is the only
+// thing available: the ratchet lives on a conversations row and a probe has no
+// conversation, being one (org, model) question asked before any work exists.
+//
+// The curator is the exception, and it is the reason this is stated as a rule
+// about delegations. Its conversations still mint under the column DEFAULT of
+// 'sdk' in both dialects, so a multi curator turn goes through the subprocess
+// while this probes direct. Harmless — both reach the same provider with the
+// same org credential, which is all a verdict claims — and it closes on its
+// own when the curator cuts over to native.
 //
 // Both transports produce the same three verdicts from the same status sets:
 // what differs is where the status is read from, not what it means.
@@ -147,9 +154,9 @@ func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Ent
 	return p.probeSDK(ctx, orgID, entry)
 }
 
-// probeSDK spends the probe through the SDK subprocess, which is what a local
-// run is: conversations mint under the sdk runtime, so this is the transport
-// whose failure a local user would otherwise meet at dispatch.
+// probeSDK spends the probe through the SDK subprocess, which is how a local
+// delegation runs: SQLite mints them under the sdk runtime, so this is the
+// transport whose failure a local user would otherwise first meet at dispatch.
 //
 // It resolves no credentials itself. agentproc.Run owns that resolution — the
 // same call, with the same seams, that a local run makes — so a probe cannot
@@ -197,7 +204,10 @@ func (p *Prober) probeSDK(ctx context.Context, orgID string, entry modelcatalog.
 }
 
 // probeDirect spends the probe from this process, against credentials it
-// resolves and assembles itself — the way a multi-mode system job spends one.
+// resolves and assembles itself — the way a multi delegation and a multi system
+// job both spend one. The native engine's loop runs here rather than in the
+// jail, so its cell is built with no model channel at all and this client is
+// the whole of how a multi run reaches a provider.
 func (p *Prober) probeDirect(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
 	creds, err := p.resolveCredentials(ctx, orgID, entry.Key)
 	if err != nil {

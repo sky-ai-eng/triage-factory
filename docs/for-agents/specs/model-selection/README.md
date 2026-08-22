@@ -903,19 +903,24 @@ drift:
   shipped fallback. Local pre-fills both with the migration's concrete
   equivalents of today's defaults, preserving the zero-friction first run.
 
-Availability is **not** one of them. The probe has two transports — an
-in-process call over `internal/inference`, the machinery the native
-conversation runtime uses, and the SDK subprocess — but what each asks and
-what the answer means are identical, so the field carries no mode difference
-for a client to read.
+Availability is **not** one of them. The probe has two transports, and they
+are the two conversation runtimes' own: an in-process call over
+`internal/inference` (what `agentloop` builds per call for the **native**
+engine) and the **SDK** subprocess. Either way it spends the request through
+the same client a delegated run does, so it tests that run's credential path
+rather than a parallel one — and what it asks, and what the answer means, are
+identical, so the field carries no mode difference for a client to read.
 
-Which one runs is chosen by **mode**, not by the `sdk`/`native` ratchet: that
-ratchet is a `conversations` column stamped at mint and a probe has no
-conversation. Mode stands in for the question that actually decides —
-*can this process assemble a request from the org's credentials?* Multi always
-can; local may hold only a subscription, which has no key and can be
-authenticated only by the subprocess. It is the same split, for the same
-reason, that `systemllm.Complete` makes.
+It picks by mode because the mode settles the runtime: the dialect *is* the
+mode and the enqueue stamps the ratchet per dialect — Postgres mints
+delegations `native`, SQLite mints them `sdk`. Reading the ratchet itself is
+not an option, since it lives on a `conversations` row and a probe has no
+conversation.
+
+The curator is the open exception: its conversations still mint under the
+column default of `sdk` in both dialects (cutover tracked in TFAC-769), so a
+multi curator turn uses the subprocess while the probe goes direct. Both reach
+the same provider with the same org credential, which is all a verdict claims.
 
 The one thing that genuinely differs between the modes is what an org's
 credential source can be: only local can run on the host's, and that source

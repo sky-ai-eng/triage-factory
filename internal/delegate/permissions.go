@@ -19,14 +19,17 @@
 // must never become a reason to fail to ask it.
 //
 // Both runLiveAndDrive call sites (the initial run and the resume) drive
-// through this same streaming-input path — local direct runs and multi-mode
-// gVisor-sandboxed runs alike (the sandbox's bidirectional stdio channel is
-// validated end-to-end, so runOneShot is a vestigial fallback, not the
-// production sandbox path). What differs by call site is which permission
-// handler answers the prompt: local-mode runs get this file's
-// BrowserPermissionHandler; gVisor-sandboxed delegated runs get
-// AutoApprovePermissionHandler instead — see run.go/resume.go for the
-// agentproc.WillSandbox() branch.
+// through this same streaming-input path — direct spawns and gVisor-jailed
+// runs alike (the sandbox's bidirectional stdio channel is validated
+// end-to-end, so runOneShot is a vestigial fallback, not the production
+// sandbox path). What differs by call site is which permission handler answers
+// the prompt: an unjailed spawn gets this file's BrowserPermissionHandler; a
+// gVisor-jailed one gets AutoApprovePermissionHandler instead — see
+// run.go/resume.go for the agentproc.WillSandbox() branch.
+//
+// This whole file is the SDK runtime's, reached only by a conversation carrying
+// that ratchet. The native engine's tool calls never arrive here: its loop runs
+// in this process and its own dispatcher decides them.
 
 package delegate
 
