@@ -73,7 +73,9 @@ func TestCurator_Postgres_Multimode_FullTurn(t *testing.T) {
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	bindOrgLLM(t, h, orgA)
 	orgB, bob, _ := pgtest.SeedOrgWithUser(t, h, "bob")
+	bindOrgLLM(t, h, orgB)
 
 	// A "private" pinned repo for tenant A: a local bare upstream stands in
 	// for the private GitHub repo and is recorded in repositories so the
@@ -278,6 +280,7 @@ func TestCurator_Postgres_Multimode_SharedReadOnlyWorktree(t *testing.T) {
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	bindOrgLLM(t, h, orgA)
 	upstream := makeCapstoneUpstream(t)
 	const owner, repo = "acme", "shared"
 	seedRepository(t, h, orgA, owner, repo, upstream, "main")
@@ -338,7 +341,9 @@ func TestCurator_Postgres_Multimode_BoundedEvictableCache(t *testing.T) {
 	ctx := context.Background()
 
 	orgCold, _, _ := pgtest.SeedOrgWithUser(t, h, "cold")
+	bindOrgLLM(t, h, orgCold)
 	orgHot, _, _ := pgtest.SeedOrgWithUser(t, h, "hot")
+	bindOrgLLM(t, h, orgHot)
 
 	coldUp := makeCapstoneUpstream(t)
 	hotUp := makeCapstoneUpstream(t)
@@ -402,6 +407,7 @@ func TestCurator_Postgres_Multimode_CancelMidFlight(t *testing.T) {
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	bindOrgLLM(t, h, orgA)
 	upstream := makeCapstoneUpstream(t)
 	seedRepository(t, h, orgA, "acme", "repo", upstream, "main")
 	projA := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb", []string{"acme/repo"})
@@ -444,7 +450,9 @@ func TestCurator_Postgres_Multimode_SimulatedRestartSweepsOrphans(t *testing.T) 
 	ctx := context.Background()
 
 	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	bindOrgLLM(t, h, orgA)
 	orgB, bob, teamB := pgtest.SeedOrgWithUser(t, h, "bob")
+	bindOrgLLM(t, h, orgB)
 	projA := seedPgProject(t, h, orgA, alice, teamA, "a")
 	projB := seedPgProject(t, h, orgB, bob, teamB, "b")
 
@@ -648,6 +656,84 @@ func multimodeEnv(t *testing.T) {
 
 // seedRepository records a repositories row (admin pool) so the curator's
 // GetSystem read resolves a clone URL + branch for the pinned repo.
+// A curator turn for an org that brings its own credentials and has bound none
+// is refused BEFORE the agent spawns. Without the gate the turn would reach
+// agentproc.Run, be handed an empty environment, and let the SDK authenticate
+// from whatever the operator's shell holds — billing this org's conversation to
+// a credential nobody configured. A turn is the org's spend like any run, so it
+// gets the same refusal the delegated-run and background-job gates give.
+//
+// The stub call count is the assertion that matters: a refusal that happened
+// after the spawn would still show "failed" and would still have spent.
+func TestCurator_Postgres_Multimode_NoCredentialsRefusesBeforeSpawn(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	multimodeEnv(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	// Deliberately NOT bindOrgLLM'd: the org is on the Postgres column default
+	// ('byok') with no provider ref, which is a tenant partway through setup.
+	orgA, alice, teamA := pgtest.SeedOrgWithUser(t, h, "alice")
+	projectA := seedPgProjectPinned(t, h, orgA, alice, teamA, "kb", nil)
+
+	stub := &stubAgent{}
+	c := New(stores, nil, "capstone-model")
+	t.Cleanup(startTestClaimLoop(t, stores, c))
+	c.runAgent = stub.run
+	c.SetRunCredentialResolvers(&capstoneResolver{token: "ghs_capstone"}, capstoneSecrets{}, nil)
+	t.Cleanup(c.Shutdown)
+
+	reqID, err := c.SendMessage(ctx, projectA, orgA, alice, "what does this repo do?")
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	waitForStatus(t, h, reqID, "failed")
+
+	stub.mu.Lock()
+	spawned := len(stub.calls)
+	stub.mu.Unlock()
+	if spawned != 0 {
+		t.Errorf("agent spawned %d time(s); the refusal must land before anything is spent", spawned)
+	}
+
+	msgID, err := strconv.ParseInt(reqID, 10, 64)
+	if err != nil {
+		t.Fatalf("parse request id: %v", err)
+	}
+	// The refusal reason rides the claim that released the turn — the same row
+	// turnStatusPg reads its outcome from.
+	var errMsg string
+	if err := h.AdminDB.QueryRow(`
+		SELECT COALESCE(cl.error, '')
+		FROM claims cl
+		JOIN messages m ON m.conversation_id = cl.conversation_id
+		WHERE m.id = $1
+		ORDER BY cl.claimed_at DESC, cl.created_at DESC
+		LIMIT 1`, msgID).Scan(&errMsg); err != nil {
+		t.Fatalf("read turn error: %v", err)
+	}
+	if !strings.Contains(errMsg, "Claude credentials") {
+		t.Errorf("turn error = %q; want it to name the credential gap", errMsg)
+	}
+}
+
+// bindOrgLLM records that the org holds its own Anthropic credential — the
+// settings ref, and the credential source a real bind writes alongside it.
+// These rigs stub credential RESOLUTION (capstoneSecrets) but the dispatch gate
+// reads the settings row, and a multi-mode org that has bound nothing can
+// authenticate nothing: without this a turn is refused before it spawns, which
+// is the gate working rather than the fixture.
+func bindOrgLLM(t *testing.T, h *pgtest.Harness, orgID string) {
+	t.Helper()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO org_settings (org_id, anthropic_api_key_ref, llm_auth_method)
+		VALUES ($1, 'anthropic_api_key', 'byok')
+		ON CONFLICT (org_id) DO UPDATE
+		   SET anthropic_api_key_ref = 'anthropic_api_key',
+		       llm_auth_method = 'byok'`, orgID)
+}
+
 func seedRepository(t *testing.T, h *pgtest.Harness, orgID, owner, repo, cloneURL, defaultBranch string) {
 	t.Helper()
 	pgtest.MustExec(t, h.AdminDB, `
