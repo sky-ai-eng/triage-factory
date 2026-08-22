@@ -87,12 +87,25 @@ type modelCatalogResponse struct {
 // anything about the model — the mode difference travels as DATA in this
 // field, never as a branch in the client.
 const (
-	// modelAvailabilityAssumed — nobody asked. Local mode's only answer: its
-	// runs go through the SDK subprocess, which may be authenticating with a
-	// Claude Code subscription that has no API key to probe with, so there is
-	// no credential to establish anything about. A local failure surfaces at
-	// run time through the SDK's own error path, which is the only place local
-	// can learn it.
+	// modelAvailabilityUnconfigured — this model's provider holds no credential
+	// for this org, so nothing can invoke it and no probe is worth spending.
+	// Not a probe result: a local, certain fact derived from what is bound.
+	//
+	// It outranks every other value, INCLUDING a stored green — a credential
+	// unbound after a successful probe leaves a row that was true when written
+	// and is not true now, and the derived fact is the one that can still be
+	// checked. Least-fixable-first, the same ordering internal/eventsource
+	// uses, and the same argument modelaccess.Check already makes internally:
+	// sending someone to test a provider they never connected is sending them
+	// to do useless work.
+	modelAvailabilityUnconfigured = "unconfigured"
+	// modelAvailabilityAssumed — nobody asked, and nobody can. Two orgs get
+	// it: one running on ambient credentials (local's zero-config Claude Code
+	// subscription, which binds no provider ref at all — there is no key to
+	// probe with and no provider to call unconfigured), and any org in local
+	// mode, whose runs go through the SDK subprocess. A local failure surfaces
+	// at run time through the SDK's own error path, which is the only place
+	// local can learn it.
 	modelAvailabilityAssumed = "assumed"
 	// modelAvailabilityVerified — a probe invoked this model with this org's
 	// credentials and it answered. Permanent: nothing re-probes on a timer.
@@ -100,9 +113,12 @@ const (
 	// modelAvailabilityRed — a probe was refused. Carries the provider's own
 	// message in availability_detail.
 	modelAvailabilityRed = "red"
-	// modelAvailabilityUnverified — multi mode, no conclusive probe yet. It is
-	// deliberately not distinguished from "every attempt timed out": both mean
-	// nobody has established anything, and both are fixed by testing again.
+	// modelAvailabilityUnverified — multi mode, the provider IS connected, and
+	// no probe has concluded anything yet. It is deliberately not
+	// distinguished from "every attempt timed out": both mean nobody has
+	// established anything, and both are fixed by pressing test again — which
+	// is exactly why an unconnected provider must not land here, since testing
+	// one is refused rather than inconclusive.
 	modelAvailabilityUnverified = "unverified"
 )
 

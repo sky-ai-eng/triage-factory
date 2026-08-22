@@ -25,17 +25,43 @@ type modelProber interface {
 }
 
 // availabilityIndex answers what the catalog read should publish for one
-// entry's availability.
+// entry's availability, and is the single resolution every route on this
+// handler reads — the catalog reads to render a badge, the test routes to
+// refuse a provider before spending anything on it.
 //
+// Two inputs, and they answer different kinds of question. connected is a
+// LOCAL, CERTAIN fact about what the org has bound, so it holds in either mode
+// and needs no probe. rows are probe RESULTS, which only multi mode has:
 // probing is the mode difference, held as one boolean resolved once rather
-// than as a runmode read per row: local mode never probes, so every entry
-// there is "assumed" and NO table is consulted at all. It is a separate field
-// from the map because in multi an org that has probed nothing also has no
-// rows, and "we did not look" must not render the same as "we looked and found
-// nothing".
+// than as a runmode read per row, and it is a separate field from the map
+// because in multi an org that has probed nothing also has no rows — "we did
+// not look" must not render the same as "we looked and found nothing".
 type availabilityIndex struct {
-	probing bool
-	rows    map[string]domain.ModelAvailability
+	// connected is the providers the org holds credentials for, read off the
+	// settings refs. EMPTY IS NOT "none": an org with no refs at all is on
+	// ambient credentials, which is the zero-config local subscription, and
+	// every entry is assumed rather than unconfigured. That is the same rule
+	// modelaccess.Check holds, restated nowhere — ambient() is the one place
+	// this handler asks the question.
+	connected map[string]bool
+	probing   bool
+	rows      map[string]domain.ModelAvailability
+}
+
+// ambient reports whether the org has bound no provider at all, and is
+// therefore running on whatever credential the host supplies. Such an org has
+// nothing to be unconfigured ABOUT: there is no provider it failed to connect,
+// because it is not selecting between providers in the first place.
+func (a availabilityIndex) ambient() bool { return len(a.connected) == 0 }
+
+// has reports whether a probe against provider is worth attempting. An ambient
+// org passes for every provider, which is the rule modelaccess.Check holds and
+// credential resolution holds under it: there is no per-provider credential to
+// be missing. It is deliberately NOT the same question forEntry asks — that
+// one is "what is true about this model", and for an ambient org the answer is
+// that nobody knows, not that the attempt is barred.
+func (a availabilityIndex) has(provider string) bool {
+	return a.ambient() || a.connected[provider]
 }
 
 // availabilityRowKey addresses a stored row from a catalog entry. Both halves,
@@ -44,7 +70,25 @@ type availabilityIndex struct {
 func availabilityRowKey(provider, modelKey string) string { return provider + "\x00" + modelKey }
 
 // forEntry renders one entry's availability triple for the wire.
+//
+// The order is the precedence, least-fixable first. An unconnected provider is
+// decided before any stored row is consulted, so a green that a later
+// disconnect invalidated cannot outlive the credential that earned it — and so
+// nobody is badged "unverified" and pointed at a test button that the routes
+// beside this one refuse.
 func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string, checkedAt *time.Time) {
+	// An ambient org makes no claim about anything. It has not failed to
+	// connect a provider — it is not selecting between providers at all — so
+	// neither "unconfigured" nor a probe result is a true thing to say, and
+	// this is deliberately the same answer such an org got before this state
+	// existed. Checked before the provider, because ambient is the case where
+	// "the provider is not in the connected set" is not evidence of anything.
+	if a.ambient() {
+		return modelAvailabilityAssumed, "", nil
+	}
+	if !a.connected[e.Provider] {
+		return modelAvailabilityUnconfigured, "", nil
+	}
 	if !a.probing {
 		return modelAvailabilityAssumed, "", nil
 	}
@@ -66,20 +110,37 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 	return modelAvailabilityUnverified, "", nil
 }
 
-// availability resolves the org's probe results for a catalog read. Local mode
-// short-circuits without touching the store: its answer is a pure function of
-// the mode, and reading a table it never writes would be a query whose result
-// is always discarded.
+// availability resolves everything this handler knows about what the org can
+// run, in one pass, so no two routes can answer differently and no request
+// reads the settings row twice.
+//
+// Both modes read the org's bound providers — that half is a local fact and
+// local mode needs it, because an unconnected provider is the one thing about
+// availability local can honestly answer. Only multi reads
+// model_availability: local never writes that table, so querying it there
+// would be work whose result is discarded by the mode check in forEntry.
+//
+// The settings read runs on the app pool as the caller. org_settings SELECT is
+// member-level, the same gate the catalog read itself carries, so a plain
+// member resolves the same providers an admin does — which matters, because a
+// member silently answered with the defaults would see a picker full of models
+// their org cannot run.
 func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
-	if runmode.Current() != runmode.ModeMulti {
-		return availabilityIndex{}, true
-	}
-	index := availabilityIndex{probing: true, rows: map[string]domain.ModelAvailability{}}
+	index := availabilityIndex{probing: runmode.Current() == runmode.ModeMulti}
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		index.connected = modelaccess.OrgProviders(set)
+		if !index.probing {
+			return nil
+		}
 		stored, err := tx.ModelAvailability.List(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("read model availability: %w", err)
 		}
+		index.rows = make(map[string]domain.ModelAvailability, len(stored))
 		for _, row := range stored {
 			index.rows[availabilityRowKey(row.Provider, row.ModelKey)] = row
 		}
@@ -172,7 +233,11 @@ func (h *modelsHandler) handleModelTest(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	if !h.providerConnected(w, r, orgID, userID, entry.Provider) {
+	avail, ok := h.availability(w, r, orgID, userID)
+	if !ok {
+		return
+	}
+	if !requireProviderConnected(w, avail, entry.Provider) {
 		return
 	}
 
@@ -238,15 +303,15 @@ func (h *modelsHandler) handleModelTestSweep(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
-	if !h.providerConnected(w, r, orgID, userID, provider) {
-		return
-	}
-
-	// One read up front for what is already verified. Read before any probe so
-	// the skip decision is made against the state the admin saw, not against
-	// rows this same sweep just wrote.
+	// One resolution up front, for both the connected-provider gate and what
+	// is already verified. Read before any probe so the skip decision is made
+	// against the state the admin saw, not against rows this same sweep just
+	// wrote.
 	avail, ok := h.availability(w, r, orgID, userID)
 	if !ok {
+		return
+	}
+	if !requireProviderConnected(w, avail, provider) {
 		return
 	}
 
@@ -392,31 +457,21 @@ func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Entry, boo
 	return modelcatalog.Entry{}, false
 }
 
-// providerConnected refuses a probe against a provider the org holds no
+// requireProviderConnected refuses a probe against a provider the org holds no
 // credential for, before anything is attempted.
 //
-// It reads the settings refs (what is BOUND) rather than discovering the gap
-// from a failed resolution, so the sweep refuses once, up front, instead of
-// once per candidate — and so a sweep of an unconnected provider writes no
-// rows at all rather than a few before giving up.
-func (h *modelsHandler) providerConnected(w http.ResponseWriter, r *http.Request, orgID, userID, provider string) bool {
-	var connected map[string]bool
-	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		connected = modelaccess.OrgProviders(set)
-		return nil
-	}); err != nil {
-		internalError(w, "models", err)
-		return false
+// It reads the already-resolved index rather than the store, so the refusal
+// and the badge the catalog read publishes for the same model are one
+// decision: a caller told "unconfigured" by the read and "not connected" by
+// this cannot be told two different things about one credential. Deciding it
+// up front is also what makes a sweep of an unconnected provider write no rows
+// at all, rather than a few before giving up.
+func requireProviderConnected(w http.ResponseWriter, avail availabilityIndex, provider string) bool {
+	if avail.has(provider) {
+		return true
 	}
-	if !connected[provider] {
-		writeNotConfigured(w, fmt.Sprintf(
-			"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
-			modelcatalog.ProviderDisplayName(provider)))
-		return false
-	}
-	return true
+	writeNotConfigured(w, fmt.Sprintf(
+		"%s is not connected for this organization — connect it in Settings → Claude credentials before testing its models",
+		modelcatalog.ProviderDisplayName(provider)))
+	return false
 }

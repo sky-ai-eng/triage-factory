@@ -12,6 +12,19 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// bindAnthropicRef records that the org holds an Anthropic credential. The
+// settings REF is what the availability derivation reads — it is the record of
+// what an admin bound, and the vault secret behind it is only needed by
+// something that actually makes a request.
+func bindAnthropicRef(t *testing.T, r *authRig, orgID string) {
+	t.Helper()
+	if _, err := r.h.AdminDB.Exec(`
+		INSERT INTO org_settings (org_id, anthropic_api_key_ref) VALUES ($1, 'anthropic_api_key')
+		ON CONFLICT (org_id) DO UPDATE SET anthropic_api_key_ref = 'anthropic_api_key'`, orgID); err != nil {
+		t.Fatalf("bind anthropic ref: %v", err)
+	}
+}
+
 // modelsPath addresses one org's catalog.
 func modelsPath(orgID string) string { return "/api/orgs/" + orgID + "/models" }
 
@@ -129,15 +142,19 @@ func TestModelsList_OrgScoping(t *testing.T) {
 // exactly this difference as DATA. A client reads the field; it never asks
 // which mode it is talking to.
 //
-// Local says "assumed" because it has nothing to probe with: its runs go
-// through the SDK subprocess, possibly on a Claude Code subscription with no
-// API key. Multi says "unverified" until a probe concludes something.
+// The multi org here holds an Anthropic credential and no Bedrock one, so it
+// exercises the real divergence rather than the degenerate case: multi
+// distinguishes "connected, nothing established" from "no credential for this
+// provider at all", while local answers "assumed" for everything because its
+// runs go through the SDK subprocess, possibly on a Claude Code subscription
+// with no API key to establish anything with.
 func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
 	multi := func() []modelCatalogRow {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		r := newAuthRig(t)
 		alice := r.seedUser()
 		orgA, _ := r.seedOrg(alice, "alice-parity-org")
+		bindAnthropicRef(t, r, orgA.String())
 		resp, _ := r.driveCallback(alice)
 		got := r.requestWithSid(http.MethodGet, modelsPath(orgA.String()), r.sidFromResp(resp))
 		defer got.Body.Close()
@@ -163,14 +180,21 @@ func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
 		t.Fatalf("local returned %d models, multi %d — the catalog is the same file in both", len(local), len(multi))
 	}
 	for i := range local {
+		// Local's org binds nothing, so it is ambient and says so for every
+		// entry — including the Bedrock ones the multi org calls unconfigured.
+		// That is the asymmetry the field exists to carry.
 		if local[i].Availability != modelAvailabilityAssumed {
 			t.Errorf("%s: local availability = %q, want %q", local[i].Key, local[i].Availability, modelAvailabilityAssumed)
 		}
-		if multi[i].Availability != modelAvailabilityUnverified {
-			t.Errorf("%s: multi availability = %q, want %q with nothing probed", multi[i].Key, multi[i].Availability, modelAvailabilityUnverified)
+		wantMulti := modelAvailabilityUnverified
+		if multi[i].Provider != modelcatalog.ProviderAnthropic {
+			wantMulti = modelAvailabilityUnconfigured
+		}
+		if multi[i].Availability != wantMulti {
+			t.Errorf("%s (%s): multi availability = %q, want %q", multi[i].Key, multi[i].Provider, multi[i].Availability, wantMulti)
 		}
 		// Neither mode reports a detail or a check time for a state no probe
-		// produced.
+		// produced — and neither of these states is one.
 		if local[i].AvailabilityDetail != "" || local[i].AvailabilityCheckedAt != nil ||
 			multi[i].AvailabilityDetail != "" || multi[i].AvailabilityCheckedAt != nil {
 			t.Errorf("%s: an unprobed row carries a detail or a timestamp", local[i].Key)

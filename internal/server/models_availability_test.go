@@ -489,16 +489,27 @@ func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
 		t.Fatalf("test = %d (body: %s)", rec.Code, rec.Body.String())
 	}
 
+	// The neighbour is configured IDENTICALLY — same provider bound — so the
+	// only thing that could differ between the two reads is the stored
+	// verdict. Leave it unbound and the test passes for the wrong reason: it
+	// would be reading "ambient", not "your neighbour's probe is not yours".
 	otherOrg, otherAdmin, _ := pgtest.SeedOrgWithUser(t, rig.h, "availability-neighbour")
+	pgtest.MustExec(t, rig.h.AdminDB,
+		`INSERT INTO org_settings (org_id, anthropic_api_key_ref) VALUES ($1, 'anthropic_api_key')
+		 ON CONFLICT (org_id) DO UPDATE SET anthropic_api_key_ref = 'anthropic_api_key'`, otherOrg)
 	rec := httptest.NewRecorder()
 	rig.mdh.handleModelsList(rec, rig.req(t, otherAdmin, otherOrg, nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("neighbour read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
-		if row.Availability != modelAvailabilityUnverified {
+		want := modelAvailabilityUnverified
+		if row.Provider != modelcatalog.ProviderAnthropic {
+			want = modelAvailabilityUnconfigured
+		}
+		if row.Availability != want {
 			t.Errorf("%s: neighbour sees %q, want %q — the verdict belongs to the org that paid for it",
-				row.Key, row.Availability, modelAvailabilityUnverified)
+				row.Key, row.Availability, want)
 		}
 	}
 }
@@ -558,5 +569,174 @@ func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
 				t.Errorf("sweep = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+// The state this whole value exists for: with only Anthropic bound, the four
+// Bedrock rows must say so rather than inviting a test. Before this, they read
+// "unverified" — which means "press test again" — while the test route beside
+// them refused with 409. The read was pointing users at a button its own PR
+// blocked.
+func TestModelsList_Postgres_UnconnectedProviderIsUnconfigured(t *testing.T) {
+	rig := newAvailabilityRig(t) // binds Anthropic only
+
+	for _, row := range rig.catalogRead(t, rig.admin) {
+		want := modelAvailabilityUnverified
+		if row.Provider != modelcatalog.ProviderAnthropic {
+			want = modelAvailabilityUnconfigured
+		}
+		if row.Availability != want {
+			t.Errorf("%s (%s): availability = %q, want %q", row.Key, row.Provider, row.Availability, want)
+		}
+		if row.AvailabilityDetail != "" || row.AvailabilityCheckedAt != nil {
+			t.Errorf("%s: an unprobed row carries a detail or a timestamp", row.Key)
+		}
+	}
+}
+
+// The derived fact outranks the stored one. A credential unbound after a
+// successful probe leaves a green row that was true when it was written and is
+// not true now — and the row cannot know that, because nothing re-probes.
+// Reporting it as verified would send someone to pin a model that cannot run.
+func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	rig.provider.answerWith(http.StatusOK, "")
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+
+	if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusOK {
+		t.Fatalf("seed verify = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := rig.rowFor(t, rig.catalogRead(t, rig.admin), key).Availability; got != modelAvailabilityVerified {
+		t.Fatalf("availability before the disconnect = %q, want %q", got, modelAvailabilityVerified)
+	}
+
+	// The org switches providers: Bedrock in, Anthropic out, the way the two
+	// credential routes do it — each clears only its own ref. It has to still
+	// hold SOMETHING, or it would be ambient, which is a different state with
+	// a different answer (see the ambient test below). The green row is
+	// deliberately left in place: nothing purges it, which is exactly why the
+	// derivation has to outrank it.
+	pgtest.MustExec(t, rig.h.AdminDB, `
+		UPDATE org_settings
+		   SET bedrock_credentials_ref = 'aws_bearer_token_bedrock',
+		       anthropic_api_key_ref   = NULL
+		 WHERE org_id = $1`, rig.orgID)
+
+	if got := rig.rowFor(t, rig.catalogRead(t, rig.admin), key).Availability; got != modelAvailabilityUnconfigured {
+		t.Errorf("availability after the disconnect = %q, want %q", got, modelAvailabilityUnconfigured)
+	}
+	var stored int
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM model_availability WHERE org_id = $1 AND state = 'green'`, rig.orgID).Scan(&stored); err != nil {
+		t.Fatalf("count stored rows: %v", err)
+	}
+	if stored != 1 {
+		t.Errorf("stored green rows = %d, want the row left untouched — this is a read-side derivation, not a purge", stored)
+	}
+}
+
+// An org that binds nothing is on ambient credentials, not missing a provider.
+// It gets the answer it always got, so subscription users see no new badge.
+func TestModelsList_Postgres_AmbientOrgIsAssumed(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	pgtest.MustExec(t, rig.h.AdminDB,
+		`UPDATE org_settings SET anthropic_api_key_ref = NULL, bedrock_credentials_ref = NULL WHERE org_id = $1`, rig.orgID)
+
+	for _, row := range rig.catalogRead(t, rig.admin) {
+		if row.Availability != modelAvailabilityAssumed {
+			t.Errorf("%s: availability = %q, want %q for an org that has bound nothing",
+				row.Key, row.Availability, modelAvailabilityAssumed)
+		}
+	}
+}
+
+// Availability is org truth, so the team-scoped read reports the same state for
+// every entry that survives the team's provider restriction. The restriction
+// removes entries; it never changes what a remaining one says.
+func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	rig.provider.answerWith(http.StatusOK, "")
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusOK {
+		t.Fatalf("seed verify = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	orgRows := map[string]string{}
+	for _, row := range rig.catalogRead(t, rig.admin) {
+		orgRows[row.Key] = row.Availability
+	}
+
+	r := rig.req(t, rig.admin, rig.orgID, nil)
+	r.SetPathValue("team_id", rig.teamID)
+	rec := httptest.NewRecorder()
+	rig.mdh.handleTeamModelsList(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("team read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	items := decodeModels(t, rec.Body.Bytes()).Items
+	if len(items) == 0 {
+		t.Fatal("team read returned no models")
+	}
+	for _, row := range items {
+		if want := orgRows[row.Key]; row.Availability != want {
+			t.Errorf("%s: team read says %q, org read says %q — availability is org truth", row.Key, row.Availability, want)
+		}
+	}
+}
+
+// Local mode's half of this state, and the constraint it must not break.
+//
+// Local answers "unconfigured" for a provider the org has not bound — it is a
+// local, certain fact and the one part of availability local can honestly
+// give, which matters because local is the mode the bad picker actually
+// shipped in. But it must still never read model_availability: local writes
+// that table nowhere, and a query whose result is discarded is one the mode
+// split says should not exist.
+//
+// The table is DROPPED to assert that. A stub store could be told to fail, but
+// this proves the property against the real store bundle the handler builds
+// for itself — if local ever starts touching the table, this 500s.
+func TestModelsList_LocalMode_UnconfiguredWithoutReadingTheTable(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	// Bind Anthropic only, so the org is not ambient and Bedrock is genuinely
+	// unconfigured.
+	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read org settings: %v", err)
+	}
+	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+	set.BedrockCredentialsRef = ""
+	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+		t.Fatalf("bind anthropic: %v", err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE model_availability`); err != nil {
+		t.Fatalf("drop model_availability: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 — local must not query model_availability (body: %s)", rec.Code, rec.Body.String())
+	}
+	var anthropic, bedrock int
+	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
+		switch row.Provider {
+		case modelcatalog.ProviderAnthropic:
+			anthropic++
+			// Connected, but local can establish nothing about it.
+			if row.Availability != modelAvailabilityAssumed {
+				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, modelAvailabilityAssumed)
+			}
+		default:
+			bedrock++
+			if row.Availability != modelAvailabilityUnconfigured {
+				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, modelAvailabilityUnconfigured)
+			}
+		}
+	}
+	if anthropic == 0 || bedrock == 0 {
+		t.Fatalf("catalog gave %d anthropic / %d bedrock rows; the test needs both", anthropic, bedrock)
 	}
 }
