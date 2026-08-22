@@ -893,21 +893,22 @@ Five layers, most-shared first:
 | vocabulary & storage | concrete model ids | **identical** — the SDK's `--model` accepts concrete ids, so no translation exists anywhere |
 | catalog & names | allowlist ⋈ datasheet, embedded | **identical** — it ships in the binary |
 | model universe | filtered by the org's configured providers | filtered by what the SDK can drive: the Claude family via Anthropic direct / Bedrock / Vertex. **Not a mock — a truth.** A GPT entry in a local picker would be a lie, because nothing local can execute it |
-| availability | `verified` via ListModels ∩ probe, save-gated (Q4) | always **`assumed`** — no bifrost, and the subscription case has no key to probe with. The test-connection button and the save gate key off the field and simply do not engage; failures surface at run time through the SDK's existing error path, the only place local can learn them |
+| availability | `verified` via probe, save-gated (Q4) | **identical vocabulary** — local probes through the agent runtime, which reports the provider's HTTP status on its terminal event (`api_error_status`), so a subscription with no key this process could assemble a request from still yields a real verdict. Same four states, same test-connection button, same stored rows |
 | caps & usage | full | shared ledger shape (`messages.cost_usd`); rate caps work identically (a picker filter against catalog prices); budget caps per §7.1 |
 
-Two deliberate asymmetries, written down so they are decisions rather than
+One deliberate asymmetry, written down so it is a decision rather than
 drift:
 
 - **Setup flow.** Multi requires the two model picks (R2, Q6) with no
   shipped fallback. Local pre-fills both with the migration's concrete
   equivalents of today's defaults, preserving the zero-friction first run.
-- **Opt-in local verification** (a local user with a real API key running
-  the 2-token probe) is deferred: it adds a third availability state's
-  worth of UI to the one mode where runtime failure is already
-  well-surfaced. The `availability` field leaves room; a future ticket
-  relaxes it by making local sometimes return `verified`, changing no
-  component.
+
+Availability is **not** one of them. The probe's transport follows the mode
+— a direct call in multi, the agent runtime in local — but what it asks and
+what the answer means are the same, so the field carries no mode difference
+for a client to read. The one thing that does differ is what an org's
+credential source can be: only local can run on the host's, and that source
+is what makes every provider reachable rather than only the bound ones.
 
 ### 7.1 Budget caps: enforcement follows settlement
 

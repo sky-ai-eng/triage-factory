@@ -29,19 +29,18 @@ type modelProber interface {
 // handler reads — the catalog reads to render a badge, the test routes to
 // refuse a provider before spending anything on it.
 //
-// Three inputs. hostCredentials and connected are LOCAL, CERTAIN facts read off
-// the settings row, so they hold in either mode and need no probe. rows are
-// probe RESULTS, which only multi mode has: multi is held as one field resolved
-// once rather than as a runmode read per row, and it is separate from the map
-// because in multi an org that has probed nothing also has no rows — "we did not
-// look" must not render the same as "we looked and found nothing".
+// Two inputs. hostCredentials and connected are LOCAL, CERTAIN facts read off
+// the settings row, so they need no probe. rows are probe RESULTS, and their
+// ABSENCE is the third state: an org that has probed nothing has no rows, and
+// "we did not look" must not render the same as "we looked and found nothing".
 type availabilityIndex struct {
 	// hostCredentials is the org running on whatever credential the host
 	// supplies — domain.LLMAuthSystem, resolved through EffectiveLLMAuthMethod
 	// so multi mode is always false. Such an org has nothing to be unconfigured
 	// ABOUT: there is no provider it failed to connect, because it is not
-	// selecting between providers in the first place, and nothing TF holds
-	// could be probed on its behalf.
+	// selecting between providers in the first place. What it CAN invoke is
+	// still an open question, and still a probeable one — the runtime carries
+	// that credential even though this process cannot read it.
 	//
 	// It is the org's recorded choice, read rather than derived from connected
 	// being empty — an empty set means two different things, and only the
@@ -52,7 +51,6 @@ type availabilityIndex struct {
 	// connected is the providers the org holds credentials for, read off the
 	// settings refs.
 	connected map[string]bool
-	multi     bool
 	rows      map[string]domain.ModelAvailability
 }
 
@@ -85,9 +83,6 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 	if !a.has(e.Provider) {
 		return modelAvailabilityUnconfigured, "", nil
 	}
-	if !a.multi {
-		return modelAvailabilityAssumed, "", nil
-	}
 	row, ok := a.rows[availabilityRowKey(e.Provider, e.Key)]
 	if !ok {
 		return modelAvailabilityUnverified, "", nil
@@ -110,11 +105,11 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 // run, in one pass, so no two routes can answer differently and no request
 // reads the settings row twice.
 //
-// Both modes read the credential source and the org's bound providers — that
-// half is a local fact and local mode needs it, because an unconnected provider
-// is the one thing about availability local can honestly answer. Only multi reads model_availability:
-// local never writes that table, so querying it there would be work whose
-// result is discarded by the mode check in forEntry.
+// One resolution for both modes, off the same two reads: the settings row for
+// what the org brings and what it has bound, and model_availability for what a
+// probe has established. Only the credential SOURCE is mode-sensitive — a multi
+// org always brings its own — and that is settled by EffectiveLLMAuthMethod
+// here rather than by a mode check anything downstream repeats.
 //
 // The settings read runs on the app pool as the caller. org_settings SELECT is
 // member-level, the same gate the catalog read itself carries, so a plain
@@ -123,7 +118,7 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 // their org cannot run.
 func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
 	multi := runmode.Current() == runmode.ModeMulti
-	index := availabilityIndex{multi: multi}
+	var index availabilityIndex
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
@@ -131,9 +126,6 @@ func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, org
 		}
 		index.hostCredentials = domain.EffectiveLLMAuthMethod(set.LLMAuthMethod, multi) == domain.LLMAuthSystem
 		index.connected = modelaccess.OrgProviders(set)
-		if !index.multi {
-			return nil
-		}
 		stored, err := tx.ModelAvailability.List(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("read model availability: %w", err)
@@ -399,23 +391,13 @@ func (h *modelsHandler) runProbe(w http.ResponseWriter, r *http.Request, prober 
 	}, true
 }
 
-// requireProbing gates both test routes on the two things that make a probe
-// possible at all, and answers each with what it actually is.
+// requireProbing gates both test routes on the one thing that makes a probe
+// possible at all: a prober wired into this process.
 //
-// Local mode is a 409 rather than a 404: the route exists in this binary, the
-// deployment simply cannot answer the question — its runs authenticate through
-// the SDK subprocess, possibly with a Claude Code subscription that has no key
-// to test. A client never lands here, because the availability field it reads
-// says "assumed" and the affordance keyed off that field is not drawn; a
-// headless caller gets the reason in the code.
+// There is no mode gate. Both modes can spend a probe — multi from this
+// process, local through the agent runtime — so the only deployment that
+// cannot answer is one where the seam was never wired.
 func (h *modelsHandler) requireProbing(w http.ResponseWriter) (modelProber, bool) {
-	if runmode.Current() != runmode.ModeMulti {
-		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-			Reason:  httpx.ReasonModeUnsupported,
-			Message: "model availability cannot be probed in local mode: runs authenticate through the Claude Code SDK, which may hold no API key to test with. Availability is reported as \"assumed\" and failures surface at run time.",
-		})
-		return nil, false
-	}
 	// Both nils mean the same thing and both must be caught here: the getter
 	// itself is nil in a unit test that never set it, and the getter RETURNS
 	// nil on a pod where SetModelProber has not run — routes register before

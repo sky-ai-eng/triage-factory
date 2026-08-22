@@ -33,18 +33,31 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 var log = logging.Component("modelprobe")
 
-// probeTimeout bounds one probe. A one-token completion that has not answered
-// in this long is not going to say anything about entitlement, and a sweep of
-// a provider's candidates runs them one after another inside a single HTTP
-// request — so the bound is what keeps a wedged upstream from holding the
-// admin's browser open for minutes to reach the same inconclusive it would
-// reach here.
+// probeTimeout bounds one probe spent directly from this process. A one-token
+// completion that has not answered in this long is not going to say anything
+// about entitlement, and a sweep of a provider's candidates runs them one after
+// another inside a single HTTP request — so the bound is what keeps a wedged
+// upstream from holding the admin's browser open for minutes to reach the same
+// inconclusive it would reach here.
 const probeTimeout = 15 * time.Second
+
+// probeSDKTimeout bounds one probe spent through the agent runtime. It is
+// wider than the direct bound because it covers more than a completion: the
+// node subprocess has to boot, and on a deployment whose first act is pressing
+// test, agentproc installs the runtime before it can send anything. A warm
+// invocation answers in a few seconds; this is sized for the cold one, so a
+// fresh install does not report every model inconclusive.
+//
+// Still narrower than a retrying upstream, which is the point of having a
+// bound at all: the runtime retries a 5xx for around three minutes before
+// giving up, and both numbers reach the same inconclusive.
+const probeSDKTimeout = 60 * time.Second
 
 // probeMessage is the whole prompt. The question is whether the request is
 // ACCEPTED, so the cheapest content that is still a valid turn is the right
@@ -55,6 +68,16 @@ const probeMessage = "ping"
 // max_tokens, and the request is billed on what it generates, so this is the
 // floor of what the probe can cost.
 const probeMaxTokens = 1
+
+// probeMaxTurns bounds the SDK path at a single assistant turn. The probe
+// allowlists no tools, so one turn is all a "ping" can take; the flag is what
+// stops a runtime that decides to try one anyway from burning the timeout to
+// reach the same answer.
+const probeMaxTurns = 1
+
+// runSDK is the SDK-subprocess seam, swapped out in tests so the local branch
+// is verifiable without spawning node.
+var runSDK = agentproc.Run
 
 // Result is one probe's conclusion.
 type Result struct {
@@ -72,6 +95,10 @@ type Result struct {
 // role-mode Bedrock org stores no key at all and must mint an STS triple for
 // this call exactly as a run would. Probing through a different path than runs
 // use would test something other than what runs do.
+//
+// Both are nil in local mode, where runs resolve nothing here either: the
+// subprocess authenticates from the host environment, and handing it the same
+// two nils a run gets is what keeps the probe honest about that.
 type Prober struct {
 	secrets  agentproc.SecretsReader
 	resolver func(ctx context.Context, orgID, model string) (map[string]string, error)
@@ -96,7 +123,75 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 // recorded for them and the caller reports a setup gap, not an unavailable
 // model. Every outcome of an attempt that DID reach the wire comes back as a
 // Result, including the failures.
+//
+// The transport follows the mode, for the same reason systemllm.Complete's
+// does: a probe must ask the question the way a run would, and the two modes
+// run agents differently. Multi calls the provider from this process. Local
+// spends the request through the SDK subprocess, which is the only path that
+// can authenticate a Claude Code subscription — the credential a local
+// deployment most often holds, and the one nothing in this process could
+// assemble a request with.
+//
+// Both transports produce the same three verdicts from the same status sets:
+// what differs is where the status is read from, not what it means.
 func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
+	if runmode.Current() == runmode.ModeMulti {
+		return p.probeDirect(ctx, orgID, entry)
+	}
+	return p.probeSDK(ctx, orgID, entry)
+}
+
+// probeSDK spends the probe through the agent runtime, the way a local run
+// spends one.
+//
+// It resolves no credentials itself. agentproc.Run owns that resolution — the
+// same call, with the same seams, that a local run makes — so a probe cannot
+// test a credential path a run would not take. That is also why the ambient
+// case works at all: there is nothing for this process to read, and the
+// subprocess authenticates from the environment it inherits.
+//
+// This probe is the expensive one, and by a wide margin. probeMaxTokens has no
+// equivalent here: the runtime composes its own request, so what goes on the
+// wire is Claude Code's whole system prompt and tool schemas — tens of
+// thousands of input tokens, and a second smaller call after the turn — where
+// the direct path sends one user row and caps the completion at a token. The
+// answer is worth it, because it is the only way to ask the question of a
+// subscription at all, but it is why nothing may spend one of these without a
+// person asking first.
+func (p *Prober) probeSDK(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
+	callCtx, cancel := context.WithTimeout(ctx, probeSDKTimeout)
+	defer cancel()
+
+	startedAt := time.Now().UTC()
+	usage := &agentproc.UsageSink{}
+	outcome, err := runSDK(callCtx, agentproc.RunOptions{
+		Model:    entry.Key,
+		Message:  probeMessage,
+		MaxTurns: probeMaxTurns,
+		OrgID:    orgID,
+		// No AllowedTools: an empty allowlist auto-denies every tool in the
+		// headless posture, which is what makes "ping" a single API call and
+		// nothing else.
+		Secrets:     p.secrets,
+		LLMResolver: p.resolver,
+	}, usage)
+	p.recordSDK(ctx, orgID, entry.Key, startedAt, outcome, usage)
+
+	if err != nil && IsSetupGap(err) {
+		// Same contract as the direct path: a credential the runtime could not
+		// assemble is a setup gap, not a verdict about the model.
+		return Result{}, err
+	}
+	verdict, detail := classifySDK(callCtx, outcome, err)
+	if verdict == VerdictGreen {
+		return Result{Verdict: VerdictGreen}, nil
+	}
+	return Result{Verdict: verdict, Detail: detail}, nil
+}
+
+// probeDirect spends the probe from this process, against credentials it
+// resolves and assembles itself — the way a multi-mode system job spends one.
+func (p *Prober) probeDirect(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {
 	creds, err := p.resolveCredentials(ctx, orgID, entry.Key)
 	if err != nil {
 		return Result{}, err
@@ -225,6 +320,27 @@ func (p *Prober) record(ctx context.Context, orgID, modelKey string, startedAt t
 		Model:     modelKey,
 		StartedAt: startedAt,
 	}, traceID, usage, cost, int(time.Since(startedAt).Milliseconds()), callErr != nil)
+}
+
+// recordSDK lands the same job=probe ledger row for the subprocess transport
+// that record lands for the direct one, so a probe costs the same visible
+// thing in either mode.
+//
+// It prices nothing itself: the runtime reports what the call cost on the
+// terminal result event, and the recorder reads it from there. That is the one
+// real difference between the two — a direct probe is priced from TF's own
+// datasheet against the catalog key, an SDK probe is priced by the runtime
+// that made the request.
+func (p *Prober) recordSDK(ctx context.Context, orgID, modelKey string, startedAt time.Time, outcome *agentproc.Outcome, usage *agentproc.UsageSink) {
+	if p.recorder == nil {
+		return
+	}
+	p.recorder.Record(ctx, systemllm.Call{
+		OrgID:     orgID,
+		Job:       systemllm.JobProbe,
+		Model:     modelKey,
+		StartedAt: startedAt,
+	}, outcome, usage)
 }
 
 // IsSetupGap reports whether err is a Probe error meaning the org never

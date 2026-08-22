@@ -515,28 +515,89 @@ func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
 	}
 }
 
-// Local mode cannot answer the question at all: its runs go through the SDK
-// subprocess, which may hold a Claude Code subscription and no API key. The
-// route exists in the binary and says so, rather than 404ing as if it did not.
-func TestModelTest_LocalModeRefuses(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	s := newTestServer(t)
-	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: nil}
+// cannedProber answers with a fixed verdict. It stands in for the transport, so
+// a route test establishes what the handler DOES with a verdict without
+// spending a request or spawning the agent runtime — what each transport
+// concludes is internal/modelprobe's own question.
+type cannedProber struct {
+	res modelprobe.Result
+	err error
+}
 
-	r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
-	r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
-	r.SetPathValue("model_key", modelKeyOn(t, modelcatalog.ProviderAnthropic))
-	ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
-	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
-	rec := httptest.NewRecorder()
-	mdh.handleModelTest(rec, r.WithContext(ctx))
+func (c cannedProber) Probe(context.Context, string, modelcatalog.Entry) (modelprobe.Result, error) {
+	return c.res, c.err
+}
 
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("local test = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
-	}
-	if got := rec.Body.String(); !strings.Contains(got, httpx.ReasonModeUnsupported) {
-		t.Errorf("body = %s, want reason %s", got, httpx.ReasonModeUnsupported)
+// Local mode probes, and the verdict it reaches is stored and published exactly
+// as multi's is. Its runs go through the agent runtime, which reports the
+// provider's HTTP status on its terminal event, so there is no question the
+// deployment has to decline — and declining was the whole reason a fourth
+// availability state existed.
+//
+// Both conclusive verdicts, because they take different arms of the write and a
+// refusal is the one that has to carry the provider's own message out to the
+// catalog read.
+func TestModelTest_LocalMode_ProbesAndPublishesTheVerdict(t *testing.T) {
+	for name, tc := range map[string]struct {
+		verdict     modelprobe.Verdict
+		detail      string
+		wantOutcome string
+		wantState   string
+	}{
+		"green": {modelprobe.VerdictGreen, "", modelTestVerified, modelAvailabilityVerified},
+		"red":   {modelprobe.VerdictRed, "HTTP 403: Authentication error", modelTestRed, modelAvailabilityRed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			canned := cannedProber{res: modelprobe.Result{Verdict: tc.verdict, Detail: tc.detail}}
+			mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return canned }}
+
+			key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+			r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
+			r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
+			r.SetPathValue("model_key", key)
+			ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
+			ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+			rec := httptest.NewRecorder()
+			mdh.handleModelTest(rec, r.WithContext(ctx))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("local test = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+			}
+			var got modelTestResult
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode test result: %v (body: %s)", err, rec.Body.String())
+			}
+			if got.Outcome != tc.wantOutcome {
+				t.Errorf("outcome = %q, want %q", got.Outcome, tc.wantOutcome)
+			}
+			if got.Detail != tc.detail {
+				t.Errorf("detail = %q, want %q", got.Detail, tc.detail)
+			}
+			if got.CheckedAt == nil {
+				t.Error("no checked_at on a conclusive verdict — the row was not stored")
+			}
+
+			// The verdict reaches the catalog read, which is where anyone
+			// choosing a model actually sees it.
+			read := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+			if read.Code != http.StatusOK {
+				t.Fatalf("catalog read = %d, want 200 (body: %s)", read.Code, read.Body.String())
+			}
+			for _, row := range decodeModels(t, read.Body.Bytes()).Items {
+				if row.Key != key {
+					continue
+				}
+				if row.Availability != tc.wantState {
+					t.Errorf("availability = %q, want %q", row.Availability, tc.wantState)
+				}
+				if row.AvailabilityDetail != tc.detail {
+					t.Errorf("availability_detail = %q, want %q", row.AvailabilityDetail, tc.detail)
+				}
+			}
+		})
 	}
 }
 
@@ -638,8 +699,8 @@ func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 // A multi-mode org that binds nothing is unconfigured, not ambient. There are
 // no host credentials for a hosted deployment to lend — the operator's
 // environment is one environment shared by every tenant, and credential
-// resolution refuses such an org outright — so "assumed" here would badge a
-// picker full of models whose every run fails on the way out.
+// resolution refuses such an org outright — so anything softer here would badge
+// a picker full of models whose every run fails on the way out.
 func TestModelsList_Postgres_NothingBoundIsUnconfigured(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	pgtest.MustExec(t, rig.h.AdminDB,
@@ -709,12 +770,12 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	}
 }
 
-// The zero-configuration local install: it has CHOSEN the host's credentials, so
-// the agent subprocess authenticates from the inherited environment and every
-// model is assumed. The answer it has always had — the choice is now recorded
-// rather than inferred, but the recorded value is the same one the inference
-// produced.
-func TestModelsList_LocalMode_HostCredentialsAreAssumed(t *testing.T) {
+// The zero-configuration local install: it has CHOSEN the host's credentials,
+// which is not a per-provider binding, so there is no provider it could be
+// missing and nothing is unconfigured. What it is instead is unprobed — an
+// answer it can act on, because the test route will spend one through the agent
+// runtime and come back with a real verdict.
+func TestModelsList_LocalMode_HostCredentialsAreUnverified(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -728,9 +789,9 @@ func TestModelsList_LocalMode_HostCredentialsAreAssumed(t *testing.T) {
 		t.Fatal("catalog read returned no models")
 	}
 	for _, row := range items {
-		if row.Availability != modelAvailabilityAssumed {
+		if row.Availability != modelAvailabilityUnverified {
 			t.Errorf("%s: availability = %q, want %q on the host's credentials",
-				row.Key, row.Availability, modelAvailabilityAssumed)
+				row.Key, row.Availability, modelAvailabilityUnverified)
 		}
 	}
 }
@@ -771,19 +832,15 @@ func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsUnconfigured(t *testi
 	}
 }
 
-// Local mode's half of this state, and the constraint it must not break.
+// Local mode's half of the same state, and the stored verdict beside it.
 //
-// Local answers "unconfigured" for a provider the org has not bound — it is a
-// local, certain fact and the one part of availability local can honestly
-// give, which matters because local is the mode the bad picker actually
-// shipped in. But it must still never read model_availability: local writes
-// that table nowhere, and a query whose result is discarded is one the mode
-// split says should not exist.
-//
-// The table is DROPPED to assert that. A stub store could be told to fail, but
-// this proves the property against the real store bundle the handler builds
-// for itself — if local ever starts touching the table, this 500s.
-func TestModelsList_LocalMode_UnconfiguredWithoutReadingTheTable(t *testing.T) {
+// Local answers "unconfigured" for a provider the org has not bound, exactly as
+// multi does. And it reads model_availability: a probe spent here writes a row
+// like any other, so a stored green renders verified rather than being
+// discarded by a mode check. Both halves in one read, against the real store
+// bundle the handler builds for itself, because the two are one precedence
+// order and testing them apart would not catch them disagreeing.
+func TestModelsList_LocalMode_ReadsStoredVerdictsAndUnconfiguredProviders(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -802,22 +859,27 @@ func TestModelsList_LocalMode_UnconfiguredWithoutReadingTheTable(t *testing.T) {
 	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
 		t.Fatalf("bind anthropic: %v", err)
 	}
-	if _, err := s.db.Exec(`DROP TABLE model_availability`); err != nil {
-		t.Fatalf("drop model_availability: %v", err)
+	probed := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	if _, err := s.allStores.ModelAvailability.Record(t.Context(), runmode.LocalDefaultOrgID,
+		modelcatalog.ProviderAnthropic, probed, domain.ModelAvailabilityGreen, ""); err != nil {
+		t.Fatalf("record a green verdict: %v", err)
 	}
 
 	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 — local must not query model_availability (body: %s)", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
 	var anthropic, bedrock int
 	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
 		switch row.Provider {
 		case modelcatalog.ProviderAnthropic:
 			anthropic++
-			// Connected, but local can establish nothing about it.
-			if row.Availability != modelAvailabilityAssumed {
-				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, modelAvailabilityAssumed)
+			want := modelAvailabilityUnverified
+			if row.Key == probed {
+				want = modelAvailabilityVerified
+			}
+			if row.Availability != want {
+				t.Errorf("%s: availability = %q, want %q", row.Key, row.Availability, want)
 			}
 		default:
 			bedrock++

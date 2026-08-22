@@ -488,6 +488,18 @@ type Result struct {
 	// because the bridge called interrupt().
 	Subtype string
 
+	// APIErrorStatus is the HTTP status the provider answered the runtime's
+	// last request with, from the result event's api_error_status. Set only
+	// when the invocation ended on an API error, so it is meaningful only
+	// alongside IsError; zero everywhere else, including on a run whose
+	// earlier attempts were retried past.
+	//
+	// It is the one place the SDK reports a provider's answer as structured
+	// data rather than prose. Subtype is not a substitute: it reads "success"
+	// on an authentication failure, so a caller sorting refusals from outages
+	// reads this.
+	APIErrorStatus int
+
 	// Interrupted marks a turn that ended by interruption rather than
 	// completion. Primary source: the result's terminal_reason field
 	// ("aborted_streaming" / "aborted_tools") — the SDK's native marker;
@@ -516,6 +528,9 @@ func parseResult(raw map[string]any) *Result {
 	}
 	rc.Result, _ = raw["result"].(string)
 	rc.Subtype, _ = raw["subtype"].(string)
+	if s, ok := raw["api_error_status"].(float64); ok {
+		rc.APIErrorStatus = int(s)
+	}
 	if tr, _ := raw["terminal_reason"].(string); tr == "aborted_streaming" || tr == "aborted_tools" {
 		rc.Interrupted = true
 	}

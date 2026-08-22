@@ -2,8 +2,10 @@ package modelprobe
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
@@ -92,38 +94,123 @@ func truncate(msg string) string {
 // the same rendered text — same marker, same precedence — because the two are
 // classifying the same string for different questions and disagreeing about
 // what "the provider answered 503" means would be a bug in one of them.
-// callCtx is the ctx the REQUEST ran under, not the caller's. It is derived
-// from the caller's, so a non-nil Err covers both endings that are TF's own
-// clock rather than the provider's answer: the caller navigating away
-// mid-sweep, and the per-probe timeout expiring. Checking the caller's ctx
-// instead would miss the second — the outer one is still healthy when a probe
-// times out — and there is no error value to fall back on, because
-// internal/inference flattens every failure to a plain string and no ctx
-// sentinel survives for errors.Is to match.
 func classify(callCtx context.Context, err error) (Verdict, string) {
 	if err == nil {
 		return VerdictGreen, ""
 	}
+	status, ok := inference.RenderedStatus(err)
+	return classifyFailure(callCtx, status, ok, err.Error())
+}
+
+// classifyFailure sorts one attempt that did NOT succeed, given whatever the
+// transport managed to say about it: the provider's HTTP status when there is
+// one (hasStatus false means nobody reported a number, not status 0) and the
+// flattened message.
+//
+// Both probe paths land here, which is the point: the direct call reads a
+// status off the rendered provider error, the SDK subprocess reads it off the
+// terminal result event's api_error_status, and the two arrive at the same
+// verdict for the same number. A refusal is a refusal whichever transport
+// carried the answer, so the status sets and the marker list are not
+// duplicated per path.
+//
+// callCtx is the ctx the ATTEMPT ran under, not the caller's. It is derived
+// from the caller's, so a non-nil Err covers both endings that are TF's own
+// clock rather than the provider's answer: the caller navigating away
+// mid-sweep, and the per-probe timeout expiring. Checking the caller's ctx
+// instead would miss the second — the outer one is still healthy when a probe
+// times out. It is checked before the status because a transport can report
+// one on the way down from a cancellation, and TF's own clock ending the
+// attempt is not the provider answering.
+func classifyFailure(callCtx context.Context, status int, hasStatus bool, message string) (Verdict, string) {
 	if callCtx.Err() != nil {
-		return VerdictInconclusive, truncate(err.Error())
+		return VerdictInconclusive, truncate(message)
 	}
-	if status, ok := inference.RenderedStatus(err); ok {
+	if hasStatus {
 		switch {
 		case refusalStatuses[status]:
-			return VerdictRed, truncate(err.Error())
+			return VerdictRed, truncate(message)
 		case inconclusiveStatus(status):
-			return VerdictInconclusive, truncate(err.Error())
+			return VerdictInconclusive, truncate(message)
 		}
 	}
-	lower := strings.ToLower(err.Error())
+	lower := strings.ToLower(message)
 	for _, marker := range refusalMarkers {
 		if strings.Contains(lower, marker) {
-			return VerdictRed, truncate(err.Error())
+			return VerdictRed, truncate(message)
 		}
 	}
 	// Everything unrecognized is inconclusive. That includes a malformed
 	// request TF itself produced, which is the case this default exists for: a
 	// bug on our side must not be recorded as the org's model being
 	// unavailable.
-	return VerdictInconclusive, truncate(err.Error())
+	return VerdictInconclusive, truncate(message)
+}
+
+// classifySDK sorts the outcome of a probe spent through the agent runtime.
+//
+// The runtime reports a provider refusal as a completed invocation carrying an
+// error, not as a process failure: Run returns a nil error and a terminal
+// result whose IsError is set and whose APIErrorStatus is the status the
+// provider answered with. So a non-nil error here means the runtime itself
+// never got an answer — it failed to start, its stream broke, the subprocess
+// died, or the deadline ended it — which is inconclusive for the same reason a
+// dial failure is on the direct path.
+//
+// Two fields are deliberately not consulted. Subtype reads "success" on an
+// authentication failure, so it distinguishes nothing. And the runtime's own
+// prose contradicts the status it ships beside — a 403 arrives described as a
+// temporary network issue — which is exactly why the status is what decides
+// and why sdkErrorDetail puts the number in front of the message.
+func classifySDK(callCtx context.Context, outcome *agentproc.Outcome, err error) (Verdict, string) {
+	if err != nil {
+		return classifyFailure(callCtx, 0, false, sdkFailureMessage(outcome, err))
+	}
+	if outcome == nil || outcome.Result == nil {
+		return VerdictInconclusive, "the agent runtime exited without a terminal result event"
+	}
+	res := outcome.Result
+	if !res.IsError {
+		return VerdictGreen, ""
+	}
+	// An error with no status is an invocation that failed short of the
+	// provider answering — a turn limit, a runtime fault. hasStatus is false
+	// for it, so it falls to the markers and then to inconclusive, which is
+	// what "the question was not answered" is worth.
+	return classifyFailure(callCtx, res.APIErrorStatus, res.APIErrorStatus != 0, sdkErrorDetail(res))
+}
+
+// sdkErrorDetail is what an admin reads for a refusal the runtime carried.
+//
+// The status leads because the message behind it cannot be trusted to describe
+// it: the runtime renders a 403 as "Authentication error · This may be a
+// temporary network issue, please try again", which tells someone to retry
+// their way out of a permanent entitlement problem. The message is kept whole
+// after it — it is still the only vendor-specific thing in the answer.
+func sdkErrorDetail(res *agentproc.Result) string {
+	msg := strings.TrimSpace(res.Result)
+	if msg == "" {
+		msg = "the agent runtime reported an error with no message"
+	}
+	if res.APIErrorStatus == 0 {
+		return msg
+	}
+	return fmt.Sprintf("HTTP %d: %s", res.APIErrorStatus, msg)
+}
+
+// sdkFailureMessage carries the runtime's stderr alongside the error, because
+// on this path it is the only account of what happened: the error itself names
+// a failure class ("agent runtime exited with error: exit status 1") and the
+// diagnostics are all on the other stream. Nothing is stored for the verdict
+// this feeds — inconclusive writes no row — so it exists purely to be read
+// once by the admin who pressed test.
+func sdkFailureMessage(outcome *agentproc.Outcome, err error) string {
+	stderr := ""
+	if outcome != nil {
+		stderr = strings.TrimSpace(outcome.Stderr)
+	}
+	if stderr == "" {
+		return err.Error()
+	}
+	return fmt.Sprintf("%s (stderr: %s)", err.Error(), stderr)
 }

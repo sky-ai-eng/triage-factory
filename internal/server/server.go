@@ -1660,9 +1660,10 @@ func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 	s.bedrockRole = r
 }
 
-// SetModelProber wires the model-availability prober. Called once at startup in
-// multi mode; left nil in local, where availability is "assumed" for every
-// entry and there is no credential to establish anything with.
+// SetModelProber wires the model-availability prober. Called once at startup on
+// every serving process, in either mode — the transport differs (a direct call
+// in multi, the agent runtime in local) but the question and the verdicts do
+// not. Nil until wired: the test routes report the deployment cannot probe.
 func (s *Server) SetModelProber(p modelProber) {
 	s.modelProber = p
 }

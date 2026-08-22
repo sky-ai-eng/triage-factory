@@ -13,12 +13,6 @@ import (
 // modelAvailabilityStore is the SQLite impl of db.ModelAvailabilityStore.
 // Local mode is N=1 — one process, one org — so the app/admin split the
 // Postgres impl draws collapses here, with the org asserted rather than gated.
-//
-// Local mode never probes (its models read answers "assumed" unconditionally),
-// so in practice this table stays empty there. It is implemented anyway
-// because a store method is the interface plus BOTH dialects: a dialect that
-// answered "not here" would make the conformance suite unable to state the
-// contract once.
 type modelAvailabilityStore struct{ q queryer }
 
 func newModelAvailabilityStore(q queryer) db.ModelAvailabilityStore {

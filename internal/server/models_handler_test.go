@@ -79,12 +79,12 @@ func TestModelsList_ServesTheJoinedCatalog(t *testing.T) {
 			t.Errorf("%s: display_order = %d, want %d", got.Key, got.DisplayOrder, i)
 		}
 		// No org has expressed an enable-set yet, so every entry is enabled;
-		// and nothing probes yet, so nothing is more than assumed available.
+		// and nothing has been probed yet, so nothing is more than unverified.
 		if !got.Enabled {
 			t.Errorf("%s: enabled = false, want true with no stored enable-set", got.Key)
 		}
-		if got.Availability != modelAvailabilityAssumed {
-			t.Errorf("%s: availability = %q, want %q", got.Key, got.Availability, modelAvailabilityAssumed)
+		if got.Availability != modelAvailabilityUnverified {
+			t.Errorf("%s: availability = %q, want %q", got.Key, got.Availability, modelAvailabilityUnverified)
 		}
 	}
 }
@@ -143,11 +143,12 @@ func TestModelsList_OrgScoping(t *testing.T) {
 // which mode it is talking to.
 //
 // The multi org here holds an Anthropic credential and no Bedrock one, so it
-// exercises the real divergence rather than the degenerate case: multi
+// exercises the real divergence rather than the degenerate case: it
 // distinguishes "connected, nothing established" from "no credential for this
-// provider at all", while local answers "assumed" for everything because its
-// runs go through the SDK subprocess, possibly on a Claude Code subscription
-// with no API key to establish anything with.
+// provider at all". The local org runs on the host's credentials, which is not
+// a per-provider binding, so it has no provider it could be missing and every
+// entry is merely unprobed. The difference is the credential SOURCE, not the
+// mode — the vocabulary is the same four values on both sides.
 func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
 	multi := func() []modelCatalogRow {
 		runmode.SetForTest(t, runmode.ModeMulti)
@@ -180,11 +181,11 @@ func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
 		t.Fatalf("local returned %d models, multi %d — the catalog is the same file in both", len(local), len(multi))
 	}
 	for i := range local {
-		// Local's org binds nothing, so it is ambient and says so for every
-		// entry — including the Bedrock ones the multi org calls unconfigured.
-		// That is the asymmetry the field exists to carry.
-		if local[i].Availability != modelAvailabilityAssumed {
-			t.Errorf("%s: local availability = %q, want %q", local[i].Key, local[i].Availability, modelAvailabilityAssumed)
+		// Local's org runs on the host's credentials, so nothing is
+		// unconfigured for it — including the Bedrock entries the multi org
+		// calls exactly that. That is the asymmetry the field exists to carry.
+		if local[i].Availability != modelAvailabilityUnverified {
+			t.Errorf("%s: local availability = %q, want %q", local[i].Key, local[i].Availability, modelAvailabilityUnverified)
 		}
 		wantMulti := modelAvailabilityUnverified
 		if multi[i].Provider != modelcatalog.ProviderAnthropic {

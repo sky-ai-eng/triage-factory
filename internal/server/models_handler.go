@@ -73,8 +73,8 @@ type modelCatalogRow struct {
 	// same badge and completely different fixes.
 	AvailabilityDetail string `json:"availability_detail,omitempty"`
 	// AvailabilityCheckedAt is when the probe behind this state ran. Absent
-	// for "unconfigured", "assumed" and "unverified", which are the states no
-	// probe produced.
+	// for "unconfigured" and "unverified", which are the states no probe
+	// produced.
 	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty"`
 	DisplayOrder          int        `json:"display_order"`
 }
@@ -83,10 +83,10 @@ type modelCatalogResponse struct {
 	Items []modelCatalogRow `json:"items"`
 }
 
-// The availability vocabulary this read publishes. Four values, and which
-// three an org can see is decided by the deployment mode rather than by
-// anything about the model — the mode difference travels as DATA in this
-// field, never as a branch in the client.
+// The availability vocabulary this read publishes. Four values, the same four
+// in either deployment mode: an org running on the host's credentials probes
+// through the agent runtime, which reports the provider's HTTP status on its
+// terminal event, so there is no deployment TF can only guess about.
 const (
 	// modelAvailabilityUnconfigured — this org brings its own credentials and
 	// holds none for this model's provider, so nothing can invoke it and no
@@ -107,21 +107,15 @@ const (
 	// sending someone to test a provider they never connected is sending them
 	// to do useless work.
 	modelAvailabilityUnconfigured = "unconfigured"
-	// modelAvailabilityAssumed — nobody asked, and nobody can. Two orgs get it:
-	// one that has chosen to run on the host's credentials
-	// (domain.LLMAuthSystem — TF holds nothing to probe with, and no provider it
-	// could call unconfigured), and any org in local mode, whose runs go through
-	// the SDK subprocess. A local failure surfaces at run time through the SDK's
-	// own error path, which is the only place local can learn it.
-	modelAvailabilityAssumed = "assumed"
 	// modelAvailabilityVerified — a probe invoked this model with this org's
 	// credentials and it answered. Permanent: nothing re-probes on a timer.
 	modelAvailabilityVerified = "verified"
 	// modelAvailabilityRed — a probe was refused. Carries the provider's own
 	// message in availability_detail.
 	modelAvailabilityRed = "red"
-	// modelAvailabilityUnverified — multi mode, the provider IS connected, and
-	// no probe has concluded anything yet. It is deliberately not
+	// modelAvailabilityUnverified — TF can put a credential behind this model
+	// (the provider is connected, or the org runs on the host's) and no probe
+	// has concluded anything yet. It is deliberately not
 	// distinguished from "every attempt timed out": both mean nobody has
 	// established anything, and both are fixed by pressing test again — which
 	// is exactly why an unconnected provider must not land here, since testing

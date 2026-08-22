@@ -337,12 +337,17 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// role-setup endpoint reporting the method is control-service only.
 	if a.srv != nil && a.llmResolver != nil {
 		a.srv.SetBedrockRoleResolver(a.llmResolver)
+	}
+	if a.srv != nil {
 		// Model-availability probes (the settings surface's "test connection"
-		// and the eager pass after a credential bind). Same gate as the line
-		// above and for the same reason: a probe resolves credentials exactly
-		// as a run does, through the role-aware seam, so it can only exist
-		// where that seam does. Local mode leaves it nil and reports every
-		// model as "assumed".
+		// and the eager pass after a credential bind). Wired on every serving
+		// process, because a probe resolves credentials exactly as a run does
+		// and every serving process has runs to answer for. The seams it takes
+		// are therefore the ones a run takes here: the role-aware resolver in
+		// multi, and in local the same two nils, which send the probe through
+		// the agent runtime against the host's own environment.
+		// SystemEnvResolver answers nil for a nil resolver, so local needs no
+		// branch of its own.
 		a.srv.SetModelProber(modelprobe.New(a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-model-probe"), a.llmRecorder))
 	}
 	if a.plan.brain {

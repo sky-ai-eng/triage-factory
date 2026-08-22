@@ -424,3 +424,100 @@ func TestProbe_DetailIsBounded(t *testing.T) {
 		t.Error("a clipped detail does not say it was clipped")
 	}
 }
+
+// stubRunSDK swaps the agent-runtime seam for the duration of one test.
+func stubRunSDK(t *testing.T, fn func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error)) {
+	t.Helper()
+	prev := runSDK
+	runSDK = fn
+	t.Cleanup(func() { runSDK = prev })
+}
+
+// Local mode spends its probe through the agent runtime, and hands it the
+// invocation a local run would make: the exact catalog key, the one-token
+// prompt, a single turn, no tool allowlist, and the org's own credential seams
+// — which are nil here, exactly as they are for a local run, because the
+// subprocess authenticates from the host's environment.
+//
+// Resolution is the runtime's to do. A probe that assembled its own request
+// would be testing a credential path no local run takes, and would have nothing
+// at all to assemble for the subscription case this exists to answer.
+func TestProbe_LocalMode_InvokesTheRuntimeAsARunWould(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	entry := anthropicEntry(t)
+
+	var got agentproc.RunOptions
+	stubRunSDK(t, func(_ context.Context, opts agentproc.RunOptions, _ agentproc.Sink) (*agentproc.Outcome, error) {
+		got = opts
+		return &agentproc.Outcome{Result: &agentproc.Result{Result: "pong"}}, nil
+	})
+
+	res, err := New(nil, nil, nil).Probe(t.Context(), "org-1", entry)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Verdict != VerdictGreen {
+		t.Errorf("verdict = %q, want %q", res.Verdict, VerdictGreen)
+	}
+	if got.Model != entry.Key {
+		t.Errorf("model = %q, want the catalog key %q", got.Model, entry.Key)
+	}
+	if got.Message != probeMessage {
+		t.Errorf("message = %q, want %q", got.Message, probeMessage)
+	}
+	if got.MaxTurns != probeMaxTurns {
+		t.Errorf("max turns = %d, want %d", got.MaxTurns, probeMaxTurns)
+	}
+	if got.AllowedTools != "" {
+		t.Errorf("allowed tools = %q, want none — a probe is one API call and nothing else", got.AllowedTools)
+	}
+	if got.OrgID != "org-1" {
+		t.Errorf("org = %q, want org-1", got.OrgID)
+	}
+	if got.Secrets != nil || got.LLMResolver != nil {
+		t.Error("the probe supplied credential seams a local run does not have")
+	}
+}
+
+// A refusal the runtime carried is red, and the stored detail names the status
+// — the runtime's own prose calls a 403 a temporary network issue.
+func TestProbe_LocalMode_RefusalIsRed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stubRunSDK(t, func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		return &agentproc.Outcome{Result: &agentproc.Result{
+			IsError:        true,
+			Subtype:        "success",
+			APIErrorStatus: 403,
+			Result:         "Authentication error · This may be a temporary network issue, please try again",
+		}}, nil
+	})
+
+	res, err := New(nil, nil, nil).Probe(t.Context(), "org-1", anthropicEntry(t))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Verdict != VerdictRed {
+		t.Fatalf("verdict = %q, want %q", res.Verdict, VerdictRed)
+	}
+	if !strings.Contains(res.Detail, "403") {
+		t.Errorf("detail = %q, want the status in it", res.Detail)
+	}
+}
+
+// A credential the runtime could not assemble is a setup gap on this transport
+// too — an error rather than a verdict, so the caller reports a thing to go
+// configure instead of recording the model as unavailable.
+func TestProbe_LocalMode_SetupGapIsAnErrorNotAVerdict(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	stubRunSDK(t, func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+		return nil, fmt.Errorf("agent runtime: %w", agentproc.ErrNoCredentialsConfigured)
+	})
+
+	res, err := New(nil, nil, nil).Probe(t.Context(), "org-1", anthropicEntry(t))
+	if err == nil {
+		t.Fatalf("Probe returned verdict %q, want a setup-gap error", res.Verdict)
+	}
+	if !IsSetupGap(err) {
+		t.Errorf("IsSetupGap(%v) = false, want true", err)
+	}
+}

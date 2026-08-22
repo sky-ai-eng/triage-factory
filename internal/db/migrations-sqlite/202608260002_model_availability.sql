@@ -39,10 +39,10 @@
 -- key this build no longer offers is inert (nothing iterates to it) rather
 -- than invalid.
 --
--- Local mode never writes here — its models read answers "assumed"
--- unconditionally, because the SDK subprocess may be authenticating through a
--- Claude Code subscription that has no key to probe with. The table exists in
--- this dialect because a store method is the interface plus both dialects.
+-- Both modes write here. Local spends its probe through the agent runtime,
+-- which reports the provider's HTTP status on its terminal event, so a
+-- deployment authenticating through a Claude Code subscription — with no key
+-- this process could assemble a request from — still gets a real answer.
 CREATE TABLE model_availability (
     org_id     TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     provider   TEXT NOT NULL,
