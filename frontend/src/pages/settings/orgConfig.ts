@@ -38,6 +38,10 @@ export interface OrgConfigForm {
   jira_api_token: string
   jira_poll_interval: string
   max_llm_model_tier: string
+  // The model the three background jobs — scoring, project classification, repo
+  // profiling — run on. A catalog key. Empty means nobody has picked one, and
+  // those jobs do not run until somebody does: there is no fallback model.
+  background_jobs_model: string
   // Org-wide daily LLM spend cap (TFAC-477), held as the raw text input. Empty =
   // "no cap"; a numeric string is the per-day USD ceiling. Stored as a string
   // (not a number) so the input can be cleared to "" cleanly and partial typing
@@ -106,6 +110,9 @@ export interface OrgSettingsData {
   // partly or wholly unobservable.
   jira_credential_env_provided?: boolean
   max_llm_model_tier?: string
+  // The background-jobs model as a catalog key; "" = not picked. Always
+  // present — "" is a state the form renders, not an absent field.
+  background_jobs_model: string
   // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
   max_daily_cost_usd: number
   // Org-wide concurrent-run limit; 0 = unlimited. Always present.
@@ -146,6 +153,7 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_api_token: '',
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
+  background_jobs_model: '',
   max_daily_cost_usd: '',
   max_concurrent_runs: '',
   anthropic_api_key: '',
@@ -180,6 +188,7 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
     max_llm_model_tier: org.max_llm_model_tier || '',
+    background_jobs_model: org.background_jobs_model || '',
     // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
     // the numeric string the input edits.
     max_daily_cost_usd: org.max_daily_cost_usd ? String(org.max_daily_cost_usd) : '',
@@ -304,6 +313,7 @@ export type OrgSettingsPatch = Partial<
     | 'jira_url'
     | 'jira_poll_interval'
     | 'max_llm_model_tier'
+    | 'background_jobs_model'
     | 'max_daily_cost_usd'
     | 'max_concurrent_runs'
   >
@@ -339,6 +349,11 @@ export async function patchOrgSettings(
   if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
   if (fields.max_llm_model_tier !== undefined)
     body.max_llm_model_tier = blankAsNull(fields.max_llm_model_tier)
+  // Blank sends null, which is not "leave it alone" here — it stops the
+  // background jobs. That is the only way to turn them off short of unbinding
+  // the Claude credential every other feature shares.
+  if (fields.background_jobs_model !== undefined)
+    body.background_jobs_model = blankAsNull(fields.background_jobs_model)
   if (fields.max_daily_cost_usd !== undefined)
     body.max_daily_cost_usd = numericOrNull(fields.max_daily_cost_usd)
   if (fields.max_concurrent_runs !== undefined)

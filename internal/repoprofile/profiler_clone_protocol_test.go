@@ -84,6 +84,12 @@ func (cloneProtocolOrgStore) ListActiveSystem(context.Context) ([]string, error)
 	return []string{"org-1"}, nil
 }
 
+// BackgroundJobsModel is set because the cycle now resolves it from this same
+// read and skips entirely without a usable one — the clone URL this test is
+// about is written past that gate.
 func (s cloneProtocolOrgStore) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{GitHubCloneProtocol: s.stored}, nil
+	return domain.OrgSettings{
+		GitHubCloneProtocol: s.stored,
+		BackgroundJobsModel: domain.LocalBackgroundJobsModel,
+	}, nil
 }

@@ -9,7 +9,18 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
+
+// testModel is the background-jobs model these tests resolve to, and fixedModel
+// is the systemllm.ModelFunc that hands it out. The value is a real catalog key
+// so a stub can't pass where the production resolver would refuse; nothing in
+// these tests calls a provider with it.
+const testModel = domain.ModelHaiku
+
+var fixedModel systemllm.ModelFunc = func(context.Context, string) (string, error) {
+	return testModel, nil
+}
 
 // isolateHome redirects ~ to a fresh tempdir for the test. Required
 // for any test that runs classify, because readProjectKB resolves
@@ -27,7 +38,7 @@ func isolateHome(t *testing.T) {
 // stage1Fn field rather than a package-level mutable var.
 func stage1Stub(scoresByProjectName map[string]int) (stage1Func, *callRecorder) {
 	rec := &callRecorder{}
-	fn := func(_ context.Context, orgID string, p haikuPrompt) (int, string, error) {
+	fn := func(_ context.Context, orgID string, p votePrompt, _ string) (int, string, error) {
 		rec.record(p.Message)
 		rec.mu.Lock()
 		rec.orgIDs = append(rec.orgIDs, orgID)
@@ -49,7 +60,7 @@ func stage1Stub(scoresByProjectName map[string]int) (stage1Func, *callRecorder) 
 // runner plus the stage1 call recorder.
 func stubRunner(orgID string, stage1 map[string]int) (*Runner, *callRecorder) {
 	s1, rec1 := stage1Stub(stage1)
-	r := NewRunner(nil, nil, orgID, nil, nil, nil, nil)
+	r := NewRunner(nil, nil, orgID, nil, nil, nil, nil, fixedModel)
 	r.stage1Fn = s1
 	return r, rec1
 }
@@ -96,7 +107,7 @@ func TestClassify_OrgIDFlowsToHaiku(t *testing.T) {
 		{ID: "p-a", Name: "A"},
 		{ID: "p-b", Name: "B"},
 	}
-	r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 
 	got := stage1.orgIDList()
 	if len(got) != 2 {
@@ -126,7 +137,7 @@ func TestClassify_WinnerAboveThreshold(t *testing.T) {
 		Title: "Migrate session token validation",
 	}
 
-	winner, votes := r.classify(context.Background(), projects, entity)
+	winner, votes := r.classify(context.Background(), projects, entity, testModel)
 	if winner == nil {
 		t.Fatalf("expected winner, got nil; votes: %+v", votes)
 	}
@@ -148,7 +159,7 @@ func TestClassify_AllBelowThreshold_ReturnsNil(t *testing.T) {
 	}
 	entity := domain.Entity{ID: "e1", Title: "Random PR"}
 
-	winner, votes := r.classify(context.Background(), projects, entity)
+	winner, votes := r.classify(context.Background(), projects, entity, testModel)
 	if winner != nil {
 		t.Errorf("expected nil winner, got %s", *winner)
 	}
@@ -170,7 +181,7 @@ func TestClassify_HighestAboveThresholdWins(t *testing.T) {
 		{ID: "p2", Name: "P2"},
 		{ID: "p3", Name: "P3"},
 	}
-	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 	if winner == nil || *winner != "p2" {
 		got := "<nil>"
 		if winner != nil {
@@ -196,7 +207,7 @@ func TestClassify_ExactTieUnassigned(t *testing.T) {
 		{ID: "p-alpha", Name: "Alpha"},
 		{ID: "p-beta", Name: "Beta"},
 	}
-	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 	if winner != nil {
 		t.Errorf("expected nil winner on exact tie, got %s", *winner)
 	}
@@ -220,7 +231,7 @@ func TestClassify_ThreeWayExactTieUnassigned(t *testing.T) {
 		{ID: "p-beta", Name: "Beta"},
 		{ID: "p-gamma", Name: "Gamma"},
 	}
-	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 	if winner != nil {
 		t.Errorf("expected nil winner on three-way exact tie, got %s", *winner)
 	}
@@ -242,7 +253,7 @@ func TestClassify_UniqueWinnerWithTiedRunnerUp(t *testing.T) {
 		{ID: "p-second", Name: "Second"},
 		{ID: "p-third", Name: "Third"},
 	}
-	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	winner, _ := r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 	if winner == nil || *winner != "p-winner" {
 		got := "<nil>"
 		if winner != nil {
@@ -254,7 +265,7 @@ func TestClassify_UniqueWinnerWithTiedRunnerUp(t *testing.T) {
 
 func TestClassify_NoProjects_ReturnsNilNoVotes(t *testing.T) {
 	r, _ := stubRunner("test-org", nil)
-	winner, votes := r.classify(context.Background(), nil, domain.Entity{Title: "X"})
+	winner, votes := r.classify(context.Background(), nil, domain.Entity{Title: "X"}, testModel)
 	if winner != nil {
 		t.Errorf("expected nil winner")
 	}
@@ -267,7 +278,7 @@ func TestClassify_HaikuErrorTreatedAsNoVote(t *testing.T) {
 	isolateHome(t)
 	r, _ := stubRunner("test-org", nil)
 	// Override stage1 with a per-project failure: "Flaky" errors, others score 80.
-	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+	r.stage1Fn = func(_ context.Context, _ string, p votePrompt, _ string) (int, string, error) {
 		if strings.Contains(p.Message, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure")
 		}
@@ -278,7 +289,7 @@ func TestClassify_HaikuErrorTreatedAsNoVote(t *testing.T) {
 		{ID: "p-flaky", Name: "Flaky"},
 		{ID: "p-good", Name: "Healthy"},
 	}
-	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"})
+	winner, votes := r.classify(context.Background(), projects, domain.Entity{Title: "X"}, testModel)
 	if winner == nil || *winner != "p-good" {
 		got := "<nil>"
 		if winner != nil {

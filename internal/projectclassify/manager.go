@@ -28,10 +28,11 @@ import (
 type Manager struct {
 	entities   db.EntityStore
 	projects   db.ProjectStore
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader threaded into each Runner's Haiku calls (nil in local; system-door in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader threaded into each Runner's vote calls (nil in local; system-door in multi).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.
+	models     systemllm.ModelFunc     // resolves each org's background-jobs model, injected into every per-org Runner.
 	kb         *kbstore.Store          // multi-mode KB blob store; nil in local, where the KB is read from disk.
 
 	mu      sync.Mutex
@@ -49,7 +50,7 @@ func (m *Manager) SetKBStore(kb *kbstore.Store) {
 	m.kb = kb
 }
 
-// llmResolveFunc is the RunOptions.LLMResolver shape the classifier's Haiku
+// llmResolveFunc is the RunOptions.LLMResolver shape the classifier's vote
 // calls carry — the brain-side llmcred adapter minting short-lived STS creds
 // for a role-mode Bedrock org (nil in local/tests → Run's built-in
 // resolution).
@@ -60,7 +61,7 @@ type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]s
 // through it. Unlike the previous single Runner, the Manager holds no
 // OrgsStore: triggering is per-org (the bus subscriber and WaitFor each supply
 // an orgID), so nothing enumerates the orgs table anymore.
-func NewManager(entities db.EntityStore, projects db.ProjectStore, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) *Manager {
+func NewManager(entities db.EntityStore, projects db.ProjectStore, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, models systemllm.ModelFunc) *Manager {
 	return &Manager{
 		entities:   entities,
 		projects:   projects,
@@ -68,6 +69,7 @@ func NewManager(entities db.EntityStore, projects db.ProjectStore, secrets agent
 		llmResolve: llmResolve,
 		recorder:   recorder,
 		limiter:    limiter,
+		models:     models,
 		runners:    make(map[string]*Runner),
 	}
 }
@@ -93,7 +95,7 @@ func (m *Manager) Trigger(orgID string) {
 	}
 	r, ok := m.runners[orgID]
 	if !ok {
-		r = NewRunner(m.entities, m.projects, orgID, m.secrets, m.llmResolve, m.recorder, m.limiter)
+		r = NewRunner(m.entities, m.projects, orgID, m.secrets, m.llmResolve, m.recorder, m.limiter, m.models)
 		r.kb = m.kb
 		r.Start()
 		m.runners[orgID] = r

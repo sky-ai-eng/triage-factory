@@ -64,8 +64,9 @@ func (r *Runner) Trigger(force bool) {
 }
 
 // Start launches the runner's loop. The derived ctx cancels when Stop()
-// closes r.stop, so any in-flight profiling agent (a Haiku batch call) gets
-// killed on shutdown rather than blocking teardown until it times out.
+// closes r.stop, so any in-flight profiling agent (a batch call on the org's
+// background-jobs model) gets killed on shutdown rather than blocking teardown
+// until it times out.
 func (r *Runner) Start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

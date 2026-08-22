@@ -28,6 +28,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
 import { toast } from '../../../components/Toast/toastStore'
+import { modelDisplayName } from '../../../hooks/useModelCatalog'
 import { noteWrittenTeam, useWriteTeam } from '../../../hooks/useTeams'
 import { apiJSON, httpErrorMessage } from '../../../lib/apiClient'
 import {
@@ -37,7 +38,7 @@ import {
   reachabilityMessage,
 } from '../../../lib/reachability'
 import { GitHubUrlStep, GitHubCloneStep } from '../../setup/GitHubStep'
-import { OrgModelStep } from '../../setup/ModelStep'
+import { OrgBackgroundJobsModelStep, OrgModelStep } from '../../setup/ModelStep'
 import {
   initialWizardState,
   loadOrg,
@@ -271,6 +272,11 @@ export default function OrgSettings({
   const capSummary = baseline.org.max_llm_model_tier
     ? `Capped at ${TIER_LABELS[baseline.org.max_llm_model_tier] ?? baseline.org.max_llm_model_tier}`
     : 'No cap'
+  // "Not set" is not a gap to paper over — it is the state in which the three
+  // background jobs do not run, so the collapsed section says so.
+  const backgroundJobsSummary = baseline.org.background_jobs_model
+    ? modelDisplayName(baseline.org.background_jobs_model)
+    : 'Not set — background jobs are off'
   const dailyCapValue = Number(baseline.org.max_daily_cost_usd)
   const dailyCapSummary =
     baseline.org.max_daily_cost_usd.trim() !== '' && dailyCapValue > 0
@@ -679,6 +685,26 @@ export default function OrgSettings({
         onCancel={() => revertOrg(['max_llm_model_tier'])}
       >
         <OrgModelStep {...ctx} />
+      </SettingsSection>
+
+      {/* ── Background jobs model ── The one model the scorer, the project
+          classifier and the repo profiler all run on. Empty is a real state:
+          those jobs skip until somebody picks, because nothing falls back. */}
+      <SettingsSection
+        title="Background jobs model"
+        summary={backgroundJobsSummary}
+        dirty={draft.org.background_jobs_model !== baseline.org.background_jobs_model}
+        saving={isSaving('background-jobs-model')}
+        onSave={() =>
+          commitOrgSlice(
+            'background-jobs-model',
+            { background_jobs_model: draft.org.background_jobs_model },
+            'Background jobs model',
+          )
+        }
+        onCancel={() => revertOrg(['background_jobs_model'])}
+      >
+        <OrgBackgroundJobsModelStep {...ctx} allowOff />
       </SettingsSection>
 
       {/* ── Daily spend cap (TFAC-477) ── A runaway-spend fuse: when the org's

@@ -31,7 +31,17 @@ var pricing = map[string]modelPricing{
 		CacheReadPerMTok:  0.10,
 		CacheWritePerMTok: 1.25,
 	},
-	// Short aliases (as stored in config/run model field)
+	// The three Claude Code tier words. Nothing writes them any more —
+	// configuration carries concrete model ids, and so does every model stamp a
+	// new message or system-job row lands with. They are here to price rows that
+	// already exist: a conversation's per-message model records what actually
+	// ran, so a transcript from before the vocabulary changed still says
+	// "sonnet", and CalculateCostUSD's one caller (the agent footer's estimate
+	// path) reads exactly those stamps. Dropping these entries would silently
+	// re-price a historical footer at $0.
+	//
+	// The rates are what each word meant when it was written, which is the only
+	// defensible thing to charge a row that was produced under them.
 	"opus": {
 		InputPerMTok:      5.00,
 		OutputPerMTok:     25.00,

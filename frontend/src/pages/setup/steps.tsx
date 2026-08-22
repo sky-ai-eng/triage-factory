@@ -53,7 +53,7 @@ import {
 } from '../../lib/reachability'
 import { toast } from '../../components/Toast/toastStore'
 import RepoPickerModal from '../../components/RepoPickerModal'
-import { OrgModelStep, TeamModelStep } from './ModelStep'
+import { OrgBackgroundJobsModelStep, OrgModelStep, TeamModelStep } from './ModelStep'
 import { OrgClaudeSourceStep, OrgClaudeKeyStep } from './ClaudeStep'
 import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
@@ -1091,6 +1091,25 @@ const orgModelStep: WizardStep = {
   render: (ctx) => <OrgModelStep {...ctx} />,
 }
 
+// Step · Background jobs model — the one model scoring, project classification
+// and repo profiling all run on. Blocking, and that is the whole point in multi:
+// nothing falls back, so an org that skips this has three background jobs that
+// silently never run. It is not felt in local, where the setting arrives
+// pre-filled and the step is complete on arrival — the mode difference travels
+// as the seeded value, not as a branch here.
+const orgBackgroundJobsModelStep: WizardStep = {
+  id: 'org-background-jobs-model',
+  section: 'org',
+  title: 'Background jobs model',
+  isComplete: (s) => s.org.background_jobs_model !== '',
+  persist: persistOrgFields('background_jobs_model'),
+  collapsedSummary: (s) =>
+    s.org.background_jobs_model
+      ? modelDisplayName(s.org.background_jobs_model)
+      : 'No background jobs model',
+  render: (ctx) => <OrgBackgroundJobsModelStep {...ctx} />,
+}
+
 // Step · Claude credential source (local only). The system-vs-BYOK picker, a
 // self-advancing ChoiceCards (no Continue): "system" records the choice and its
 // persist clears any stored key so the resolver falls back to the
@@ -1580,6 +1599,7 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraAccessStep,
   jiraPollerStep,
   orgModelStep,
+  orgBackgroundJobsModelStep,
   orgClaudeSourceStep,
   orgClaudeKeyStep,
   reposStep,
