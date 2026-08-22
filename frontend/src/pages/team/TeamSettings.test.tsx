@@ -124,6 +124,7 @@ beforeEach(() => {
   session.present = true
   roles.team = 'admin'
   roles.org = true
+  sources.state = {}
   api.apiJSON.mockImplementation((path: string) => {
     if (path.endsWith('/members/list'))
       return Promise.resolve({ items: MEMBERS.members, total_count: MEMBERS.members.length })
@@ -184,6 +185,24 @@ describe('the band', () => {
     // Not the panel that lists the sources — the source itself.
     await waitFor(() => expect(document.querySelector('.sp[data-source="github"]')).not.toBeNull())
     expect(screen.getByText('event source · platform')).toBeInTheDocument()
+  })
+
+  it('lets a row the org cannot reach fall through to the panel, not its page', async () => {
+    sources.state = { jira: 'disabled' }
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    // Not a control: a source with nothing to configure offers no way in.
+    const row = screen.getByText('Jira').closest('.ts-flow-row')!
+    expect(row.tagName).toBe('DIV')
+    expect(row).toHaveAttribute('data-off')
+
+    // The click lands on the cell behind it — the panel opens, the source
+    // page does not, and the card says why the source is off.
+    fireEvent.click(screen.getByText('Jira'))
+    expect(screen.getByText('Pick a source to configure')).toBeInTheDocument()
+    expect(document.querySelector('.sp[data-source="jira"]')).toBeNull()
+    expect(screen.getByText('Jira is turned off — an org admin paused it.')).toBeInTheDocument()
   })
 
   it('opens the panel from the cell around the rows, not only from its head', async () => {

@@ -325,6 +325,12 @@
   background: var(--color-sunk);
 }
 
+/* An off source's row takes no light of its own — the press it accepts
+   belongs to the whole cell behind it. */
+.ts-flow-row[data-off]:hover {
+  background: none;
+}
+
 .ts-flow-row-line {
   display: flex;
   align-items: baseline;

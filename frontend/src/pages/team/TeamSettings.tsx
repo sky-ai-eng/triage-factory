@@ -538,14 +538,31 @@ export default function TeamSettings() {
               <div className="ts-flow-list">
                 {/* Naming a source is how you get to it: the band works as
                     navigation between the three, not only as a way into the
-                    panel that lists them. */}
+                    panel that lists them. A source the org cannot reach is
+                    the exception — its row is not a control, so the click
+                    falls through to the cell, which opens the panel where
+                    the card says why the source is off. */}
                 {SOURCES.map((s) => {
                   // A null count is undefined for the source (Slack has no
                   // tracked set), so its row keeps the dash and draws no
                   // share — a zero would claim a quiet week.
                   const events = activitySource(activity, s)?.events ?? null
                   const frac = events !== null && flowEvents ? events / flowEvents : null
-                  return (
+                  const line = (
+                    <>
+                      <span className="ts-flow-row-line">
+                        <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
+                        <span className="ts-lead-flex" />
+                        <span className="ts-flow-row-v">{events ?? '—'}</span>
+                      </span>
+                      <Meter frac={frac} thin />
+                    </>
+                  )
+                  return sourceOff(s) ? (
+                    <div className="ts-flow-row" data-off key={s}>
+                      {line}
+                    </div>
+                  ) : (
                     <button
                       type="button"
                       className="ts-flow-row"
@@ -555,12 +572,7 @@ export default function TeamSettings() {
                         openSource(s)
                       }}
                     >
-                      <span className="ts-flow-row-line">
-                        <span className="ts-flow-row-n">{SOURCE_NAMES[s]}</span>
-                        <span className="ts-lead-flex" />
-                        <span className="ts-flow-row-v">{events ?? '—'}</span>
-                      </span>
-                      <Meter frac={frac} thin />
+                      {line}
                     </button>
                   )
                 })}
