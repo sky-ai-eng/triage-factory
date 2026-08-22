@@ -303,6 +303,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
+			BackgroundJobsModel:   domain.ModelSonnet,
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
@@ -612,6 +613,40 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if got.MaxConcurrentRuns != 0 {
 			t.Errorf("stored negative MaxConcurrentRuns scanned as %v; want 0 (clamped to unlimited)", got.MaxConcurrentRuns)
+		}
+	})
+
+	// The background-jobs model is the one org setting whose column DEFAULT
+	// differs per dialect — SQLite pre-fills a local install, Postgres leaves a
+	// fresh org to pick during setup — so what has to hold on BOTH is that the
+	// value a caller writes is the value it reads back, empty included. Empty is
+	// a real intent here (it turns the three system jobs off), and a store that
+	// coalesced it to NULL and back to the column default would silently turn
+	// them on again.
+	t.Run("OrgSettings_BackgroundJobsModel_RoundTripsIncludingEmpty", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		for _, want := range []string{domain.ModelOpus, "", domain.ModelHaiku} {
+			in := base
+			in.BackgroundJobsModel = want
+			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			if err != nil {
+				t.Fatalf("UpdateSettings(%q): %v", want, err)
+			}
+			if stored.BackgroundJobsModel != want {
+				t.Errorf("write returned BackgroundJobsModel %q, want %q", stored.BackgroundJobsModel, want)
+			}
+			got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				t.Fatalf("GetSettingsSystem: %v", err)
+			}
+			if got.BackgroundJobsModel != want {
+				t.Errorf("read back BackgroundJobsModel %q, want %q", got.BackgroundJobsModel, want)
+			}
 		}
 	})
 

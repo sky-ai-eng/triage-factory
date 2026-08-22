@@ -68,11 +68,18 @@ func (a *App) buildAI() {
 	//
 	// Applied in both modes (a real cap, not nil): in multi it bounds gVisor
 	// sandboxes; in local — where agentproc.Run is a direct subprocess with no
-	// sandbox — it's still a modest ceiling on concurrent background Haiku
+	// sandbox — it's still a modest ceiling on concurrent background LLM
 	// processes. nil (unlimited) is reserved for callers that opt out (tests).
 	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
 
-	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), llmRecorder, sysLimiter, ai.RunnerCallbacks{
+	// The org's background-jobs model, read per cycle from org_settings. One
+	// resolver shared by the scorer and the classifier; the profiler resolves
+	// from the settings row it already reads for the clone protocol. A cycle
+	// whose org has no usable model skips and says so — there is no fallback
+	// model to substitute.
+	systemJobModel := systemllm.NewModelFunc(a.stores.Orgs)
+
+	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), llmRecorder, sysLimiter, systemJobModel, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -129,7 +136,7 @@ func (a *App) buildAI() {
 	// poller isn't running. triggerScorer relays over tf_ctl instead when
 	// this pod isn't the holder (TFAC-583).
 	a.srv.SetScorerTrigger(a.triggerScorer)
-	aiLog.Info("scorer manager ready (per-org runners)", "model", ai.SystemJobModel)
+	aiLog.Info("scorer manager ready (per-org runners)")
 
 	// Repo-profiling manager: per-org Runners profiling configured repos off
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
@@ -157,16 +164,16 @@ func (a *App) buildAI() {
 	// above — the re-profile button may be clicked against a standby
 	// control pod.
 	a.srv.SetProfilerTrigger(a.triggerProfiler)
-	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", ai.SystemJobModel)
+	repoprofileLog.Info("repo-profiling manager ready (per-org runners)")
 
 	// Project classifier: per-org Runners, classifying newly-
-	// discovered entities against existing projects via per-project Haiku
-	// quorum vote off the system:poll: subscriber. Sticky — only fires on
+	// discovered entities against existing projects via a per-project quorum
+	// vote off the system:poll: subscriber. Sticky — only fires on
 	// entities with classified_at IS NULL. Sibling to the scorer/profiler:
 	// per-org isolation so a large org's backlog can't head-of-line-block
 	// another tenant's classification.
-	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), llmRecorder, sysLimiter)
-	classifyLog.Info("project classifier manager ready (per-org runners)", "model", ai.SystemJobModel)
+	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), llmRecorder, sysLimiter, systemJobModel)
+	classifyLog.Info("project classifier manager ready (per-org runners)")
 
 	// Artifact reconciler: per-org Runners mirroring artifacts against live
 	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling

@@ -6,10 +6,11 @@ import "strings"
 // carries these verbatim — a team default, a per-prompt override — and they are
 // what reaches the provider, so nothing downstream translates a stored value.
 //
-// Haiku is the dated spelling to stay aligned with the system jobs' pin
-// (ai.SystemJobModelDirect); Sonnet and Opus are the undated current ids. A
-// test in internal/modelcatalog pins all three to catalog keys, which is what
-// keeps a value the settings UI offers from being one the ledger cannot price.
+// Haiku is the dated spelling, which is what the vendor publishes it under and
+// what the pricing datasheet carries; Sonnet and Opus are the undated current
+// ids. A test in internal/modelcatalog pins all three to catalog keys, which is
+// what keeps a value the settings UI offers from being one the ledger cannot
+// price.
 const (
 	ModelHaiku  = "claude-haiku-4-5-20251001"
 	ModelSonnet = "claude-sonnet-5"

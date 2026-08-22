@@ -41,10 +41,10 @@ func TestRunner_ProviderBackoff_LogsQuietly(t *testing.T) {
 	classifyLog = slog.New(logs)
 	t.Cleanup(func() { classifyLog = prev })
 
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel)
 	// Force every Stage 1 vote to fail with a breaker skip (simulates the
 	// upstream provider being in cooldown).
-	r.stage1Fn = func(context.Context, string, haikuPrompt) (int, string, error) {
+	r.stage1Fn = func(context.Context, string, votePrompt, string) (int, string, error) {
 		return 0, "", &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
 	}
 	r.run(context.Background()) // synchronous one cycle
@@ -127,7 +127,7 @@ func newTestDB(t *testing.T) *sql.DB {
 // TestRunner_StopIdempotent pins that Stop is safe to call more than once
 // (guarded by stopOnce); a bare close(r.stop) would panic on the second call.
 func TestRunner_StopIdempotent(t *testing.T) {
-	r := NewRunner(nil, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
+	r := NewRunner(nil, nil, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel)
 	r.Start()
 	r.Stop()
 	r.Stop() // must not panic
@@ -151,9 +151,9 @@ func TestRunner_AllErroredLeavesEntityForRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel)
 	// Force every Stage 1 vote to error (simulates claude CLI down).
-	r.stage1Fn = func(context.Context, string, haikuPrompt) (int, string, error) {
+	r.stage1Fn = func(context.Context, string, votePrompt, string) (int, string, error) {
 		return 0, "", errors.New("simulated CLI down")
 	}
 	r.run(context.Background()) // synchronous one cycle
@@ -193,8 +193,8 @@ func TestRunner_PartialErrorStillStamps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
-	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel)
+	r.stage1Fn = func(_ context.Context, _ string, p votePrompt, _ string) (int, string, error) {
 		if strings.Contains(p.Message, "<project_name>\nFlaky\n</project_name>") {
 			return 0, "", errors.New("simulated CLI failure for Flaky")
 		}
@@ -234,8 +234,8 @@ func TestRunner_ExactTieRationaleDoesNotQuoteOneCandidate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil)
-	r.stage1Fn = func(_ context.Context, _ string, p haikuPrompt) (int, string, error) {
+	r := NewRunner(sqlitestore.New(database).Entities, sqlitestore.New(database).Projects, runmode.LocalDefaultOrgID, nil, nil, nil, nil, fixedModel)
+	r.stage1Fn = func(_ context.Context, _ string, p votePrompt, _ string) (int, string, error) {
 		if strings.Contains(p.Message, "<project_name>\nAlpha\n</project_name>") {
 			return 75, "definitely belongs to Alpha", nil
 		}

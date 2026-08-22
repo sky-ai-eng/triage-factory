@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -140,8 +141,7 @@ func completeOpts(orgID string, secrets agentproc.SecretsReader) CompleteOptions
 		Message:      "combined local prompt",
 		SystemPrompt: "system instructions",
 		UserMessage:  "user data",
-		Model:        "haiku",
-		DirectModel:  "claude-haiku-4-5-20251001",
+		Model:        domain.ModelHaiku,
 		MaxTokens:    2048,
 		Temperature:  0.1,
 		TraceID:      "test-trace",
@@ -207,9 +207,9 @@ func TestComplete_Direct_AnthropicAuthTokenBearer(t *testing.T) {
 }
 
 // TestComplete_Direct_RequestShape pins what a system job actually sends: the
-// pinned model, the prompt split (instructions as the system prompt, data as
-// the single user turn), the token cap, and — the one easily-dropped field —
-// the caller's temperature.
+// org's background-jobs model, the prompt split (instructions as the system
+// prompt, data as the single user turn), the token cap, and — the one
+// easily-dropped field — the caller's temperature.
 func TestComplete_Direct_RequestShape(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := &capturingHandler{t: t, text: "ok"}
@@ -225,8 +225,8 @@ func TestComplete_Direct_RequestShape(t *testing.T) {
 	}
 
 	body := h.LastBody()
-	if got := body["model"]; got != "claude-haiku-4-5-20251001" {
-		t.Errorf("model = %v, want the pinned DirectModel", got)
+	if got := body["model"]; got != domain.ModelHaiku {
+		t.Errorf("model = %v, want the org's background-jobs model", got)
 	}
 	if got, ok := body["temperature"].(float64); !ok || got != 0.1 {
 		t.Errorf("temperature = %v (present=%v), want the caller's 0.1", body["temperature"], ok)
@@ -303,7 +303,7 @@ func TestComplete_Direct_RecordsSuccessRow(t *testing.T) {
 		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
 	}
 	got := fs.rows[0]
-	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != "claude-haiku-4-5-20251001" {
+	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != domain.ModelHaiku {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 	// The fixture reports 10 input + 3 cache-read + 2 cache-write; the neutral
@@ -314,11 +314,11 @@ func TestComplete_Direct_RecordsSuccessRow(t *testing.T) {
 	}
 	// Cost, by contrast, prices the inclusive usage — the formula subtracts
 	// the cache buckets back out at their own rates.
-	wantCost, ok := inference.CostForUsage(opts.DirectModel, inference.Usage{
+	wantCost, ok := inference.CostForUsage(opts.Model, inference.Usage{
 		PromptTokens: 15, OutputTokens: 5, CacheReadTokens: 3, CacheCreationTokens: 2,
 	})
 	if !ok {
-		t.Fatalf("the pinned system-job model %q must be priceable from the vendored datasheet", opts.DirectModel)
+		t.Fatalf("the system-job model %q must be priceable from the vendored datasheet", opts.Model)
 	}
 	if got.TotalCostUSD != wantCost {
 		t.Errorf("TotalCostUSD = %v, want %v", got.TotalCostUSD, wantCost)
@@ -368,30 +368,28 @@ func TestComplete_Direct_RecordsErrorRow(t *testing.T) {
 	if got.TraceID != "" {
 		t.Errorf("TraceID = %q, want empty — no response, no idempotency key", got.TraceID)
 	}
-	if got.Model != "claude-haiku-4-5-20251001" || got.Job != JobClassifier {
+	if got.Model != domain.ModelHaiku || got.Job != JobClassifier {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 }
 
-// TestRecordDirectCall_PricesOnPinnedModel is the regression guard for a
-// Bedrock call recording the wrong cost: the resolved request model is an
-// inference-profile id/ARN (the regional default, or an org's
-// bedrock_model_id override) whose datasheet row is not what the org is
-// billed on, so cost math keys off opts.DirectModel — while the row still
-// records the resolved model for observability.
-func TestRecordDirectCall_PricesOnPinnedModel(t *testing.T) {
+// TestRecordDirectCall_PricesOnTheRequestedModel pins that the ledger charges
+// what actually ran: the model the request carried is both the row's model and
+// the pricing key, for every provider. The knob is a catalog key and the catalog
+// only offers keys the datasheet prices, so the two can't come apart.
+func TestRecordDirectCall_PricesOnTheRequestedModel(t *testing.T) {
 	usage := inference.Usage{PromptTokens: 1000, OutputTokens: 500, CacheReadTokens: 100, CacheCreationTokens: 50}
-	wantCost, ok := inference.CostForUsage("claude-haiku-4-5-20251001", usage)
-	if !ok {
-		t.Fatal("the pinned system-job model must be priceable from the vendored datasheet")
-	}
 
-	for _, resolved := range []string{defaultBedrockHaikuModel, "custom.inference.profile"} {
-		t.Run(resolved, func(t *testing.T) {
+	for _, model := range modelcatalog.Keys() {
+		t.Run(model, func(t *testing.T) {
+			wantCost, ok := inference.CostForUsage(model, usage)
+			if !ok {
+				t.Fatalf("catalog model %q must be priceable from the vendored datasheet", model)
+			}
 			fs := &fakeStore{}
-			r := NewRecorder(fs)
 			opts := completeOpts("org-1", nil)
-			r.recordDirectCall(context.Background(), opts, resolved, time.Now().UTC(), 42,
+			opts.Model = model
+			NewRecorder(fs).recordDirectCall(context.Background(), opts, time.Now().UTC(), 42,
 				&inference.Completion{ID: "msg_x", Usage: usage}, nil)
 
 			if len(fs.rows) != 1 {
@@ -399,10 +397,10 @@ func TestRecordDirectCall_PricesOnPinnedModel(t *testing.T) {
 			}
 			got := fs.rows[0]
 			if got.TotalCostUSD != wantCost {
-				t.Errorf("TotalCostUSD = %v, want %v (cost must key on DirectModel, not the resolved model %q)", got.TotalCostUSD, wantCost, resolved)
+				t.Errorf("TotalCostUSD = %v, want %v", got.TotalCostUSD, wantCost)
 			}
-			if got.Model != resolved {
-				t.Errorf("Model = %q, want the resolved model recorded for observability", got.Model)
+			if got.Model != model {
+				t.Errorf("Model = %q, want the model the request carried", got.Model)
 			}
 		})
 	}
@@ -428,40 +426,75 @@ func TestDirectUsageFrom(t *testing.T) {
 	}
 }
 
-// TestRequestModel pins the model each provider branch requests: an Anthropic
-// org sends the caller's pinned id verbatim, a Bedrock org sends its
-// bedrock_model_id override when set and the pinned Haiku inference profile
-// otherwise. It also pins that the model is whitelisted on the key the call
-// carries — a model the key can't serve fails at request time with a
-// confusing no-key-for-model error.
-func TestRequestModel(t *testing.T) {
-	const pinned = "claude-haiku-4-5-20251001"
-	cases := []struct {
-		name  string
-		creds map[string]string
-		want  string
-	}{
-		{"anthropic uses the pinned model", map[string]string{"ANTHROPIC_API_KEY": "k"}, pinned},
-		{"bedrock bearer falls back to the default profile", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1"}, defaultBedrockHaikuModel},
-		{"bedrock sigv4 falls back to the default profile", map[string]string{"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s", "AWS_REGION": "us-east-1"}, defaultBedrockHaikuModel},
-		{"bedrock_model_id wins", map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1", "ANTHROPIC_MODEL": "custom.inference.profile"}, "custom.inference.profile"},
-		{"an anthropic key wins over bedrock, model included", map[string]string{"ANTHROPIC_API_KEY": "k", "AWS_BEARER_TOKEN_BEDROCK": "t", "ANTHROPIC_MODEL": "custom.inference.profile"}, pinned},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			pc, err := mapDirectCreds(tc.creds, pinned)
+// TestMapDirectCreds pins the two things the credential mapping decides for a
+// system job: the key it builds whitelists the model the request will carry
+// (bifrost reads an empty whitelist as "no models", so a missing one fails at
+// request time with a confusing no-key-for-model error), and credentials for a
+// provider other than the one the catalog says serves the model are refused
+// rather than used — resolution already picked the provider from the model, so
+// a mismatch is a bug, and buying the request anyway is the substitution the
+// no-fallback rule forbids.
+func TestMapDirectCreds(t *testing.T) {
+	anthropicKey := map[string]string{"ANTHROPIC_API_KEY": "k"}
+	bedrockBearer := map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "t", "AWS_REGION": "us-east-1"}
+	bedrockSigV4 := map[string]string{"AWS_ACCESS_KEY_ID": "a", "AWS_SECRET_ACCESS_KEY": "s", "AWS_REGION": "us-east-1"}
+
+	t.Run("every catalog model maps to the provider that serves it", func(t *testing.T) {
+		for _, e := range modelcatalog.Entries() {
+			var creds map[string]string
+			switch e.Provider {
+			case modelcatalog.ProviderAnthropic:
+				creds = anthropicKey
+			case modelcatalog.ProviderBedrock:
+				creds = bedrockBearer
+			default:
+				t.Fatalf("%s: no credential shape for provider %q", e.Key, e.Provider)
+			}
+			pc, err := mapDirectCreds(creds, e.Key)
 			if err != nil {
-				t.Fatalf("mapDirectCreds: %v", err)
+				t.Errorf("%s: %v", e.Key, err)
+				continue
 			}
-			got := requestModel(pc, tc.creds, pinned)
-			if got != tc.want {
-				t.Errorf("requestModel = %q, want %q", got, tc.want)
+			if string(pc.Provider) != e.Provider {
+				t.Errorf("%s: provider = %q, want %q", e.Key, pc.Provider, e.Provider)
 			}
-			if !slices.Contains(pc.Models, got) {
-				t.Errorf("key whitelist %v does not carry the requested model %q", pc.Models, got)
+			if !slices.Contains(pc.Models, e.Key) {
+				t.Errorf("%s: key whitelist %v does not carry the requested model", e.Key, pc.Models)
 			}
-		})
+		}
+	})
+
+	t.Run("a provider mismatch is refused", func(t *testing.T) {
+		anthropicModel := modelOn(t, modelcatalog.ProviderAnthropic)
+		bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+		for _, tc := range []struct {
+			name  string
+			creds map[string]string
+			model string
+		}{
+			{"bedrock model, anthropic credentials", anthropicKey, bedrockModel},
+			{"anthropic model, bedrock bearer", bedrockBearer, anthropicModel},
+			{"anthropic model, bedrock sigv4", bedrockSigV4, anthropicModel},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				if _, err := mapDirectCreds(tc.creds, tc.model); err == nil {
+					t.Fatal("expected a refusal, got credentials")
+				}
+			})
+		}
+	})
+}
+
+// modelOn returns an offered model served by provider.
+func modelOn(t *testing.T, provider string) string {
+	t.Helper()
+	for _, e := range modelcatalog.Entries() {
+		if e.Provider == provider {
+			return e.Key
+		}
 	}
+	t.Fatalf("catalog offers no model on %s", provider)
+	return ""
 }
 
 // TestComplete_Direct_NoCredentialsConfigured pins error propagation for an
@@ -489,6 +522,58 @@ func TestComplete_Direct_ResolverReturnedNothing(t *testing.T) {
 	_, err := NewRecorder(nil).Complete(context.Background(), opts)
 	if !errors.Is(err, inference.ErrNoCredentials) {
 		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+}
+
+// TestResolveDirectCreds_BedrockOnlyOrg is the case the pinned-Haiku system
+// jobs could not serve: an org that holds only AWS material. Its knob names a
+// Bedrock catalog key, and that key is what selects the provider — so
+// resolution returns Bedrock material and the mapping whitelists the very model
+// the request will carry, with nothing anywhere re-deriving a spelling.
+func TestResolveDirectCreds_BedrockOnlyOrg(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	secrets := stubSecrets{
+		"org-1/aws_bearer_token_bedrock": "bedrock-tok",
+		"org-1/aws_region":               "eu-central-1",
+	}
+
+	opts := completeOpts("org-1", secrets)
+	opts.Model = bedrockModel
+	creds, err := resolveDirectCreds(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("resolveDirectCreds: %v", err)
+	}
+	pc, err := mapDirectCreds(creds, opts.Model)
+	if err != nil {
+		t.Fatalf("mapDirectCreds: %v", err)
+	}
+	if pc.Provider != inference.ProviderBedrock {
+		t.Errorf("provider = %q, want bedrock", pc.Provider)
+	}
+	if pc.Bedrock == nil || pc.Bedrock.Region != "eu-central-1" {
+		t.Errorf("bedrock credentials = %+v, want the org's region", pc.Bedrock)
+	}
+	if !slices.Contains(pc.Models, bedrockModel) {
+		t.Errorf("key whitelist %v does not carry the requested model %q", pc.Models, bedrockModel)
+	}
+}
+
+// TestResolveDirectCreds_ModelWithoutItsProviderIsRefused is the same org from
+// the other side: it picked an Anthropic model and holds no Anthropic
+// credential. Nothing substitutes the Bedrock material it does hold — the call
+// is refused, naming the provider to connect.
+func TestResolveDirectCreds_ModelWithoutItsProviderIsRefused(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	secrets := stubSecrets{
+		"org-1/aws_bearer_token_bedrock": "bedrock-tok",
+		"org-1/aws_region":               "eu-central-1",
+	}
+
+	opts := completeOpts("org-1", secrets)
+	opts.Model = modelOn(t, modelcatalog.ProviderAnthropic)
+	if _, err := resolveDirectCreds(context.Background(), opts); !errors.Is(err, agentproc.ErrProviderNotConfigured) {
+		t.Fatalf("err = %v, want ErrProviderNotConfigured", err)
 	}
 }
 
@@ -526,13 +611,14 @@ func TestComplete_Direct_MissingSystemOrUserMessage(t *testing.T) {
 	})
 }
 
-// TestComplete_Direct_MissingDirectModel pins the fast-fail guard for a
-// caller that forgot to set DirectModel: no request may go out with an empty
-// model — the stub server fails the test if hit.
-func TestComplete_Direct_MissingDirectModel(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeMulti)
+// TestComplete_MissingModel pins the fast-fail guard for a caller whose org has
+// no background-jobs model resolved: no request may go out — the stub server
+// fails the test if hit — and the refusal is ErrNoModel in BOTH modes, because
+// an empty --model is a model nobody chose just as much as an empty request
+// model is.
+func TestComplete_MissingModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("no request should be sent when DirectModel is missing")
+		t.Error("no request should be sent when the model is missing")
 	}))
 	defer srv.Close()
 
@@ -540,10 +626,23 @@ func TestComplete_Direct_MissingDirectModel(t *testing.T) {
 		"org-1/anthropic_api_key":  "sk-ant-test",
 		"org-1/anthropic_base_url": srv.URL,
 	}
-	opts := completeOpts("org-1", secrets)
-	opts.DirectModel = ""
-	if _, err := NewRecorder(nil).Complete(context.Background(), opts); err == nil {
-		t.Fatal("expected an error when DirectModel is empty")
+	for _, mode := range []runmode.Mode{runmode.ModeMulti, runmode.ModeLocal} {
+		t.Run(string(mode), func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			orig := runLocal
+			runLocal = func(context.Context, agentproc.RunOptions, agentproc.Sink) (*agentproc.Outcome, error) {
+				t.Error("no subprocess should be spawned when the model is missing")
+				return nil, nil
+			}
+			t.Cleanup(func() { runLocal = orig })
+
+			opts := completeOpts("org-1", secrets)
+			opts.Model = ""
+			_, err := NewRecorder(nil).Complete(context.Background(), opts)
+			if !errors.Is(err, ErrNoModel) {
+				t.Fatalf("err = %v, want ErrNoModel", err)
+			}
+		})
 	}
 }
 

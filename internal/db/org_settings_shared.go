@@ -44,8 +44,8 @@ func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverrid
 // ScanOrgSettingsCore decodes the org_settings columns each dialect store's
 // orgSettingsColumns projects, in that order: github_clone_protocol,
 // anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-// max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-// github_credential_class, version. GitHubBaseURL / GitHubPollInterval /
+// background_jobs_model, max_daily_cost_usd, max_concurrent_runs,
+// marketplace_enabled, github_credential_class, version. GitHubBaseURL / GitHubPollInterval /
 // JiraBaseURL / JiraPollInterval are left at the Go zero value — callers
 // apply ApplyOrgSourceOverrides afterward.
 //
@@ -57,6 +57,7 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 	var (
 		anthRef, bedRef, maxTier sql.NullString
 		cloneProto               string
+		backgroundJobsModel      string
 		maxDailyCost             sql.NullFloat64
 		maxConcurrentRuns        sql.NullInt64
 		marketplaceEnabled       bool
@@ -65,7 +66,7 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 	)
 	if err := scan(
 		&cloneProto,
-		&anthRef, &bedRef, &maxTier,
+		&anthRef, &bedRef, &maxTier, &backgroundJobsModel,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
 		&credentialClass, &version,
 	); err != nil {
@@ -84,9 +85,12 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		AnthropicAPIKeyRef:    anthRef.String,
 		BedrockCredentialsRef: bedRef.String,
 		MaxLLMModelTier:       maxTier.String,
-		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
-		MaxConcurrentRuns:     concurrentRuns,
-		MarketplaceEnabled:    marketplaceEnabled,
+		// NOT NULL on both backends, so no null coalescing: "" is the org's own
+		// "not picked", which is the value the multi-mode column defaults to.
+		BackgroundJobsModel: backgroundJobsModel,
+		MaxDailyCostUSD:     maxDailyCost.Float64, // NULL → 0 (no cap)
+		MaxConcurrentRuns:   concurrentRuns,
+		MarketplaceEnabled:  marketplaceEnabled,
 		// Surfaced verbatim, never coerced to a known value: callers switch on
 		// it and refuse what they don't recognise, which is the whole point of
 		// storing the class instead of inferring it.

@@ -19,7 +19,7 @@ import (
 func TestManager_TriggerLazyCreatesPerOrgRunner(t *testing.T) {
 	scores := &recordingScoreStore{seen: map[string]int{}}
 
-	m := NewManager(scores, nil, nil, nil, nil, nil, RunnerCallbacks{})
+	m := NewManager(scores, nil, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	defer m.Stop()
 
 	m.Trigger("org-a")
@@ -60,7 +60,7 @@ func TestManager_DistinctOrgsRunConcurrently(t *testing.T) {
 		},
 	}
 
-	m := NewManager(scores, nil, nil, nil, nil, nil, RunnerCallbacks{})
+	m := NewManager(scores, nil, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	defer m.Stop()
 
 	m.Trigger("org-a")
@@ -91,7 +91,7 @@ func TestManager_DistinctOrgsRunConcurrently(t *testing.T) {
 func TestManager_EmptyOrgIDDropped(t *testing.T) {
 	scores := &recordingScoreStore{seen: map[string]int{}}
 
-	m := NewManager(scores, nil, nil, nil, nil, nil, RunnerCallbacks{})
+	m := NewManager(scores, nil, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 	defer m.Stop()
 
 	m.Trigger("")
@@ -116,7 +116,7 @@ func TestManager_EmptyOrgIDDropped(t *testing.T) {
 // shut down.
 func TestManager_StopIdempotent(t *testing.T) {
 	scores := &recordingScoreStore{seen: map[string]int{}}
-	m := NewManager(scores, nil, nil, nil, nil, nil, RunnerCallbacks{})
+	m := NewManager(scores, nil, nil, nil, nil, nil, fixedModel, RunnerCallbacks{})
 
 	m.Trigger("org-a")
 	if !waitFor(t, time.Second, func() bool { return scores.callsFor("org-a") >= 1 }) {

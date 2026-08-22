@@ -134,6 +134,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// from the value it ends at.
 		"github_clone_protocol": defaultsCloneProtocol(),
 		"max_llm_model_tier":    "sonnet",
+		"background_jobs_model": domain.ModelOpus,
 		"max_daily_cost_usd":    42.5,
 		"max_concurrent_runs":   9,
 	})
@@ -151,6 +152,10 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		// max_llm_model_tier is omitempty on the wire, so its cleared value is
 		// an absent key, which decodes to nil.
 		{"max_llm_model_tier", nil},
+		// background_jobs_model is NOT omitempty on the wire: "" is the state
+		// in which the background jobs do not run, and a form that has to
+		// render it needs the key present rather than absent.
+		{"background_jobs_model", ""},
 		{"max_daily_cost_usd", float64(0)},
 		{"max_concurrent_runs", float64(0)},
 	}

@@ -2,6 +2,7 @@ package projectclassify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -14,18 +15,22 @@ import (
 	"go.opentelemetry.io/otel/codes"
 )
 
-// stage1Func runs one broad-pass Haiku classification. It is the
+// stage1Func runs one broad-pass classification call. It is the
 // classifier's unit-test seam — a per-instance field on the Runner,
 // defaulted in NewRunner to the real implementation, overridable in tests —
 // mirroring the repo-profiler's batchFn pattern.
 // orgID is carried explicitly (rather than read off the receiver inside the
 // seam) so a stub can assert the Runner's org threads through to the model
 // call; secrets/recorder/limiter are read off the receiver by the real impl.
-type stage1Func func(ctx context.Context, orgID string, p haikuPrompt) (int, string, error)
+//
+// model is the org's background-jobs model, resolved once at the top of the
+// cycle and passed down rather than read per vote — a cycle spends on one
+// model, and every vote it casts is recorded against that one.
+type stage1Func func(ctx context.Context, orgID string, p votePrompt, model string) (int, string, error)
 
 // Runner drives project classification for a single org as a background loop.
 // It mirrors ai.Runner: a buffered trigger channel coalesces signals
-// (single-flight) and a stop channel cancels any in-flight Haiku call on
+// (single-flight) and a stop channel cancels any in-flight vote call on
 // shutdown. Each cycle classifies the org's unclassified entities against its
 // projects via a per-project quorum vote. The per-org split (one Runner per
 // org, owned by the Manager) is what keeps a large org's backlog from
@@ -34,10 +39,11 @@ type Runner struct {
 	orgID      string
 	entities   db.EntityStore
 	projects   db.ProjectStore
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → Haiku (nil in local; system-door in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader threaded into Classify → the vote call (nil in local; system-door in multi).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-vote LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap (nil → unlimited).
+	models     systemllm.ModelFunc     // resolves the org's background-jobs model; a cycle with no usable one skips.
 	kb         *kbstore.Store          // multi-mode KB blob store; set by the Manager, nil in local/tests.
 
 	// stage1Fn is the test seam (see stage1Func), defaulted in NewRunner
@@ -51,7 +57,7 @@ type Runner struct {
 	running  bool
 }
 
-func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) *Runner {
+func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, models systemllm.ModelFunc) *Runner {
 	r := &Runner{
 		orgID:      orgID,
 		entities:   entities,
@@ -60,10 +66,11 @@ func NewRunner(entities db.EntityStore, projects db.ProjectStore, orgID string, 
 		llmResolve: llmResolve,
 		recorder:   recorder,
 		limiter:    limiter,
+		models:     models,
 		trigger:    make(chan struct{}, 1),
 		stop:       make(chan struct{}),
 	}
-	r.stage1Fn = r.realRunStage1Haiku
+	r.stage1Fn = r.realRunStage1
 	return r
 }
 
@@ -78,7 +85,7 @@ func (r *Runner) Trigger() {
 
 func (r *Runner) Start() {
 	// Derive a ctx that cancels when Stop() closes r.stop, so any
-	// in-flight Haiku call (which now goes through agentproc.Run → SDK
+	// in-flight vote call (which now goes through agentproc.Run → SDK
 	// subprocess) gets SIGKILL'd on server shutdown rather than
 	// blocking until the model times out on its own.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -162,12 +169,35 @@ func (r *Runner) run(ctx context.Context) {
 		return
 	}
 
-	classifyLog.Info("classifying entities against projects", "org", r.orgID, "entities", len(entities), "projects", len(projects))
+	// Resolve the org's background-jobs model before any vote is cast. Either way
+	// this cycle classifies nothing — it never substitutes a model of TF's
+	// choosing — and either way classified_at stays NULL, exactly as it does for
+	// an all-errored entity, so everything resurfaces next cycle.
+	//
+	// The two reasons it can fail are not the same event. An unusable SETTING is
+	// a configuration state whose remedy is an org admin picking a model: WARN,
+	// and the next cycle asks again. Anything else — the settings row could not
+	// be read, nothing was wired to read it with — is a failed cycle, and gets
+	// what the two reads above it get, so a wedged database is not quietly
+	// reported as an org that has not chosen.
+	model, err := r.models.Resolve(ctx, r.orgID)
+	switch {
+	case errors.Is(err, systemllm.ErrNoModel):
+		span.SetAttributes(telemetry.Outcome("no_model"))
+		classifyLog.WarnContext(ctx, "skipping classification cycle", "org", r.orgID, "error", err)
+		return
+	case err != nil:
+		span.SetStatus(codes.Error, "resolve background jobs model")
+		classifyLog.ErrorContext(ctx, "resolve background jobs model failed", "org", r.orgID, "error", err)
+		return
+	}
+
+	classifyLog.Info("classifying entities against projects", "org", r.orgID, "entities", len(entities), "projects", len(projects), "model", model)
 
 	assigned := 0
 	skipped := 0
 	for _, e := range entities {
-		winner, votes := r.classify(ctx, projects, e)
+		winner, votes := r.classify(ctx, projects, e, model)
 		// All votes errored — leave classified_at NULL so the entity
 		// resurfaces next cycle. Stamping it here would permanently
 		// freeze the entity at unassigned even if the underlying

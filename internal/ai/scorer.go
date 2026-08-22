@@ -58,29 +58,16 @@ type TaskScore struct {
 	Summary             string  `json:"summary"`
 }
 
-// SystemJobModel is the model the three headless background jobs (scorer,
-// repo-profiler, project-classifier) run on: always haiku — fast and cheap,
-// plenty capable for summarization, priority scoring, and classification. The
-// user's model preference is reserved for heavier features like delegation.
-// Shared here (rather than re-declared per package) so the three surfaces
-// can't drift on Haiku version.
-//
-// This is the CLI model alias local mode passes to `claude -p --model`; the
-// raw Messages API used by the multi-mode direct path doesn't accept it —
-// see SystemJobModelDirect.
-const SystemJobModel = "haiku"
-
-// SystemJobModelDirect is the pinned model id the multi-mode direct-API
-// path (internal/systemllm) uses in place of the "haiku" CLI alias. Must
-// match a key in the pricing table (pricing.go) so cost accounting resolves.
-const SystemJobModelDirect = "claude-haiku-4-5-20251001"
-
 // batchScoreFn scores one batch of task inputs. It is the scorer's unit-test
 // seam: the Runner holds one as a struct field (scoreFn), defaulted to a
 // closure over the real scoreBatch that captures the recorder + system-job
 // limiter, so tests can inject a stub without spawning an agent subprocess and
 // without a package-level mutable var. Mirrors the repo-profiler's batchFn.
-type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader) ([]TaskScore, error)
+//
+// model is the org's background-jobs model, resolved once at the top of the
+// cycle and passed down rather than read here — a cycle spends on one model,
+// and every batch it runs is recorded against that one.
+type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID, model string, secrets agentproc.SecretsReader) ([]TaskScore, error)
 
 // llmResolveFunc is the RunOptions.LLMResolver shape a background LLM job
 // carries — the brain-side llmcred adapter (llmcred.SystemEnvResolver) that
@@ -97,7 +84,7 @@ type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]s
 // batch doesn't inflate the count, and so the number stays correct if
 // batchSize changes. Failures are non-fatal: the method still returns whatever
 // scores succeeded, and the caller surfaces skippedTasks as a warning toast.
-func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []TaskScore, skippedTasks int, err error) {
+func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task, model string) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil
 	}
@@ -165,7 +152,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 		wg.Add(1)
 		go func(idx int, b []TaskInput) {
 			defer wg.Done()
-			scores, err := r.scoreFn(ctx, b, orgID, r.secrets)
+			scores, err := r.scoreFn(ctx, b, orgID, model, r.secrets)
 			results[idx] = batchResult{scores, err}
 		}(i, batch)
 	}
@@ -197,7 +184,7 @@ func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task) (scores []
 	return allScores, skipped, nil
 }
 
-func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
+func scoreBatch(ctx context.Context, tasks []TaskInput, orgID, model string, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]TaskScore, error) {
 	tasksJSON, err := json.Marshal(tasks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tasks: %w", err)
@@ -230,8 +217,7 @@ func scoreBatch(ctx context.Context, tasks []TaskInput, orgID string, secrets ag
 		Message:      fmt.Sprintf(batchPrioritizePrompt, string(tasksJSON)),
 		SystemPrompt: batchPrioritizeSystemPrompt,
 		UserMessage:  fmt.Sprintf(batchPrioritizeUserPrompt, string(tasksJSON)),
-		Model:        SystemJobModel,
-		DirectModel:  SystemJobModelDirect,
+		Model:        model,
 		MaxTokens:    16384,
 		Temperature:  0.1,
 		TraceID:      "scorer-batch",
