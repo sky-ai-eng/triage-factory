@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -635,17 +636,43 @@ func TestModelsList_Postgres_UnconfiguredOutranksAStoredGreen(t *testing.T) {
 	}
 }
 
-// An org that binds nothing is on ambient credentials, not missing a provider.
-// It gets the answer it always got, so subscription users see no new badge.
-func TestModelsList_Postgres_AmbientOrgIsAssumed(t *testing.T) {
+// A multi-mode org that binds nothing is unconfigured, not ambient. There are
+// no host credentials for a hosted deployment to lend — the operator's
+// environment is one environment shared by every tenant, and credential
+// resolution refuses such an org outright — so "assumed" here would badge a
+// picker full of models whose every run fails on the way out.
+func TestModelsList_Postgres_NothingBoundIsUnconfigured(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	pgtest.MustExec(t, rig.h.AdminDB,
 		`UPDATE org_settings SET anthropic_api_key_ref = NULL, bedrock_credentials_ref = NULL WHERE org_id = $1`, rig.orgID)
 
 	for _, row := range rig.catalogRead(t, rig.admin) {
-		if row.Availability != modelAvailabilityAssumed {
+		if row.Availability != modelAvailabilityUnconfigured {
 			t.Errorf("%s: availability = %q, want %q for an org that has bound nothing",
-				row.Key, row.Availability, modelAvailabilityAssumed)
+				row.Key, row.Availability, modelAvailabilityUnconfigured)
+		}
+	}
+}
+
+// And a row that says otherwise does not change it. Availability asks what
+// credential resolution would do, which in multi is refuse — the org's recorded
+// credential source is a setup fact, not a dispatch one, and a badge that
+// deferred to it would promise a run this deployment cannot make. The settings
+// PATCH refuses to write this value at all; this is the backstop for a row that
+// arrived some other way.
+func TestModelsList_Postgres_StoredHostCredentialsAreInert(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	pgtest.MustExec(t, rig.h.AdminDB, `
+		UPDATE org_settings
+		   SET anthropic_api_key_ref = NULL,
+		       bedrock_credentials_ref = NULL,
+		       llm_auth_method = 'system'
+		 WHERE org_id = $1`, rig.orgID)
+
+	for _, row := range rig.catalogRead(t, rig.admin) {
+		if row.Availability != modelAvailabilityUnconfigured {
+			t.Errorf("%s: availability = %q, want %q — multi has no host credentials to run under",
+				row.Key, row.Availability, modelAvailabilityUnconfigured)
 		}
 	}
 }
@@ -684,6 +711,69 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	}
 }
 
+// The zero-configuration local install: nothing bound, so the agent subprocess
+// authenticates from the inherited environment and every model is assumed. The
+// answer it has always had, and the one the mode's own credential resolution
+// gives.
+func TestModelsList_LocalMode_HostCredentialsAreAssumed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	items := decodeModels(t, rec.Body.Bytes()).Items
+	if len(items) == 0 {
+		t.Fatal("catalog read returned no models")
+	}
+	for _, row := range items {
+		if row.Availability != modelAvailabilityAssumed {
+			t.Errorf("%s: availability = %q, want %q on the host's credentials",
+				row.Key, row.Availability, modelAvailabilityAssumed)
+		}
+	}
+}
+
+// A local org that has SAID it brings its own key and bound none is still
+// assumed, not unconfigured, and the recorded choice is deliberately not what
+// decides that. Local credential resolution hands the subprocess nothing and
+// lets the SDK authenticate from the inherited environment whenever the org has
+// bound nothing — whatever anyone picked — so a run here may well succeed, and
+// a badge saying the model cannot be invoked would contradict it. The setup gap
+// is real and the Claude credentials section is where it is named; the model
+// picker's job is to say what would happen.
+func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsStillAssumed(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read org settings: %v", err)
+	}
+	set.LLMAuthMethod = domain.LLMAuthBYOK
+	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+		t.Fatalf("select byok: %v", err)
+	}
+
+	rec := doJSON(t, s, http.MethodGet, modelsPath(runmode.LocalDefaultOrgID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	items := decodeModels(t, rec.Body.Bytes()).Items
+	if len(items) == 0 {
+		t.Fatal("catalog read returned no models")
+	}
+	for _, row := range items {
+		if row.Availability != modelAvailabilityAssumed {
+			t.Errorf("%s: availability = %q, want %q — local resolution falls back to the inherited environment",
+				row.Key, row.Availability, modelAvailabilityAssumed)
+		}
+	}
+}
+
 // Local mode's half of this state, and the constraint it must not break.
 //
 // Local answers "unconfigured" for a provider the org has not bound — it is a
@@ -701,14 +791,17 @@ func TestModelsList_LocalMode_UnconfiguredWithoutReadingTheTable(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	// Bind Anthropic only, so the org is not ambient and Bedrock is genuinely
-	// unconfigured.
+	// Bind Anthropic only, so the org is on its own credentials and Bedrock is
+	// genuinely unconfigured. Both fields, because that is what the bind route
+	// writes: the ref says which provider, the method says the org has stopped
+	// running on the host's.
 	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
 	if err != nil {
 		t.Fatalf("read org settings: %v", err)
 	}
 	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 	set.BedrockCredentialsRef = ""
+	set.LLMAuthMethod = domain.LLMAuthBYOK
 	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
 		t.Fatalf("bind anthropic: %v", err)
 	}

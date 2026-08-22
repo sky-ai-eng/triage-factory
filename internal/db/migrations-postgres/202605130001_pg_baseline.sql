@@ -958,6 +958,32 @@ CREATE TABLE public.org_settings (
     -- without touching this row.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
+    -- Where the org's Claude credentials come from, stated rather than inferred
+    -- from the two refs above being empty. 'system' is the host's credentials
+    -- (TF supplies the subprocess nothing and the Claude Code SDK resolves auth
+    -- from the inherited environment); 'byok' is the org's own bound material,
+    -- whichever provider serves the model. The refs stay the record of WHICH
+    -- providers are bound; this column answers what it means when none are —
+    -- deliberately on the host's credentials, or not set up.
+    --
+    -- App-validated, not CHECK-constrained, the max_llm_model_tier /
+    -- background_jobs_model precedent: the SQLite tree adds this column with
+    -- ALTER TABLE, where widening a CHECK later means a full table rebuild, and
+    -- a constraint that exists on one dialect only is worse than one on
+    -- neither.
+    --
+    -- DEFAULT 'byok', and here that is not a default so much as the only value:
+    -- a hosted deployment has no host credentials to lend — the operator's
+    -- environment would be shared by every tenant, and credential resolution
+    -- refuses an org with nothing bound outright — so the settings PATCH
+    -- refuses 'system' in multi mode and domain.EffectiveLLMAuthMethod resolves
+    -- to 'byok' whatever the column says. The SQLite tree defaults to 'system'
+    -- instead (202608260003_org_llm_auth_method.sql): local mode is
+    -- single-user and zero-configuration, so a fresh install arrives already on
+    -- the host's credentials and is never asked to pick. Rolled into the
+    -- baseline (not a forward migration) because multi-mode / Postgres is
+    -- net-new and unshipped, so there are no existing rows to backfill.
+    llm_auth_method text DEFAULT 'byok'::text NOT NULL,
     -- Max model tier the org permits teams/users to pick. NULL means no cap.
     -- App-validated, not CHECK-constrained (the max_llm_model_tier_check was
     -- dropped in this baseline, both dialects): an opaque, provider-agnostic

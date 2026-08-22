@@ -590,9 +590,22 @@ type orgSettingsResponse struct {
 	// Always emitted (not omitempty) for the same reason as MaxDailyCostUSD —
 	// the form renders the numeric input's current value, "0 / unlimited"
 	// included.
-	MaxConcurrentRuns  int  `json:"max_concurrent_runs"`
-	HasAnthropicAPIKey bool `json:"has_anthropic_api_key"`
-	HasBedrockCreds    bool `json:"has_bedrock_credentials"`
+	MaxConcurrentRuns int `json:"max_concurrent_runs"`
+	// LLMAuthMethod is where this org's Claude credentials come from:
+	// "system" (the host's, resolved by the SDK from the environment the agent
+	// subprocess inherits) or "byok" (the org's own bound material). The
+	// EFFECTIVE value, so a multi-mode deployment always reads "byok" — the
+	// client never has to know that "system" is local-only to render the right
+	// control, which is the mode difference travelling as data.
+	//
+	// Read alongside has_anthropic_api_key / has_bedrock_credentials, never
+	// derived from them: those say which providers are bound, this says what it
+	// means that none are. Always emitted — a client rendering the source
+	// picker has to know the current selection, and an omitted field would read
+	// as "unchanged".
+	LLMAuthMethod      string `json:"llm_auth_method"`
+	HasAnthropicAPIKey bool   `json:"has_anthropic_api_key"`
+	HasBedrockCreds    bool   `json:"has_bedrock_credentials"`
 	// Bedrock non-secret config (TFAC-68). The credential itself never
 	// leaves the vault — presence rides has_bedrock_credentials and the
 	// method marker below; these three let the Settings form render the
@@ -763,6 +776,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		BackgroundJobsModel:       orgSet.BackgroundJobsModel,
 		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
 		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
+		LLMAuthMethod:             domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, !local),
 		HasAnthropicAPIKey:        orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:           orgSet.BedrockCredentialsRef != "",
 		BedrockAuthMethod:         bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
@@ -797,6 +811,7 @@ type orgSettingsPatch struct {
 	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
 	MaxLLMModelTier     json.RawMessage `json:"max_llm_model_tier"`
 	BackgroundJobsModel json.RawMessage `json:"background_jobs_model"`
+	LLMAuthMethod       json.RawMessage `json:"llm_auth_method"`
 	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
 	MaxConcurrentRuns   json.RawMessage `json:"max_concurrent_runs"`
 	// Version is the token the caller read this row at. Required, and a plain
@@ -864,10 +879,37 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 				return e
 			}
 		}
+		// Running on the host's credentials means holding none of your own:
+		// credential resolution reaches for a stored key whenever one exists,
+		// so a row claiming "system" beside a bound provider would describe a
+		// run that does not happen. Removing the material is its own act on its
+		// own resource — this refuses rather than reaching across and deleting
+		// it, which is exactly the overloaded write the LLM credential routes
+		// were split up to stop.
+		//
+		// Checked here, against the row the write is landing on, and only when
+		// this write is the one asking for it: a save that re-sends a method
+		// stored before someone else bound a key must not be blamed for a state
+		// it did not create.
+		if cur.LLMAuthMethod == domain.LLMAuthSystem && cur.LLMAuthMethod != prevOrgSet.LLMAuthMethod {
+			if bound := boundLLMProviders(cur); len(bound) > 0 {
+				return fmt.Errorf("%w: disconnect %s first", errLLMAuthMethodHasCredentials, strings.Join(bound, " and "))
+			}
+		}
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
 	})
 	if writeModelAccessError(w, err, "background_jobs_model") {
+		return
+	}
+	if errors.Is(err, errLLMAuthMethodHasCredentials) {
+		// 422, not 400: the value is a legal one and the body is well formed —
+		// what is wrong is the state of the resource it would land on, which is
+		// the same distinction the credential binds draw for a key the provider
+		// rejects.
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "llm_auth_method",
+		})
 		return
 	}
 	if errors.Is(err, db.ErrOrgSettingsVersion) {
@@ -930,7 +972,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	if !httpx.PatchNamed(
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
 		req.JiraBaseURL, req.JiraPollInterval, req.MaxLLMModelTier,
-		req.BackgroundJobsModel, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
+		req.BackgroundJobsModel, req.LLMAuthMethod, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
 	) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
@@ -1094,6 +1136,33 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(modelcatalog.Keys(), ", "))
 		default:
 			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
+		}
+	}
+	// llm_auth_method names where the org's Claude credentials come from, and
+	// it is the one settings field whose legal values depend on the deployment:
+	// "system" means the agent subprocess inherits the host's environment, and
+	// a hosted deployment's environment is one environment shared by every
+	// tenant. Refused there rather than stored-and-ignored, so an admin is told
+	// no instead of being left with a row that reads one way and runs another.
+	//
+	// Not nullable. There is no third state to clear TO — an org's credentials
+	// come from one of the two places — so an explicit null is a rejected value
+	// rather than a spelling of "unset".
+	//
+	// Whether the org still holds material that "system" would contradict is
+	// checked in the transaction below, against the row this write is landing
+	// on.
+	if v, st := httpx.PatchString(&shape, req.LLMAuthMethod, "llm_auth_method"); st != httpx.PatchAbsent {
+		method := strings.TrimSpace(v)
+		switch {
+		case st == httpx.PatchClear:
+			shape.Invalid("llm_auth_method", "llm_auth_method cannot be cleared: an organization's Claude credentials come from the host (\"system\") or from its own bound material (\"byok\")")
+		case method != domain.LLMAuthSystem && method != domain.LLMAuthBYOK:
+			shape.Invalid("llm_auth_method", "llm_auth_method must be \""+domain.LLMAuthSystem+"\" or \""+domain.LLMAuthBYOK+"\"")
+		case method == domain.LLMAuthSystem && runmode.Current() == runmode.ModeMulti:
+			shape.Invalid("llm_auth_method", "this deployment has no host credentials to run under — every organization brings its own, so llm_auth_method must be \""+domain.LLMAuthBYOK+"\"")
+		default:
+			set(func(o *domain.OrgSettings) { o.LLMAuthMethod = method })
 		}
 	}
 	// "No cap" is null. An explicit 0 is refused rather than quietly read as

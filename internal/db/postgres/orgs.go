@@ -117,7 +117,7 @@ func (s *orgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain
 // though the row it comes from is now two tables.
 const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-	       background_jobs_model,
+	       background_jobs_model, llm_auth_method,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 	       github_credential_class, version`
 
@@ -276,6 +276,7 @@ const orgSettingsConflictUpdate = `
 			bedrock_credentials_ref = EXCLUDED.bedrock_credentials_ref,
 			max_llm_model_tier = EXCLUDED.max_llm_model_tier,
 			background_jobs_model = EXCLUDED.background_jobs_model,
+			llm_auth_method = EXCLUDED.llm_auth_method,
 			max_daily_cost_usd = EXCLUDED.max_daily_cost_usd,
 			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
@@ -302,10 +303,25 @@ func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
 		// Plain string, not nullString: the column is NOT NULL and "" is the
 		// org's own "not picked yet" rather than an absent value.
 		u.BackgroundJobsModel,
+		// "" is restated as the column's own DEFAULT rather than written
+		// through: this dialect is multi mode, whose only credential source is
+		// the org's own, and a caller that built the struct without knowing
+		// about this field must not blank it into a value the read would have
+		// to guess at.
+		authMethodOrDefault(u.LLMAuthMethod),
 		nullFloat(u.MaxDailyCostUSD),
 		nullInt(u.MaxConcurrentRuns),
 		u.MarketplaceEnabled,
 	}
+}
+
+// authMethodOrDefault substitutes the column's DEFAULT for an unset field, the
+// way orgSettingsWriteArgs substitutes "ssh" for an unset clone protocol.
+func authMethodOrDefault(method string) string {
+	if method == "" {
+		return domain.LLMAuthBYOK
+	}
+	return method
 }
 
 // upsertSettings writes every org_settings column this writer owns and
@@ -319,11 +335,11 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 		INSERT INTO org_settings (
 			org_id, github_clone_protocol,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
-			background_jobs_model,
+			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			version, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1, now()
 		)`+conflict+`
 		RETURNING `+orgSettingsColumns, orgSettingsWriteArgs(orgID, u)...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
@@ -347,12 +363,13 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			bedrock_credentials_ref = $4,
 			max_llm_model_tier = $5,
 			background_jobs_model = $6,
-			max_daily_cost_usd = $7,
-			max_concurrent_runs = $8,
-			marketplace_enabled = $9,
+			llm_auth_method = $7,
+			max_daily_cost_usd = $8,
+			max_concurrent_runs = $9,
+			marketplace_enabled = $10,
 			version = version + 1,
 			updated_at = now()
-		WHERE org_id = $1 AND version = $10
+		WHERE org_id = $1 AND version = $11
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }

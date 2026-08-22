@@ -21,8 +21,13 @@
 // ClaudeStep.tsx so the component file only exports components.
 import { apiFetch, httpErrorMessage } from '../../lib/apiClient'
 import { disconnectBedrock } from './bedrockConnect'
+import type { ClaudeCredentialSource } from './orgConfig'
 
-export const CLAUDE_SOURCE_OPTIONS: { kind: 'system' | 'byok'; title: string; detail: string }[] = [
+export const CLAUDE_SOURCE_OPTIONS: {
+  kind: ClaudeCredentialSource
+  title: string
+  detail: string
+}[] = [
   {
     kind: 'system',
     title: 'Use system Claude Code credentials',
@@ -60,12 +65,15 @@ export async function disconnectAnthropic(orgId: string): Promise<LLMResult> {
   }
 }
 
-// disconnectLLM is the "use the system Claude Code credentials" selection
-// (local only): hold no org-level LLM credential of ANY provider, so the
-// resolver falls back to the subscription/env path. That is two credentials and
-// therefore two deletes — the server no longer has a single write that wipes
-// both, because the one it had was an Anthropic route silently destroying AWS
-// material. Both are idempotent, so this is safe on an org with nothing stored.
+// disconnectLLM removes every org-level LLM credential, which is the
+// PRECONDITION for the "use the system Claude Code credentials" selection
+// (local only) rather than the selection itself: the selection is a stored
+// value, written by patching llm_auth_method afterwards, and the backend
+// refuses that write while any provider material is still bound. It is two
+// deletes because it is two credentials — the server has no single write that
+// wipes both, because the one it had was an Anthropic route silently destroying
+// AWS material. Both are idempotent, so this is safe on an org with nothing
+// stored.
 export async function disconnectLLM(orgId: string): Promise<LLMResult> {
   const anthropic = await disconnectAnthropic(orgId)
   if (!anthropic.ok) return anthropic

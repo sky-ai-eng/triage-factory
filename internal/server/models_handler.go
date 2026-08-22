@@ -73,7 +73,8 @@ type modelCatalogRow struct {
 	// same badge and completely different fixes.
 	AvailabilityDetail string `json:"availability_detail,omitempty"`
 	// AvailabilityCheckedAt is when the probe behind this state ran. Absent
-	// for "assumed" and "unverified", which are the states no probe produced.
+	// for "unconfigured", "assumed" and "unverified", which are the states no
+	// probe produced.
 	AvailabilityCheckedAt *time.Time `json:"availability_checked_at,omitempty"`
 	DisplayOrder          int        `json:"display_order"`
 }
@@ -87,9 +88,16 @@ type modelCatalogResponse struct {
 // anything about the model — the mode difference travels as DATA in this
 // field, never as a branch in the client.
 const (
-	// modelAvailabilityUnconfigured — this model's provider holds no credential
-	// for this org, so nothing can invoke it and no probe is worth spending.
-	// Not a probe result: a local, certain fact derived from what is bound.
+	// modelAvailabilityUnconfigured — credential resolution would refuse this
+	// model outright, because the org holds nothing for the provider that
+	// serves it. Nothing can invoke it and no probe is worth spending. Not a
+	// probe result: a local, certain fact about what is bound.
+	//
+	// An org that has bound NOTHING is this only in multi, where a hosted
+	// deployment has no host credentials to lend. In local that org runs on the
+	// environment the agent subprocess inherits, so it is assumed instead —
+	// there is no provider it failed to connect, because it is not selecting
+	// between providers at all.
 	//
 	// It outranks every other value, INCLUDING a stored green — a credential
 	// unbound after a successful probe leaves a row that was true when written
@@ -99,13 +107,13 @@ const (
 	// sending someone to test a provider they never connected is sending them
 	// to do useless work.
 	modelAvailabilityUnconfigured = "unconfigured"
-	// modelAvailabilityAssumed — nobody asked, and nobody can. Two orgs get
-	// it: one running on ambient credentials (local's zero-config Claude Code
-	// subscription, which binds no provider ref at all — there is no key to
-	// probe with and no provider to call unconfigured), and any org in local
-	// mode, whose runs go through the SDK subprocess. A local failure surfaces
-	// at run time through the SDK's own error path, which is the only place
-	// local can learn it.
+	// modelAvailabilityAssumed — nobody asked, and nobody can. Every model an
+	// org in local mode could dispatch is this: its runs go through the SDK
+	// subprocess, which local cannot probe on its behalf, and a failure
+	// surfaces at run time through the SDK's own error path — the only place
+	// local can learn it. It is also every model of a local org that has bound
+	// nothing at all, which is the zero-config subscription install: TF holds
+	// nothing to probe with, and no provider it could call unconfigured.
 	modelAvailabilityAssumed = "assumed"
 	// modelAvailabilityVerified — a probe invoked this model with this org's
 	// credentials and it answered. Permanent: nothing re-probes on a timer.
