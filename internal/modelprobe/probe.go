@@ -31,9 +31,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
+
+var log = logging.Component("modelprobe")
 
 // probeTimeout bounds one probe. A one-token completion that has not answered
 // in this long is not going to say anything about entitlement, and a sweep of
@@ -147,10 +150,11 @@ func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Ent
 	})
 	p.record(ctx, orgID, entry.Key, startedAt, completion, callErr)
 
-	// The classifier is handed the OUTER ctx as well as the error, so a probe
-	// the caller abandoned is inconclusive rather than being read as whatever
-	// the transport happened to report on the way down.
-	verdict, detail := classify(ctx, callErr)
+	// The classifier is handed the REQUEST's ctx, which is derived from the
+	// caller's — so a probe abandoned mid-sweep and one that ran out its own
+	// timeout are both inconclusive, rather than being read as whatever the
+	// transport happened to report on the way down.
+	verdict, detail := classify(callCtx, callErr)
 	if verdict == VerdictGreen {
 		return Result{Verdict: VerdictGreen}, nil
 	}
@@ -203,7 +207,17 @@ func (p *Prober) record(ctx context.Context, orgID, modelKey string, startedAt t
 	if completion != nil {
 		usage = systemllm.DirectUsageFrom(completion.Usage)
 		traceID = completion.ID
-		cost, _ = inference.CostForUsage(modelKey, completion.Usage)
+		priced := false
+		cost, priced = inference.CostForUsage(modelKey, completion.Usage)
+		if !priced {
+			// Unreachable through the catalog, which drops any entry the
+			// datasheet cannot price — so this fires only if the two ever
+			// disagree. It is logged rather than swallowed for the same reason
+			// the direct-call path logs it: a silent zero in the accounting
+			// table is indistinguishable from a genuinely free call, and the
+			// row would look like a working cost stamp reporting nothing.
+			log.Warn("no pricing entry for probed model; recording zero cost", "org", orgID, "model", modelKey)
+		}
 	}
 	p.recorder.RecordDirect(ctx, systemllm.Call{
 		OrgID:     orgID,

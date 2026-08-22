@@ -2,7 +2,6 @@ package modelprobe
 
 import (
 	"context"
-	"errors"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
@@ -93,13 +92,19 @@ func truncate(msg string) string {
 // the same rendered text — same marker, same precedence — because the two are
 // classifying the same string for different questions and disagreeing about
 // what "the provider answered 503" means would be a bug in one of them.
-func classify(ctx context.Context, err error) (Verdict, string) {
+// callCtx is the ctx the REQUEST ran under, not the caller's. It is derived
+// from the caller's, so a non-nil Err covers both endings that are TF's own
+// clock rather than the provider's answer: the caller navigating away
+// mid-sweep, and the per-probe timeout expiring. Checking the caller's ctx
+// instead would miss the second — the outer one is still healthy when a probe
+// times out — and there is no error value to fall back on, because
+// internal/inference flattens every failure to a plain string and no ctx
+// sentinel survives for errors.Is to match.
+func classify(callCtx context.Context, err error) (Verdict, string) {
 	if err == nil {
 		return VerdictGreen, ""
 	}
-	// A cancelled or timed-out request is TF's own deadline, not the
-	// provider's answer — including the caller navigating away mid-sweep.
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if callCtx.Err() != nil {
 		return VerdictInconclusive, truncate(err.Error())
 	}
 	if status, ok := inference.RenderedStatus(err); ok {
