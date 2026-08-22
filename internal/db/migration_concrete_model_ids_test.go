@@ -12,8 +12,8 @@ import (
 // between them, so the fixture rows below are staged exactly the way a shipped
 // build wrote them.
 const (
-	beforeConcreteModelIDs = 202608220001
-	concreteModelIDs       = 202608230001
+	beforeConcreteModelIDs = 202608240001
+	concreteModelIDs       = 202608240002
 )
 
 // The migration that rewrites stored configuration from the three Claude Code
