@@ -52,6 +52,18 @@ vi.mock('../../hooks/useTeamRole', () => ({
   useTeamRole: () => ({ roleForTeam: () => roles.team, loading: false }),
 }))
 
+// The availability read, controllable per test — mocked so the real module's
+// per-org cache can't leak one test's answer into another.
+const sources = vi.hoisted(() => ({ state: {} as Record<string, string | undefined> }))
+vi.mock('../../hooks/useEventSources', () => ({
+  useEventSources: () => ({
+    sources: [],
+    loaded: true,
+    stateOf: (kind: string) => sources.state[kind],
+    canProduce: (kind: string) => sources.state[kind] === undefined,
+  }),
+}))
+
 const teamsRefresh = vi.hoisted(() => vi.fn())
 vi.mock('../../hooks/useTeams', () => ({
   useTeams: () => ({
@@ -246,6 +258,24 @@ describe('archiving the team', () => {
     // Absent, not disabled: the endpoint is the org's, and 404s for them.
     expect(screen.queryByText('Archive this team')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Archive' })).not.toBeInTheDocument()
+  })
+})
+
+describe('the sources panel', () => {
+  it('sinks a source the org cannot reach, and counts only the connected', async () => {
+    sources.state = { jira: 'unconfigured' }
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(bandHead()!)
+
+    // The card says the one sentence that would change the state, loses its
+    // numbers, and stops taking a click; the foot counts what is actually on.
+    expect(screen.getByText('Jira is not connected for this workspace.')).toBeInTheDocument()
+    const card = document.querySelector('.tf-src[data-state="unavailable"]')
+    expect(card).not.toBeNull()
+    expect(card?.getAttribute('data-clickable')).toBeNull()
+    expect(screen.getByText(/2 sources connected/)).toBeInTheDocument()
   })
 })
 

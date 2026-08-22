@@ -17,6 +17,19 @@ import SlackSource from './SlackSource'
 // The rest is the wiring a member must never see, and the set-replace each
 // verb resolves to.
 
+// The availability read, controllable per test. The real hook keeps a
+// module-level per-org cache, so letting it fetch would leak one test's
+// answer into every later one; a mutable map gives each test its own truth.
+const sources = vi.hoisted(() => ({ state: {} as Record<string, string | undefined> }))
+vi.mock('../../hooks/useEventSources', () => ({
+  useEventSources: () => ({
+    sources: [],
+    loaded: true,
+    stateOf: (kind: string) => sources.state[kind],
+    canProduce: (kind: string) => sources.state[kind] === undefined,
+  }),
+}))
+
 const BODY = {
   teamId: 't1',
   teamName: 'platform',
@@ -109,6 +122,7 @@ function row(label: string): HTMLElement {
 }
 
 beforeEach(() => {
+  sources.state = {}
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
@@ -233,6 +247,7 @@ describe('Jira source page', () => {
             members: [{ id: '2', name: 'In Progress' }],
             canonical: { id: '2', name: 'In Progress' },
           },
+          in_review: { members: [{ id: '4', name: 'QA' }], canonical: { id: '4', name: 'QA' } },
           done: { members: [{ id: '3', name: 'Done' }], canonical: { id: '3', name: 'Done' } },
         },
         // Watched but never armed — a valid saved state since watch-then-arm,
@@ -241,6 +256,7 @@ describe('Jira source page', () => {
           key: 'SKY',
           pickup: { members: [] },
           in_progress: { members: [] },
+          in_review: { members: [] },
           done: { members: [] },
         },
       ],
@@ -261,6 +277,7 @@ describe('Jira source page', () => {
       { id: '2', name: 'In Progress' },
       { id: '3', name: 'Done' },
       { id: '4', name: 'QA' },
+      { id: '5', name: 'Blocked' },
     ],
   }
 
@@ -309,7 +326,7 @@ describe('Jira source page', () => {
   it('switches the board through the strip, and marks the unmapped key', async () => {
     const fetchMock = stub(SETTINGS)
     render(<JiraSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
 
     // Two keys, the shown one selected, the unarmed one marked.
     const keys = Array.from(document.querySelectorAll('.sp-projkey'))
@@ -350,10 +367,33 @@ describe('Jira source page', () => {
     expect(order[1]).toBeLessThan(order[2])
   })
 
+  it('states why Jira is off and holds the live reads, keeping the config', async () => {
+    sources.state = { jira: 'disabled' }
+    const fetchMock = stub(SETTINGS)
+    render(<JiraSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(screen.getByText('Jira is turned off — an org admin paused it.')).toBeInTheDocument(),
+    )
+    // The stored configuration still renders — watched keys, the board's map —
+    // because the team's config is TF's data, not Jira's.
+    expect(screen.getAllByText('PLAT').length).toBeGreaterThan(0)
+    expect(screen.getByText('In Progress')).toBeInTheDocument()
+
+    // No catalog page, no status vocabulary: both reads would just collect
+    // refusals while the source is off.
+    const urls = fetchMock.mock.calls.map((c) => String(c[0]))
+    expect(urls.some((u) => u.includes('/api/jira/projects/list'))).toBe(false)
+    expect(urls.some((u) => u.includes('/api/jira/statuses'))).toBe(false)
+    // And with no catalog there is nothing to offer Watch on: only the
+    // watched rows are listed.
+    expect(screen.queryByText('Operations')).not.toBeInTheDocument()
+  })
+
   it('offers no drag, because nothing would persist it', async () => {
     stub(SETTINGS)
     render(<JiraSource {...BODY} />)
-    await waitFor(() => expect(screen.getByText('QA')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
 
     // Absent, not disabled: a cursor that says "pick me up" over a chip that
     // cannot be picked up promises and then fails.

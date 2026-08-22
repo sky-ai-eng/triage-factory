@@ -19,6 +19,8 @@ import { useOptionalAuth } from '../../contexts/AuthContext'
 import { useMemberRoster, displayNameFor } from '../../hooks/useMemberRoster'
 import type { MemberRosterAdapter, RosterMember } from '../../hooks/useMemberRoster'
 import { useTeamActivity, activitySource } from '../../hooks/useTeamActivity'
+import { useEventSources } from '../../hooks/useEventSources'
+import { sourceUnavailableReason } from '../../lib/eventSources'
 import { useTeamUsage, fmtSpendUSD } from '../../hooks/useTeamUsage'
 import { archiveTeam, fetchArchivePreview } from '../../lib/teamLifecycle'
 import type { ArchivePreview } from '../../lib/teamLifecycle'
@@ -139,6 +141,15 @@ export default function TeamSettings() {
   const orgHref = useOrgHref()
   const orgId = useActiveOrgId()
   const [region, setRegion] = useState<Region>('roster')
+
+  // Why a source cannot reach this org, per kind — null when it can, and null
+  // while the read is unresolved, because greying a card on an answer we do
+  // not have is worse than greying it late.
+  const { stateOf } = useEventSources()
+  const sourceOff = useCallback(
+    (kind: string) => sourceUnavailableReason(kind, stateOf(kind)),
+    [stateOf],
+  )
   const [filter, setFilter] = useState('')
   const [params, setParams] = useSearchParams()
   const source = SOURCES_BY_KEY[params.get('source') ?? ''] ?? null
@@ -750,31 +761,34 @@ export default function TeamSettings() {
                 <SourceCard
                   name="GitHub"
                   source="github"
-                  state="configured"
+                  state={sourceOff('github') ? 'unavailable' : 'configured'}
                   scope="repositories this team tracks"
                   stats={[
                     ['events · 7d', '—'],
                     ['became tasks', '—'],
                   ]}
+                  note={sourceOff('github')}
                   onClick={() => openSource('github')}
                 />
                 <SourceCard
                   name="Jira"
                   source="jira"
-                  state="configured"
+                  state={sourceOff('jira') ? 'unavailable' : 'configured'}
                   scope="projects this team watches"
                   stats={[
                     ['events · 7d', '—'],
                     ['became tasks', '—'],
                   ]}
+                  note={sourceOff('jira')}
                   onClick={() => openSource('jira')}
                 />
                 <SourceCard
                   name="Slack"
                   source="slack"
-                  state="configured"
+                  state={sourceOff('slack') ? 'unavailable' : 'configured'}
                   scope="channels this team watches"
                   stats={[['mentions · 7d', '—']]}
+                  note={sourceOff('slack')}
                   onClick={() => openSource('slack')}
                 />
                 <SourceCard
@@ -793,7 +807,9 @@ export default function TeamSettings() {
             </div>
 
             <div className="ts-panelview-foot">
-              <span>{SOURCES.length} sources connected · last event —</span>
+              <span>
+                {SOURCES.filter((k) => !sourceOff(k)).length} sources connected · last event —
+              </span>
             </div>
           </div>
         ) : null}

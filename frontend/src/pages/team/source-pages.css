@@ -345,6 +345,17 @@
   text-wrap: pretty;
 }
 
+/* The one sentence for a source that cannot reach the org — an availability
+   state, not an error. */
+.sp-offnote {
+  flex: none;
+  margin-top: -8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  font-style: italic;
+  color: var(--color-ink-3);
+}
+
 /* ── The board's project strip ─────────────────────────────────────
    One key per watched project; the selected one is the board below. A
    project whose statuses are not mapped yet carries a small hollow marker,

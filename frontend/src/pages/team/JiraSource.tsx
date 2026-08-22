@@ -7,6 +7,8 @@ import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiJSON } from '../../lib/apiClient'
 import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
+import { useEventSources } from '../../hooks/useEventSources'
+import { sourceUnavailableReason } from '../../lib/eventSources'
 import {
   fetchTeamSettings,
   saveTeamJiraProjects,
@@ -36,11 +38,11 @@ import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProje
 // hides every other project's mapping, which is why the strip is this page's
 // own device rather than the mock's.
 //
-// The board reads and does not write. Two reasons, and both have to go before
-// it can drag here: `StatusRules` reports no change out to a caller, and the
-// stored rule set has three columns to the board's four — a save from this
-// surface would silently drop whatever was put in IN REVIEW (backend-needs
-// 14). Under `interactive={false}` the board is absent-not-disabled: no drag,
+// The board reads and does not write. The stored rules now cover all four
+// columns, so what keeps this surface read-only is `StatusRules` itself: it
+// reports no change out to a caller, and its chips are keyed by display name
+// where a write needs the status ids. Both go together when the board becomes
+// an editor. Under `interactive={false}` the board is absent-not-disabled: no drag,
 // no staging, no grab cursor, no tab stops. Nothing is greyed out, because the
 // mapping answers "where does our work come from", which a member legitimately
 // needs.
@@ -70,10 +72,13 @@ function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
       members: (p.in_progress?.members ?? []).map((m) => m.name),
       primary: p.in_progress?.canonical?.name ?? null,
     },
-    // Nothing stores an in-review rule yet, so the column is genuinely empty
-    // rather than unmapped-looking: every status it would hold sits in the
-    // tray, which is where an unmapped status belongs.
-    review: { members: [], primary: null },
+    // Optional rule: a team that maps nothing here keeps its review-state
+    // tickets In Progress on the Jira side, and the empty column is that
+    // choice rendered rather than a gap.
+    review: {
+      members: (p.in_review?.members ?? []).map((m) => m.name),
+      primary: p.in_review?.canonical?.name ?? null,
+    },
     done: {
       members: (p.done?.members ?? []).map((m) => m.name),
       primary: p.done?.canonical?.name ?? null,
@@ -101,6 +106,15 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // their labels name.
   const flow = activitySource(useTeamActivity(teamId, 7), 'jira')
 
+  // Why Jira cannot reach this org right now, or null — which is also the
+  // answer while the availability read is unresolved, so the page never
+  // announces an outage it has not confirmed. When off, the live reads that
+  // would just collect refusals (catalog, statuses) are held; the stored
+  // configuration still renders, and removal still works, because removing
+  // never asks Jira anything.
+  const { stateOf } = useEventSources()
+  const offReason = sourceUnavailableReason('jira', stateOf('jira'))
+
   useEffect(() => {
     if (!teamId) return
     let live = true
@@ -126,6 +140,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // and the filter runs server-side for the same reason: the page holds one
   // page of a proxied list, so a client-side scan would silently miss.
   useEffect(() => {
+    if (offReason) return
     const q = filter.trim()
     let live = true
     const controller = new AbortController()
@@ -147,7 +162,13 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       controller.abort()
       clearTimeout(timer)
     }
-  }, [filter])
+  }, [filter, offReason])
+
+  // While off, the catalog is derived-empty rather than reset: the last
+  // fetch's leftovers must not render, and the effect above refetches the
+  // moment the source comes back.
+  const catalog = offReason ? null : candidates
+  const catalogTruncated = offReason ? false : truncated
 
   const watched = useMemo(() => projects ?? [], [projects])
   const watchedKeys = useMemo(() => new Set(watched.map((p) => normKey(p.key))), [watched])
@@ -162,7 +183,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const shownK = shown ? normKey(shown.key) : ''
 
   useEffect(() => {
-    if (!shownK || statusesByKey[shownK]) return
+    if (!shownK || offReason || statusesByKey[shownK]) return
     let live = true
     void apiJSON<JiraStatusRef[]>('/api/jira/statuses?project=' + encodeURIComponent(shownK))
       .then((list) => {
@@ -175,7 +196,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
     return () => {
       live = false
     }
-  }, [shownK, statusesByKey])
+  }, [shownK, offReason, statusesByKey])
 
   const board = useMemo(() => mapFor(shown ?? undefined), [shown])
   // Never null into the board: StatusRules falls back to a demo status list
@@ -183,7 +204,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const statuses = shown ? (statusesByKey[shownK] ?? []).map((s) => s.name) : []
 
   const rows: TableRow[] = useMemo(() => {
-    const byKey = new Map((candidates ?? []).map((c) => [normKey(c.key), c]))
+    const byKey = new Map((catalog ?? []).map((c) => [normKey(c.key), c]))
     const needle = filter.trim().toLowerCase()
     const out: TableRow[] = []
     for (const p of watched) {
@@ -202,13 +223,13 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       }
       out.push({ id: key, key, name, issues: null, watched: true })
     }
-    for (const c of candidates ?? []) {
+    for (const c of catalog ?? []) {
       const key = normKey(c.key)
       if (watchedKeys.has(key)) continue
       out.push({ id: key, key, name: c.name, issues: null, watched: false })
     }
     return out
-  }, [candidates, filter, watched, watchedKeys])
+  }, [catalog, filter, watched, watchedKeys])
 
   const columns: TableColumn[] = useMemo(
     () => [
@@ -295,6 +316,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
             and the board are one argument, so they share a column. */}
         <div className="sp-jira-left">
           <p className="sp-prose">{PROSE}</p>
+          {offReason ? <p className="sp-offnote">{offReason}</p> : null}
           <div className="sp-subhead">
             <span className="sp-subhead-t">What each status means</span>
             <span className="sp-subhead-p">
@@ -368,7 +390,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
               emptyLabel={projects ? 'no projects visible' : 'loading…'}
               // The catalog is a live proxy that reports no total, so a full
               // page can only say that narrowing would reveal more.
-              footer={truncated ? 'more projects exist · narrow the filter' : undefined}
+              footer={catalogTruncated ? 'more projects exist · narrow the filter' : undefined}
               selectable={isAdmin}
               actions={
                 isAdmin
