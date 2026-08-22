@@ -28,6 +28,21 @@ import (
 // because that is the whole fix.
 var ErrProviderUnconfigured = errors.New("model's provider is not connected")
 
+// ErrNoCredentials is an org that can authenticate nothing at all: it brings
+// its own Claude credentials and has bound none. Org-level rather than
+// per-model, which is why Ready answers it and Check does not — no choice of
+// model fixes it.
+//
+// It is a REFUSAL, not a fallback, and that is the whole point of the sentinel.
+// A local run whose org has bound nothing hands the agent subprocess an empty
+// environment and lets the SDK authenticate from whatever the operator's shell
+// holds. For an org on domain.LLMAuthSystem that is the configuration working
+// as chosen. For an org that said it brings its own, it is TF quietly spending
+// on a credential nobody configured and nobody can see — the same fault as
+// substituting a model the caller did not choose, and worse, because the payer
+// changes rather than the price.
+var ErrNoCredentials = errors.New("organization has no Claude credentials of its own")
+
 // ErrProviderRestricted is a model served by a provider an org admin has
 // restricted this team from spending against. Distinct from unconfigured
 // because the remedies differ — one is a credential nobody bound, the other a
@@ -47,11 +62,34 @@ var ErrProviderRestricted = errors.New("model's provider is restricted for this 
 // provider it is not allowed to use has been sent to do useless work.
 //
 // An org that has connected NO provider passes the credential check for every
-// model — the same rule credential resolution holds. Such an org is on ambient
-// credentials (local mode's zero-config Claude Code subscription), where the
-// host env is the credential and there is nothing for a model to select
-// between. The restriction still applies there, because it is an explicit
+// model, because there is nothing for a model to select between — whether it may
+// run at all is Ready's question, asked once per dispatch rather than once per
+// model. The restriction still applies to such an org, because it is an explicit
 // decision somebody made rather than an inference from what is bound.
+// Ready reports whether the org holds credentials any run could authenticate
+// with. Ask it before dispatching work, and only before dispatching: a save is
+// allowed to name a model the org cannot run yet, because setup picks a model
+// before it binds a credential and a settings form that refused would be
+// unusable in the order it is presented.
+//
+// An org on domain.LLMAuthSystem is always ready — the host's environment is
+// its credential and TF holds nothing to check. An org on domain.LLMAuthBYOK is
+// ready once it has bound anything at all; WHICH provider is Check's question,
+// and a caller asking both gets the more specific answer second.
+//
+// Multi resolves to BYOK whatever the row says, so a hosted org that has bound
+// nothing is refused here by name rather than deeper in credential resolution,
+// where the same refusal arrives as a caller bug.
+func Ready(org domain.OrgSettings, multiMode bool) error {
+	if domain.EffectiveLLMAuthMethod(org.LLMAuthMethod, multiMode) == domain.LLMAuthSystem {
+		return nil
+	}
+	if len(OrgProviders(org)) == 0 {
+		return fmt.Errorf("%w: connect a provider in Settings → Claude credentials, or switch to the credentials already on this machine", ErrNoCredentials)
+	}
+	return nil
+}
+
 func Check(model string, org domain.OrgSettings, allowedProviders []string) error {
 	provider, ok := modelcatalog.ProviderFor(model)
 	if !ok {

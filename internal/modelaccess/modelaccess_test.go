@@ -65,17 +65,63 @@ func TestCheck_RestrictionOutranksTheCredential(t *testing.T) {
 	}
 }
 
-// An org on ambient credentials has connected nothing, so nothing is refused
-// for want of a credential — but an explicit restriction still binds.
-func TestCheck_AmbientOrg(t *testing.T) {
-	var ambient domain.OrgSettings
+// Ready is the org-level question Check deliberately does not answer: can this
+// org authenticate anything at all?
+//
+// The zero-config local install has chosen the host's credentials and is ready
+// with nothing bound — that emptiness is the configuration working. The org that
+// said it brings its own and bound none is refused, because the alternative is a
+// run authenticating from whatever the operator's environment holds and spending
+// against a credential nobody configured. Same empty set, opposite answers, and
+// the recorded choice is the whole difference.
+func TestReady_TurnsOnTheRecordedCredentialSource(t *testing.T) {
+	host := domain.OrgSettings{LLMAuthMethod: domain.LLMAuthSystem}
+	if err := Ready(host, false); err != nil {
+		t.Errorf("an org on the host's credentials was refused: %v", err)
+	}
+
+	own := domain.OrgSettings{LLMAuthMethod: domain.LLMAuthBYOK}
+	err := Ready(own, false)
+	if !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("err = %v, want ErrNoCredentials", err)
+	}
+	if !strings.Contains(err.Error(), "Settings") {
+		t.Errorf("error %q does not say where to fix it", err)
+	}
+
+	// Binding ANY provider is enough. Which one serves a given model is Check's
+	// question, and answering it here would report the wrong fault.
+	own.BedrockCredentialsRef = "aws_role_arn"
+	if err := Ready(own, false); err != nil {
+		t.Errorf("an org holding Bedrock material was refused: %v", err)
+	}
+}
+
+// Multi resolves to BYOK whatever the row says — a hosted deployment has no host
+// credentials to lend — so a row claiming otherwise is inert rather than a way
+// to dispatch against the operator's environment.
+func TestReady_MultiIgnoresAStoredHostCredentialSource(t *testing.T) {
+	stored := domain.OrgSettings{LLMAuthMethod: domain.LLMAuthSystem}
+	if err := Ready(stored, true); !errors.Is(err, ErrNoCredentials) {
+		t.Errorf("err = %v, want ErrNoCredentials in multi", err)
+	}
+	if err := Ready(bothConnected(), true); err != nil {
+		t.Errorf("a configured multi org was refused: %v", err)
+	}
+}
+
+// An org that has connected nothing has no model refused for want of a
+// credential — whether it may run at all is Ready's question, asked once per
+// dispatch rather than once per model — but an explicit restriction still binds.
+func TestCheck_OrgWithNothingConnected(t *testing.T) {
+	var nothing domain.OrgSettings
 	bedrock := modelOn(t, modelcatalog.ProviderBedrock)
 
-	if err := Check(bedrock, ambient, nil); err != nil {
+	if err := Check(bedrock, nothing, nil); err != nil {
 		t.Errorf("an org with nothing connected refused a model: %v", err)
 	}
-	if err := Check(bedrock, ambient, []string{modelcatalog.ProviderAnthropic}); !errors.Is(err, ErrProviderRestricted) {
-		t.Errorf("err = %v, want the admin's restriction to bind even on ambient credentials", err)
+	if err := Check(bedrock, nothing, []string{modelcatalog.ProviderAnthropic}); !errors.Is(err, ErrProviderRestricted) {
+		t.Errorf("err = %v, want the admin's restriction to bind whatever is connected", err)
 	}
 }
 

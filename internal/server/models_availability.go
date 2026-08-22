@@ -29,43 +29,45 @@ type modelProber interface {
 // handler reads — the catalog reads to render a badge, the test routes to
 // refuse a provider before spending anything on it.
 //
-// Two inputs. connected is a LOCAL, CERTAIN fact about what the org has bound,
-// so it holds in either mode and needs no probe. rows are probe RESULTS, which
-// only multi mode has — and multi decides both of those, which is why the mode
-// travels as one field resolved once rather than as a runmode read per row. The
-// map is separate from it because in multi an org that has probed nothing also
-// has no rows: "we did not look" must not render the same as "we looked and
-// found nothing".
+// Three inputs. hostCredentials and connected are LOCAL, CERTAIN facts read off
+// the settings row, so they hold in either mode and need no probe. rows are
+// probe RESULTS, which only multi mode has: multi is held as one field resolved
+// once rather than as a runmode read per row, and it is separate from the map
+// because in multi an org that has probed nothing also has no rows — "we did not
+// look" must not render the same as "we looked and found nothing".
 type availabilityIndex struct {
-	// multi is the deployment mode, and availability turns on it twice: only
-	// multi stores probe results, and only local lets a run authenticate from
-	// the environment the agent subprocess inherits.
-	multi bool
+	// hostCredentials is the org running on whatever credential the host
+	// supplies — domain.LLMAuthSystem, resolved through EffectiveLLMAuthMethod
+	// so multi mode is always false. Such an org has nothing to be unconfigured
+	// ABOUT: there is no provider it failed to connect, because it is not
+	// selecting between providers in the first place, and nothing TF holds
+	// could be probed on its behalf.
+	//
+	// It is the org's recorded choice, never inferred from connected being
+	// empty. The two coincide for an org that made the choice, and they part
+	// exactly where the inference was wrong: an org that brings its own key and
+	// has bound none has an empty set and is running on nothing it chose, which
+	// modelaccess.Ready refuses to dispatch rather than quietly serving from the
+	// operator's environment.
+	hostCredentials bool
 	// connected is the providers the org holds credentials for, read off the
 	// settings refs.
 	connected map[string]bool
+	multi     bool
 	rows      map[string]domain.ModelAvailability
 }
 
 // has reports whether TF can put a credential behind a call to provider — the
-// exact question credential resolution asks at dispatch, restated here so a
-// badge and a run cannot disagree about the same org.
+// same question the dispatch gates ask, in the same terms, so a badge and a run
+// cannot disagree about the same org.
 //
-// The empty connected set is why the mode is in it. In multi that org can run
-// nothing: there are no host credentials for a hosted deployment to lend, so
-// resolution refuses outright. In local it can run anything, because TF supplies
-// the subprocess nothing and the Claude Code SDK resolves authentication from
-// the inherited environment — which is the zero-config subscription install, and
-// stays true of a local org that means to bring its own key and has not bound
-// one yet. That org has a setup gap, and the Claude credentials section says so;
-// what it does not have is a model this deployment would refuse to dispatch, so
-// this is deliberately NOT keyed on the org's recorded credential source.
-//
-// Once anything IS bound, both modes agree and the mode drops out: resolution
-// refuses a model whose own provider is missing rather than substituting the
-// one that is there.
+// An org on host credentials passes for every provider: there is no per-provider
+// credential to be missing. An org on its own passes only for what it bound —
+// including when it bound nothing, which is a refusal for every model rather
+// than a free pass, because the alternative is spending against a credential
+// nobody configured.
 func (a availabilityIndex) has(provider string) bool {
-	return a.connected[provider] || (!a.multi && len(a.connected) == 0)
+	return a.hostCredentials || a.connected[provider]
 }
 
 // availabilityRowKey addresses a stored row from a catalog entry. Both halves,
@@ -109,9 +111,9 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 // run, in one pass, so no two routes can answer differently and no request
 // reads the settings row twice.
 //
-// Both modes read the org's bound providers — that half is a local fact and
-// local mode needs it, because an unconnected provider is the one thing about
-// availability local can honestly answer. Only multi reads model_availability:
+// Both modes read the credential source and the org's bound providers — that
+// half is a local fact and local mode needs it, because an unconnected provider
+// is the one thing about availability local can honestly answer. Only multi reads model_availability:
 // local never writes that table, so querying it there would be work whose
 // result is discarded by the mode check in forEntry.
 //
@@ -121,12 +123,14 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 // member silently answered with the defaults would see a picker full of models
 // their org cannot run.
 func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, orgID, userID string) (availabilityIndex, bool) {
-	index := availabilityIndex{multi: runmode.Current() == runmode.ModeMulti}
+	multi := runmode.Current() == runmode.ModeMulti
+	index := availabilityIndex{multi: multi}
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		set, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
+		index.hostCredentials = domain.EffectiveLLMAuthMethod(set.LLMAuthMethod, multi) == domain.LLMAuthSystem
 		index.connected = modelaccess.OrgProviders(set)
 		if !index.multi {
 			return nil

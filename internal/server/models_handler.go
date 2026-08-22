@@ -88,16 +88,16 @@ type modelCatalogResponse struct {
 // anything about the model — the mode difference travels as DATA in this
 // field, never as a branch in the client.
 const (
-	// modelAvailabilityUnconfigured — credential resolution would refuse this
-	// model outright, because the org holds nothing for the provider that
-	// serves it. Nothing can invoke it and no probe is worth spending. Not a
-	// probe result: a local, certain fact about what is bound.
+	// modelAvailabilityUnconfigured — this org brings its own credentials and
+	// holds none for this model's provider, so nothing can invoke it and no
+	// probe is worth spending. Not a probe result: a local, certain fact,
+	// derived from what is bound and from the org's recorded credential source
+	// — an org running on the host's has no provider to be missing.
 	//
-	// An org that has bound NOTHING is this only in multi, where a hosted
-	// deployment has no host credentials to lend. In local that org runs on the
-	// environment the agent subprocess inherits, so it is assumed instead —
-	// there is no provider it failed to connect, because it is not selecting
-	// between providers at all.
+	// An org that brings its own and has bound NOTHING is this for every model,
+	// in either mode, and the dispatch gates agree: a run there would otherwise
+	// authenticate from whatever the operator's environment holds, spending
+	// against a credential nobody configured.
 	//
 	// It outranks every other value, INCLUDING a stored green — a credential
 	// unbound after a successful probe leaves a row that was true when written
@@ -107,13 +107,12 @@ const (
 	// sending someone to test a provider they never connected is sending them
 	// to do useless work.
 	modelAvailabilityUnconfigured = "unconfigured"
-	// modelAvailabilityAssumed — nobody asked, and nobody can. Every model an
-	// org in local mode could dispatch is this: its runs go through the SDK
-	// subprocess, which local cannot probe on its behalf, and a failure
-	// surfaces at run time through the SDK's own error path — the only place
-	// local can learn it. It is also every model of a local org that has bound
-	// nothing at all, which is the zero-config subscription install: TF holds
-	// nothing to probe with, and no provider it could call unconfigured.
+	// modelAvailabilityAssumed — nobody asked, and nobody can. Two orgs get it:
+	// one that has chosen to run on the host's credentials
+	// (domain.LLMAuthSystem — TF holds nothing to probe with, and no provider it
+	// could call unconfigured), and any org in local mode, whose runs go through
+	// the SDK subprocess. A local failure surfaces at run time through the SDK's
+	// own error path, which is the only place local can learn it.
 	modelAvailabilityAssumed = "assumed"
 	// modelAvailabilityVerified — a probe invoked this model with this org's
 	// credentials and it answered. Permanent: nothing re-probes on a timer.

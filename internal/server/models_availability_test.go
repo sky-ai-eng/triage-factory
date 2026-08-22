@@ -654,12 +654,11 @@ func TestModelsList_Postgres_NothingBoundIsUnconfigured(t *testing.T) {
 	}
 }
 
-// And a row that says otherwise does not change it. Availability asks what
-// credential resolution would do, which in multi is refuse — the org's recorded
-// credential source is a setup fact, not a dispatch one, and a badge that
-// deferred to it would promise a run this deployment cannot make. The settings
-// PATCH refuses to write this value at all; this is the backstop for a row that
-// arrived some other way.
+// And a row hand-written to say the org runs on the host's credentials does not
+// change it: domain.EffectiveLLMAuthMethod resolves the mode's single legal
+// value whatever the column says, because a hosted deployment has none to lend.
+// The settings PATCH refuses to write it at all; this is the backstop for a row
+// that arrived some other way.
 func TestModelsList_Postgres_StoredHostCredentialsAreInert(t *testing.T) {
 	rig := newAvailabilityRig(t)
 	pgtest.MustExec(t, rig.h.AdminDB, `
@@ -711,10 +710,11 @@ func TestTeamModelsList_Postgres_ReportsTheSameAvailability(t *testing.T) {
 	}
 }
 
-// The zero-configuration local install: nothing bound, so the agent subprocess
-// authenticates from the inherited environment and every model is assumed. The
-// answer it has always had, and the one the mode's own credential resolution
-// gives.
+// The zero-configuration local install: it has CHOSEN the host's credentials, so
+// the agent subprocess authenticates from the inherited environment and every
+// model is assumed. The answer it has always had — the choice is now recorded
+// rather than inferred, but the recorded value is the same one the inference
+// produced.
 func TestModelsList_LocalMode_HostCredentialsAreAssumed(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -736,15 +736,13 @@ func TestModelsList_LocalMode_HostCredentialsAreAssumed(t *testing.T) {
 	}
 }
 
-// A local org that has SAID it brings its own key and bound none is still
-// assumed, not unconfigured, and the recorded choice is deliberately not what
-// decides that. Local credential resolution hands the subprocess nothing and
-// lets the SDK authenticate from the inherited environment whenever the org has
-// bound nothing — whatever anyone picked — so a run here may well succeed, and
-// a badge saying the model cannot be invoked would contradict it. The setup gap
-// is real and the Claude credentials section is where it is named; the model
-// picker's job is to say what would happen.
-func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsStillAssumed(t *testing.T) {
+// A local org that has SAID it brings its own key and bound none is
+// unconfigured, and the recorded choice is what decides it — the same emptiness
+// that means "zero-config subscription" one row over. modelaccess.Ready refuses
+// to dispatch for such an org rather than letting the run authenticate from
+// whatever the operator's environment holds, so the badge is not overstating:
+// it is naming the refusal a run would hit.
+func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsUnconfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
@@ -767,9 +765,9 @@ func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsStillAssumed(t *testi
 		t.Fatal("catalog read returned no models")
 	}
 	for _, row := range items {
-		if row.Availability != modelAvailabilityAssumed {
-			t.Errorf("%s: availability = %q, want %q — local resolution falls back to the inherited environment",
-				row.Key, row.Availability, modelAvailabilityAssumed)
+		if row.Availability != modelAvailabilityUnconfigured {
+			t.Errorf("%s: availability = %q, want %q for an org bringing its own key with none bound",
+				row.Key, row.Availability, modelAvailabilityUnconfigured)
 		}
 	}
 }

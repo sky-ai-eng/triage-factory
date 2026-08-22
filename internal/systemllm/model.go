@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // OrgSettingsReader is the claims-free org-settings read the model resolution
@@ -40,9 +41,11 @@ var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 // project classifier, the repo profiler — run on, from the org settings row a
 // caller already holds.
 //
-// Three gates, all of which make the setting unusable rather than substitutable:
-// the value must be present, the catalog must offer it, and the org must have
-// connected the provider that serves it. The R5 delegation gates (tool support,
+// Four gates, all of which make the setting unusable rather than substitutable:
+// the value must be present, the catalog must offer it, the org must be able to
+// authenticate at all, and it must have connected the provider that serves this
+// model. The third is what stops a cycle billing an org's work to whatever
+// credential the operator's shell happens to hold. The R5 delegation gates (tool support,
 // a 64k window) deliberately do NOT apply — these jobs are toolless and
 // short-context, so every catalog entry is a legitimate choice here.
 //
@@ -56,6 +59,9 @@ func ModelForSettings(set domain.OrgSettings) (string, error) {
 	}
 	if !modelcatalog.Offers(model) {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q, which this deployment does not offer — pick another in Settings", ErrNoModel, model)
+	}
+	if err := modelaccess.Ready(set, runmode.Current() == runmode.ModeMulti); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrNoModel, err)
 	}
 	if err := modelaccess.Check(model, set, nil); err != nil {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q: %w", ErrNoModel, model, err)
