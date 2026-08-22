@@ -574,10 +574,9 @@ func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
 }
 
 // The state this whole value exists for: with only Anthropic bound, the four
-// Bedrock rows must say so rather than inviting a test. Before this, they read
-// "unverified" — which means "press test again" — while the test route beside
-// them refused with 409. The read was pointing users at a button its own PR
-// blocked.
+// Bedrock rows must say so rather than inviting a test. "unverified" would mean
+// "press test again" on a button the test route beside them refuses with 409,
+// which is a read pointing users at something they cannot do.
 func TestModelsList_Postgres_UnconnectedProviderIsUnconfigured(t *testing.T) {
 	rig := newAvailabilityRig(t) // binds Anthropic only
 

@@ -70,7 +70,7 @@ var errLLMAuthMethodHasCredentials = errors.New("an organization running on the 
 // host's environment are mutually exclusive and the bind is the act that
 // settles which one this org is doing — there is nothing left to ask an admin
 // to confirm. The refs still say WHICH provider is bound; this says the org is
-// no longer on the host's.
+// not on the host's.
 func onOwnCredentials(o *domain.OrgSettings) { o.LLMAuthMethod = domain.LLMAuthBYOK }
 
 // boundLLMProviders names the providers an org holds material for, in the words

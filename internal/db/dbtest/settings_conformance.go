@@ -657,7 +657,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	// values must round-trip on both dialects, and neither may store the empty
 	// string: a caller that built the struct without naming the field gets the
 	// column's own default, because "" is not a third credential source and a
-	// read that had to guess at it is exactly what this column replaced.
+	// read left to guess at one is what this column exists to prevent.
 	t.Run("OrgSettings_LLMAuthMethod_RoundTripsAndNeverStoresBlank", func(t *testing.T) {
 		stores, ids := factory(t)
 		base := domain.OrgSettings{

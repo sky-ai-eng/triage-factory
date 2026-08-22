@@ -58,10 +58,10 @@ func TestOrgSettingsGet_LocalDefaultsToHostCredentials(t *testing.T) {
 	}
 }
 
-// The selection round-trips as a stored fact rather than being re-derived from
+// The selection round-trips as a stored fact rather than being derived from
 // what is bound — which is the whole point: an org that brings its own key and
-// has not bound one yet is no longer indistinguishable from one running on the
-// host's.
+// has not bound one yet is a different state from one running on the host's,
+// and only a stored value distinguishes them.
 func TestOrgSettingsPatch_LLMAuthMethod_RoundTrips(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()

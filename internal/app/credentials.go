@@ -21,8 +21,17 @@ import (
 //     the orgID always originates from the run/entity/task, never user
 //     input). Local mode keeps it nil → the agent runs unsandboxed and
 //     inherits the host's ambient Claude subscription.
+//
+//     TODO(TFAC-888): that nil is why a local org's own bound Anthropic key
+//     is never read by a run — agentproc.anthropicEnv is reachable only with
+//     a reader, so the key is validated, stored, and then ignored while the
+//     subprocess authenticates from the operator's environment. Wiring a
+//     reader here is the fix, and it changes who pays for a local user
+//     holding both a key and a subscription.
+//
 //   - modelFor resolves the run's team default model (per-(org, team),
 //     capped by the org max tier). A prompt's own Model still overrides it.
+//
 //   - ghResolver picks the right GitHub credential (App-installation token
 //     → org PAT) per (org, target). Shared by the poller, spawner, curator,
 //     and repo profiler.

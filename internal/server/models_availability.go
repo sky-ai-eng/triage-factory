@@ -43,12 +43,11 @@ type availabilityIndex struct {
 	// selecting between providers in the first place, and nothing TF holds
 	// could be probed on its behalf.
 	//
-	// It is the org's recorded choice, never inferred from connected being
-	// empty. The two coincide for an org that made the choice, and they part
-	// exactly where the inference was wrong: an org that brings its own key and
-	// has bound none has an empty set and is running on nothing it chose, which
-	// modelaccess.Ready refuses to dispatch rather than quietly serving from the
-	// operator's environment.
+	// It is the org's recorded choice, read rather than derived from connected
+	// being empty — an empty set means two different things, and only the
+	// recorded source tells them apart. An org that brings its own key and has
+	// bound none has that same empty set and is running on nothing it chose,
+	// which is a refusal for every model rather than a free pass.
 	hostCredentials bool
 	// connected is the providers the org holds credentials for, read off the
 	// settings refs.

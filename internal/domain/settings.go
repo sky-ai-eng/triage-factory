@@ -56,11 +56,10 @@ const (
 //
 // Multi-mode is ALWAYS LLMAuthBYOK, independent of the stored value: there are
 // no host credentials for a hosted deployment to lend, because the operator's
-// environment is one environment shared by every tenant, and credential
-// resolution refuses an org with nothing bound rather than falling back to it.
-// Storing the other value there is refused on the way in, so the disagreement
-// should not arise; resolving it here as well is what makes a row that arrived
-// some other way inert instead of a cross-tenant credential leak.
+// environment is one environment shared by every tenant. Storing the other
+// value there is refused on the way in, so the disagreement should not arise;
+// resolving it here as well is what makes a row that arrived some other way
+// inert instead of a cross-tenant credential leak.
 //
 // Local mode treats only the literal LLMAuthBYOK as BYOK and resolves empty or
 // any unrecognised value to LLMAuthSystem — the same shape EffectiveCloneProtocol

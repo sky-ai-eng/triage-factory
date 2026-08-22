@@ -77,6 +77,11 @@ var ErrProviderRestricted = errors.New("model's provider is restricted for this 
 // ready once it has bound anything at all; WHICH provider is Check's question,
 // and a caller asking both gets the more specific answer second.
 //
+// TODO(TFAC-888): "has bound anything" is as far as this can go in local,
+// where a bound credential is not the one a run actually authenticates with.
+// Once local reads the org's own material, ready and used are the same
+// credential in both modes and this doc loses its asterisk.
+//
 // Multi resolves to BYOK whatever the row says, so a hosted org that has bound
 // nothing is refused here by name rather than deeper in credential resolution,
 // where the same refusal arrives as a caller bug.
