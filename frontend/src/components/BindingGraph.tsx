@@ -20,6 +20,8 @@ import type { Blueprint, BlueprintStep, Prompt, TriggerHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, apiListAll, httpErrorMessage } from '../lib/apiClient'
 import { useFocusTrap } from '../hooks/useFocusTrap'
+import { useEventSources } from '../hooks/useEventSources'
+import { sourceLabel } from '../lib/eventSources'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import {
   type BindingScope,
@@ -218,10 +220,15 @@ const FALLBACK_NODE = { width: 220, height: 84 }
 // --- Sidebar ---
 
 function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds: Set<string> }) {
+  const { canProduce } = useEventSources()
+
   const groups: Record<string, EventType[]> = {}
   for (const et of eventTypes) {
     if (et.source === 'system') continue
     if (activeIds.has(et.id)) continue
+    // Dragging an event whose source cannot reach this org would bind a
+    // trigger that waits forever — and the create route refuses it anyway.
+    if (!canProduce(et.source)) continue
     if (!groups[et.source]) groups[et.source] = []
     groups[et.source].push(et)
   }
@@ -231,8 +238,9 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
     e.dataTransfer.effectAllowed = 'move'
   }
 
-  const sourceLabels: Record<string, string> = { github: 'GitHub', jira: 'Jira' }
-  const sourceColors: Record<string, string> = { github: 'bg-ink-3', jira: 'bg-ink-3' }
+  // Every source gets the same neutral dot — this design reserves colour for
+  // state, not identity. The NAMES come from the shared label map, so a source
+  // added to the vocabulary can never render here as a raw lowercase key.
 
   const allPlaced = Object.values(groups).every((g) => g.length === 0)
 
@@ -251,11 +259,9 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
               items.length > 0 && (
                 <div key={source}>
                   <div className="flex items-center gap-1.5 px-1 mb-1.5">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${sourceColors[source] || 'bg-ink-3'}`}
-                    />
+                    <span className="w-1.5 h-1.5 rounded-full bg-ink-3" />
                     <span className="text-label font-semibold text-ink-3 uppercase tracking-wider">
-                      {sourceLabels[source] || source}
+                      {sourceLabel(source)}
                     </span>
                   </div>
                   {items.map((et) => (

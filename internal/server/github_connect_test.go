@@ -219,11 +219,11 @@ func seedGitHubApp(t *testing.T, rig *authRig, orgID, userID, clientID, clientSe
 func seedOrgGitHubHost(t *testing.T, rig *authRig, orgID, host string) {
 	t.Helper()
 	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url)
-		VALUES ($1, $2)
-		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES ($1, 'github', $2)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
 	`, orgID, host); err != nil {
-		t.Fatalf("seed org_settings: %v", err)
+		t.Fatalf("seed org_event_sources: %v", err)
 	}
 }
 

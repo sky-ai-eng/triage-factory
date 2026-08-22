@@ -10,6 +10,8 @@ import Slider from './Slider'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 import { blueprintsBase, handlersBase } from '../lib/scope'
+import { useEventSources } from '../hooks/useEventSources'
+import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 
 interface TriggerConfigPanelProps {
   open: boolean
@@ -34,6 +36,7 @@ export default function TriggerConfigPanel({
   onRefresh,
 }: TriggerConfigPanelProps) {
   const handlerBase = handlersBase()
+  const { stateOf } = useEventSources()
   const [predicate, setPredicate] = useState<Record<string, unknown>>({})
   const [minAutonomy, setMinAutonomy] = useState(0)
   const [breakerThreshold, setBreakerThreshold] = useState(4)
@@ -69,6 +72,15 @@ export default function TriggerConfigPanel({
   // lookup undefined, so the toggle stays available on a valid owner-ladder event.
   const eventWatchInert =
     eventTypes.find((et) => et.id === trigger?.event_type)?.supports_watch === false
+
+  // Why this trigger's source can no longer produce events, or null when it
+  // can. Reads the row's own derived flag — the state is only consulted for
+  // the prose — so the panel and the list agree by construction.
+  const triggerSourceKind = sourceKindOf(trigger?.event_type ?? '')
+  const sourceUnavailable =
+    trigger?.source_available === false
+      ? sourceCannotFireNote(triggerSourceKind, stateOf(triggerSourceKind))
+      : null
 
   // Initialize state when trigger changes
   useEffect(() => {
@@ -185,7 +197,8 @@ export default function TriggerConfigPanel({
                   <Switch.Root
                     checked={enabled}
                     onCheckedChange={handleToggle}
-                    disabled={readOnly}
+                    disabled={readOnly || sourceUnavailable !== null}
+                    title={sourceUnavailable ?? undefined}
                     className="w-[34px] h-[18px] rounded-full bg-tint-3 data-[state=checked]:bg-warm transition-colors disabled:opacity-50"
                   >
                     <Switch.Thumb className="block w-[14px] h-[14px] bg-raised rounded-full shadow-float transition-transform translate-x-[2px] data-[state=checked]:translate-x-[18px]" />
@@ -208,6 +221,15 @@ export default function TriggerConfigPanel({
                   </span>
                 )}
               </div>
+              {/* The trigger's source can no longer produce events. It is kept
+                  and shown — deleting a configured trigger because a
+                  credential was unbound is not the product's call — but arming
+                  it is inert, so the toggle above is too. */}
+              {sourceUnavailable && (
+                <p className="text-reported text-ink-3 italic mt-2">
+                  {sourceUnavailable} This trigger can&rsquo;t fire.
+                </p>
+              )}
             </div>
 
             {/* Body — a disabled fieldset makes every native control read-only

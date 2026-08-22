@@ -36,8 +36,9 @@ interface WatchRow {
 
 /**
  * JiraProjectRulesGroup is the team-scope Jira project surface: which projects
- * the team watches, and — per watched project — the pickup / in-progress / done
- * status rules that arm it.
+ * the team watches, and — per watched project — the pickup / in-progress /
+ * in-review / done status rules. Pickup, in-progress and done are what arm it;
+ * in-review is optional.
  *
  * Watching and arming are two steps, not one. The watch table below picks from
  * the org credential's live catalog and a project joins the tracked set on one
@@ -239,9 +240,12 @@ export default function JiraProjectRulesGroup({
     if (names.size === 0) return []
     return value.filter((p) => {
       if (normKey(p.key) === key || !projectIsArmed(p)) return false
-      return [...p.pickup.members, ...p.in_progress.members, ...p.done.members].every((m) =>
-        names.has(m.name),
-      )
+      return [
+        ...p.pickup.members,
+        ...p.in_progress.members,
+        ...p.in_review.members,
+        ...p.done.members,
+      ].every((m) => names.has(m.name))
     })
   }
 
@@ -256,6 +260,10 @@ export default function JiraProjectRulesGroup({
       in_progress: {
         members: remap(source.in_progress.members),
         canonical: remapOne(source.in_progress.canonical),
+      },
+      in_review: {
+        members: remap(source.in_review.members),
+        canonical: remapOne(source.in_review.canonical),
       },
       done: { members: remap(source.done.members), canonical: remapOne(source.done.canonical) },
     })
@@ -414,6 +422,15 @@ export default function JiraProjectRulesGroup({
                       onChange={(v) => updateProject(key, { in_progress: v })}
                       requireCanonical={true}
                       canonicalPrompt="Claim →"
+                    />
+                    <JiraStatusRule
+                      label="In review"
+                      description="Optional — the status that means work awaits human review."
+                      allStatuses={statuses}
+                      value={project.in_review}
+                      onChange={(v) => updateProject(key, { in_review: v })}
+                      requireCanonical={true}
+                      canonicalPrompt="Review →"
                     />
                     <JiraStatusRule
                       label="Done"

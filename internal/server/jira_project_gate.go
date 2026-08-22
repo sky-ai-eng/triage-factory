@@ -91,11 +91,18 @@ type projectPlan struct {
 	row    domain.JiraProjectStatusRules
 	newKey bool
 
-	pickup, inProgress, done ruleWish
+	pickup, inProgress, inReview, done ruleWish
+}
+
+// changedIDs is every status id this plan still has to resolve, across all four
+// rules — the one place the rule set is enumerated for the "does this project
+// need Jira at all?" question.
+func (p projectPlan) changedIDs() int {
+	return len(p.pickup.ids()) + len(p.inProgress.ids()) + len(p.inReview.ids()) + len(p.done.ids())
 }
 
 func (p projectPlan) needsJira() bool {
-	return p.newKey || len(p.pickup.ids())+len(p.inProgress.ids())+len(p.done.ids()) > 0
+	return p.newKey || p.changedIDs() > 0
 }
 
 // gateJiraProjects turns the request's wishes into the rules to store.
@@ -130,6 +137,7 @@ func (s *Server) gateJiraProjects(
 			newKey:     !isStored,
 			pickup:     requestedPickup(wish.write.Pickup, prior.PickupMembers),
 			inProgress: requestedRule(wish.write.InProgress, prior.InProgressMembers, prior.InProgressCanonical),
+			inReview:   requestedRule(wish.write.InReview, prior.InReviewMembers, prior.InReviewCanonical),
 			done:       requestedRule(wish.write.Done, prior.DoneMembers, prior.DoneCanonical),
 		}
 		if !p.pickup.changed {
@@ -138,6 +146,10 @@ func (s *Server) gateJiraProjects(
 		if !p.inProgress.changed {
 			p.row.InProgressMembers = slices.Clone(prior.InProgressMembers)
 			p.row.InProgressCanonical = prior.InProgressCanonical
+		}
+		if !p.inReview.changed {
+			p.row.InReviewMembers = slices.Clone(prior.InReviewMembers)
+			p.row.InReviewCanonical = prior.InReviewCanonical
 		}
 		if !p.done.changed {
 			p.row.DoneMembers = slices.Clone(prior.DoneMembers)
@@ -175,11 +187,11 @@ func (s *Server) gateJiraProjects(
 				continue
 			}
 		}
-		if len(p.pickup.ids())+len(p.inProgress.ids())+len(p.done.ids()) == 0 {
+		if p.changedIDs() == 0 {
 			out = append(out, p.row)
 			continue
 		}
-		// One fetch per project with a changed rule, shared by all three rules
+		// One fetch per project with a changed rule, shared by all four rules
 		// and doing both jobs at once: it is the gate, and it is where every
 		// display name comes from.
 		statuses, err := client.ProjectStatuses(r.Context(), p.wish.key)
@@ -208,6 +220,10 @@ func (s *Server) gateJiraProjects(
 		if p.inProgress.changed {
 			row.InProgressMembers = resolve(p.inProgress.memberIDs, base+".in_progress.member_ids")
 			row.InProgressCanonical = resolveOne(p.inProgress.canonicalID, byID, &v, base+".in_progress.canonical_id", p.wish.key)
+		}
+		if p.inReview.changed {
+			row.InReviewMembers = resolve(p.inReview.memberIDs, base+".in_review.member_ids")
+			row.InReviewCanonical = resolveOne(p.inReview.canonicalID, byID, &v, base+".in_review.canonical_id", p.wish.key)
 		}
 		if p.done.changed {
 			row.DoneMembers = resolve(p.done.memberIDs, base+".done.member_ids")

@@ -606,6 +606,15 @@ interface EventHandlerBase {
   applies_to_unowned: boolean
   created_at: string
   updated_at: string
+  // source_available: whether the org can still produce events of this
+  // handler's source — derived per read, never stored. Present on the READ
+  // shapes (the list and the single read); absent from a write's answer, which
+  // is the row it stored. False means the handler can never fire as things
+  // stand: the credential is unbound, the workspace disconnected, the licence
+  // lapsed. Such rows are deliberately still listed and still counted — an
+  // unconfigured source is the reader's to fix, so it is explained rather than
+  // hidden. Undefined means no claim; render as available.
+  source_available?: boolean
 }
 
 export interface RuleHandler extends EventHandlerBase {
@@ -1242,6 +1251,10 @@ export type WSEvent =
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  // Which event sources can reach the org changed. Payload-free and
+  // org-scoped: the client refetches GET /api/orgs/{org}/sources, which is
+  // where the scoping lives.
+  | { type: 'sources_updated'; data: Record<string, never> }
   // The workspace's reachable-repo mirror was refreshed. Payload-free: the
   // repository picker refetches through the REST read, which carries the
   // scoping — the cheap tier, and what turns a first-ever open's "discovering

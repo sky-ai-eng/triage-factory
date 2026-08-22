@@ -47,6 +47,7 @@ func seedBlueprintForTrigger(t *testing.T, s *Server, id string) {
 
 func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:new_commits",
 		"name":             "Heads-up on new commits",
@@ -80,6 +81,7 @@ func TestHandleEventHandlerCreate_RuleHappyPath(t *testing.T) {
 
 func TestHandleEventHandlerCreate_TriggerHappyPath(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-trigger-create")
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":               "github:pr:ci_check_failed",
@@ -109,6 +111,7 @@ func TestHandleEventHandlerCreate_TriggerAppliesDefaults(t *testing.T) {
 	// defaults (4 and 0.0), so the canvas drag-to-create gesture can supply
 	// only blueprint_id + event_type.
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-defaults")
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type":   "github:pr:ci_check_failed",
@@ -133,6 +136,7 @@ func TestHandleEventHandlerCreate_TriggerAppliesDefaults(t *testing.T) {
 // wire — come back as UNKNOWN_FIELD rather than being accepted and dropped.
 func TestHandleEventHandlerCreate_RejectsCrossKindFields(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	for name, tc := range map[string]struct {
 		path string
 		body map[string]any
@@ -164,6 +168,7 @@ func TestHandleEventHandlerCreate_RejectsCrossKindFields(t *testing.T) {
 
 func TestHandleEventHandlerCreate_RuleRequiresName(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type": "github:pr:opened",
 		// no name
@@ -175,6 +180,7 @@ func TestHandleEventHandlerCreate_RuleRequiresName(t *testing.T) {
 
 func TestHandleEventHandlerCreate_TriggerRequiresBlueprintID(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
 		"event_type": "github:pr:ci_check_failed",
 		// no blueprint_id
@@ -186,6 +192,7 @@ func TestHandleEventHandlerCreate_TriggerRequiresBlueprintID(t *testing.T) {
 
 func TestHandleEventHandlerCreate_RejectsUnknownEventType(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "not:a:real:event",
 		"name":             "x",
@@ -202,6 +209,7 @@ func TestHandleEventHandlerCreate_CanonicalizesPredicate(t *testing.T) {
 	// the wire-out form is identical for match-all regardless of the
 	// shape the client sent. Pin the round-trip.
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	for name, predicate := range map[string]any{
 		"empty object":  map[string]any{},
 		"explicit null": nil,
@@ -232,6 +240,7 @@ func TestHandleEventHandlerCreate_CanonicalizesPredicate(t *testing.T) {
 // spellings is how two callers end up disagreeing about which is canonical.
 func TestHandleEventHandlerCreate_PredicateIsAnObject(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	body := func(predicate any) map[string]any {
 		return map[string]any{
 			"event_type": "github:pr:new_commits", "name": "predicate", "scope_predicate": predicate,
@@ -255,6 +264,7 @@ func TestHandleEventHandlerCreate_PredicateIsAnObject(t *testing.T) {
 
 func TestHandleEventHandlerCreate_RejectsInvalidPredicate(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:new_commits",
 		"name":             "bad",
@@ -544,6 +554,7 @@ func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 // trigger described two ways depending on how it was born.
 func TestEventHandlerTriggerParity_CreateAndPromote(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-parity-created")
 	seedBlueprintForTrigger(t, s, "p-parity-promoted")
 
@@ -690,6 +701,7 @@ func TestHandleEventHandlerReorder_RejectsInexactSet(t *testing.T) {
 
 func TestHandleEventHandlersList_KindFilter(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	_ = createUserRule(t, s)
 	seedBlueprintForTrigger(t, s, "p-list")
 	doJSON(t, s, http.MethodPost, "/api/event-handlers/triggers", map[string]any{
@@ -783,6 +795,7 @@ func createUserTrigger(t *testing.T, s *Server, blueprintID string) string {
 // reach the store as a bad cast).
 func TestHandleEventHandlerGet_ShapeParityAndNotFound(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	created := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
 		"event_type":       "github:pr:new_commits",
 		"name":             "Heads-up on new commits",

@@ -8,6 +8,8 @@ import TeamPicker from './TeamPicker'
 import type { RuleHandler, EventType } from '../types'
 import { toast } from './Toast/toastStore'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import { useEventSources } from '../hooks/useEventSources'
+import { sourceKindOf, sourceUnavailableReason } from '../lib/eventSources'
 import { handlersBase, rulesCreatePath } from '../lib/scope'
 import { apiFetch, apiJSON, httpErrorMessage } from '../lib/apiClient'
 
@@ -49,6 +51,10 @@ export default function TaskRuleEditor({
   const [enabled, setEnabled] = useState(true)
   // applies_to_unowned — the explicit "watch" scope opt-in (TFAC-517).
   const [appliesToUnowned, setAppliesToUnowned] = useState(false)
+
+  // Which sources can actually reach this org — the picker offers no event a
+  // rule could never fire on, and the create route refuses one anyway.
+  const { canProduce, stateOf } = useEventSources()
 
   // UI state
   const [eventTypes, setEventTypes] = useState<EventType[]>([])
@@ -320,13 +326,33 @@ export default function TaskRuleEditor({
                     >
                       <option value="">Select event type…</option>
                       {eventTypes
-                        .filter((et) => et.source !== 'system')
+                        // system: is bus-only and never routed. An
+                        // unavailable source is hidden for a different reason:
+                        // its events cannot reach this org at all, so a rule
+                        // bound to one would wait forever. The row being
+                        // EDITED is kept regardless — event_type is immutable,
+                        // so dropping it would blank the control on exactly
+                        // the rule the reader opened to fix.
+                        .filter(
+                          (et) =>
+                            et.source !== 'system' &&
+                            (et.id === eventType || canProduce(et.source)),
+                        )
                         .map((et) => (
                           <option key={et.id} value={et.id}>
                             {et.label} ({et.id})
                           </option>
                         ))}
                     </select>
+                    {eventType && !canProduce(sourceKindOf(eventType)) && (
+                      <p className="text-[11px] text-text-tertiary mt-1.5 italic">
+                        {sourceUnavailableReason(
+                          sourceKindOf(eventType),
+                          stateOf(sourceKindOf(eventType)),
+                        )}{' '}
+                        This rule can&rsquo;t fire until it is.
+                      </p>
+                    )}
                   </div>
 
                   {/* Name */}

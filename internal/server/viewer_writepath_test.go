@@ -8,10 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -61,6 +64,20 @@ func newViewerRig(t *testing.T) *viewerRig {
 		admin:  founder,
 		member: member,
 		viewer: viewer,
+	}
+}
+
+// bindGitHubPAT stores an org GitHub PAT under the founder's claims, making
+// the github event source available to the rig's org.
+func (r *viewerRig) bindGitHubPAT(t *testing.T) {
+	t.Helper()
+	if err := r.s.tx.WithTx(t.Context(), r.orgID, r.admin, func(tx db.TxStores) error {
+		return integrations.Save(t.Context(), tx.Secrets, r.orgID, auth.Credentials{
+			GitHubURL: "https://github.com",
+			GitHubPAT: "ghp-fixture",
+		})
+	}); err != nil {
+		t.Fatalf("bind github pat: %v", err)
 	}
 }
 
@@ -208,6 +225,11 @@ func TestViewer_BlueprintCreate_Forbidden(t *testing.T) {
 // added alongside the RLS swap.
 func TestViewer_EventHandlerCreate_Forbidden(t *testing.T) {
 	r := newViewerRig(t)
+	// The create route refuses an event type whose source the org cannot
+	// produce, and that check runs with the rest of the body validation —
+	// before the role gate. Bind the credential so the request reaches the
+	// gate this test is about.
+	r.bindGitHubPAT(t)
 	body := map[string]any{"event_type": "github:pr:opened", "name": "my-rule"}
 
 	rec := httptest.NewRecorder()

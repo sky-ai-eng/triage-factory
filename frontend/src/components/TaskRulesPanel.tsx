@@ -22,6 +22,8 @@ import TaskRuleEditor from './TaskRuleEditor'
 import type { RuleHandler } from '../types'
 import { toast } from './Toast/toastStore'
 import { apiFetch, apiListAll, httpErrorMessage } from '../lib/apiClient'
+import { useEventSources } from '../hooks/useEventSources'
+import { sourceCannotFireNote, sourceKindOf } from '../lib/eventSources'
 
 interface TaskRulesPanelProps {
   open: boolean
@@ -230,6 +232,7 @@ function SortableRuleRow({
   onEdit: () => void
   onToggle: () => void
 }) {
+  const { stateOf } = useEventSources()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: rule.id,
   })
@@ -240,6 +243,14 @@ function SortableRuleRow({
     opacity: isDragging ? 0.5 : 1,
     zIndex: isDragging ? 10 : undefined,
   }
+
+  // A rule whose source can no longer produce events is shown, not hidden: the
+  // row is the reader's way to edit or delete it, and an unconfigured source is
+  // theirs to fix. What goes inert is the arming toggle — enabling a rule that
+  // cannot fire is a promise the factory can't keep.
+  const kind = sourceKindOf(rule.event_type)
+  const unavailable = rule.source_available === false
+  const reason = unavailable ? sourceCannotFireNote(kind, stateOf(kind)) : null
 
   return (
     <div
@@ -268,7 +279,7 @@ function SortableRuleRow({
             <div className="flex items-center gap-2 min-w-0">
               <span
                 className={`text-body font-medium truncate min-w-0 ${
-                  rule.enabled ? 'text-ink-1' : 'text-ink-3 line-through'
+                  rule.enabled && !unavailable ? 'text-ink-1' : 'text-ink-3 line-through'
                 }`}
               >
                 {rule.name}
@@ -282,6 +293,11 @@ function SortableRuleRow({
             <div className="mt-1">
               <EventBadge eventType={rule.event_type} compact />
             </div>
+            {reason && (
+              <p className="text-reported text-ink-3 mt-1 italic">
+                {reason} This rule can&rsquo;t fire.
+              </p>
+            )}
             {rule.scope_predicate_json && (
               <p className="text-reported text-ink-3 mt-1 truncate font-mono">
                 {formatPredicate(rule.scope_predicate_json)}
@@ -294,7 +310,9 @@ function SortableRuleRow({
             <Switch.Root
               checked={rule.enabled}
               onCheckedChange={onToggle}
-              className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 cursor-pointer"
+              disabled={unavailable}
+              title={reason ?? undefined}
+              className="relative w-8 h-[18px] rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Switch.Thumb className="block w-[14px] h-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
             </Switch.Root>

@@ -10,11 +10,14 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/zalando/go-keyring"
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -63,6 +66,39 @@ func newTestServer(t *testing.T) *Server {
 	}
 	stores := sqlitestore.New(database)
 	return New(database, stores)
+}
+
+// configureEventSources binds the test org's GitHub and Jira credentials in a
+// mock keychain, making both sources AVAILABLE for the event-source gate the
+// event-handler create routes run.
+//
+// A fixture calls it when the thing under test is authoring a handler rather
+// than the credential state itself: production reaches every authoring surface
+// behind a setup gate that already requires GitHub, so an org that can author
+// a github rule always has one bound. It is not folded into newTestServer
+// because just as many fixtures are about the UNCONFIGURED org, and a server
+// that quietly arrived configured would take that state away from them.
+func configureEventSources(t *testing.T, s *Server) {
+	t.Helper()
+	keyring.MockInit()
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
+		GitHubURL: "https://github.com",
+		GitHubPAT: "ghp-fixture",
+		JiraURL:   "https://jira.example.com",
+		JiraPAT:   "jira-fixture",
+	}); err != nil {
+		t.Fatalf("configure event sources: %v", err)
+	}
+}
+
+// unconfigureEventSources resets the mock keychain, leaving the test org with
+// no credential bound. Local secrets live in ONE process-wide mock bag, so a
+// fixture that is about the unconfigured org has to say so: a sibling test's
+// configureEventSources otherwise leaves its credentials behind and the "fresh
+// org" is quietly a configured one.
+func unconfigureEventSources(t *testing.T) {
+	t.Helper()
+	keyring.MockInit()
 }
 
 // fixtureUUID derives a stable uuid from a readable seed, so fixtures keep

@@ -138,6 +138,7 @@ func TestHandleEventSchemaGet_GatedSourceOKWithFeature(t *testing.T) {
 
 func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	// Create both handlers BEFORE gating (create isn't reachable for the
 	// jira one once gated) — rows persist, only visibility is filtered.
 	jiraID := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
@@ -165,6 +166,7 @@ func TestHandleEventHandlersList_HidesGatedHandler(t *testing.T) {
 
 func TestHandleEventHandlersList_GatedHandlerVisibleWithFeature(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	jiraID := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
@@ -183,6 +185,7 @@ func TestHandleEventHandlersList_GatedHandlerVisibleWithFeature(t *testing.T) {
 
 func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	gateJiraForTest(t)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
@@ -202,6 +205,7 @@ func TestHandleEventHandlerCreate_RejectsGatedEventType(t *testing.T) {
 
 func TestHandleEventHandlerCreate_UngatedEventTypeUnaffected(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	gateJiraForTest(t)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/event-handlers/rules", map[string]any{
@@ -217,6 +221,7 @@ func TestHandleEventHandlerCreate_UngatedEventTypeUnaffected(t *testing.T) {
 
 func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	gateJiraForTest(t)
 	grantTestGateFeature(t)
 

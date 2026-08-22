@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -123,6 +124,18 @@ type Runtime interface {
 	// only the orchestrator's does), so it is a runtime method, not a direct
 	// entitlements.For() call in callExtension.
 	CheckEntitlement(ctx context.Context, feature string) (bool, error)
+
+	// SourceDisabled reports whether an org admin has turned the named event
+	// source off for the run's org. Every GitHub and Jira verb resolves its
+	// credential behind this, which is what makes the switch reach an agent
+	// that is ALREADY running rather than only the next one to start.
+	//
+	// It relays on the sidecar for the same reason CheckEntitlement does: the
+	// policy lives in a database that process does not have. And it is read
+	// per call rather than cached for the life of a run, because a cache is a
+	// window in which a source an admin turned off still answers, and the read
+	// is one indexed row against the API round trip it guards.
+	SourceDisabled(ctx context.Context, kind string) (bool, error)
 }
 
 // ExtensionRuntime is the narrower runtime a provider's sidecar-half handler
@@ -167,6 +180,7 @@ const (
 	opRecordReadTouch       = "record_read_touch"
 	opMemoryLoad            = "memory_load"
 	opCheckEntitlement      = "check_entitlement"
+	opSourceDisabled        = "source_disabled"
 	opReviewPosture         = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
@@ -210,6 +224,16 @@ type checkEntitlementArgs struct {
 
 type checkEntitlementResult struct {
 	Allowed bool `json:"allowed"`
+}
+
+// sourceDisabledArgs / sourceDisabledResult are the source_disabled op's
+// payloads — a source kind, and whether an org admin has turned it off.
+type sourceDisabledArgs struct {
+	Kind string `json:"kind"`
+}
+
+type sourceDisabledResult struct {
+	Disabled bool `json:"disabled"`
 }
 
 // ReviewPostureResolution is what the review-posting decision reads from
@@ -555,6 +579,17 @@ func (r *directRuntime) CheckEntitlement(_ context.Context, feature string) (boo
 	return entitlements.For(r.info.OrgID).Has(entitlements.Feature(feature)), nil
 }
 
+// SourceDisabled reads the org's stored source policy. The nil-store arm is
+// the test seam every other read here carries: a client assembled with partial
+// stores has no policy to answer from, and inventing one would fail verbs that
+// have nothing to do with this switch.
+func (r *directRuntime) SourceDisabled(ctx context.Context, kind string) (bool, error) {
+	if r.stores.OrgEventSources == nil {
+		return false, nil
+	}
+	return eventsource.Disabled(ctx, r.stores.OrgEventSources, r.info.OrgID, kind)
+}
+
 // Relay dispatches a provider op locally against db.Stores (all/local), the
 // mirror of the sidecar relaying it to the orchestrator. Core built-ins never
 // call this (they use the typed methods); a provider handler reaching its own
@@ -804,6 +839,14 @@ func (r *relayRuntime) CheckEntitlement(ctx context.Context, feature string) (bo
 		return false, err
 	}
 	return res.Allowed, nil
+}
+
+func (r *relayRuntime) SourceDisabled(ctx context.Context, kind string) (bool, error) {
+	var res sourceDisabledResult
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opSourceDisabled, sourceDisabledArgs{Kind: kind}, &res); err != nil {
+		return false, err
+	}
+	return res.Disabled, nil
 }
 
 // sidecarRelayConn adapts a live supervision channel to relayConn — the

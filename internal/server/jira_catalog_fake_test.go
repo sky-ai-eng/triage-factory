@@ -24,12 +24,14 @@ const (
 	statusToDoID       = "10000"
 	statusInProgressID = "10001"
 	statusDoneID       = "10002"
+	statusInReviewID   = "10003"
 	statusUnknownID    = "99999"
 )
 
 var jiraFixtureStatuses = []fakeJiraStatus{
 	{ID: statusToDoID, Name: "To Do"},
 	{ID: statusInProgressID, Name: "In Progress"},
+	{ID: statusInReviewID, Name: "Code Review"},
 	{ID: statusDoneID, Name: "Done"},
 }
 

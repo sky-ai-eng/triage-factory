@@ -27,6 +27,7 @@ type SettingsStores struct {
 	JiraStatusRules  db.JiraStatusRulesStore
 	TeamGitHubGroups db.TeamGitHubGroupsStore
 	TeamGitHubRepos  db.TeamGitHubReposStore
+	OrgEventSources  db.OrgEventSourceStore
 }
 
 // SettingsIDs are the tenancy keys the factory pre-seeded.
@@ -206,6 +207,87 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// reason a one-column write hands back the whole row.
 		if classed.GitHubBaseURL != versioned.GitHubBaseURL {
 			t.Errorf("SetGitHubCredentialClass returned %+v, want the prior save's base URL preserved", classed)
+		}
+	})
+
+	// OrgSettings_PerSourceWriteDoesNotShareTheVersionToken pins the
+	// concurrency split base_url / poll_interval moving onto org_event_sources
+	// left behind: the org_settings.version token guards a settings-page save
+	// (UpdateSettingsVersioned, covering that route's own base_url /
+	// poll_interval writes too — they land in the same transaction as the
+	// guarded org_settings row), but it says nothing about the admin-only
+	// per-source route (OrgEventSourceStore.SetDisabled), which is an
+	// unguarded, last-writer-wins upsert on a disjoint set of columns on the
+	// SAME org_event_sources row.
+	//
+	// Two admins racing on genuinely different resources (the settings-page
+	// save; the per-source disable switch) must not spuriously block or
+	// unwind each other, and each must leave the other's columns alone —
+	// that's the whole point of the split. This test plays out both
+	// directions of that on one shared row.
+	t.Run("OrgSettings_PerSourceWriteDoesNotShareTheVersionToken", func(t *testing.T) {
+		stores, ids := factory(t)
+		if stores.OrgEventSources == nil {
+			t.Skip("factory did not wire OrgEventSources")
+		}
+
+		// Admin A saves the settings page — this is the version-guarded
+		// write, and it lands base_url in the same transaction.
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{
+			GitHubBaseURL:       "https://a-saved.example.com",
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}, 0)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (create): %v", err)
+		}
+
+		// Admin B, on the per-source route, pauses github. Unguarded: it
+		// doesn't ask for A's version and it must still succeed.
+		if _, err := stores.OrgEventSources.SetDisabled(ctx, ids.OrgID, "github", true, ids.UserID); err != nil {
+			t.Fatalf("SetDisabled: %v", err)
+		}
+
+		// B's write must not have touched org_settings.version, or A's base
+		// URL — the two writers own disjoint columns of the org_event_sources
+		// row, and B's route doesn't touch org_settings at all.
+		afterB, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after SetDisabled: %v", err)
+		}
+		if afterB.Version != saved.Version {
+			t.Errorf("SetDisabled bumped org_settings.version: got %d, want unchanged %d", afterB.Version, saved.Version)
+		}
+		if afterB.GitHubBaseURL != "https://a-saved.example.com" {
+			t.Errorf("SetDisabled clobbered github base_url: got %q", afterB.GitHubBaseURL)
+		}
+
+		// A saves again at the version from the FIRST save — B's write never
+		// touched org_settings.version, so this is not a stale token and must
+		// succeed, not conflict.
+		resaved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{
+			GitHubBaseURL:       "https://a-saved.example.com",
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+			MaxDailyCostUSD:     42,
+		}, saved.Version)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (A resaves at the version B's write left intact): %v", err)
+		}
+		if resaved.MaxDailyCostUSD != 42 {
+			t.Errorf("A's resave didn't land: MaxDailyCostUSD = %v, want 42", resaved.MaxDailyCostUSD)
+		}
+
+		// And the other direction: A's org_settings-scoped save must not have
+		// touched B's disabled flag — disjoint columns, same row.
+		disabledRow, err := stores.OrgEventSources.Get(ctx, ids.OrgID, "github")
+		if err != nil {
+			t.Fatalf("OrgEventSources.Get: %v", err)
+		}
+		if disabledRow == nil || !disabledRow.Disabled {
+			t.Errorf("A's settings save cleared github's disabled flag: %+v", disabledRow)
 		}
 	})
 
@@ -880,6 +962,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("JiraStatusRules_ReplaceForTeam_UpsertsRows", func(t *testing.T) {
+		// SKY maps the optional in-review rule and ENG leaves it empty, so one
+		// round-trip covers both stored shapes of it.
 		stores, ids := factory(t)
 		input := []domain.JiraProjectStatusRules{
 			{
@@ -887,6 +971,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				PickupMembers:       jiraRefs("To Do", "Backlog"),
 				InProgressMembers:   jiraRefs("In Progress"),
 				InProgressCanonical: jiraRef("In Progress"),
+				InReviewMembers:     jiraRefs("In Progress", "Code Review"),
+				InReviewCanonical:   jiraRef("Code Review"),
 				DoneMembers:         jiraRefs("Done"),
 				DoneCanonical:       jiraRef("Done"),
 			},
@@ -909,16 +995,57 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// List* reads populate TeamID (the PK's first column);
 		// ReplaceForTeam takes the team as a parameter and ignores the
 		// struct field, so set the expected TeamID before the round-trip
-		// compare.
+		// compare. An unmapped rule reads back as an EMPTY slice rather than
+		// nil — the column holds "[]" and the scan reflects the column — which
+		// is why ENG's untouched in-review members need saying here.
 		want := make([]domain.JiraProjectStatusRules, len(input))
 		copy(want, input)
 		for i := range want {
 			want[i].TeamID = ids.TeamID
+			if want[i].InReviewMembers == nil {
+				want[i].InReviewMembers = []domain.JiraStatusRef{}
+			}
 		}
 		sortRulesByKey(got)
 		sortRulesByKey(want)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after ReplaceForTeam, ListForTeam = %+v; want %+v", got, want)
+		}
+	})
+
+	t.Run("JiraStatusRules_ReplaceForTeam_ClearsInReviewRule", func(t *testing.T) {
+		// The optional rule has to be removable, which is the direction the
+		// complete-or-empty CHECK could get wrong: members and canonical must
+		// clear together, and the row must survive with the other three intact.
+		stores, ids := factory(t)
+		mapped := []domain.JiraProjectStatusRules{{
+			ProjectKey: "SKY", PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			InReviewMembers: jiraRefs("Code Review"), InReviewCanonical: jiraRef("Code Review"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+		}}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, mapped); err != nil {
+			t.Fatalf("ReplaceForTeam (mapped): %v", err)
+		}
+		cleared := mapped
+		cleared[0].InReviewMembers = nil
+		cleared[0].InReviewCanonical = domain.JiraStatusRef{}
+		if err := stores.JiraStatusRules.ReplaceForTeam(ctx, ids.TeamID, cleared); err != nil {
+			t.Fatalf("ReplaceForTeam (cleared): %v", err)
+		}
+		got, err := stores.JiraStatusRules.ListForTeamSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("rules = %+v, want the one SKY row", got)
+		}
+		if len(got[0].InReviewMembers) != 0 || !got[0].InReviewCanonical.IsZero() {
+			t.Errorf("in-review rule = %+v / %+v, want both cleared",
+				got[0].InReviewMembers, got[0].InReviewCanonical)
+		}
+		if got[0].InProgressCanonical != jiraRef("In Progress") || got[0].DoneCanonical != jiraRef("Done") {
+			t.Errorf("row = %+v, want the other rules untouched by the clear", got[0])
 		}
 	})
 

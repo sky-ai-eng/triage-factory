@@ -38,6 +38,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -238,6 +239,12 @@ type App struct {
 func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	a := &App{cfg: cfg, plan: planForRole(runmode.Role())}
 	appLog.Info("boot role", "role", a.plan.role, "mode", runmode.Current())
+
+	// Cheapest check in the file — pure embedded data, no I/O — so it runs
+	// before anything acquires a lock or opens a pool.
+	if err = checkModelCatalog(cfg.Version, modelcatalog.JoinError()); err != nil {
+		return nil, err
+	}
 
 	// Install the OTel meter provider before anything downstream constructs
 	// instruments, so every subsystem records against the real SDK from its
@@ -476,8 +483,35 @@ func (a *App) wire() {
 	if a.plan.serveHTTP {
 		a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
 		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
+		a.srv.SetOnSourcesChanged(a.sourcesChanged)
 	}
 }
 
 // local reports whether the binary is running in single-tenant local mode.
 func (a *App) local() bool { return runmode.Current() == runmode.ModeLocal }
+
+// unreleasedVersion is the value main.Version carries when the linker did not
+// stamp a release tag. Config.Version is empty on a build path that never
+// reaches main (tests constructing a Config directly), which is unreleased for
+// the same reason.
+const unreleasedVersion = "dev"
+
+// checkModelCatalog decides what a broken catalog join costs.
+//
+// The supported-models file and the pricing datasheet are both compiled in, so
+// a failed join is settled when the binary is linked: whoever builds it can see
+// it, and an operator running it cannot fix it. So an unreleased build refuses
+// to boot — the author is right there, and a model TF names but cannot price is
+// a defect to fix, not to ship — while a released build logs the dropped
+// entries and serves the rest. A key retired upstream costs a stale binary one
+// picker row; it must never cost it the server.
+func checkModelCatalog(version string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if version == "" || version == unreleasedVersion {
+		return fmt.Errorf("model catalog: %w", err)
+	}
+	appLog.Error("model catalog entries dropped", "error", err)
+	return nil
+}

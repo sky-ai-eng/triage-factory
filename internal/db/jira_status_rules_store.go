@@ -8,7 +8,7 @@ import (
 
 // JiraStatusRulesStore owns the jira_project_status_rules table —
 // one row per (team_id, project_key) carrying the team's per-project
-// pickup/in_progress/done status configuration. Separate from
+// pickup/in_progress/in_review/done status configuration. Separate from
 // TeamsStore because the table is multi-row per team with bulk-replace
 // semantics (config.Save's clone-then-prune flow); folding it into
 // the single-row TeamSettings struct would muddy the per-scope read
@@ -31,6 +31,11 @@ import (
 // Every List* method populates domain.JiraProjectStatusRules.TeamID (the
 // PK's first column) so the poller's per-project merge and the router's
 // team↔project gate can attribute each row to its team.
+//
+// The in_review rule is optional and, unlike the other three, feeds nothing
+// that decides what TF polls or how a ticket is classified — see
+// domain.JiraProjectStatusRules. A row whose in_review columns are empty is a
+// complete configuration, which is why every read here can hand one back.
 type JiraStatusRulesStore interface {
 	// ListForTeam returns the team's per-project rules in
 	// project_key ascending order. Empty slice with nil error when

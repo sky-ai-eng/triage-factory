@@ -113,6 +113,10 @@ type Router struct {
 	scorer        Scorer
 	ws            *websocket.Hub
 	publisher     EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors the per-event routing disposition sentinel onto the bus (TFAC-593)
+	// sourceGate answers whether an org has paused an event source. nil-safe;
+	// set post-construction via SetEventSourceGate — a router without one
+	// never drops. See source_gate.go.
+	sourceGate *sourceGate
 
 	// executorID/bootEpoch are this process's persistent instance-registry
 	// identity (TFAC-577), set post-construction via SetExecutorID before

@@ -25,19 +25,20 @@ import (
 // testTaskStore, reviewRouter) live in review_routing_test.go.
 
 // jiraTestHost is the org's Jira host. Identities are bound to it and
-// org_settings.jira_base_url is set to it so the router's assignee→teams
-// resolution finds the same key the writers stored.
+// org_event_sources' jira row's base_url is set to it so the router's
+// assignee→teams resolution finds the same key the writers stored.
 const jiraTestHost = "https://acme.atlassian.net"
 
-// setJiraHost stamps org_settings.jira_base_url for the default org. Safe to
-// call alongside setReviewHost — both upsert the single org_settings row.
+// setJiraHost stamps the jira row's base_url on org_event_sources for the
+// default org. Safe to call alongside setReviewHost — the two set different
+// kinds' rows.
 func setJiraHost(t *testing.T, database *sql.DB) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO org_settings (org_id, jira_base_url) VALUES (?, ?)
-		ON CONFLICT(org_id) DO UPDATE SET jira_base_url = excluded.jira_base_url
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
+		ON CONFLICT(org_id, kind) DO UPDATE SET base_url = excluded.base_url
 	`, runmode.LocalDefaultOrgID, jiraTestHost); err != nil {
-		t.Fatalf("set org jira_base_url: %v", err)
+		t.Fatalf("set org jira base_url: %v", err)
 	}
 }
 

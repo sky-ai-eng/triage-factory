@@ -18,12 +18,16 @@ import type { GitHubTeamCandidate } from '../../lib/githubTeams'
 import type { SlackChannelsResponse } from '../../types'
 
 // JiraProjectConfig mirrors the backend per-project rule wire shape (key +
-// the three status rules). One project's tracking config; a team can carry
+// the four status rules). One project's tracking config; a team can carry
 // several with independent workflows.
 export interface JiraProjectConfig {
   key: string
   pickup: JiraStatusRuleValue
   in_progress: JiraStatusRuleValue
+  // Optional: the status naming work that awaits human review. No Jira status
+  // is ever read back into TF's in-review board column, so this is a write
+  // target only and an empty rule is a complete configuration.
+  in_review: JiraStatusRuleValue
   done: JiraStatusRuleValue
 }
 
@@ -134,6 +138,7 @@ export const emptyProject = (key = ''): JiraProjectConfig => ({
   key,
   pickup: { members: [] },
   in_progress: { members: [] },
+  in_review: { members: [] },
   done: { members: [] },
 })
 
@@ -156,6 +161,9 @@ export const ruleIsIdentified = (r: JiraStatusRuleValue): boolean =>
 // is in the tracked set, and mapping its workflow's statuses is the step after
 // that — so an unarmed project saves fine and simply contributes nothing to
 // the discovery JQL until it is mapped.
+//
+// in_review is deliberately not part of armed: it is optional, and it gates
+// nothing the poller asks.
 export const projectIsArmed = (p: JiraProjectConfig): boolean =>
   p.key.trim() !== '' &&
   p.pickup.members.length > 0 &&
@@ -171,7 +179,7 @@ export const projectIsArmed = (p: JiraProjectConfig): boolean =>
 // executed, and a write target that isn't one of them is a rule that would
 // fail at transition time. This is what decides whether a save can go through.
 export const projectRulesValid = (p: JiraProjectConfig): boolean =>
-  [p.in_progress, p.done].every(
+  [p.in_progress, p.in_review, p.done].every(
     (r) =>
       r.members.length > 0 === !!r.canonical &&
       (!r.canonical ||
@@ -205,7 +213,7 @@ export function unresolvableStatuses(
   if (allStatuses.length === 0) return []
   const out: JiraStatusRef[] = []
   const seen = new Set<string>()
-  for (const rule of [p.pickup, p.in_progress, p.done]) {
+  for (const rule of [p.pickup, p.in_progress, p.in_review, p.done]) {
     for (const ref of [...rule.members, ...(rule.canonical ? [rule.canonical] : [])]) {
       const dedup = ref.id || ref.name
       if (!dedup || seen.has(dedup)) continue
@@ -227,7 +235,13 @@ export function dropStatus(p: JiraProjectConfig, status: JiraStatusRef): JiraPro
     members: r.members.filter((m) => !sameStatus(m, status)),
     canonical: r.canonical && sameStatus(r.canonical, status) ? null : r.canonical,
   })
-  return { ...p, pickup: strip(p.pickup), in_progress: strip(p.in_progress), done: strip(p.done) }
+  return {
+    ...p,
+    pickup: strip(p.pickup),
+    in_progress: strip(p.in_progress),
+    in_review: strip(p.in_review),
+    done: strip(p.done),
+  }
 }
 
 // teamProjectsBlocked reports whether the team's Jira project rules should
@@ -394,6 +408,8 @@ export async function saveTeamJiraProjects(
       if (pickup) body.pickup = pickup
       const inProgress = jiraRuleWrite(p.in_progress, true)
       if (inProgress) body.in_progress = inProgress
+      const inReview = jiraRuleWrite(p.in_review, true)
+      if (inReview) body.in_review = inReview
       const done = jiraRuleWrite(p.done, true)
       if (done) body.done = done
       return body
