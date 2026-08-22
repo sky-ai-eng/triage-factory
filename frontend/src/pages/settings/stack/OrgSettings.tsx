@@ -704,7 +704,7 @@ export default function OrgSettings({
         }
         onCancel={() => revertOrg(['background_jobs_model'])}
       >
-        <OrgBackgroundJobsModelStep {...ctx} />
+        <OrgBackgroundJobsModelStep {...ctx} allowOff />
       </SettingsSection>
 
       {/* ── Daily spend cap (TFAC-477) ── A runaway-spend fuse: when the org's

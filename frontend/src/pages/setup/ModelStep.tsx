@@ -70,9 +70,22 @@ export function TeamModelStep({ state, patch }: StepContext) {
 // further narrowing: the delegation picker's gates (tool support, a big enough
 // context window) are about running an agent, and these jobs are toolless
 // single-turn calls that fit in any window the catalog offers.
-export function OrgBackgroundJobsModelStep({ state, patch }: StepContext) {
+//
+// `allowOff` is passed by the render site, not carried on StepContext, because
+// the two surfaces want opposite things from the same body. The wizard step is
+// mandatory — it blocks until a model is chosen, which is the whole reason a
+// fresh workspace cannot end up with three jobs that silently never run — so it
+// offers no way out. Settings passes it, because turning the jobs off is a
+// decision an admin is allowed to make later, and the alternative is unbinding
+// the Claude credential every other feature shares.
+export function OrgBackgroundJobsModelStep({
+  state,
+  patch,
+  allowOff,
+}: StepContext & { allowOff?: boolean }) {
   const { models, loaded } = useModelCatalog()
   const choose = (model: string) => patch({ org: { ...state.org, background_jobs_model: model } })
+  const off = state.org.background_jobs_model === ''
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
@@ -95,6 +108,24 @@ export function OrgBackgroundJobsModelStep({ state, patch }: StepContext) {
           ariaLabel="Background jobs model"
         />
       )}
+      {/* The off switch sits BESIDE the selector rather than in it. An empty
+          option would turn the control into its cap form — the ladder with the
+          ghosted region and the "no cap" end — which reads as an ordering over
+          models, the one claim the catalog declines to make. */}
+      {allowOff &&
+        (off ? (
+          <p className="text-[12px] text-text-tertiary">
+            Background jobs are off. Pick a model to turn them back on.
+          </p>
+        ) : (
+          <button
+            type="button"
+            onClick={() => choose('')}
+            className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+          >
+            Turn background jobs off
+          </button>
+        ))}
     </div>
   )
 }
