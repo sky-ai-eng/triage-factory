@@ -385,7 +385,7 @@ func (s *projectSession) dispatch(item queueItem) {
 		s.releaseFailed(item, "could not read organization settings")
 		s.revertTurnContext(item, start.Consumed, 0)
 		return
-	} else if err := modelaccess.Ready(orgSet, runmode.Current() == runmode.ModeMulti); err != nil {
+	} else if err := modelaccess.ForOrg(orgSet).Ready(); err != nil {
 		s.releaseFailed(item, err.Error())
 		s.revertTurnContext(item, start.Consumed, 0)
 		return

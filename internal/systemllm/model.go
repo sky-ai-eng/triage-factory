@@ -9,7 +9,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // OrgSettingsReader is the claims-free org-settings read the model resolution
@@ -60,10 +59,11 @@ func ModelForSettings(set domain.OrgSettings) (string, error) {
 	if !modelcatalog.Offers(model) {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q, which this deployment does not offer — pick another in Settings", ErrNoModel, model)
 	}
-	if err := modelaccess.Ready(set, runmode.Current() == runmode.ModeMulti); err != nil {
+	creds := modelaccess.ForOrg(set)
+	if err := creds.Ready(); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrNoModel, err)
 	}
-	if err := modelaccess.Check(model, set, nil); err != nil {
+	if err := creds.Check(model, nil); err != nil {
 		return "", fmt.Errorf("%w: the background jobs model setting names %q: %w", ErrNoModel, model, err)
 	}
 	return model, nil

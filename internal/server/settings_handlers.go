@@ -331,7 +331,7 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 			if orgErr != nil {
 				return fmt.Errorf("load org settings: %w", orgErr)
 			}
-			if e := modelaccess.Check(savedModel, orgSet, teamSet.AllowedProviders); e != nil {
+			if e := modelaccess.ForOrg(orgSet).Check(savedModel, teamSet.AllowedProviders); e != nil {
 				return e
 			}
 		}
@@ -875,7 +875,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// No team restriction is consulted, and there is no team to consult one
 		// for — these jobs are the org's own work.
 		if cur.BackgroundJobsModel != "" && cur.BackgroundJobsModel != prevOrgSet.BackgroundJobsModel {
-			if e := modelaccess.Check(cur.BackgroundJobsModel, cur, nil); e != nil {
+			if e := modelaccess.ForOrg(cur).Check(cur.BackgroundJobsModel, nil); e != nil {
 				return e
 			}
 		}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // checkModelProviders is the admission gate for the models a delegation would
@@ -55,7 +54,8 @@ func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string,
 	// per-model questions. A local org that has bound nothing and did not choose
 	// to run on the machine's credentials would otherwise dispatch and quietly
 	// spend against whatever the operator's shell holds.
-	if err := modelaccess.Ready(orgSet, runmode.Current() == runmode.ModeMulti); err != nil {
+	creds := modelaccess.ForOrg(orgSet)
+	if err := creds.Ready(); err != nil {
 		return fmt.Errorf("cannot dispatch: %w", err)
 	}
 
@@ -65,7 +65,7 @@ func (s *Spawner) checkModelProviders(ctx context.Context, orgID, teamID string,
 			continue
 		}
 		seen[m] = true
-		if err := modelaccess.Check(m, orgSet, allowed); err != nil {
+		if err := creds.Check(m, allowed); err != nil {
 			return fmt.Errorf("cannot dispatch: %w", err)
 		}
 	}

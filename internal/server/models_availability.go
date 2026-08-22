@@ -29,42 +29,15 @@ type modelProber interface {
 // handler reads — the catalog reads to render a badge, the test routes to
 // refuse a provider before spending anything on it.
 //
-// Two inputs. hostCredentials and connected are LOCAL, CERTAIN facts read off
-// the settings row, so they need no probe. rows are probe RESULTS, and their
-// ABSENCE is the third state: an org that has probed nothing has no rows, and
-// "we did not look" must not render the same as "we looked and found nothing".
+// Two inputs. creds is a LOCAL, CERTAIN fact resolved off the settings row, so
+// it needs no probe; it is modelaccess's own value rather than a second copy of
+// the same derivation, which is what keeps a badge and a dispatch refusal from
+// disagreeing about one org. rows are probe RESULTS, and their ABSENCE is the
+// third state: an org that has probed nothing has no rows, and "we did not
+// look" must not render the same as "we looked and found nothing".
 type availabilityIndex struct {
-	// hostCredentials is the org running on whatever credential the host
-	// supplies — domain.LLMAuthSystem, resolved through EffectiveLLMAuthMethod
-	// so multi mode is always false. Such an org has nothing to be unconfigured
-	// ABOUT: there is no provider it failed to connect, because it is not
-	// selecting between providers in the first place. What it CAN invoke is
-	// still an open question, and still a probeable one — the runtime carries
-	// that credential even though this process cannot read it.
-	//
-	// It is the org's recorded choice, read rather than derived from connected
-	// being empty — an empty set means two different things, and only the
-	// recorded source tells them apart. An org that brings its own key and has
-	// bound none has that same empty set and is running on nothing it chose,
-	// which is a refusal for every model rather than a free pass.
-	hostCredentials bool
-	// connected is the providers the org holds credentials for, read off the
-	// settings refs.
-	connected map[string]bool
-	rows      map[string]domain.ModelAvailability
-}
-
-// has reports whether TF can put a credential behind a call to provider — the
-// same question the dispatch gates ask, in the same terms, so a badge and a run
-// cannot disagree about the same org.
-//
-// An org on host credentials passes for every provider: there is no per-provider
-// credential to be missing. An org on its own passes only for what it bound —
-// including when it bound nothing, which is a refusal for every model rather
-// than a free pass, because the alternative is spending against a credential
-// nobody configured.
-func (a availabilityIndex) has(provider string) bool {
-	return a.hostCredentials || a.connected[provider]
+	creds modelaccess.Credentials
+	rows  map[string]domain.ModelAvailability
 }
 
 // availabilityRowKey addresses a stored row from a catalog entry. Both halves,
@@ -80,7 +53,7 @@ func availabilityRowKey(provider, modelKey string) string { return provider + "\
 // badged "unverified" and pointed at a test button that the routes beside this
 // one refuse.
 func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string, checkedAt *time.Time) {
-	if !a.has(e.Provider) {
+	if !a.creds.Has(e.Provider) {
 		return modelAvailabilityUnconfigured, "", nil
 	}
 	row, ok := a.rows[availabilityRowKey(e.Provider, e.Key)]
@@ -107,9 +80,9 @@ func (a availabilityIndex) forEntry(e modelcatalog.Entry) (state, detail string,
 //
 // One resolution for both modes, off the same two reads: the settings row for
 // what the org brings and what it has bound, and model_availability for what a
-// probe has established. Only the credential SOURCE is mode-sensitive — a multi
-// org always brings its own — and that is settled by EffectiveLLMAuthMethod
-// here rather than by a mode check anything downstream repeats.
+// probe has established. Only the credential source is mode-sensitive — a multi
+// org always brings its own — and modelaccess.For settles that, so the mode is
+// read once here rather than by anything downstream.
 //
 // The settings read runs on the app pool as the caller. org_settings SELECT is
 // member-level, the same gate the catalog read itself carries, so a plain
@@ -124,8 +97,7 @@ func (h *modelsHandler) availability(w http.ResponseWriter, r *http.Request, org
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
-		index.hostCredentials = domain.EffectiveLLMAuthMethod(set.LLMAuthMethod, multi) == domain.LLMAuthSystem
-		index.connected = modelaccess.OrgProviders(set)
+		index.creds = modelaccess.For(set, multi)
 		stored, err := tx.ModelAvailability.List(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("read model availability: %w", err)
@@ -447,7 +419,7 @@ func offeredModel(w http.ResponseWriter, rawKey string) (modelcatalog.Entry, boo
 // up front is also what makes a sweep of an unconnected provider write no rows
 // at all, rather than a few before giving up.
 func requireProviderConnected(w http.ResponseWriter, avail availabilityIndex, provider string) bool {
-	if avail.has(provider) {
+	if avail.creds.Has(provider) {
 		return true
 	}
 	writeNotConfigured(w, fmt.Sprintf(
