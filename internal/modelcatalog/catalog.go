@@ -127,17 +127,44 @@ func Entries() []Entry {
 // it.
 func JoinError() error { return joinErr }
 
-// DefaultEnabled is the enable-set an org that has never expressed a preference
-// gets: every entry in the catalog. Stored enable-sets read this as their
-// absent-value semantics, so "the org chose nothing" and "the org chose
-// everything" stay distinguishable in storage while resolving the same here.
-func DefaultEnabled() []string {
+// Keys returns the offered keys in display order — the accepted set for any
+// stored model value. A validator wants this rather than Entries: what makes a
+// value acceptable is that the catalog names it, and nothing about its price or
+// window enters that.
+func Keys() []string {
 	keys := make([]string, 0, len(entries))
 	for _, e := range entries {
 		keys = append(keys, e.Key)
 	}
 	return keys
 }
+
+// Offers reports whether key is one this build names. The membership test every
+// surface that validates a stored model value runs, so "offered" has one
+// definition rather than one per handler. Named for what it asks rather than
+// Has, which on this package already belongs to EnableSet and answers the
+// narrower per-org question.
+//
+// It answers for the BUILD, not for a tenant — no enable-set is consulted here.
+//
+// TODO(TFAC-703): make the accepted set the org's (and the team's) enable-set
+// rather than the whole catalog, so a stored model can only ever name one the
+// org turned on. Until then a pin is bounded by the catalog alone, and the
+// org max-tier cap — which this replaces — reaches only the team default.
+func Offers(key string) bool {
+	for _, e := range entries {
+		if e.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultEnabled is the enable-set an org that has never expressed a preference
+// gets: every entry in the catalog. Stored enable-sets read this as their
+// absent-value semantics, so "the org chose nothing" and "the org chose
+// everything" stay distinguishable in storage while resolving the same here.
+func DefaultEnabled() []string { return Keys() }
 
 // EnableSet answers whether one org has a given model enabled.
 type EnableSet struct {

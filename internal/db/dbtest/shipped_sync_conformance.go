@@ -84,7 +84,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsA, bpsA); err != nil {
 			t.Fatalf("seed sync: %v", err)
 		}
-		promptsB := []domain.Prompt{syncPrompt("ci", "CI Fix v2", "new body", "haiku", "Read")}
+		promptsB := []domain.Prompt{syncPrompt("ci", "CI Fix v2", "new body", domain.ModelHaiku, "Read")}
 		bpsB := []domain.SeedBlueprint{syncBlueprint("ci", "CI Fix v2", "ci")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, promptsB, bpsB); err != nil {
 			t.Fatalf("sync: %v", err)
@@ -93,7 +93,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		if p == nil {
 			t.Fatal("prompt ci missing after sync")
 		}
-		if p.Body != "new body" || p.Name != "CI Fix v2" || p.Model != "haiku" || p.AllowedTools != "Read" {
+		if p.Body != "new body" || p.Name != "CI Fix v2" || p.Model != domain.ModelHaiku || p.AllowedTools != "Read" {
 			t.Errorf("stale prompt not restored: %+v", p)
 		}
 		if b := blueprintBySlug(t, stores, orgID, teamID, "ci"); b == nil || b.Name != "CI Fix v2" {
@@ -165,7 +165,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 
 	t.Run("EqualContent_ZeroWrites", func(t *testing.T) {
 		stores, orgID, teamID, _ := factory(t)
-		prompts := []domain.Prompt{syncPrompt("eq", "Eq", "same", "opus", "Read")}
+		prompts := []domain.Prompt{syncPrompt("eq", "Eq", "same", domain.ModelOpus, "Read")}
 		bps := []domain.SeedBlueprint{syncBlueprint("eq", "Eq", "eq")}
 		if err := stores.ShippedDefaults.SyncShippedIntoTeam(ctx, orgID, teamID, prompts, bps); err != nil {
 			t.Fatalf("seed sync: %v", err)
@@ -219,7 +219,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 		}
 		promptsB := []domain.Prompt{
 			syncPrompt("pa", "PA", "pa1", "", ""),
-			syncPrompt("pnew", "PNew", "pnew body", "haiku", "Write"),
+			syncPrompt("pnew", "PNew", "pnew body", domain.ModelHaiku, "Write"),
 		}
 		bpsB := []domain.SeedBlueprint{
 			syncBlueprint("ua", "UA", "pa"),
@@ -232,7 +232,7 @@ func RunShippedSyncConformance(t *testing.T, factory ShippedSyncFactory) {
 			t.Fatal("new shipped blueprint not inserted")
 		}
 		np := promptBySlug(t, stores, orgID, teamID, "pnew")
-		if np == nil || np.Body != "pnew body" || np.Model != "haiku" || np.AllowedTools != "Write" {
+		if np == nil || np.Body != "pnew body" || np.Model != domain.ModelHaiku || np.AllowedTools != "Write" {
 			t.Errorf("new shipped prompt not inserted correctly: %+v", np)
 		}
 		if slugs := stepSlugsOf(t, stores, orgID, teamID, "unew"); len(slugs) != 1 || slugs[0] != "pnew" {

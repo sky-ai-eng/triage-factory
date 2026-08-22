@@ -129,7 +129,7 @@ func (a *App) buildAI() {
 	// poller isn't running. triggerScorer relays over tf_ctl instead when
 	// this pod isn't the holder (TFAC-583).
 	a.srv.SetScorerTrigger(a.triggerScorer)
-	aiLog.Info("scorer manager ready (per-org runners)", "model", "haiku")
+	aiLog.Info("scorer manager ready (per-org runners)", "model", ai.SystemJobModel)
 
 	// Repo-profiling manager: per-org Runners profiling configured repos off
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
@@ -157,7 +157,7 @@ func (a *App) buildAI() {
 	// above — the re-profile button may be clicked against a standby
 	// control pod.
 	a.srv.SetProfilerTrigger(a.triggerProfiler)
-	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", "haiku")
+	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", ai.SystemJobModel)
 
 	// Project classifier: per-org Runners, classifying newly-
 	// discovered entities against existing projects via per-project Haiku
@@ -166,7 +166,7 @@ func (a *App) buildAI() {
 	// per-org isolation so a large org's backlog can't head-of-line-block
 	// another tenant's classification.
 	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), llmRecorder, sysLimiter)
-	classifyLog.Info("project classifier manager ready (per-org runners)", "model", "haiku")
+	classifyLog.Info("project classifier manager ready (per-org runners)", "model", ai.SystemJobModel)
 
 	// Artifact reconciler: per-org Runners mirroring artifacts against live
 	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling

@@ -68,18 +68,24 @@ var jiraFormatting string
 // Prompts are team-scoped. Each entry carries a SystemSlug (the stable shipped
 // identifier) rather than a literal id — the seeder mints a random UUID per
 // team copy and dedupes on (org_id, team_id, system_slug).
+//
+// No seed names a model. A seed goes to every org whatever its providers, so a
+// concrete id here would be a claim about a deployment TF cannot see, and the
+// tier words that used to stand in for one no longer exist. Every seeded prompt
+// therefore ships Model "" — inherit the team default — which the team owns and
+// can override per prompt in the editor. The accepted cost is that a
+// deliberately cheap step (the PR-review aggregator) runs at the team default
+// until someone pins it.
 func Prompts() []domain.Prompt {
 	return []domain.Prompt{
 		// PR review is a three-step blueprint (system-pr-review, see
 		// Blueprints): a security pass and a correctness pass each write
 		// findings to _tfac, then a cheap aggregator posts and submits the
-		// review. The two reviewer steps inherit the team default model; the
-		// aggregator is mechanical assembly, so it runs on haiku (a downgrade
-		// — stepModelOrInherit never lets a per-step model escalate past the
-		// team's tier).
+		// review. Every step inherits the team default, including the
+		// aggregator — see the no-seed-names-a-model note above.
 		{SystemSlug: "system-pr-review-security", Name: "PR Review: Security", Body: prReviewSecurity, Source: "system"},
 		{SystemSlug: "system-pr-review-correctness", Name: "PR Review: Correctness", Body: prReviewCorrectness, Source: "system"},
-		{SystemSlug: "system-pr-review-aggregate", Name: "PR Review: Assemble & Submit", Body: prReviewAggregate, Source: "system", Model: "haiku"},
+		{SystemSlug: "system-pr-review-aggregate", Name: "PR Review: Assemble & Submit", Body: prReviewAggregate, Source: "system"},
 
 		// Merge conflict resolution prompt — auto-fired on merge
 		// conflicts on the user's own PRs via the matching trigger.
