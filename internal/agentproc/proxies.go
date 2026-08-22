@@ -795,10 +795,13 @@ type sandboxProxyConfig struct {
 }
 
 // proxyConfigFromCreds maps a resolveCredentials output to the
-// llmproxy.Config + provider kind. The mapping mirrors the resolver's
-// precedence order: Anthropic key wins over Bedrock; Bedrock bearer
-// wins over the AWS triple; the triple maps to the Phase 2 SigV4
-// re-signing provider.
+// llmproxy.Config + provider kind.
+//
+// The map carries exactly one provider's material — resolution selects a
+// provider from the run's model before rendering it — so the order below is
+// which key it looks for first, not a choice between two live credentials.
+// Within Bedrock it is a real order: the bearer wins over the AWS triple, and
+// the triple maps to the SigV4 re-signing provider.
 func proxyConfigFromCreds(creds map[string]string) (sandboxProxyConfig, error) {
 	if apiKey := creds["ANTHROPIC_API_KEY"]; apiKey != "" {
 		// Anthropic direct (or org-gateway) path. The org may have

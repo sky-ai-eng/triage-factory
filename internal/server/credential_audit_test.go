@@ -500,8 +500,8 @@ func TestAnthropicDelete_AuditsRemoval(t *testing.T) {
 	rows := credAuditRows(t, s)
 	findCredAudit(t, rows, domain.AccessActionCredentialSet, domain.CredentialKindAnthropicKey)
 	findCredAudit(t, rows, domain.AccessActionCredentialRemoved, domain.CredentialKindAnthropicKey)
-	// The org never had Bedrock configured, so the exclusivity sweep on either
-	// call must not log a Bedrock revocation.
+	// Neither call touches Bedrock — binding or removing one provider says
+	// nothing about the other — so no Bedrock revocation may be logged.
 	for _, r := range rows {
 		if r.Kind == domain.CredentialKindBedrock {
 			t.Errorf("unexpected Bedrock row %+v — Bedrock was never configured", r)

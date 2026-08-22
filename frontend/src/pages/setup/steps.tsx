@@ -1184,9 +1184,20 @@ export function bedrockFormError(s: WizardState): string | null {
 // host error line). Mandatory while visible: a run can't execute without a
 // credential, so isComplete requires a validated+stored credential for the
 // SELECTED provider — which blocks Finish in multi and local-BYOK until one is
-// set. The providers are mutually exclusive server-side, so a successful
-// connect flips the other provider's connected flag off. Mirrors the
-// org-jira-access persist shape.
+// set. The picker chooses which credential to bind, not which one the org may
+// hold: a connect leaves the other provider's stored material alone, so the
+// summary names every provider that is connected. Mirrors the org-jira-access
+// persist shape.
+// connectedProviderLabels names every LLM provider the org currently holds a
+// credential for. Both can be bound at once — binding one does not disturb the
+// other — so a summary that named only the last one bound would be wrong.
+function connectedProviderLabels(s: WizardState): string[] {
+  return [
+    s.anthropicConnected ? 'Anthropic' : '',
+    s.bedrockConnected ? 'Amazon Bedrock' : '',
+  ].filter(Boolean)
+}
+
 const orgClaudeKeyStep: WizardStep = {
   id: 'org-claude-key',
   section: 'org',
@@ -1211,11 +1222,11 @@ const orgClaudeKeyStep: WizardStep = {
       // concurrency token — pick up the fresh one so a revisited org step's
       // save doesn't conflict with this write.
       const version = await freshOrgVersion(orgId, state.org.version)
+      // An Anthropic key the org already holds is untouched by this bind: the
+      // two providers coexist, and a run resolves whichever serves its model.
       patch({
         bedrockConnected: true,
         bedrockStoredMethod: state.org.bedrock_auth_method,
-        // The backend cleared any Anthropic key in the same call.
-        anthropicConnected: false,
         org: {
           ...state.org,
           bedrock_bearer_token: '',
@@ -1236,18 +1247,13 @@ const orgClaudeKeyStep: WizardStep = {
     const version = await freshOrgVersion(orgId, state.org.version)
     patch({
       anthropicConnected: true,
-      // The backend cleared any Bedrock set in the same call.
-      bedrockConnected: false,
-      bedrockStoredMethod: null,
       org: { ...state.org, anthropic_api_key: '', version },
     })
   },
   collapsedSummary: (s) =>
-    s.bedrockConnected
-      ? 'Connected · Amazon Bedrock'
-      : s.anthropicConnected
-        ? 'Connected · Anthropic'
-        : 'Not connected',
+    connectedProviderLabels(s).length
+      ? `Connected · ${connectedProviderLabels(s).join(' + ')}`
+      : 'Not connected',
   render: (ctx) => <OrgClaudeKeyStep {...ctx} />,
 }
 

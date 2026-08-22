@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -349,5 +350,94 @@ func TestProbeRole_NilMinter(t *testing.T) {
 func TestSystemEnvResolver_NilResolver(t *testing.T) {
 	if SystemEnvResolver(nil, "tf-x") != nil {
 		t.Error("SystemEnvResolver(nil) must return nil")
+	}
+}
+
+// modelOn returns an offered model served by provider — read from the catalog
+// rather than written down, so this exercises real selection.
+func modelOn(t *testing.T, provider string) string {
+	t.Helper()
+	for _, e := range modelcatalog.Entries() {
+		if e.Provider == provider {
+			return e.Key
+		}
+	}
+	t.Fatalf("catalog offers no model on %s", provider)
+	return ""
+}
+
+// TestBothProviders_OneOrg is the concurrent-credentials case end to end at this
+// seam: an org holding an Anthropic key AND a Bedrock role runs one conversation
+// on each. The Anthropic one passes the stored key through untouched; the
+// Bedrock one mints STS session credentials. Neither borrows the other's
+// material, and the org is never asked which provider it prefers.
+func TestBothProviders_OneOrg(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+	now := time.Now()
+	sec := fakeSecrets{
+		integrations.KeyAnthropicAPIKey: "sk-ant-live",
+		integrations.KeyAWSRoleARN:      "arn:aws:iam::123456789012:role/tf-bedrock",
+		integrations.KeyAWSExternalID:   "ext-abc",
+		integrations.KeyAWSRegion:       "us-east-1",
+	}
+	m := &fakeMinter{creds: mintedAt(now, time.Hour)}
+	r := NewResolver(sec, m, time.Hour, NetworkBinding{})
+	r.now = func() time.Time { return now }
+
+	anthropic, err := r.ResolveForBundle(ctx, "org-1", "conv-anthropic", modelOn(t, modelcatalog.ProviderAnthropic))
+	if err != nil {
+		t.Fatalf("anthropic conversation: %v", err)
+	}
+	if anthropic.Env["ANTHROPIC_API_KEY"] != "sk-ant-live" {
+		t.Errorf("anthropic env = %v, want the org's stored key", anthropic.Env)
+	}
+	if _, ok := anthropic.Env["AWS_SESSION_TOKEN"]; ok {
+		t.Errorf("anthropic env carries minted AWS material: %v", anthropic.Env)
+	}
+	if m.calls != 0 {
+		t.Errorf("minted %d times for an Anthropic model, want 0", m.calls)
+	}
+
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
+	bedrock, err := r.ResolveForBundle(ctx, "org-1", "conv-bedrock", bedrockModel)
+	if err != nil {
+		t.Fatalf("bedrock conversation: %v", err)
+	}
+	if bedrock.Env["AWS_SESSION_TOKEN"] != "session-tok" || bedrock.Env["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+		t.Errorf("bedrock env = %v, want minted session credentials", bedrock.Env)
+	}
+	if bedrock.Env["ANTHROPIC_MODEL"] != bedrockModel {
+		t.Errorf("ANTHROPIC_MODEL = %q, want the conversation's own model %q", bedrock.Env["ANTHROPIC_MODEL"], bedrockModel)
+	}
+	if _, ok := bedrock.Env["ANTHROPIC_API_KEY"]; ok {
+		t.Errorf("bedrock env carries the Anthropic key: %v", bedrock.Env)
+	}
+	if m.calls != 1 {
+		t.Errorf("minted %d times for a Bedrock model, want 1", m.calls)
+	}
+	if bedrock.Expiry.IsZero() {
+		t.Error("minted material carries no expiry")
+	}
+}
+
+// A role-mode org whose run names an Anthropic model it has not connected is
+// refused rather than handed minted Bedrock credentials its provider cannot use.
+func TestRoleModeOrg_AnthropicModelWithoutAKey(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	ctx := context.Background()
+	sec := fakeSecrets{
+		integrations.KeyAWSRoleARN:    "arn:aws:iam::1:role/r",
+		integrations.KeyAWSExternalID: "ext",
+	}
+	m := &fakeMinter{creds: mintedAt(time.Now(), time.Hour)}
+	r := NewResolver(sec, m, time.Hour, NetworkBinding{})
+
+	_, err := r.ResolveForBundle(ctx, "org-1", "conv-1", modelOn(t, modelcatalog.ProviderAnthropic))
+	if !errors.Is(err, agentproc.ErrProviderNotConfigured) {
+		t.Fatalf("err = %v, want ErrProviderNotConfigured", err)
+	}
+	if m.calls != 0 {
+		t.Errorf("minted %d times for a model Bedrock does not serve, want 0", m.calls)
 	}
 }

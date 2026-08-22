@@ -1322,8 +1322,8 @@ func (s *Server) routes() {
 	// The org's LLM provider credential — one resource per credential SHAPE, so
 	// a route's required fields are fixed and a blank secret never selects a
 	// second behaviour. Rotation is the PUT with a new value; removal is the
-	// DELETE. Binding one provider clears the other's stored material (the
-	// resolver can only use one) and says so in the response. See
+	// DELETE. An org may hold both providers at once: a bind replaces only
+	// material of its own provider, and says so in the response. See
 	// llm_credentials.go.
 	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
