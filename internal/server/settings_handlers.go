@@ -577,6 +577,11 @@ type orgSettingsResponse struct {
 	// a promise Settings can't keep. Local mode only.
 	JiraCredentialEnvProvided bool   `json:"jira_credential_env_provided,omitempty"`
 	MaxLLMModelTier           string `json:"max_llm_model_tier,omitempty"`
+	// BackgroundJobsModel is the model the scorer, project classifier and repo
+	// profiler run on — a catalog key. Always emitted (not omitempty): "" is
+	// the org's "not picked yet", which is the state the settings form has to
+	// render, and an omitted field would read to a client as "unchanged".
+	BackgroundJobsModel string `json:"background_jobs_model"`
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
 	// cap. Always emitted (not omitempty) so the Settings form can render the
 	// numeric input's current value, including an explicit "0 / no cap".
@@ -755,6 +760,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		HasJiraCredential:         hasJiraCred,
 		JiraCredentialEnvProvided: jiraCredEnv,
 		MaxLLMModelTier:           orgSet.MaxLLMModelTier,
+		BackgroundJobsModel:       orgSet.BackgroundJobsModel,
 		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
 		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
 		HasAnthropicAPIKey:        orgSet.AnthropicAPIKeyRef != "",
@@ -790,6 +796,7 @@ type orgSettingsPatch struct {
 	JiraBaseURL         json.RawMessage `json:"jira_base_url"`
 	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
 	MaxLLMModelTier     json.RawMessage `json:"max_llm_model_tier"`
+	BackgroundJobsModel json.RawMessage `json:"background_jobs_model"`
 	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
 	MaxConcurrentRuns   json.RawMessage `json:"max_concurrent_runs"`
 	// Version is the token the caller read this row at. Required, and a plain
@@ -844,9 +851,25 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		}
 		prevOrgSet = cur
 		apply(&cur)
+		// A background-jobs model whose provider this org has not connected is
+		// a model its next cycle would refuse, so it is not worth storing —
+		// checked here, inside the transaction, against the row the write is
+		// landing on rather than the one the client last read. Only on a
+		// change: a save that re-sends a model stored before a credential was
+		// disconnected must not be blocked by something this caller did not do.
+		// No team restriction is consulted, and there is no team to consult one
+		// for — these jobs are the org's own work.
+		if cur.BackgroundJobsModel != "" && cur.BackgroundJobsModel != prevOrgSet.BackgroundJobsModel {
+			if e := modelaccess.Check(cur.BackgroundJobsModel, cur, nil); e != nil {
+				return e
+			}
+		}
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
 	})
+	if writeModelAccessError(w, err, "background_jobs_model") {
+		return
+	}
 	if errors.Is(err, db.ErrOrgSettingsVersion) {
 		// No server-side merge: the two writers disagree about fields neither of
 		// them named, so the only honest resolution is for the loser to see the
@@ -907,7 +930,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	if !httpx.PatchNamed(
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
 		req.JiraBaseURL, req.JiraPollInterval, req.MaxLLMModelTier,
-		req.MaxDailyCostUSD, req.MaxConcurrentRuns,
+		req.BackgroundJobsModel, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
 	) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
@@ -1042,6 +1065,30 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			shape.Invalid("max_llm_model_tier", "max_llm_model_tier must be haiku, sonnet, or opus, or null for no cap")
 		case st == httpx.PatchSet:
 			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = v })
+		}
+	}
+	// background_jobs_model must name a model this deployment offers. The picker
+	// draws from the same catalog and the jobs dispatch the stored value
+	// verbatim, so there is no room for a spelling nothing can invoke. The R5
+	// delegation gates (tool support, a 64k window) deliberately do NOT narrow
+	// it — these jobs are toolless and short-context, so every catalog entry is
+	// a legitimate choice.
+	//
+	// Whether the org has connected the provider that serves it is checked in
+	// the transaction below, against the row this write is landing on.
+	//
+	// Null clears it, and clearing is a real intent: it turns the background
+	// jobs off, which is the only way to stop them short of unbinding the
+	// credential every other feature shares. The jobs then skip with a warning
+	// naming this setting — never a model of TF's choosing.
+	if v, st := httpx.PatchString(&shape, req.BackgroundJobsModel, "background_jobs_model"); st != httpx.PatchAbsent {
+		switch {
+		case st == httpx.PatchClear:
+			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
+		case !modelcatalog.Offers(strings.TrimSpace(v)):
+			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(modelcatalog.Keys(), ", "))
+		default:
+			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
 		}
 	}
 	// "No cap" is null. An explicit 0 is refused rather than quietly read as

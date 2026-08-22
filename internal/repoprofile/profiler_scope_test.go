@@ -60,7 +60,7 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 		gotOwner, gotRepo = owner, repo
 		return []string{"user-tracking"}, nil
 	})
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return []repoProfileResult{{Repo: "own/withdocs", Profile: "a profile"}}, nil
 	}
 
@@ -104,7 +104,7 @@ func TestRunOrg_LocalShape_OrgScopedBroadcastUnchanged(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return []repoProfileResult{{Repo: "own/withdocs", Profile: "a profile"}}, nil
 	}
 
@@ -142,7 +142,7 @@ func TestRunOrg_BatchFailureToast_ScopedPerUser(t *testing.T) {
 		}
 		return []string{"user-x", "user-y"}, nil
 	})
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
 	}
 
@@ -185,7 +185,7 @@ func TestRunOrg_BatchFailureToast_LocalOrgWide(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/alpha", "own/beta"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
 	}
 

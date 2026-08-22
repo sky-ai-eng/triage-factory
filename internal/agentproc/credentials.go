@@ -219,13 +219,12 @@ var credentialEnvKeys = []string{
 // model's own provider is how a Bedrock-only run ended up authenticating with an
 // Anthropic key.
 //
-// A model this build does not offer — the empty string, a Claude Code CLI alias
-// like "haiku" that the background jobs pass, a stored id from an older catalog
-// — names no provider, so there is nothing for it to decide. Those resolve the
-// org's single configured provider, and fall back to unnamedModelPrecedence when
-// several are configured. That is not the model-blind global winner this
-// replaced: it applies only where the caller expressed no model at all, and a
-// run always carries one.
+// A model this build does not offer — the empty string, a stored id from an
+// older catalog — names no provider, so there is nothing for it to decide. Those
+// resolve the org's single configured provider, and fall back to
+// unnamedModelPrecedence when several are configured. That is not the
+// model-blind global winner this replaced: it applies only where the caller
+// expressed no model at all, and a run always carries one.
 //
 // Local-mode behavior:
 //
@@ -270,9 +269,10 @@ var ErrProviderNotConfigured = errors.New("agentproc: no credential for this mod
 
 // unnamedModelPrecedence orders the providers consulted for a caller that named
 // no catalog model and an org that configured more than one. Anthropic first:
-// it is the direct path, and the background jobs that pass a CLI alias are
-// pinned to a Claude model whose Anthropic spelling is the one they were sized
-// against. A run never reaches this — it carries a catalog key.
+// it is the direct path, and the one this deployment's own tooling was built
+// against. Nothing TF dispatches reaches it — a run and a system job both carry
+// a catalog key — so it covers a stored id from an older catalog and nothing
+// else.
 var unnamedModelPrecedence = []string{modelcatalog.ProviderAnthropic, modelcatalog.ProviderBedrock}
 
 // ResolveCredentialsForBundle is resolveCredentials, exported for the brain-side

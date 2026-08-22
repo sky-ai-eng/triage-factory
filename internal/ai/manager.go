@@ -31,6 +31,7 @@ type Manager struct {
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	recorder   *systemllm.Recorder     // captures per-batch LLM cost + tokens into system_llm_runs (TFAC-451)
 	limiter    *syslimit.Limiter       // shared system-job sandbox cap, injected into every per-org Runner.
+	models     systemllm.ModelFunc     // resolves each org's background-jobs model, injected into every per-org Runner.
 	callbacks  RunnerCallbacks
 
 	mu      sync.Mutex
@@ -38,7 +39,7 @@ type Manager struct {
 	stopped bool
 }
 
-func NewManager(scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, callbacks RunnerCallbacks) *Manager {
+func NewManager(scores db.ScoreStore, entities db.EntityStore, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter, models systemllm.ModelFunc, callbacks RunnerCallbacks) *Manager {
 	return &Manager{
 		scores:     scores,
 		entities:   entities,
@@ -46,6 +47,7 @@ func NewManager(scores db.ScoreStore, entities db.EntityStore, secrets agentproc
 		llmResolve: llmResolve,
 		recorder:   recorder,
 		limiter:    limiter,
+		models:     models,
 		callbacks:  callbacks,
 		runners:    make(map[string]*Runner),
 	}
@@ -72,7 +74,7 @@ func (m *Manager) Trigger(orgID string) {
 	}
 	r, ok := m.runners[orgID]
 	if !ok {
-		r = NewRunner(m.scores, m.entities, orgID, m.secrets, m.llmResolve, m.recorder, m.limiter, m.callbacks)
+		r = NewRunner(m.scores, m.entities, orgID, m.secrets, m.llmResolve, m.recorder, m.limiter, m.models, m.callbacks)
 		r.Start()
 		m.runners[orgID] = r
 	}
