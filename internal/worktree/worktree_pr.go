@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // CreateForPR sets up a worktree on the PR's head branch.
@@ -78,7 +80,7 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 	}
 	cfg := resolveCloneOptions(opts)
 	wtDir := filepath.Join(runRoot, owner, repo, PRRefSlug(prNumber))
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(owner, repo)); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
 	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())

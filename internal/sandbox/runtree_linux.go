@@ -86,14 +86,22 @@ var runTreeGroupGID = WorktreeGID
 func SetRunTreeGroupGID(gid int) { runTreeGroupGID = gid }
 
 // runTreeDirMode is the mode the run-tree directory scaffold — the run root
-// and the owner/repo intermediates a mid-run `workspace add` mints — is set
-// to at the ownership hand-off: rwx for the owning agent (owner) AND the
-// orchestrator (group runTreeGroupGID), and nothing for anyone else. The
-// group-write bit is exactly what lets the orchestrator create checkouts
-// inside a run root it has handed to the agent; the 0700 creation mode would
-// deny it. Only the scaffold directories are set to this — a checkout's own
-// tree keeps whatever modes git wrote (executable bits and so on); being
-// reachable THROUGH the scaffold is all the orchestrator needs there.
+// and the owner/repo intermediates a mid-run `workspace add` mints — carries:
+// rwx for the owning agent (owner) AND the orchestrator (group
+// runTreeGroupGID), and nothing for anyone else. The group-write bit is
+// exactly what lets the orchestrator create checkouts inside a run root it has
+// handed to the agent.
+//
+// The scaffold is MINTED at this mode (mkdirRunTreeScaffold) and re-asserted
+// at the ownership hand-off. Both, not either: the hand-off's recursive form
+// preserves the modes it finds, so a scaffold directory that reached it at an
+// ordinary mkdir's 0755 would be frozen orchestrator-unwritable, and the
+// hand-off in turn is what moves a freshly minted level to the sandbox
+// identity so the agent can traverse its own checkout.
+//
+// Only the scaffold directories are set to this — a checkout's own tree keeps
+// whatever modes git wrote (executable bits and so on); being reachable
+// THROUGH the scaffold is all the orchestrator needs there.
 const runTreeDirMode = 0o770
 
 // chmodRunTreeDir sets a pinned run-tree directory to runTreeDirMode, using
@@ -107,6 +115,82 @@ func chmodRunTreeDir(fd int, isPathFd bool) error {
 		return unix.Fchmod(fd, uint32(runTreeDirMode))
 	}
 	return unix.Fchmodat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd), uint32(runTreeDirMode), 0)
+}
+
+// mkdirRunTreeScaffold walks rel a component at a time from a directory fd
+// pinned on root, creating each level at runTreeDirMode. Every step is
+// fd-relative (Mkdirat/Openat off the level above, O_NOFOLLOW refusing a
+// symlink entry outright), so no component is ever re-resolved as a path
+// string that a swap racing the walk could redirect.
+//
+// This is an ORDINARY, capability-less operation — it creates directories the
+// calling process then owns, and asserts a mode on those. It needs no broker
+// hop precisely because it never touches an inode it did not just mint; see
+// ensureScaffoldMode for what happens when it meets one that it did.
+func mkdirRunTreeScaffold(root, rel string) error {
+	clean := filepath.Clean(rel)
+	if clean == "." || clean == ".." || filepath.IsAbs(clean) ||
+		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("sandbox: mkdir run tree scaffold: subpath %q escapes root %q", rel, root)
+	}
+
+	dirFd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", root, err)
+	}
+	ownDirFd := true
+	defer func() {
+		if ownDirFd {
+			closeFd(dirFd)
+		}
+	}()
+
+	display := root
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		display = filepath.Join(display, seg)
+		if err := unix.Mkdirat(dirFd, seg, uint32(runTreeDirMode)); err != nil && !errors.Is(err, unix.EEXIST) {
+			return fmt.Errorf("mkdirat %s: %w", display, err)
+		}
+		fd, err := openat2AnchoredChildDir(dirFd, seg)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", display, err)
+		}
+		if err := ensureScaffoldMode(fd); err != nil {
+			closeFd(fd)
+			return fmt.Errorf("fchmod %s: %w", display, err)
+		}
+		if ownDirFd {
+			closeFd(dirFd)
+		}
+		dirFd, ownDirFd = fd, true
+	}
+	return nil
+}
+
+// ensureScaffoldMode asserts runTreeDirMode on a pinned scaffold directory.
+// Mkdirat's mode argument is masked by the process umask — the usual 022
+// clears exactly the group-write bit the scaffold exists to carry — so the
+// mode has to be set rather than merely requested at creation.
+//
+// A directory this process does not own is left alone. That is the level a
+// previous run already handed to the sandbox identity, which a capability-less
+// orchestrator cannot chmod at all; failing here would turn a tree that is
+// merely already correct into a dead one. If such a level is genuinely
+// unwritable, the Mkdirat one component below is where it surfaces — named
+// for the level that is actually wrong, rather than for this one.
+func ensureScaffoldMode(fd int) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return err
+	}
+	if st.Mode&^uint32(unix.S_IFMT) == uint32(runTreeDirMode) {
+		return nil
+	}
+	err := unix.Fchmod(fd, uint32(runTreeDirMode))
+	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+		return nil
+	}
+	return err
 }
 
 // allowedRunTreeOwner is the ownership precondition on every run-tree

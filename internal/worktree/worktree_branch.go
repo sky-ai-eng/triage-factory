@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // CreateForBranch sets up a worktree on a new feature branch based off
@@ -44,7 +46,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
 	}
 	wtDir := filepath.Join(runRoot, owner, repo)
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, owner); err != nil {
 		return "", fmt.Errorf("mkdir owner subdir: %w", err)
 	}
 	// No CloneAuth here: this is the in-sandbox Jira `workspace add` path
@@ -135,7 +137,7 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ro
 		}
 	}
 	wtDir := filepath.Join(runRoot, owner, repo, CheckoutRefSlug(ref))
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(owner, repo)); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
 	auth := resolveCloneOptions(opts).auth

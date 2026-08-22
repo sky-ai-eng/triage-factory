@@ -292,7 +292,11 @@ func (a *App) wireCloneStatusCallback() {
 		orgSet, oErr := a.stores.Orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
 		if oErr != nil {
 			cloneStatusLog.Warn("load org settings to classify failed; defaulting to kind=other", "owner", owner, "repo", repo, "error", oErr)
-		} else if orgSet.GitHubCloneProtocol == "ssh" {
+		} else if domain.EffectiveCloneProtocol(orgSet.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh" {
+			// Through the resolver, never the stored column: probing an SSH
+			// endpoint to explain a clone that never spoke SSH would name a
+			// cause the operator cannot act on.
+			//
 			// Use the configured GitHub host so GHE installs probe the right
 			// SSH endpoint, not github.com.
 			creds, _ := integrations.Load(context.Background(), a.stores.Secrets, runmode.LocalDefaultOrgID)

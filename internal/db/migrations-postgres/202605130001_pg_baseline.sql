@@ -938,7 +938,19 @@ CREATE TABLE public.org_settings (
     -- poll_interval), keyed (org_id, kind) instead of one column pair per
     -- source — see that table's comment. github_clone_protocol stays: it is a
     -- GitHub-only concept, not a uniform per-source setting.
-    github_clone_protocol text DEFAULT 'ssh'::text NOT NULL,
+    --
+    -- Defaults to https where the SQLite twin defaults to ssh, and the
+    -- divergence is the point rather than drift: Postgres means multi mode,
+    -- where an SSH clone has nothing to authenticate with — a GitHub App
+    -- installation token is an HTTPS bearer credential, and the runtime
+    -- container carries no key, agent or known_hosts. Provisioning names only
+    -- org_id and takes every other column from its DEFAULT, so this literal is
+    -- the value every multi org is actually born with; seeding ssh would put a
+    -- value in the column that the settings PATCH beside it refuses to accept,
+    -- safe to read only through domain.EffectiveCloneProtocol. The CHECK below
+    -- still admits both — the column's vocabulary is the product's, not this
+    -- deployment's.
+    github_clone_protocol text DEFAULT 'https'::text NOT NULL,
     -- org_secrets key refs (not raw secrets) for Anthropic / Bedrock credentials.
     -- NULL means "use deployment default" on hosted SaaS or "not configured
     -- yet" on self-host. The SecretStore API resolves the ref to a live

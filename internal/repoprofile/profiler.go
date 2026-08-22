@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -226,7 +227,11 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	if err != nil {
 		return false, fmt.Errorf("load org settings: %w", err)
 	}
-	preferSSH := orgSet.GitHubCloneProtocol == "ssh"
+	// Through the resolver, never the stored column: the value is the org's
+	// policy, and multi mode cannot honor an SSH one at all — the clone URL this
+	// picks is what a host-side clone runs against, and an App installation
+	// token is an HTTPS bearer credential no SSH remote can carry.
+	preferSSH := domain.EffectiveCloneProtocol(orgSet.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
 
 	// A cycle with no usable background-jobs model has no profile it can write,
 	// so it skips before spending a single GitHub call on doc fetches — and
