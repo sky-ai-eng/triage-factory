@@ -15,6 +15,32 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
+// stubBwrap puts an always-succeeding `bwrap` on PATH and returns its path.
+//
+// The tests below assert what the spawn seam BUILDS — the argv shape, the jail
+// marker, the folded-in grants, the absolutized node — none of which needs a
+// bubblewrap that can really unshare anything. Requiring a working one would
+// make the whole group skip on CI, which is the one machine that runs them on
+// every commit, so the coverage would exist only where it is least needed.
+//
+// It wins Resolve deterministically on both kinds of host: it is the PATH hit,
+// so it is the sole candidate where no bubblewrap is installed (returned
+// unprobed) and the first candidate where one is (its smoke test passes,
+// because it exits 0 for the --version probe and the mount argv alike). That
+// real bubblewrap actually works is asserted where it belongs — the
+// integration test in internal/agentproc/localsandbox, which drives the real
+// binary and skips when there is none.
+func stubBwrap(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bwrap")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh"+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return bin
+}
+
 // TestNewDirectCommand_NilSandboxIsUnchanged is the TF_LOCAL_SANDBOX=off
 // acceptance in test form: with no Spec, the spawn must be the one that
 // shipped before the sandbox existed — same argv, same env, byte for byte.
@@ -63,6 +89,7 @@ func TestNewDirectCommand_SandboxPrefixesBwrapAndMarks(t *testing.T) {
 	}
 	root := t.TempDir()
 	paths.SetForTest(t, root)
+	wantBwrap := stubBwrap(t)
 	runRoot := filepath.Join(root, "run")
 	if err := os.MkdirAll(runRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -79,10 +106,6 @@ func TestNewDirectCommand_SandboxPrefixesBwrapAndMarks(t *testing.T) {
 	// argv[0] is the RESOLVED bubblewrap, not the bare name: the probe and the
 	// spawn route through one resolution so a host with several installed
 	// cannot have one blessed at boot and a different one executed per run.
-	wantBwrap, err := localsandbox.Resolve()
-	if err != nil {
-		t.Skipf("no usable bubblewrap on this host: %v", err)
-	}
 	if cmd.Args[0] != wantBwrap {
 		t.Fatalf("argv[0] = %q, want the resolved %q", cmd.Args[0], wantBwrap)
 	}
@@ -112,6 +135,7 @@ func TestNewDirectCommand_SandboxStripsInheritedMarkerFirst(t *testing.T) {
 	t.Setenv(SandboxMarkerEnvVar, "inherited-junk")
 	root := t.TempDir()
 	paths.SetForTest(t, root)
+	stubBwrap(t)
 	runRoot := filepath.Join(root, "run")
 	if err := os.MkdirAll(runRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -145,6 +169,7 @@ func TestNewDirectCommand_SandboxSynthesizesFallbackIdentity(t *testing.T) {
 	}
 	root := t.TempDir()
 	paths.SetForTest(t, root)
+	stubBwrap(t)
 	runRoot := filepath.Join(root, "run")
 	if err := os.MkdirAll(runRoot, 0o700); err != nil {
 		t.Fatal(err)
@@ -210,6 +235,7 @@ func TestDirectArgv_FoldsInAddDirGrants(t *testing.T) {
 	}
 	root := t.TempDir()
 	paths.SetForTest(t, root)
+	stubBwrap(t)
 	runRoot := filepath.Join(root, "run")
 	grant := filepath.Join(root, "granted")
 	for _, d := range []string{runRoot, grant} {
@@ -240,13 +266,21 @@ func TestDirectArgv_SandboxFailsRatherThanDegrades(t *testing.T) {
 		t.Skipf("node not installed: %v", err)
 	}
 	paths.SetForTest(t, t.TempDir())
+	stubBwrap(t)
 	missing := filepath.Join(t.TempDir(), "never-created")
 
-	if argv, err := directArgv(RunOptions{
+	argv, err := directArgv(RunOptions{
 		Cwd:          missing,
 		LocalSandbox: &localsandbox.Spec{RunRoot: missing},
-	}, []string{"wrapper.mjs"}); err == nil {
-		t.Errorf("directArgv = %v, want an error for a run tree that is not on disk", argv)
+	}, []string{"wrapper.mjs"})
+	if err == nil {
+		t.Fatalf("directArgv = %v, want an error for a run tree that is not on disk", argv)
+	}
+	// Named, because an error for some unrelated reason — no bubblewrap on the
+	// host, say — would satisfy a bare non-nil check while proving nothing
+	// about the missing tree this test is here for.
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("directArgv error = %v, want it to name the absent run tree %q", err, missing)
 	}
 }
 
@@ -272,8 +306,12 @@ func TestDirectArgv_ResolvesNodeAbsolutely(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(relBin, "node"), []byte("#!/bin/sh"+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	stub := stubBwrap(t)
 	t.Chdir(root)
-	t.Setenv("PATH", "relbin")
+	// The relative entry first, so node resolves through it; the stub's own
+	// directory after, so bwrap still resolves without giving node an absolute
+	// path to be found by.
+	t.Setenv("PATH", "relbin"+string(os.PathListSeparator)+filepath.Dir(stub))
 	t.Setenv("GODEBUG", "execerrdot=0")
 
 	argv, err := directArgv(RunOptions{
@@ -318,9 +356,7 @@ func hasBind(args []string, flag, target string) bool {
 // agent that produces nothing and dies at its first completion.
 func TestDirectArgv_BindsResolverPathsBack(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
-	if _, err := localsandbox.Resolve(); err != nil {
-		t.Skipf("no usable bubblewrap here: %v", err)
-	}
+	stubBwrap(t)
 	runRoot := t.TempDir()
 
 	argv, err := directArgv(RunOptions{
