@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -70,6 +71,34 @@ func TestSandbox_IsolationProperties(t *testing.T) {
 		return strings.TrimSpace(string(out)), err
 	}
 
+	// The resolver, read through the real plan rather than a hand-built argv.
+	// On a systemd-resolved host /etc/resolv.conf is a symlink into the /run
+	// this plan masks, so without the bind-backs this read fails and every
+	// hostname lookup in a real run fails with it — silently, because the git
+	// and gh proxies are loopback by IP and only the LLM hop resolves a name.
+	// Where the host keeps a plain /etc/resolv.conf the read succeeds either
+	// way; the assertion costs nothing there and is the only one that fires on
+	// the hosts that break.
+	t.Run("the resolver survives the /run mask", func(t *testing.T) {
+		if _, err := os.ReadFile("/etc/resolv.conf"); err != nil {
+			t.Skipf("no readable /etc/resolv.conf on this host: %v", err)
+		}
+		dnsSpec := spec
+		dnsSpec.ReadOnly = DNSPaths()
+		dnsArgs, err := Args(dnsSpec, host)
+		if err != nil {
+			t.Fatalf("Args: %v", err)
+		}
+		out, err := exec.Command(dnsArgs[0], append(append([]string(nil), dnsArgs[1:]...),
+			sh, "-c", "cat /etc/resolv.conf")...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("resolv.conf unreadable inside the namespace: %v (%s)", err, strings.TrimSpace(string(out)))
+		}
+		if !strings.Contains(string(out), "nameserver") {
+			t.Errorf("resolv.conf read back without a nameserver line: %q", strings.TrimSpace(string(out)))
+		}
+	})
+
 	t.Run("its own tree is readable and writable", func(t *testing.T) {
 		out, err := run("cat mine.txt && echo appended > new.txt && cat new.txt")
 		if err != nil {
@@ -131,6 +160,9 @@ func TestSandbox_IsolationProperties(t *testing.T) {
 
 		withSock := spec
 		withSock.AgentHostSocket = sockPath
+		// The resolver bind-backs too, so this asserts the /run a real run
+		// gets rather than a shape production never builds.
+		withSock.ReadOnly = DNSPaths()
 		sockArgs, err := Args(withSock, host)
 		if err != nil {
 			t.Fatalf("Args: %v", err)
@@ -144,13 +176,29 @@ func TestSandbox_IsolationProperties(t *testing.T) {
 		if !strings.Contains(got, "socket-ok") {
 			t.Errorf("%s is not a socket inside the namespace: %q", AgentHostSocketDest, got)
 		}
-		// /run holds exactly the one file we put there. Everything else the
-		// host keeps in /run is gone with the tmpfs — including /run/user,
-		// which is where the session D-Bus and Secret Service sockets live,
-		// so the OS keychain has no path in from here.
+		// /run holds the socket and, on a systemd host, the resolver state
+		// bound back so DNS works. Everything else the host keeps there is
+		// gone with the tmpfs — above all /run/user, where the session D-Bus
+		// and Secret Service sockets live, so the OS keychain has no path in
+		// from here. That absence is the property the mask exists for; the
+		// resolver is root-owned world-readable state that grants nothing.
 		listing := strings.Fields(strings.TrimPrefix(got, "socket-ok"))
-		if len(listing) != 1 || listing[0] != "tf.sock" {
-			t.Errorf("/run lists %v inside the namespace, want only tf.sock", listing)
+		allowed := map[string]bool{"tf.sock": true}
+		for _, p := range DNSPaths() {
+			if rel, err := filepath.Rel("/run", p); err == nil && !strings.HasPrefix(rel, "..") {
+				allowed[strings.Split(rel, string(filepath.Separator))[0]] = true
+			}
+		}
+		for _, entry := range listing {
+			if !allowed[entry] {
+				t.Errorf("/run lists unexpected %q inside the namespace (all: %v)", entry, listing)
+			}
+		}
+		if !slices.Contains(listing, "tf.sock") {
+			t.Errorf("/run lists %v inside the namespace, want tf.sock among them", listing)
+		}
+		if slices.Contains(listing, "user") {
+			t.Error("/run/user survived the mask; the OS keychain is reachable from inside the namespace")
 		}
 	})
 

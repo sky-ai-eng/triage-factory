@@ -310,3 +310,50 @@ func hasBind(args []string, flag, target string) bool {
 	}
 	return false
 }
+
+// TestDirectArgv_BindsResolverPathsBack pins that the resolver survives the
+// plan the spawn seam actually builds. The pure layer is asserted separately
+// against injected paths; this is the wiring — a run whose plan masks /run
+// without these binds resolves no hostnames, which reaches the operator as an
+// agent that produces nothing and dies at its first completion.
+func TestDirectArgv_BindsResolverPathsBack(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	if _, err := localsandbox.Resolve(); err != nil {
+		t.Skipf("no usable bubblewrap here: %v", err)
+	}
+	runRoot := t.TempDir()
+
+	argv, err := directArgv(RunOptions{
+		Cwd:          runRoot,
+		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+	}, []string{"wrapper.mjs"})
+	if err != nil {
+		t.Fatalf("directArgv: %v", err)
+	}
+
+	dns := localsandbox.DNSPaths()
+	if len(dns) == 0 {
+		t.Fatal("DNSPaths returned nothing on a Linux host; the resolver dir is unconditional")
+	}
+	for _, p := range dns {
+		if indexOfOperand(argv, "--ro-bind-try", p) < 0 {
+			t.Errorf("plan is missing the resolver bind-back %q:\n%v", p, argv)
+		}
+	}
+	// And the mask it has to survive is still there — a plan that stopped
+	// masking /run would pass the loop above for the wrong reason.
+	if indexOfOperand(argv, "--tmpfs", "/run") < 0 {
+		t.Errorf("plan no longer masks /run:\n%v", argv)
+	}
+}
+
+// indexOfOperand returns the index of the flag in argv whose first operand is
+// target, or -1.
+func indexOfOperand(argv []string, flag, target string) int {
+	for i := 0; i+1 < len(argv); i++ {
+		if argv[i] == flag && argv[i+1] == target {
+			return i
+		}
+	}
+	return -1
+}

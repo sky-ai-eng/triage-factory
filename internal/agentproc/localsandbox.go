@@ -57,6 +57,12 @@ func directArgv(opts RunOptions, nodeArgs []string) ([]string, error) {
 	// back and must not accumulate the last spawn's resolved host paths.
 	spec := *opts.LocalSandbox
 	spec.ReadOnly = append(append([]string(nil), spec.ReadOnly...), hostToolPaths(nodePath)...)
+	// The resolver files, which the /run mask would otherwise take with it —
+	// see localsandbox.DNSPaths. They are resolved there rather than here
+	// because the boot probe builds the same bind-backs into its smoke argv,
+	// and a second copy of the resolution is how the plan the probe validates
+	// drifts from the plan a run gets.
+	spec.ReadOnly = append(spec.ReadOnly, localsandbox.DNSPaths()...)
 	// Fold in the run's --add-dir flags here rather than at the call site, so
 	// the directories the agent is GRANTED and the directories the namespace
 	// BINDS are the same list by construction. A caller that adds a grant and

@@ -141,11 +141,15 @@ type Spec struct {
 	AddDirs []string
 
 	// ReadOnly are host paths that must survive the masks, bound back ro at
-	// their real paths. This is the escape valve for the host binaries a run
-	// resolves rather than configures: the node interpreter, this TF binary,
-	// the Agent SDK install. Any of them may sit under $HOME (an nvm install,
-	// a dev build), and the mount plan cannot know that in advance — the
-	// spawn seam computes them from the already-resolved absolute paths.
+	// their real paths. This is the escape valve for what a run resolves
+	// rather than configures, and it carries two kinds of path. The host
+	// binaries — the node interpreter, this TF binary, the Agent SDK install
+	// — any of which may sit under $HOME (an nvm install, a dev build). And
+	// the resolver files (DNSPaths), because /etc/resolv.conf is a symlink
+	// into the masked /run on systemd-resolved hosts and a run that cannot
+	// resolve a hostname reaches its operator as an agent that produces
+	// nothing. The mount plan cannot know either in advance — the spawn seam
+	// computes them from the already-resolved absolute paths.
 	// Paths that were never masked are still emitted; the whole host is
 	// already ro, so re-binding one is a no-op that keeps the plan
 	// independent of where TF_TOOLCHAIN_ROOT happens to point.

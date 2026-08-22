@@ -40,3 +40,8 @@ func Preflight(_ Spec, _ Host) error { return errUnsupported }
 // Probe always errors off Linux, which is what a boot that somehow reached
 // it with the sandbox on should hear.
 func Probe() error { return errUnsupported }
+
+// DNSPaths is empty off Linux. The spawn seam calls it unconditionally while
+// building the read-only set, so it returns a value rather than an error —
+// there is no mask to bind anything back through here.
+func DNSPaths() []string { return nil }

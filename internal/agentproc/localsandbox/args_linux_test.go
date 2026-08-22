@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -514,5 +515,184 @@ func TestProbe_AppArmorDenialCarriesTheResolvedBinary(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNamespaceRefused) {
 		t.Error("the sharpened refusal lost errors.Is(err, ErrNamespaceRefused)")
+	}
+}
+
+// TestArgs_BindsResolverPathsBackThroughTheRunMask is the regression for a
+// silent, total failure: the /run mask left /etc/resolv.conf dangling on
+// systemd-resolved hosts, so every hostname lookup inside the namespace
+// failed. Nothing else noticed — the git and gh proxies are loopback by IP and
+// the agenthost socket is bound at its own path — so runs booted green and
+// died at their first completion with what looked like a hang.
+//
+// The pure layer takes the resolved paths as data, so both host shapes are
+// exercised by injecting what DNSPaths would have returned on them.
+func TestArgs_BindsResolverPathsBackThroughTheRunMask(t *testing.T) {
+	cases := []struct {
+		name     string
+		resolver string
+		// masked says whether the resolver path sits under a tmpfs, which is
+		// what makes the bind load-bearing rather than a no-op.
+		masked bool
+	}{
+		{
+			name:     "systemd-resolved stub under the masked /run",
+			resolver: "/run/systemd/resolve/stub-resolv.conf",
+			masked:   true,
+		},
+		{
+			name:     "plain file on a host that keeps one",
+			resolver: "/etc/resolv.conf",
+			masked:   false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			spec := Spec{
+				RunRoot:  "/tmp/triagefactory-runs/rk1",
+				ReadOnly: []string{c.resolver, "/run/systemd/resolve"},
+			}
+			got, err := Args(spec, testHost())
+			if err != nil {
+				t.Fatalf("Args: %v", err)
+			}
+			bind := indexOfOp(got, "--ro-bind-try", c.resolver)
+			if bind < 0 {
+				t.Fatalf("plan never binds the resolver path %q back:\n%v", c.resolver, got)
+			}
+			// Phase order is the policy: a bind-back emitted before the mask
+			// that shadows it would restore nothing, which is precisely the
+			// bug being regressed.
+			if mask := indexOfOp(got, "--tmpfs", "/run"); mask < 0 {
+				t.Fatal("plan no longer masks /run at all")
+			} else if c.masked && bind < mask {
+				t.Errorf("resolver bind at %d precedes the /run mask at %d, so the mask shadows it", bind, mask)
+			}
+			// The directory too, for nss-resolve's varlink socket: binding the
+			// stub file alone fixes glibc's fallback and leaves the primary
+			// resolution path broken.
+			if indexOfOp(got, "--ro-bind-try", systemdResolveDir) < 0 {
+				t.Errorf("plan never binds %s, so nss-resolve's socket stays masked:\n%v", systemdResolveDir, got)
+			}
+		})
+	}
+}
+
+// TestDNSPaths pins what the resolver resolution hands the plan, against a
+// fixture tree rather than whatever the machine running the suite happens to
+// be configured with.
+func TestDNSPaths(t *testing.T) {
+	// setResolv points the package at a fixture and returns its root.
+	setResolv := func(t *testing.T, link, target string) string {
+		t.Helper()
+		dir := t.TempDir()
+		restoreConf, restoreDir := resolvConfPath, systemdResolveDir
+		t.Cleanup(func() { resolvConfPath, systemdResolveDir = restoreConf, restoreDir })
+		resolvConfPath = filepath.Join(dir, link)
+		systemdResolveDir = filepath.Join(dir, "run", "systemd", "resolve")
+		if target != "" {
+			full := filepath.Join(dir, target)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, []byte("nameserver 127.0.0.53\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+
+	t.Run("follows the symlink to the real file", func(t *testing.T) {
+		dir := setResolv(t, "resolv.conf", "run/systemd/resolve/stub-resolv.conf")
+		if err := os.Symlink(filepath.Join(dir, "run/systemd/resolve/stub-resolv.conf"), resolvConfPath); err != nil {
+			t.Fatal(err)
+		}
+		got := DNSPaths()
+		want := filepath.Join(dir, "run/systemd/resolve/stub-resolv.conf")
+		if !slices.Contains(got, want) {
+			t.Errorf("DNSPaths = %v, want the symlink TARGET %q — binding the link itself restores a dangling path", got, want)
+		}
+		if !slices.Contains(got, systemdResolveDir) {
+			t.Errorf("DNSPaths = %v, want the resolver directory %q for nss-resolve's socket", got, systemdResolveDir)
+		}
+	})
+
+	t.Run("a plain file is returned as itself", func(t *testing.T) {
+		dir := setResolv(t, "resolv.conf", "resolv.conf")
+		got := DNSPaths()
+		if want := filepath.Join(dir, "resolv.conf"); !slices.Contains(got, want) {
+			t.Errorf("DNSPaths = %v, want the plain file %q", got, want)
+		}
+	})
+
+	t.Run("no resolv.conf skips it rather than failing", func(t *testing.T) {
+		setResolv(t, "resolv.conf", "")
+		got := DNSPaths()
+		if slices.Contains(got, resolvConfPath) {
+			t.Errorf("DNSPaths = %v, want no entry for an unresolvable resolv.conf", got)
+		}
+		// The directory is still offered; -try is what handles its absence,
+		// and deciding here would give the probe and the plan two answers.
+		if !slices.Contains(got, systemdResolveDir) {
+			t.Errorf("DNSPaths = %v, want the resolver directory offered unconditionally", got)
+		}
+	})
+}
+
+// TestProbeCommand pins that the probe asserts the resolver is reachable
+// where that assertion is meaningful, and stays a do-nothing exec where it is
+// not. A host with no resolv.conf must not be refused a boot for a breakage
+// the sandbox did not cause.
+func TestProbeCommand(t *testing.T) {
+	dir := t.TempDir()
+	restore := resolvConfPath
+	t.Cleanup(func() { resolvConfPath = restore })
+
+	resolvConfPath = filepath.Join(dir, "absent")
+	if got := probeCommand(); len(got) != 1 || !strings.HasSuffix(got[0], "true") {
+		t.Errorf("probeCommand with no resolv.conf = %v, want the do-nothing program", got)
+	}
+
+	resolvConfPath = filepath.Join(dir, "resolv.conf")
+	if err := os.WriteFile(resolvConfPath, []byte("nameserver 1.1.1.1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got := probeCommand()
+	if len(got) != 3 || got[1] != "-c" || !strings.Contains(got[2], resolvConfPath) {
+		t.Fatalf("probeCommand with a resolv.conf = %v, want a readability test on %q", got, resolvConfPath)
+	}
+}
+
+// TestSmokeTest_ValidatesThePlanNotJustTheNamespace pins the probe gap that
+// let this ship: the smoke argv masked only /tmp and exec'd a program that
+// does nothing, so it proved a namespace could be created and proved nothing
+// about whether the plan it gets created with is habitable.
+func TestSmokeTest_ValidatesThePlanNotJustTheNamespace(t *testing.T) {
+	dir := t.TempDir()
+	recorder := filepath.Join(dir, Binary)
+	argvLog := filepath.Join(dir, "argv")
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = --version ]; then echo bubblewrap 0.0.0; exit 0; fi\n" +
+		"printf '%s\\n' \"$@\" >" + argvLog + "\n" +
+		"exit 0\n"
+	if err := os.WriteFile(recorder, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := smokeTest(recorder); err != nil {
+		t.Fatalf("smokeTest against a recorder that always succeeds: %v", err)
+	}
+	b, err := os.ReadFile(argvLog)
+	if err != nil {
+		t.Fatalf("the smoke run never executed: %v", err)
+	}
+	argv := strings.Split(strings.TrimSpace(string(b)), "\n")
+
+	if indexOfOp(argv, "--tmpfs", "/run") < 0 {
+		t.Errorf("smoke argv never masks /run, so it cannot catch a plan that breaks under that mask:\n%v", argv)
+	}
+	for _, p := range DNSPaths() {
+		if indexOfOp(argv, "--ro-bind-try", p) < 0 {
+			t.Errorf("smoke argv is missing the resolver bind-back %q, so it validates a plan a run never gets:\n%v", p, argv)
+		}
 	}
 }

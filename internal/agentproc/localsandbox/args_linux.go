@@ -194,6 +194,56 @@ func mustExist(path, what string) error {
 	return nil
 }
 
+// resolvConfPath and systemdResolveDir are the two host paths DNS resolution
+// reaches for. Vars so tests can point them at a fixture tree instead of
+// depending on how the machine running the suite happens to be configured.
+var (
+	resolvConfPath    = "/etc/resolv.conf"
+	systemdResolveDir = "/run/systemd/resolve"
+)
+
+// DNSPaths are the resolver files that must survive the /run mask, bound back
+// read-only.
+//
+// They are needed because on systemd-resolved hosts — Ubuntu's default —
+// /etc/resolv.conf is a symlink into /run, so masking /run leaves it dangling
+// and every hostname lookup inside the namespace fails. Nothing else in a run
+// notices: the git and gh proxies are loopback by IP and the agenthost socket
+// is bound at its own path, so the only hop that resolves a name is the LLM
+// API, and a run dies at its first completion having looked like a hang. With
+// no resolv.conf at all glibc falls back to a nameserver on 127.0.0.1 where
+// nothing listens, which is why the failure surfaces as a connection refusal
+// rather than as a resolver error.
+//
+// EvalSymlinks rather than the literal path, because the real file is what has
+// to be bound and where the chain lands is distro policy: systemd-resolved's
+// stub under /run/systemd/resolve, NetworkManager's under /run/NetworkManager,
+// Debian's under /run/resolvconf, or /etc/resolv.conf itself on a host that
+// keeps a plain file — where the bind is a no-op, since the whole host is
+// already bound read-only and /etc is not masked. A resolution error means
+// there is no readable resolv.conf to bind, so the path is skipped; DNS was
+// already broken outside the namespace and the sandbox is not what to report.
+//
+// The directory is included whole rather than just the stub file: nss-resolve
+// consults the varlink socket beside it, so a bind of the file alone fixes
+// glibc's fallback path and leaves the primary one broken.
+//
+// This does NOT reopen what the /run mask exists to close. Its target is
+// /run/user/<uid> — the session D-Bus and Secret Service sockets, which is to
+// say the OS keychain. Resolver state is root-owned and world-readable, and
+// binding it back read-only grants a run nothing it could not read from any
+// other process on the machine.
+func DNSPaths() []string {
+	var out []string
+	if real, err := filepath.EvalSymlinks(resolvConfPath); err == nil {
+		out = append(out, real)
+	}
+	// Unconditional: Args and the probe both bind it with -try, which is the
+	// mechanism for "may not exist here", and a stat would only move the same
+	// decision earlier while adding a way for the two to disagree.
+	return append(out, systemdResolveDir)
+}
+
 // probeTimeout bounds the boot probe. Both probe steps are a fork+exec of a
 // program that does nothing; a host where that takes seconds has a problem
 // the operator needs told about either way.
@@ -302,7 +352,20 @@ func smokeTest(bin string) error {
 	// The same argv SHAPE a real spawn uses — including the "--" terminator —
 	// so a bubblewrap too old to understand one of them is caught here rather
 	// than on the first delegated run.
-	smoke := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--die-with-parent", "--", trueBinary()}
+	//
+	// The /run mask and the DNS bind-backs are here for a sharper reason than
+	// shape: a probe that masks only /tmp and execs a program that does
+	// nothing validates that a namespace can be CREATED, not that the plan it
+	// will be created with is habitable. The resolv.conf breakage this pair
+	// fixes passed such a probe and killed every run at its first completion,
+	// so the probe now builds the part of the plan that broke and, where the
+	// host has a resolv.conf to check, asserts it is readable from inside.
+	smoke := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run"}
+	for _, p := range DNSPaths() {
+		smoke = append(smoke, "--ro-bind-try", p, p)
+	}
+	smoke = append(smoke, "--die-with-parent", "--")
+	smoke = append(smoke, probeCommand()...)
 	if out, err := exec.CommandContext(ctx, bin, smoke...).CombinedOutput(); err != nil {
 		// bwrap's own first line is the most diagnostic thing available
 		// ("setting up uid map: Permission denied" vs "No permissions to
@@ -410,6 +473,26 @@ func userNSDiagnostics() []string {
 		out = append(out, name+"="+strings.TrimSpace(string(b)))
 	}
 	return out
+}
+
+// probeCommand is what the smoke run executes inside the namespace: a read of
+// resolv.conf where the host has one, and the do-nothing program otherwise.
+//
+// Reading it is a real assertion with no network dependency — it fails exactly
+// when the mount plan has left the resolver unreachable, which is the class of
+// bug that reaches an operator as a run that produces nothing. A host with no
+// readable resolv.conf gets the do-nothing program instead, because there the
+// read would fail for a reason the sandbox did not cause and a boot refusal
+// would be a lie.
+func probeCommand() []string {
+	if _, err := os.ReadFile(resolvConfPath); err != nil {
+		return []string{trueBinary()}
+	}
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		sh = "/bin/sh"
+	}
+	return []string{sh, "-c", "test -r " + resolvConfPath}
 }
 
 // trueBinary resolves the do-nothing program the smoke run executes inside
