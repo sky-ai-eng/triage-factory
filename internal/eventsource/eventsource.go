@@ -170,6 +170,19 @@ type Registration struct {
 	// deployment's setup or its licensing, and neither question is being asked
 	// in a mode where the source structurally cannot run.
 	MultiOnly bool
+	// HasHost declares whether this source has a self-host story — an
+	// alternate origin org_event_sources.base_url may target, the way GitHub
+	// Enterprise Server and Jira Data Center do. base_url decides
+	// where a credential is SENT, so a false HasHost is not just a UI hint:
+	// the write path that persists it refuses a value for a kind that
+	// declares none, because there is no legitimate host to redirect a
+	// SaaS-only source's credential to.
+	HasHost bool
+	// Polled declares whether this source has a poll cadence at all —
+	// org_event_sources.poll_interval is meaningful only where this is true.
+	// A push source (webhook-delivered) has none; the column stays null and
+	// nothing reads it.
+	Polled bool
 }
 
 // probeFn is a declaration's resolution step. It takes the pass's resolver
@@ -192,15 +205,26 @@ type declaration struct {
 	// declared from outside core is by construction one this deployment works
 	// without, or core could not ship without it.
 	required bool
+	// hasHost / polled mirror Registration's fields of the same name for
+	// core's own builtins — see HasHost / Polled below for what each gates.
+	hasHost bool
+	polled  bool
 }
 
 // builtins are the sources core ships or has declared. github and jira resolve
 // through this package's own probes; linear and schedule are declared and not
 // built, which is a fact the UI needs to render rather than an omission.
+//
+// linear's hasHost is false: Linear is SaaS-only with no self-host offering,
+// so org_event_sources.base_url has nothing to target for it — same reasoning
+// as Slack, stated here ahead of Linear actually shipping so the day it does,
+// HasHost is a registration decision already made rather than a default
+// nobody chose. schedule is TF's own internal cron trigger: no host, no poll
+// cadence, nothing external to configure.
 var builtins = []declaration{
-	{kind: KindGitHub, probe: githubState, required: true},
-	{kind: KindJira, probe: jiraState},
-	{kind: KindLinear},
+	{kind: KindGitHub, probe: githubState, required: true, hasHost: true, polled: true},
+	{kind: KindJira, probe: jiraState, hasHost: true, polled: true},
+	{kind: KindLinear, polled: true},
 	{kind: KindSchedule},
 }
 
@@ -246,7 +270,7 @@ func declarations() []declaration {
 		if local && reg.MultiOnly {
 			continue
 		}
-		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe)})
+		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe), hasHost: reg.HasHost, polled: reg.Polled})
 	}
 	slices.SortFunc(out, func(a, b declaration) int {
 		if (a.probe == nil) != (b.probe == nil) {
@@ -328,6 +352,33 @@ func Disableable(kind string) bool {
 	decls := declarations()
 	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
 	return i >= 0 && !decls[i].required
+}
+
+// HasHost reports whether kind declares a self-host story — whether
+// org_event_sources.base_url is a value this kind may legitimately carry.
+// False for a kind outside this deployment's vocabulary, the same as
+// Disableable: there is nothing to configure a host for.
+//
+// This is the mechanism the base_url write path consults before persisting a
+// value for any kind — see the settings handler's per-source validation loop.
+// GitHub (Enterprise Server) and Jira (Data Center) both declare one; a
+// SaaS-only source like Slack must not, because base_url decides where a
+// credential is sent and a host field for a source with no alternate host is
+// a redirection surface with no legitimate use.
+func HasHost(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && decls[i].hasHost
+}
+
+// Polled reports whether kind has a poll cadence at all — whether
+// org_event_sources.poll_interval means anything for it. False for
+// a kind outside this deployment's vocabulary, and false for a push source
+// (webhook-delivered): it has no cadence, and the column stays null.
+func Polled(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && decls[i].polled
 }
 
 // resolver carries one pass's shared reads. The github and jira answers are

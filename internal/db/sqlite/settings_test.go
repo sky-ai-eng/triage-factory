@@ -38,6 +38,7 @@ func TestSettingsStores_SQLite(t *testing.T) {
 				JiraStatusRules:  stores.JiraStatusRules,
 				TeamGitHubGroups: stores.TeamGitHubGroups,
 				TeamGitHubRepos:  stores.TeamGitHubRepos,
+				OrgEventSources:  stores.OrgEventSources,
 			}, dbtest.SettingsIDs{
 				OrgID:  runmode.LocalDefaultOrgID,
 				TeamID: runmode.LocalDefaultTeamID,

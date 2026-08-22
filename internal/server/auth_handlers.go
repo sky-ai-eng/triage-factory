@@ -878,7 +878,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	// Pass the session's active org as the org claim too (not just sub) so
 	// the host-scoped GitHub identity lookup below can prefer the row bound
 	// to the active org's GitHub host. A stale/empty active org
-	// is harmless: org_settings RLS filters it out and the lookup falls
+	// is harmless: org_event_sources RLS filters it out and the lookup falls
 	// back to the most-recently-verified identity row.
 	err := tfdb.WithTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
@@ -898,8 +898,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				             FROM user_github_identities i
 				            WHERE i.user_id = u.id
 					            ORDER BY (i.github_base_url = rtrim((
-					                        SELECT os.github_base_url FROM org_settings os
-					                         WHERE os.org_id = tf.current_org_id()
+					                        SELECT es.base_url FROM org_event_sources es
+					                         WHERE es.org_id = tf.current_org_id() AND es.kind = 'github'
 					                      ), '/')) DESC NULLS LAST,
 					                     i.verified_at DESC NULLS LAST
 				            LIMIT 1
@@ -912,8 +912,8 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			             FROM user_jira_identities ji
 			            WHERE ji.user_id = u.id
 			            ORDER BY (ji.jira_base_url = rtrim(trim((
-			                        SELECT os.jira_base_url FROM org_settings os
-			                         WHERE os.org_id = tf.current_org_id()
+			                        SELECT es.base_url FROM org_event_sources es
+			                         WHERE es.org_id = tf.current_org_id() AND es.kind = 'jira'
 			                      )), '/')) DESC NULLS LAST,
 			                     ji.verified_at DESC NULLS LAST
 			            LIMIT 1

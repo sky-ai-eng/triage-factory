@@ -34,14 +34,15 @@ func reviewRouter(database *sql.DB) *Router {
 	)
 }
 
-// setReviewHost stamps org_settings.github_base_url for the default org.
+// setReviewHost stamps the github row's base_url on org_event_sources for the
+// default org.
 func setReviewHost(t *testing.T, database *sql.DB) {
 	t.Helper()
 	if _, err := database.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url) VALUES (?, ?)
-		ON CONFLICT(org_id) DO UPDATE SET github_base_url = excluded.github_base_url
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)
+		ON CONFLICT(org_id, kind) DO UPDATE SET base_url = excluded.base_url
 	`, runmode.LocalDefaultOrgID, reviewTestHost); err != nil {
-		t.Fatalf("set org github_base_url: %v", err)
+		t.Fatalf("set org github base_url: %v", err)
 	}
 }
 

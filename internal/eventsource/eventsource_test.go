@@ -324,6 +324,41 @@ func TestKindOf(t *testing.T) {
 	}
 }
 
+// TestHasHostAndPolled pin the vocabulary GetSettings' base_url / poll_interval
+// write path consults: GitHub and Jira both declare a self-host story and a
+// poll cadence, the vocabulary carries them for a kind that declares neither
+// (schedule), a registered source can declare Polled without HasHost (a
+// pull-based integration with no self-host offering), and a kind outside the
+// vocabulary altogether gets false for both — there is nothing to configure a
+// host or a cadence for.
+func TestHasHostAndPolled(t *testing.T) {
+	t.Cleanup(eventsource.Reset)
+	ok := func(context.Context, db.TxStores, string) (eventsource.State, error) {
+		return eventsource.StateAvailable, nil
+	}
+	eventsource.Register("chat", eventsource.Registration{Probe: ok, Polled: true})
+
+	cases := []struct {
+		kind        string
+		wantHasHost bool
+		wantPolled  bool
+	}{
+		{eventsource.KindGitHub, true, true},
+		{eventsource.KindJira, true, true},
+		{eventsource.KindSchedule, false, false},
+		{"chat", false, true},
+		{"not-a-real-source", false, false},
+	}
+	for _, c := range cases {
+		if got := eventsource.HasHost(c.kind); got != c.wantHasHost {
+			t.Errorf("HasHost(%q) = %v, want %v", c.kind, got, c.wantHasHost)
+		}
+		if got := eventsource.Polled(c.kind); got != c.wantPolled {
+			t.Errorf("Polled(%q) = %v, want %v", c.kind, got, c.wantPolled)
+		}
+	}
+}
+
 // TestRegister_RejectsWiringBugs: every one of these is a mistake that would
 // otherwise show up as a source silently answering for another.
 func TestRegister_RejectsWiringBugs(t *testing.T) {

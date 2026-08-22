@@ -1269,10 +1269,10 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 
 	// Bob can SELECT (org member).
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
-		var poll string
+		var proto string
 		return tx.QueryRow(
-			`SELECT github_poll_interval::text FROM org_settings WHERE org_id = $1`, orgA,
-		).Scan(&poll)
+			`SELECT github_clone_protocol FROM org_settings WHERE org_id = $1`, orgA,
+		).Scan(&proto)
 	})
 	if err != nil {
 		t.Errorf("bob SELECT org_settings: %v", err)
@@ -1281,7 +1281,7 @@ func TestRLS_SettingsAdminOnly(t *testing.T) {
 	// Bob cannot UPDATE — UPDATE policy admin-gated; filters row out.
 	err = h.WithUser(t, bob, orgA, func(tx *sql.Tx) error {
 		res, err := tx.Exec(
-			`UPDATE org_settings SET github_poll_interval = '1 minute' WHERE org_id = $1`, orgA,
+			`UPDATE org_settings SET github_clone_protocol = 'https' WHERE org_id = $1`, orgA,
 		)
 		if err != nil {
 			return err
@@ -2045,7 +2045,7 @@ func TestRLS_TeamAdminNotOrgAdmin(t *testing.T) {
 	}
 	err = h.WithUser(t, carol, orgA, func(tx *sql.Tx) error {
 		res, err := tx.Exec(
-			`UPDATE org_settings SET github_poll_interval = '1 minute' WHERE org_id = $1`, orgA,
+			`UPDATE org_settings SET github_clone_protocol = 'https' WHERE org_id = $1`, orgA,
 		)
 		if err != nil {
 			return err
