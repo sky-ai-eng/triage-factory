@@ -350,7 +350,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// routing below is: its undelivered rows are its ordinary input queue,
 		// not staged resume messages, and flipping them delivered here would
 		// silently drop turns from a cancelled-then-restarted conversation.
-		if s.pendingInput != nil && conv.Runtime != domain.ConversationRuntimeNative {
+		if s.pendingInput != nil && undeliveredRowsFor(conv.Runtime) == inputRoleStagedResume {
 			if _, _, _, cErr := s.pendingInput.Consume(context.WithoutCancel(ctx), orgID, conv.ID); cErr != nil {
 				dispatchLog.Warn("clear pending input for raced-cancel step failed", "conversation", conv.ID, "error", cErr)
 			}
@@ -382,7 +382,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// nothing about whether this claim is a resume, and the loop drains them
 	// itself on its first iteration. Routing one here would hand a native
 	// conversation to a path that resumes a Claude session it never had.
-	if s.pendingInput != nil && conv.Runtime != domain.ConversationRuntimeNative {
+	if s.pendingInput != nil && undeliveredRowsFor(conv.Runtime) == inputRoleStagedResume {
 		if msg, userID, ok, perr := s.pendingInput.Peek(gateCtx, orgID, conv.ID); perr != nil {
 			dispatchLog.Warn("peek pending input failed; falling through to the blueprint-step path", "conversation", conv.ID, "error", perr)
 		} else if ok {
