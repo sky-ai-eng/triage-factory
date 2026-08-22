@@ -903,10 +903,21 @@ drift:
   shipped fallback. Local pre-fills both with the migration's concrete
   equivalents of today's defaults, preserving the zero-friction first run.
 
-Availability is **not** one of them. The probe's transport follows the mode
-— a direct call in multi, the agent runtime in local — but what it asks and
-what the answer means are the same, so the field carries no mode difference
-for a client to read. The one thing that does differ is what an org's
+Availability is **not** one of them. The probe has two transports — an
+in-process call over `internal/inference`, the machinery the native
+conversation runtime uses, and the SDK subprocess — but what each asks and
+what the answer means are identical, so the field carries no mode difference
+for a client to read.
+
+Which one runs is chosen by **mode**, not by the `sdk`/`native` ratchet: that
+ratchet is a `conversations` column stamped at mint and a probe has no
+conversation. Mode stands in for the question that actually decides —
+*can this process assemble a request from the org's credentials?* Multi always
+can; local may hold only a subscription, which has no key and can be
+authenticated only by the subprocess. It is the same split, for the same
+reason, that `systemllm.Complete` makes.
+
+The one thing that genuinely differs between the modes is what an org's
 credential source can be: only local can run on the host's, and that source
 is what makes every provider reachable rather than only the bound ones.
 

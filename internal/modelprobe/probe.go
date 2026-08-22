@@ -124,13 +124,19 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 // model. Every outcome of an attempt that DID reach the wire comes back as a
 // Result, including the failures.
 //
-// The transport follows the mode, for the same reason systemllm.Complete's
-// does: a probe must ask the question the way a run would, and the two modes
-// run agents differently. Multi calls the provider from this process. Local
-// spends the request through the SDK subprocess, which is the only path that
-// can authenticate a Claude Code subscription — the credential a local
-// deployment most often holds, and the one nothing in this process could
-// assemble a request with.
+// The transport follows the mode, exactly as systemllm.Complete's does and for
+// its reason rather than a delegated run's: what varies is whether this process
+// can assemble a request out of the org's credentials at all. Multi always can
+// — every org there brings its own material and the store is readable in
+// process. Local may not, because a Claude Code subscription has no key, and
+// the subprocess is the only thing that can authenticate one.
+//
+// The two paths are the same machinery the two conversation runtimes use: the
+// direct one is inference.New over a resolved env map, which is what
+// agentloop.EnvCredentials builds per call, and the SDK one is agentproc.Run.
+// The selector is deliberately NOT that ratchet. It is a conversations column
+// stamped at mint, and a probe has no conversation — it is one (org, model)
+// question — so the mode is what is knowable here.
 //
 // Both transports produce the same three verdicts from the same status sets:
 // what differs is where the status is read from, not what it means.
@@ -141,8 +147,9 @@ func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Ent
 	return p.probeSDK(ctx, orgID, entry)
 }
 
-// probeSDK spends the probe through the agent runtime, the way a local run
-// spends one.
+// probeSDK spends the probe through the SDK subprocess, which is what a local
+// run is: conversations mint under the sdk runtime, so this is the transport
+// whose failure a local user would otherwise meet at dispatch.
 //
 // It resolves no credentials itself. agentproc.Run owns that resolution — the
 // same call, with the same seams, that a local run makes — so a probe cannot
