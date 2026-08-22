@@ -33,6 +33,49 @@ to keep current" when a token is already stored.
 Where exactly they land, and how the headless encrypted-file backend works, is
 covered in [Secret storage](secret-storage.md).
 
+## Agent sandbox (Linux)
+
+On Linux, delegated agent runs execute inside a
+[bubblewrap](https://github.com/containers/bubblewrap) mount namespace by
+default. Inside it a run sees its own worktree, its own gh config, TF's git
+hooks and toolchain, and any directory you explicitly granted the run — and
+nothing else. Your home directory, the TF database and clone cache, every
+concurrent run's worktree, and the OS keychain's session sockets are all
+replaced by empty directories.
+
+This is **courtesy isolation, not a security boundary**. The agent runs as you,
+shares your network, and could break out on purpose the way any process running
+as you could. What it prevents is the accident: a wandering or prompt-injected
+agent reading another run's work, your dotfiles, or the database, all of which
+were one `cat` away before.
+
+Two consequences worth knowing:
+
+- Each run's worktree becomes a self-contained clone rather than a zero-copy
+  linked worktree, because the shared bare clone cache isn't visible inside the
+  namespace. That costs clone time and disk.
+- The agent can still read `~/.claude` — its own transcripts live there, and so
+  does the Claude Code credential the run authenticates with.
+
+`TF_LOCAL_SANDBOX=off` turns it off, and agents then run with your full user's
+powers, exactly as they did before. Set it if TF itself runs inside a container
+(nested unprivileged user namespaces are usually blocked), on a host without
+bubblewrap, or when you want the zero-copy worktree performance back.
+
+Bubblewrap is required when the sandbox is on: if TF cannot build a namespace
+at startup it **refuses to boot** rather than silently running agents
+unsandboxed. Install it (`sudo apt install bubblewrap`, or your distro's
+equivalent — the distro package is what carries the AppArmor profile that
+permits unprivileged user namespaces on Ubuntu 23.10 and later) or set
+`TF_LOCAL_SANDBOX=off`.
+
+The sandbox is Linux-only today. On macOS and Windows the setting resolves to
+off; an explicit `TF_LOCAL_SANDBOX=on` there is a boot error rather than a
+no-op, since a security setting that is quietly ignored is worse than one that
+is refused. macOS support is planned on `sandbox-exec`, which is a different
+enough mechanism — it filters paths where bubblewrap replaces them — to be its
+own piece of work rather than a port.
+
 ## Base-branch pushes
 
 Team Settings → **Team defaults** → *Pushes to the base branch* controls whether

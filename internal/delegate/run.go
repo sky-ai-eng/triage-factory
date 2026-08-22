@@ -532,6 +532,22 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
+	// Local-mode courtesy isolation: the mount-namespace plan plus the
+	// agenthost daemon its exec verbs dial. nil (and free) in multi mode and
+	// whenever the operator opted out; a failure fails the run rather than
+	// dropping the agent onto the operator's filesystem unannounced.
+	localSbx, err := s.startLocalSandbox(conversationID, namespace, ghChannel, agenthost.ConversationInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		ConversationID:   conversationID,
+		TeamID:           teamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	if err != nil {
+		return fail(err.Error(), domain.ConversationFailureUnclassified)
+	}
+	defer func() { _ = localSbx.Close() }()
+
 	delegateLog.Info("claude starting for conversation", "conversation", conversationID, "cwd", claudeCwd)
 	baseOpts := agentproc.RunOptions{
 		Cwd:            claudeCwd,
@@ -585,6 +601,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		GitUserName:    commitIdentity.Name,
 		GitUserEmail:   commitIdentity.Email,
 		GitConfigPairs: cfg.localGit.configPairs(ghChannel),
+		// Local mount namespace. nil in multi mode (the gVisor jail is the
+		// isolation there) and whenever the operator opted out.
+		LocalSandbox: localSbx.runSpec(),
 	}
 	sink := newConversationSink(s, orgID, conversationID, cfg.claimID, triggerType, creatorUserID)
 

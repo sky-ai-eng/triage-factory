@@ -124,3 +124,27 @@ func SetClientIPPolicyForTest(t TestT, trustedCIDR string, capture bool) {
 		clientIPMu.Unlock()
 	})
 }
+
+// SetLocalSandboxForTest swaps the process local-sandbox toggle for the
+// duration of t and restores the previous (localSandboxEnabled,
+// localSandboxInitialized) pair via t.Cleanup. Same caveats as SetForTest —
+// data-race-free but not safe for overlapping parallel tests that mutate the
+// same global.
+//
+// Lives here (not a _test.go file) so consumers' test packages — the worktree
+// self-contained-clone split, the delegate's Spec wiring — can force the
+// posture without threading TF_LOCAL_SANDBOX through the environment.
+func SetLocalSandboxForTest(t TestT, enabled bool) {
+	t.Helper()
+	localSandboxMu.Lock()
+	prev, prevInit := localSandboxEnabled, localSandboxInitialized
+	localSandboxEnabled = enabled
+	localSandboxInitialized = true
+	localSandboxMu.Unlock()
+	t.Cleanup(func() {
+		localSandboxMu.Lock()
+		localSandboxEnabled = prev
+		localSandboxInitialized = prevInit
+		localSandboxMu.Unlock()
+	})
+}

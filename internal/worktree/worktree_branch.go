@@ -9,8 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // CreateForBranch sets up a worktree on a new feature branch based off
@@ -119,9 +117,11 @@ func CheckoutRefSlug(ref string) string {
 // Since TFAC-546 this runs HOST-SIDE in both modes (the agenthost daemon calls
 // it on the sandbox's behalf in multi), so WithCloneAuth is honored for the
 // clone/fetch. Local mode routes to the zero-copy linked worktree as before;
-// multi mode materializes a SELF-CONTAINED clone — the run root is bind-mounted
-// into a sandbox that can't see the shared bare, so a worktree's .git pointer
-// would dangle there (mirrors CreateForPR's mode split).
+// a sandboxed run materializes a SELF-CONTAINED clone — the run root is the
+// only tree inside the sandbox, so a worktree's .git pointer into the shared
+// bare would dangle there (mirrors CreateForPR's split). Lazy materialization
+// takes the same branch as the eager one, so a repo added mid-run needs no new
+// mount.
 func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
@@ -139,7 +139,7 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ro
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
 	auth := resolveCloneOptions(opts).auth
-	if runmode.Current() == runmode.ModeMulti {
+	if selfContainedRunTrees() {
 		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 	}
 	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)

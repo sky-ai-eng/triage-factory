@@ -70,6 +70,18 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("runmode: %w", err)
 	}
 
+	// Local-mode OS sandbox posture (TF_LOCAL_SANDBOX). Resolved right after
+	// the mode because it is a function of it: on is the default for local
+	// mode on Linux, meaningless in multi (already a gVisor jail), and
+	// unhonorable off Linux. An explicit value that cannot be honored fails
+	// boot here rather than degrading silently — see runmode's doc for why
+	// that direction is the only safe one for a safety knob. Whether
+	// bubblewrap actually works on this host is probed separately, at server
+	// boot (internal/app), so a CLI subcommand is never held hostage to it.
+	if err := runmode.InitLocalSandboxFromEnv(); err != nil {
+		return fmt.Errorf("runmode local sandbox: %w", err)
+	}
+
 	// Resolve the deployment role (TF_ROLE) right after the mode and
 	// before the argv dispatch, so the `migrate` subcommand and every
 	// subsystem see the same role. Multi mode requires control or

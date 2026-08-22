@@ -58,10 +58,19 @@ multi-mode executor it is the run's own capless credential sidecar, holding only
 that one run's material; on the all/local path it is the orchestrator.
 
 Local mode (single user, single machine, SQLite) collapses adversary A's
-multi-tenant threats: it is single-tenant, and **the sandbox is skipped
+multi-tenant threats: it is single-tenant, and **the gVisor sandbox is skipped
 entirely** (`shouldSandbox()` = `runmode.Current() == runmode.ModeMulti && runtime.GOOS == "linux"`), so it takes none of
 the host privileges below. Everything in this document about capabilities and
 privilege separation concerns the multi-mode (self-host and SaaS) deployments.
+
+On Linux, local runs do get a **mount namespace** by default (bubblewrap;
+`TF_LOCAL_SANDBOX`, see [Configuration](../local-mode/configuration.md)). It is
+courtesy isolation and deliberately not a boundary — same uid, shared network,
+shared `/proc` — so nothing in this document rests on it. What it buys is that a
+confused or prompt-injected agent cannot read a sibling run's worktree, the TF
+database, or the operator's home directory without deliberately breaking out,
+and that the OS keychain is out of reach from inside. Everything a compromised
+local agent could do to the machine before, it can still do if it tries.
 
 ---
 

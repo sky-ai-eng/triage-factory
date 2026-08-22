@@ -427,6 +427,21 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		extraEnv = append(extraEnv, githooks.PushCaptureEnvVar+"="+githooks.PushCaptureProxy)
 	}
 
+	// A resume gets the same isolation the initial invocation had — the
+	// namespace is per-invocation, like the gh channel above, so a cold resume
+	// builds its own plan and its own agenthost daemon over the same run tree.
+	localSbx, err := s.startLocalSandbox(conversationID, opts.Namespace, ghChannel, agenthost.ConversationInfo{
+		OrgID:            orgID,
+		UserID:           creatorUserID,
+		ConversationID:   conversationID,
+		TeamID:           opts.TeamID,
+		IsEventTriggered: triggerType == domain.TriggerTypeEvent,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = localSbx.Close() }()
+
 	baseOpts := agentproc.RunOptions{
 		Cwd:            cwd,
 		Model:          model,
@@ -456,6 +471,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		StartAgentHost:   startAgentHost,
 		GHChannel:        ghChannel,
 		GitConfigPairs:   opts.localGit.configPairs(ghChannel),
+		LocalSandbox:     localSbx.runSpec(),
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.
