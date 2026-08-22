@@ -13,12 +13,17 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
-// modelsHandler serves GET /api/orgs/{org_id}/models — the models this
-// deployment offers, as one org sees them.
+// modelsHandler serves the models this deployment offers, at the two scopes
+// that shape the answer, plus the write that shapes the narrower one:
 //
-// The subject is the org, not the caller, because the answer depends on the
-// org: `enabled` is org state, and an org admin belonging to several orgs must
-// be able to read each one's catalog without first moving a session cursor.
+//   - GET /api/orgs/{org_id}/models — as one org sees them.
+//   - GET /api/teams/{team_id}/models — as one team may run them.
+//   - PUT /api/teams/{team_id}/models/providers — the org admin's restriction.
+//
+// The subject is the org or the team, never the caller, because the answer
+// depends on it: `enabled` is org state and the provider restriction is team
+// state, and an admin belonging to several of either must be able to read each
+// without first moving a session cursor.
 //
 // Read is any member, not admin. The widest audience for this read is a team
 // admin who cannot read org settings at all but has to know what the org
@@ -72,8 +77,8 @@ const modelAvailabilityAssumed = "assumed"
 // handleModelsList returns the org's model catalog.
 //
 // Unpaginated by design: the catalog is the build's own vocabulary, fixed at
-// compile time and four entries long, and a page token would address a set that
-// changes only when the binary does. Same call as GET /api/event-types.
+// compile time and a handful of entries long, and a page token would address a
+// set that changes only when the binary does. Same call as GET /api/event-types.
 //
 // Local mode answers the identical contract from the identical catalog. Its
 // universe is what the SDK subprocess can actually drive — the Claude family
@@ -149,9 +154,18 @@ func (h *modelsHandler) handleTeamModelsList(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The restriction is read on the admin pool, after the gate above has
+	// established the team is in the caller's org. It is org policy ABOUT a
+	// team rather than the team's own configuration, and its first reader is
+	// the org admin who set it — who need not be a member of the team, and
+	// whom the membership-gated team_settings RLS would silently answer with
+	// the defaults, showing them an unrestricted catalog seconds after they
+	// restricted it. A wrong answer here is worse than a wider one: what it
+	// discloses to another org member is which providers a sibling team may
+	// spend against.
 	var allowed modelcatalog.ProviderSet
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		set, err := tx.Teams.GetSettings(r.Context(), teamID)
+		set, err := tx.Teams.GetSettingsSystem(r.Context(), teamID)
 		if err != nil {
 			return fmt.Errorf("read team settings: %w", err)
 		}

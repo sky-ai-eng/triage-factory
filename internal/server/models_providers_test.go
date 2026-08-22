@@ -294,14 +294,19 @@ func TestTeamProviders_GatesAndScope_Postgres(t *testing.T) {
 			t.Fatalf("org admin PUT = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 		}
 		// The restriction landed on teamA and shaped its read, on the Postgres
-		// dialect as it does on SQLite.
-		read := httptest.NewRecorder()
-		mdh.handleTeamModelsList(read, withCaller(req(http.MethodGet, teamA, nil), teamAdmin))
-		if read.Code != http.StatusOK {
-			t.Fatalf("teamA read = %d, want 200 (body: %s)", read.Code, read.Body.String())
-		}
-		if providersOf(decodeModels(t, read.Body.Bytes()).Items)[modelcatalog.ProviderBedrock] {
-			t.Error("Bedrock entries survived the restriction on Postgres")
+		// dialect as it does on SQLite — for a member of the team, and for the
+		// org admin who set it, who is not one. The second reader is the point:
+		// a membership-gated read would answer them with the defaults and show
+		// an unrestricted catalog seconds after they restricted it.
+		for _, caller := range []string{teamAdmin, orgAdmin} {
+			read := httptest.NewRecorder()
+			mdh.handleTeamModelsList(read, withCaller(req(http.MethodGet, teamA, nil), caller))
+			if read.Code != http.StatusOK {
+				t.Fatalf("teamA read = %d, want 200 (body: %s)", read.Code, read.Body.String())
+			}
+			if providersOf(decodeModels(t, read.Body.Bytes()).Items)[modelcatalog.ProviderBedrock] {
+				t.Errorf("Bedrock entries survived the restriction on Postgres (caller %s)", caller)
+			}
 		}
 		// teamB is untouched: a restriction is per team, not per org.
 		other := httptest.NewRecorder()
