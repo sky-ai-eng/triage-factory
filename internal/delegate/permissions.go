@@ -28,8 +28,11 @@
 // run.go/resume.go for the agentproc.WillSandbox() branch.
 //
 // This whole file is the SDK runtime's, reached only by a conversation carrying
-// that ratchet. The native engine's tool calls never arrive here: its loop runs
-// in this process and its own dispatcher decides them.
+// that ratchet. Nothing equivalent exists for the native engine, and not
+// because it was skipped: prompting presupposes an off-allowlist call to decide,
+// and there is no such thing there. The tools it advertises ARE its boundary,
+// and a name outside them is dispatched into the jail like any other and
+// answered "unknown tool".
 
 package delegate
 
