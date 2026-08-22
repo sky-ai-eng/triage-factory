@@ -324,7 +324,7 @@ func TestKindOf(t *testing.T) {
 	}
 }
 
-// TestHasHostAndPolled pin the vocabulary GetSettings' base_url / poll_interval
+// TestHasHostAndPolled pins the vocabulary GetSettings' base_url / poll_interval
 // write path consults: GitHub and Jira both declare a self-host story and a
 // poll cadence, the vocabulary carries them for a kind that declares neither
 // (schedule), a registered source can declare Polled without HasHost (a
