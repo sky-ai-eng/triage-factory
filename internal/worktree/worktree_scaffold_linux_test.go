@@ -11,6 +11,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
+// Linux-only by filename, because the property is: off Linux no sandbox
+// identity ever takes a run tree, so MkdirRunTreeScaffold is deliberately the
+// plain MkdirAll it replaces and there is no group-write bit to assert.
+
 // TestCreateInRoot_MintsScaffoldDirs pins the owner/ and owner/repo/ levels the
 // checkout and PR creates mint under a run root to the run-tree scaffold mode,
 // through the real create rather than the helper alone.
