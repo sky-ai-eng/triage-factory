@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 )
 
 // CreateRequest is the body of a prompt create.
@@ -35,29 +36,24 @@ type UpdateRequest struct {
 	Model string `json:"model"`
 }
 
-// allowedModelOverrides is the set of non-empty values accepted for
-// prompts.model. "" is always allowed and means "inherit the global default
-// from settings.AI.Model at dispatch". Kept aligned with the picker in
-// frontend/src/pages/Settings.tsx.
-var allowedModelOverrides = []string{"haiku", "sonnet", "opus"}
-
-// ValidModel reports whether m is an acceptable prompts.model value — "" (inherit
-// the global default) or one of the allowed per-prompt overrides.
+// ValidModel reports whether m is an acceptable prompts.model value — "" (the
+// step is unset and inherits the team default at dispatch) or a model catalog
+// key.
+//
+// The catalog is the accepted set rather than a list kept beside it: the value
+// stored here is dispatched verbatim, so anything the catalog does not name is
+// a model the ledger has no price for and, quite possibly, one no credential
+// can invoke. The picker draws from the same read, which is what makes a
+// rejection here something only a headless caller can provoke.
 func ValidModel(m string) bool {
-	if m == "" {
-		return true
-	}
-	for _, v := range allowedModelOverrides {
-		if m == v {
-			return true
-		}
-	}
-	return false
+	return m == "" || modelcatalog.Offers(m)
 }
 
-// InvalidModelError is the 400 message for a value ValidModel rejects.
+// InvalidModelError is the 400 message for a value ValidModel rejects. It names
+// the offered keys rather than the requirement in the abstract, because the
+// caller's next move is picking one of them.
 func InvalidModelError() string {
-	return `model must be "" or one of: ` + strings.Join(allowedModelOverrides, ", ")
+	return `model must be "" (inherit the team default) or one of: ` + strings.Join(modelcatalog.Keys(), ", ")
 }
 
 // SoftDeleteBySource soft-deletes a prompt according to its source and

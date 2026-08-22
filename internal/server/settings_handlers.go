@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -369,18 +370,20 @@ func resolveTeamSettingsPatch(w http.ResponseWriter, req teamSettingsPatch) (app
 	)
 	set := func(f func(*domain.TeamSettings)) { mutators = append(mutators, f) }
 
-	// ai_model's VOCABULARY is deliberately unvalidated: a model identifier is
-	// provider-agnostic and opaque here, and settling what the accepted set is
-	// belongs to the model-selection epic. Non-empty is the whole rule; null
-	// clears the team's preference so the org default applies.
+	// ai_model must name a model this deployment offers. The picker draws its
+	// options from the same catalog, so the closed set is the one the UI shows
+	// — and a stored value that is dispatched verbatim has no room for a
+	// spelling nothing can invoke. Null clears the team's preference.
 	if v, st := httpx.PatchString(&shape, req.AIModel, "ai_model"); st != httpx.PatchAbsent {
 		switch {
 		case st == httpx.PatchClear:
 			set(func(t *domain.TeamSettings) { t.DefaultModel = "" })
 		case st == httpx.PatchSet && strings.TrimSpace(v) == "":
 			shape.Invalid("ai_model", "ai_model must name a model, or be null to inherit the org default")
+		case st == httpx.PatchSet && !modelcatalog.Offers(strings.TrimSpace(v)):
+			shape.Invalid("ai_model", "ai_model must name a model this deployment offers: "+strings.Join(modelcatalog.Keys(), ", "))
 		case st == httpx.PatchSet:
-			set(func(t *domain.TeamSettings) { t.DefaultModel = v })
+			set(func(t *domain.TeamSettings) { t.DefaultModel = strings.TrimSpace(v) })
 		}
 	}
 	if v, st := httpx.PatchBool(&shape, req.AIAutoDelegate, "ai_auto_delegate_enabled"); st != httpx.PatchAbsent {

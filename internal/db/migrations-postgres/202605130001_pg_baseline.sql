@@ -1789,13 +1789,20 @@ CREATE TABLE public.team_settings (
     ai_reprioritize_threshold integer DEFAULT 5 NOT NULL,
     ai_preference_update_interval integer DEFAULT 20 NOT NULL,
     -- Team-scope AI behavior policy. Moved off user_settings: in v1 the
-    -- team owns the Claude tier used for scoring + agent runs (clamped by
+    -- team owns the model used for scoring + agent runs (clamped by
     -- org_settings.max_llm_model_tier when set) and the master toggle for
     -- auto-delegation. auto_delegate_enabled defaults TRUE: a team whose
     -- trigger is enabled means the run to fire, and shipped triggers are off
     -- until opted in, so a second gate defaulting off would swallow it. Teams
     -- wanting review-before-run turn it off.
-    default_model text DEFAULT 'sonnet'::text NOT NULL,
+    --
+    -- default_model is a concrete model id (a modelcatalog key), never a
+    -- vendor tier word — it is dispatched verbatim and priced by that same
+    -- string. NOT NULL with a literal DEFAULT because a partial upsert
+    -- (SetDailyCostCapSystem) materializes the row without naming the column,
+    -- so what this defaults to is what that team runs on; kept equal to
+    -- domain.DefaultModel.
+    default_model text DEFAULT 'claude-sonnet-5'::text NOT NULL,
     auto_delegate_enabled boolean DEFAULT true NOT NULL,
     -- Claude Code SDK permission posture. Multi-mode SDK runs always use auto;
     -- local mode honors this team setting, and native runs ignore it.

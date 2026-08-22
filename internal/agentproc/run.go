@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc/localsandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -121,6 +122,26 @@ type RunOptions struct {
 	// per-engagement credential proxy. The sandbox path carries its equivalent
 	// in PrebuiltProxyEnv.
 	GitConfigPairs [][2]string
+
+	// LocalSandbox, when non-nil, wraps the direct (non-gVisor) spawn in a
+	// bubblewrap mount namespace — the local-mode courtesy isolation that
+	// keeps a wandering agent out of sibling runs, the TF state root and the
+	// operator's home. nil is today's behavior, byte-identical: no prefix on
+	// the argv, no marker in the env.
+	//
+	// Wired per call site rather than derived from runmode here, because the
+	// mount plan is a claim about where the run's files ARE and only the
+	// caller knows that: the delegate populates it whenever
+	// runmode.LocalSandboxEnabled(), and the curator and the toolless system
+	// jobs pass nil — the curator's cwd, git path and repo mounts differ
+	// enough to need their own plan rather than a wider version of this one.
+	//
+	// A run that carries a Spec fails rather than degrading if the namespace
+	// cannot be built: the boot probe already established bubblewrap works on
+	// this host, so a per-spawn failure is a real fault, and "isolation was
+	// requested and silently not applied" is the one outcome this must never
+	// produce.
+	LocalSandbox *localsandbox.Spec
 
 	// TraceID is stamped onto every emitted message's ConversationID field.
 	// Storage-neutral: delegate uses the conversation id, the curator
@@ -946,7 +967,11 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	if err != nil {
 		return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
 	}
-	cmd := exec.CommandContext(runCtx, "node", nodeArgs...)
+	argv, err := directArgv(opts, nodeArgs)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(runCtx, argv[0], argv[1:]...)
 	cmd.Dir = opts.Cwd
 	// Install the TF-controlled git hooks dir as process-scoped
 	// core.hooksPath for this agent (F2, TFAC-456). This is the local /
@@ -971,6 +996,16 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// identity → IdentityConfigPairs returns nil → block carries hooks alone
 	// (unchanged behavior). TFAC-452.
 	identityPairs := githooks.IdentityConfigPairs(opts.GitUserName, opts.GitUserEmail)
+	if len(identityPairs) == 0 && opts.LocalSandbox != nil {
+		// The sandbox masks the operator's ~/.gitconfig deliberately — their
+		// credential helpers and url rewrites must not leak into an agent's
+		// git — so "inherit ambient" resolves to nothing in here and every
+		// commit would fail with "please tell me who you are". A neutral
+		// placeholder is the only answer that keeps an org with no configured
+		// identity able to commit at all; outside the sandbox the ambient
+		// config is still the right answer and this branch never fires.
+		identityPairs = githooks.FallbackIdentityConfigPairs()
+	}
 	identityPairs = append(identityPairs, opts.GitConfigPairs...)
 	// Engine runtime tuning rides ExtraEnv's lane. Strip any inherited
 	// jscJITEnvKey from the parent env first rather than relying on
@@ -987,6 +1022,20 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// were never supposed to have.
 	parentEnv := filterEnv(os.Environ(), []string{jscJITEnvKey, SandboxMarkerEnvVar})
 	hookEnv = append(append([]string(nil), hookEnv...), agentRuntimeEnv()...)
+	if opts.LocalSandbox != nil {
+		// Re-add the marker the strip above removed, deliberately: this process
+		// is not in a jail, but the child IS, and the marker is what flips the
+		// binary's boot identity to jail-cli for the agent's own
+		// `triagefactory exec` invocations. Set here rather than upstream so it
+		// tracks the actual decision to sandbox rather than a caller's intent —
+		// and so the strip keeps doing its job on an operator's stray export,
+		// which must never survive into an unsandboxed spawn.
+		//
+		// The consequence the agent sees: every exec verb dials the run's
+		// agenthost socket instead of opening a database, no subcommand can
+		// reach the keychain, and every non-exec subcommand is refused by name.
+		hookEnv = append(hookEnv, SandboxMarkerEnvVar+"="+SandboxMarkerEnvValue)
+	}
 	// The real-gh channel rides the same lane. It is appended last of the
 	// run-scoped entries so its PATH — which must lead with the TF-owned gh
 	// dir — wins over any inherited copy under exec's last-wins duplicate

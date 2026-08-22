@@ -178,7 +178,7 @@ func TestTeamSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 	s := newTestServer(t)
 
 	patchTeamSettingsOK(t, s, "default", map[string]any{
-		"ai_model":                           "opus",
+		"ai_model":                           domain.ModelOpus,
 		"ai_auto_delegate_enabled":           false,
 		"auto_mode_enabled":                  false,
 		"ai_reprioritize_threshold":          11,

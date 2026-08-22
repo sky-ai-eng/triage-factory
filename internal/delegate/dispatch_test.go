@@ -590,11 +590,14 @@ func mustGetRun(t *testing.T, s *Spawner, org, brID string) *domain.BlueprintRun
 }
 
 // TestStepModelOrInherit pins the per-step model resolution used when a
-// blueprint advances: a per-step Prompt.Model override is
-// downgrade-only — it applies only when it names a known, cheaper tier than the
-// run's already tier-capped inherited model, so the shipped PR-review aggregator
-// can drop to Haiku while no per-step value can ever escalate past the org cap
-// baked into `inherited`. An empty override inherits unchanged.
+// blueprint advances: unset inherits, pinned wins, and nothing in between.
+//
+// Every case where a pin differs from what was inherited is the same case —
+// the pin is what runs — including the ones an ordering rule used to discard:
+// a costlier model than the run inherited, a model no Anthropic tier ranks
+// (Fable), an older spelling. A pin is a person's explicit choice, and the id
+// that survives here is the STORED one, since it is what reaches the provider
+// and what the ledger prices.
 func TestStepModelOrInherit(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -602,15 +605,18 @@ func TestStepModelOrInherit(t *testing.T) {
 		inherited string
 		want      string
 	}{
-		{"empty inherits", "", "opus", "opus"},
-		{"empty inherits sonnet", "", "sonnet", "sonnet"},
-		{"haiku downgrades from opus", "haiku", "opus", "haiku"},
-		{"sonnet downgrades from opus", "sonnet", "opus", "sonnet"},
-		{"haiku downgrades from sonnet", "haiku", "sonnet", "haiku"},
-		{"opus cannot escalate from sonnet", "opus", "sonnet", "sonnet"},
-		{"opus cannot escalate from haiku", "opus", "haiku", "haiku"},
-		{"same tier is a no-op", "opus", "opus", "opus"},
-		{"unknown override is ignored", "gpt-9", "opus", "opus"},
+		{"empty inherits", "", domain.ModelOpus, domain.ModelOpus},
+		{"empty inherits sonnet", "", domain.ModelSonnet, domain.ModelSonnet},
+		{"a cheaper pin wins", domain.ModelHaiku, domain.ModelOpus, domain.ModelHaiku},
+		{"a mid pin wins", domain.ModelSonnet, domain.ModelOpus, domain.ModelSonnet},
+		{"a costlier pin wins too", domain.ModelOpus, domain.ModelSonnet, domain.ModelOpus},
+		{"a much costlier pin wins", domain.ModelOpus, domain.ModelHaiku, domain.ModelOpus},
+		{"the same model is a no-op", domain.ModelOpus, domain.ModelOpus, domain.ModelOpus},
+		// A catalog model with no place on the Haiku-Sonnet-Opus ladder. It is
+		// pinnable, so it runs.
+		{"a model outside the tier ladder wins", "claude-fable-5", domain.ModelOpus, "claude-fable-5"},
+		// A prior-generation spelling nothing ranks either.
+		{"an older concrete spelling wins", "claude-opus-4-8", domain.ModelOpus, "claude-opus-4-8"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

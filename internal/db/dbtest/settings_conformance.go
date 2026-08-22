@@ -112,7 +112,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 		saved, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, domain.TeamSettings{
 			JiraProjects: []string{"RET"}, AIReprioritizeThreshold: 4,
-			AIPreferenceUpdateInterval: 12, DefaultModel: "opus",
+			AIPreferenceUpdateInterval: 12, DefaultModel: domain.ModelOpus,
 			PermissionAbsentGraceMS: 1000,
 			BranchTemplate:          "ret/<ticket-id>",
 			ReviewPosture:           domain.ReviewPostureAutoUnlessBlocking,
@@ -130,7 +130,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		AssertWriteReturnedStoredRow(t, "Teams.SetDailyCostCapSystem", capped, read)
 		// The cap moved and everything the earlier save wrote is still there —
 		// the whole reason a one-column write hands back the whole row.
-		if capped.MaxDailyCostUSD != 9.5 || capped.DefaultModel != "opus" {
+		if capped.MaxDailyCostUSD != 9.5 || capped.DefaultModel != domain.ModelOpus {
 			t.Errorf("SetDailyCostCapSystem returned %+v, want the new cap over the saved settings", capped)
 		}
 
@@ -816,7 +816,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraProjects:                    []string{"SKY", "ENG", "OPS"},
 			AIReprioritizeThreshold:         7,
 			AIPreferenceUpdateInterval:      30,
-			DefaultModel:                    "opus",
+			DefaultModel:                    domain.ModelOpus,
 			AutoDelegateEnabled:             true,
 			AutoModeEnabled:                 false,
 			PermissionAbsentGraceMS:         30000,
@@ -866,7 +866,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 		// A read-modify-write team-settings save that changes another field but not
 		// the cap must preserve it — the team-admin path can never alter the cap.
-		got.DefaultModel = "haiku"
+		got.DefaultModel = domain.ModelHaiku
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
 			t.Fatalf("UpdateSettings (rmw): %v", err)
 		}
@@ -877,8 +877,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if after.MaxDailyCostUSD != 42.50 {
 			t.Errorf("UpdateSettings clobbered the cap: got %v, want 42.50 preserved", after.MaxDailyCostUSD)
 		}
-		if after.DefaultModel != "haiku" {
-			t.Errorf("UpdateSettings didn't apply the unrelated change: got %q, want haiku", after.DefaultModel)
+		if after.DefaultModel != domain.ModelHaiku {
+			t.Errorf("UpdateSettings didn't apply the unrelated change: got %q, want %q", after.DefaultModel, domain.ModelHaiku)
 		}
 
 		// ≤ 0 clears the cap (stored NULL → read back as 0 / no cap).
@@ -917,7 +917,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		in := domain.TeamSettings{
 			AIReprioritizeThreshold:    5,
 			AIPreferenceUpdateInterval: 20,
-			DefaultModel:               "sonnet",
+			DefaultModel:               domain.ModelSonnet,
 		}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, in); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)

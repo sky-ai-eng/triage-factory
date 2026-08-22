@@ -6,6 +6,7 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import TeamPicker from './TeamPicker'
 import MarketplacePublishControl from './MarketplacePublishControl'
 import { useTeams, pickerDefault, noteWrittenTeam } from '../hooks/useTeams'
+import { useModelCatalog, modelDisplayName } from '../hooks/useModelCatalog'
 import { promptsBase, blueprintsBase } from '../lib/scope'
 
 interface Props {
@@ -83,6 +84,10 @@ export default function PromptDrawer({
   const effectiveTeam = lockedTeamId || team
   const [model, setModel] = useState('')
   const [defaultModel, setDefaultModel] = useState('')
+  // The models this org offers. A prompt's Model is a pin drawn from the same
+  // catalog the team default is, so the two pickers can never disagree about
+  // what exists.
+  const { models } = useModelCatalog()
   const [stats, setStats] = useState<PromptStatsData | null>(null)
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
@@ -380,10 +385,20 @@ export default function PromptDrawer({
                   disabled={readOnly}
                   className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-60"
                 >
-                  <option value="">Default{defaultModel ? ` (${defaultModel})` : ''}</option>
-                  <option value="haiku">Haiku (fast, cheap)</option>
-                  <option value="sonnet">Sonnet (balanced)</option>
-                  <option value="opus">Opus (most capable)</option>
+                  <option value="">
+                    Default{defaultModel ? ` (${modelDisplayName(defaultModel)})` : ''}
+                  </option>
+                  {models.map((m) => (
+                    <option key={m.key} value={m.key}>
+                      {m.display_name}
+                    </option>
+                  ))}
+                  {/* A pin the catalog no longer offers still has to render as
+                      the selection, or the drawer would silently show this
+                      prompt inheriting a model it does not inherit. */}
+                  {model !== '' && !models.some((m) => m.key === model) && (
+                    <option value={model}>{modelDisplayName(model)}</option>
+                  )}
                 </select>
                 <p className="text-label text-ink-3 mt-1.5">
                   Default tracks the model chosen in Settings — change it there and every prompt

@@ -1,16 +1,19 @@
-// ModelTierSelector — a capability *ladder*, not a row of equal cards. The
-// tiers ascend left→right (Haiku → Sonnet → Opus), and the selection reads as a
-// ceiling: a warm fill runs along the track up to the chosen tier, everything
-// above it ghosts out (the clamped region), and a "No cap" (∞) end lifts the
-// ceiling entirely. This maps the data's actual shape — an ordered cap — onto
-// the control, so a team default above the cap *visibly* sits in the ghosted
-// zone.
+// ModelTierSelector — two controls sharing one shape, chosen by the options.
 //
-// Two modes, inferred from the options: a CAP set includes the "" (no cap) end
-// and gets the fill + ghost-above ceiling treatment; a plain PICK set (the team
-// default — concrete tiers only) just highlights the chosen tier. Controlled,
-// value-typed as a plain string, radiogroup + roving tabIndex + arrow keys —
-// the same a11y contract whichever surface composes it.
+// A CAP set includes the "" (no cap) end and renders as a capability *ladder*:
+// the tiers ascend left→right (Haiku → Sonnet → Opus) and the selection reads as
+// a ceiling — a warm fill runs along the track up to the chosen tier, everything
+// above it ghosts out (the clamped region), and the "No cap" (∞) end lifts the
+// ceiling entirely. That maps the data's actual shape, an ordered cap, onto the
+// control.
+//
+// A PICK set — a model choice, drawn from the catalog — is a row of equal cells
+// with the chosen one highlighted, and deliberately no fill, no ghosting, and no
+// left-to-right meaning: the catalog asserts no ordering over models, so a
+// control implying one would be inventing a claim about which is better.
+//
+// Controlled either way, value-typed as a plain string, radiogroup + roving
+// tabIndex + arrow keys — the same a11y contract whichever surface composes it.
 
 import { useRef } from 'react'
 import { nextRadioIndex } from '../../lib/rovingRadio'
@@ -33,7 +36,8 @@ export default function ModelTierSelector({
 
   // A CAP set carries the "" (no cap) end — that turns on the ceiling treatment.
   const isCap = options.some((o) => o.value === '')
-  // Tier cells in ascending order (the no-cap end isn't a tier).
+  // Ladder rungs in ascending order (the no-cap end isn't one). Read only in
+  // cap mode; a pick set never consults them.
   const tiers = options.filter((o) => o.value !== '')
   // Where the ceiling sits among the tiers: no cap ("") ⇒ above every tier. An
   // unrecognized tier (a server-side value the UI doesn't list yet) findIndex's
