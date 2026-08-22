@@ -304,19 +304,21 @@ func TestBedrockDelete(t *testing.T) {
 	}
 }
 
-// TestBedrockPut_ExclusivityWithAnthropic pins the provider switch in both
-// directions — connecting one provider clears the other's stored material,
-// because the resolver can only use one and the loser would be dead config the
-// settings page still rendered as configured — AND that the response now
-// enumerates what it removed instead of doing it silently.
-func TestBedrockPut_ExclusivityWithAnthropic(t *testing.T) {
+// TestLLMCredentials_BothProvidersCoexist pins that the two providers are
+// independent: binding one does not disturb the other's stored material in
+// either direction, both secrets survive, and each disconnect removes only its
+// own. An org running some models on Anthropic and others on Bedrock needs both
+// live at once — which run uses which is decided by the run's model, not by
+// which credential was bound last.
+func TestLLMCredentials_BothProvidersCoexist(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	auth.SetAnthropicModelsURLForTest(t, anthropicModelsStub(t, http.StatusOK).URL)
 
-	// Anthropic first, then Bedrock: the Anthropic key must go, and be named.
+	// Anthropic first, then Bedrock: the Anthropic key stays, and the bind says
+	// it removed nothing.
 	if rec := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "sk-ant-first"}); rec.Code != http.StatusOK {
 		t.Fatalf("anthropic seed: %d %s", rec.Code, rec.Body.String())
 	}
@@ -324,40 +326,44 @@ func TestBedrockPut_ExclusivityWithAnthropic(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("bedrock bind: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := clearedList(t, rec); len(got) != 1 || got[0] != "anthropic" {
-		t.Errorf("cleared = %v, want [anthropic]", got)
+	if got := clearedList(t, rec); len(got) != 0 {
+		t.Errorf("cleared = %v, want [] (binding Bedrock removes no Anthropic material)", got)
 	}
-	if got := mustSecret(t, s, "anthropic_api_key"); got != "" {
-		t.Errorf("anthropic key = %q after Bedrock bind, want cleared (resolver would prefer it)", got)
+	if got := mustSecret(t, s, "anthropic_api_key"); got != "sk-ant-first" {
+		t.Errorf("anthropic key = %q after the Bedrock bind, want it untouched", got)
+	}
+	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "bdrk-1" {
+		t.Errorf("bedrock bearer = %q, want bdrk-1", got)
 	}
 	view := getOrgBedrockView(t, s)
-	if view.HasAnthr || !view.Has {
-		t.Errorf("view = %+v, want bedrock-only after the switch", view)
+	if !view.HasAnthr || !view.Has {
+		t.Errorf("view = %+v, want BOTH providers configured", view)
 	}
 
-	// Bedrock then Anthropic: the Bedrock set must go, and be named.
+	// Rotating the Anthropic key leaves Bedrock alone, the other direction of
+	// the same rule.
 	back := doJSON(t, s, http.MethodPut, llmPath("anthropic"), map[string]any{"api_key": "sk-ant-back"})
 	if back.Code != http.StatusOK {
 		t.Fatalf("anthropic rebind: %d %s", back.Code, back.Body.String())
 	}
-	if got := clearedList(t, back); len(got) != 1 || got[0] != "bedrock:bearer" {
-		t.Errorf("cleared = %v, want [bedrock:bearer]", got)
+	if got := clearedList(t, back); len(got) != 0 {
+		t.Errorf("cleared = %v, want [] (binding Anthropic removes no Bedrock material)", got)
 	}
-	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "" {
-		t.Errorf("bedrock bearer = %q after Anthropic bind, want cleared", got)
+	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "bdrk-1" {
+		t.Errorf("bedrock bearer = %q after the Anthropic bind, want it untouched", got)
 	}
 	view = getOrgBedrockView(t, s)
-	if !view.HasAnthr || view.Has {
-		t.Errorf("view = %+v, want anthropic-only after switching back", view)
+	if !view.HasAnthr || !view.Has {
+		t.Errorf("view = %+v, want both still configured", view)
 	}
 
-	// "System credentials" is now two explicit deletes rather than one blank
-	// write that destroyed both — the same end state, said out loud.
-	if rec := putBedrock(t, s, "bearer", map[string]any{"bearer_token": "bdrk-2", "region": "us-east-1"}); rec.Code != http.StatusOK {
-		t.Fatalf("bedrock reseed: %d %s", rec.Code, rec.Body.String())
-	}
+	// Each disconnect removes its own provider and only its own.
 	if rec := doJSON(t, s, http.MethodDelete, llmPath("anthropic"), nil); rec.Code != http.StatusOK {
 		t.Fatalf("anthropic delete: %d %s", rec.Code, rec.Body.String())
+	}
+	view = getOrgBedrockView(t, s)
+	if view.HasAnthr || !view.Has {
+		t.Errorf("view = %+v after disconnecting Anthropic, want Bedrock still configured", view)
 	}
 	if rec := doJSON(t, s, http.MethodDelete, llmPath("bedrock"), nil); rec.Code != http.StatusOK {
 		t.Fatalf("bedrock delete: %d %s", rec.Code, rec.Body.String())
@@ -365,6 +371,32 @@ func TestBedrockPut_ExclusivityWithAnthropic(t *testing.T) {
 	view = getOrgBedrockView(t, s)
 	if view.Has || view.HasAnthr {
 		t.Errorf("view = %+v after both deletes, want no provider configured", view)
+	}
+}
+
+// A second Bedrock shape still replaces the first: the two are one credential
+// wearing different clothes, and the resolver detects role mode by a stored ARN
+// — so a leftover shape is material that would be used instead of the one just
+// bound. The `cleared` list names it.
+func TestBedrockPut_ReplacingAShapeClearsThePrevious(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	if rec := putBedrock(t, s, "bearer", map[string]any{"bearer_token": "bdrk-1", "region": "us-east-1"}); rec.Code != http.StatusOK {
+		t.Fatalf("bedrock bearer bind: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := putBedrock(t, s, "access-keys", map[string]any{
+		"access_key_id": "AKIA1", "secret_access_key": "sk", "region": "us-east-1",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bedrock access-keys bind: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := clearedList(t, rec); len(got) != 1 || got[0] != "bedrock:bearer" {
+		t.Errorf("cleared = %v, want [bedrock:bearer]", got)
+	}
+	if got := mustSecret(t, s, integrations.KeyAWSBearerTokenBedrock); got != "" {
+		t.Errorf("bedrock bearer = %q after binding the access-key pair, want cleared", got)
 	}
 }
 

@@ -1338,8 +1338,16 @@ func (s *Server) routes() {
 	// team admin who cannot see org settings but must know what the org
 	// enabled. Unpaginated for the same reason /api/event-types is — a
 	// compile-time vocabulary, not a collection that grows with use.
-	mdh := &modelsHandler{az: s.az}
+	//
+	// The team-scoped read is the same node one scope down (as /usage is
+	// mounted at both): the org's catalog minus the providers an org admin
+	// restricted that team from spending against. The restriction itself is
+	// written beside it and is org-admin-only — a team that could widen its own
+	// would not be restricted.
+	mdh := &modelsHandler{az: s.az, tx: s.tx}
 	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
+	s.api("GET /api/teams/{team_id}/models", mdh.handleTeamModelsList)
+	s.apiMutating("PUT /api/teams/{team_id}/models/providers", mdh.handleTeamProvidersPut)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
