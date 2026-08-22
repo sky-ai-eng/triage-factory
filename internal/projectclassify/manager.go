@@ -53,7 +53,7 @@ func (m *Manager) SetKBStore(kb *kbstore.Store) {
 // calls carry — the brain-side llmcred adapter minting short-lived STS creds
 // for a role-mode Bedrock org (nil in local/tests → Run's built-in
 // resolution).
-type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 // NewManager builds a classification Manager. It holds entities because
 // WaitFor (the spawner's pre-KB-injection block) reads classification state

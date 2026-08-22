@@ -61,7 +61,10 @@ type CompleteOptions struct {
 	// triple; the local path forwards it to agentproc.Run. nil keeps the
 	// built-in raw-secret resolution (bearer/access_keys/Anthropic, local
 	// ambient) — byte-for-byte unchanged.
-	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
+	//
+	// The model argument selects the provider for a run that names one. These
+	// jobs pass none — see resolveDirectCreds.
+	LLMResolver func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}),
 	// threaded through to the system_llm_runs row.

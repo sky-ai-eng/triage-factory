@@ -46,7 +46,7 @@ type Curator struct {
 	// multi mode. Nil in tests / when unset — the refresh then runs with no
 	// injected credential (the unauthenticated path).
 	secrets    agentproc.SecretsReader
-	llmResolve func(context.Context, string) (map[string]string, error) // brain-side role-aware LLM resolver (nil in local/tests).
+	llmResolve func(ctx context.Context, orgID, model string) (map[string]string, error) // brain-side role-aware LLM resolver (nil in local/tests).
 	modelFor   func(context.Context, string, string) string
 	ghResolver ghclient.Resolver
 	sessions   map[string]*projectSession // projectID → goroutine handle
@@ -236,7 +236,7 @@ func (c *Curator) HasLiveSession(projectID string) bool {
 // (internal/llmcred, TFAC-616) so a role-mode Bedrock org's curator turns
 // mint short-lived STS session creds — a brain-bound mint (control-process
 // egress, no network condition). nil in local mode (ambient) and in tests.
-func (c *Curator) SetLLMResolver(fn func(context.Context, string) (map[string]string, error)) {
+func (c *Curator) SetLLMResolver(fn func(ctx context.Context, orgID, model string) (map[string]string, error)) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.llmResolve = fn
@@ -244,7 +244,7 @@ func (c *Curator) SetLLMResolver(fn func(context.Context, string) (map[string]st
 
 // getLLMResolver returns the wired resolver func under the lock, matching
 // getSecrets' race-free accessor shape.
-func (c *Curator) getLLMResolver() func(context.Context, string) (map[string]string, error) {
+func (c *Curator) getLLMResolver() func(ctx context.Context, orgID, model string) (map[string]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.llmResolve

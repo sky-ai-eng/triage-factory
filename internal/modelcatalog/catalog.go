@@ -73,8 +73,10 @@ type PricesPerMTok struct {
 type Entry struct {
 	Key         string
 	DisplayName string
-	// Provider is the datasheet's vendor label for the key (its
-	// litellm_provider), passed through as-is.
+	// Provider is the access path this key is reached through, mapped from the
+	// datasheet's vendor label through datasheetProviders. It is the provider
+	// vocabulary a credential lookup and a team restriction share, not
+	// upstream's label, which spells one path several ways.
 	Provider              string
 	Prices                PricesPerMTok
 	ContextWindow         int
@@ -231,6 +233,13 @@ func load(fileJSON []byte, lookup func(string) (inference.Info, bool)) ([]Entry,
 			problems = append(problems, fmt.Errorf("%s: no priced row in the pricing datasheet", s.Key))
 			continue
 		}
+		provider, ok := datasheetProviders[info.Provider]
+		if !ok {
+			// No credential path resolves this key, so offering it would put a
+			// model in the picker that no org can authenticate.
+			problems = append(problems, fmt.Errorf("%s: datasheet vendor %q maps to no provider TF drives", s.Key, info.Provider))
+			continue
+		}
 		if info.MaxInputTokens <= 0 {
 			// A priced row can still lack a window fact; offering it would
 			// publish context_window 0 as if it meant something.
@@ -240,7 +249,7 @@ func load(fileJSON []byte, lookup func(string) (inference.Info, bool)) ([]Entry,
 		out = append(out, Entry{
 			Key:         s.Key,
 			DisplayName: s.DisplayName,
-			Provider:    info.Provider,
+			Provider:    provider,
 			Prices: PricesPerMTok{
 				Input:      perMTok(info.InputCostPerToken),
 				Output:     perMTok(info.OutputCostPerToken),
