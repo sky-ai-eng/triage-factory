@@ -66,6 +66,28 @@ func ChownRunTree(ctx context.Context, root, subpath string) error {
 	return chownRunTree(ctx, root, subpath)
 }
 
+// MkdirRunTreeScaffold creates the directories rel names under root — the
+// owner/ and owner/repo/ levels a checkout is materialized beneath — as run
+// tree SCAFFOLD, group-writable from birth rather than only from the
+// ownership hand-off that follows a successful create.
+//
+// Birth is the load-bearing word. The hand-off's recursive form preserves
+// whatever modes it finds, so a scaffold directory that reaches it at the
+// 0755 an ordinary mkdir produces is frozen sandbox-owned and orchestrator-
+// unwritable, and every later checkout under that owner fails EACCES. Minting
+// it group-writable makes the scaffold contract hold for the life of the tree
+// no matter which creates in between succeeded.
+//
+// rel is taken apart and walked one component at a time off a pinned
+// directory fd, never re-resolved as a path string: the run root is writable
+// by the jailed agent, so a component swapped for a symlink between the
+// create and the mode assertion would otherwise redirect that assertion out
+// of the tree. Off Linux this is the plain MkdirAll the callers used before
+// the scaffold contract existed — no sandbox identity owns these trees there.
+func MkdirRunTreeScaffold(root, rel string) error {
+	return mkdirRunTreeScaffold(root, rel)
+}
+
 // RemoveRunTree removes a run tree (run root, scratch cwd, parked
 // worktree) and everything under it; a missing path is a no-op
 // success. Callers that used os.RemoveAll directly on run trees route
