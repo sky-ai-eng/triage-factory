@@ -14,5 +14,21 @@
   {
     "key": "claude-fable-5",
     "display_name": "Claude Fable 5"
+  },
+  {
+    "key": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "display_name": "Claude Haiku 4.5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-sonnet-5",
+    "display_name": "Claude Sonnet 5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-opus-5",
+    "display_name": "Claude Opus 5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-fable-5",
+    "display_name": "Claude Fable 5 (Bedrock, US)"
   }
 ]

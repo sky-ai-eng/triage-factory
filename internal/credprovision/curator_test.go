@@ -57,10 +57,26 @@ func (f *fakeClaimCredentials) Put(_ context.Context, orgID, conversationID, exe
 	return nil
 }
 
-type fakeLLM struct{ mat llmcred.Material }
+type fakeLLM struct {
+	mat llmcred.Material
+	// gotModel records the model the provisioner selected material with — the
+	// provider selector, so a test can assert the conversation's own model
+	// reaches resolution rather than the org's preferred provider.
+	gotModel string
+}
 
-func (f *fakeLLM) ResolveForBundle(context.Context, string, string) (llmcred.Material, error) {
+func (f *fakeLLM) ResolveForBundle(_ context.Context, _, _, model string) (llmcred.Material, error) {
+	f.gotModel = model
 	return f.mat, nil
+}
+
+type fakeConversations struct {
+	db.ConversationStore
+	conv *domain.Conversation
+}
+
+func (f *fakeConversations) GetSystem(context.Context, string, string) (*domain.Conversation, error) {
+	return f.conv, nil
 }
 
 // curatorTurnManager builds a Manager wired with the curator fakes plus a
@@ -78,6 +94,7 @@ func curatorTurnManager(t *testing.T, turn *domain.CuratorTurnProvision, project
 	m := &Manager{
 		stores: db.Stores{
 			Curator:          &fakeCurator{turn: turn, ok: turn != nil},
+			Conversations:    &fakeConversations{conv: &domain.Conversation{ID: "conv-1", Model: domain.ModelSonnet}},
 			Instances:        &fakeInstances{inst: &domain.Instance{BootEpoch: 7}},
 			Projects:         &fakeProjects{project: project},
 			TeamGitHubRepos:  &fakeTeamRepos{tracked: tracked},
@@ -119,6 +136,11 @@ func TestProvisionForCuratorTurn_SealsPinnedIntersectTracked(t *testing.T) {
 	p := rc.puts[0]
 	if p.orgID != "org-1" || p.conversationID != "conv-1" || p.executorID != "home-1" || p.bootEpoch != 7 {
 		t.Errorf("Put args = (%q, %q, %q, %d), want (org-1, conv-1, home-1, 7)", p.orgID, p.conversationID, p.executorID, p.bootEpoch)
+	}
+	// The conversation's own model is what selected the sealed material: an org
+	// holding both providers seals the one this turn runs on, not a preferred one.
+	if got := m.llm.(*fakeLLM).gotModel; got != domain.ModelSonnet {
+		t.Errorf("LLM material resolved with model %q, want the conversation's %q", got, domain.ModelSonnet)
 	}
 
 	plaintext, err := kp.Open(p.sealed)

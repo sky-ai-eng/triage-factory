@@ -89,7 +89,7 @@ const teamSettingsColumns = `jira_projects, ai_reprioritize_threshold, ai_prefer
 		       default_model, auto_delegate_enabled, auto_mode_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
 		       max_daily_cost_usd, branch_template, review_posture,
-		       base_branch_push_policy`
+		       base_branch_push_policy, allowed_providers`
 
 // scanTeamSettings decodes one team_settings row in teamSettingsColumns order.
 func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
@@ -105,12 +105,14 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		branchTemplate          string
 		reviewPosture           string
 		basePushPolicy          string
+		providersJSON           string
 	)
 	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
+		&providersJSON,
 	); err != nil {
 		return domain.TeamSettings{}, err
 	}
@@ -118,6 +120,12 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	if projectsJSON != "" {
 		if err := json.Unmarshal([]byte(projectsJSON), &projects); err != nil {
 			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.jira_projects: %w", err)
+		}
+	}
+	providers := []string{}
+	if providersJSON != "" {
+		if err := json.Unmarshal([]byte(providersJSON), &providers); err != nil {
+			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.allowed_providers: %w", err)
 		}
 	}
 	return domain.TeamSettings{
@@ -133,6 +141,7 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		BranchTemplate:                  branchTemplate,
 		ReviewPosture:                   reviewPosture,
 		BaseBranchPushPolicy:            basePushPolicy,
+		AllowedProviders:                providers,
 	}, nil
 }
 
@@ -529,12 +538,17 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("marshal team_settings.jira_projects: %w", err)
 	}
-	// max_daily_cost_usd rides along (0 → NULL via nullFloatValue) so a read-
-	// modify-write team-settings save round-trips the org-admin-set cap untouched.
-	// The team-settings handler never populates this field from its request body
-	// (a team admin cannot set their own cap), so its GetSettings→UpdateSettings
-	// flow always writes back exactly what it read. The cap is *changed* only by
-	// the org-admin SetDailyCostCapSystem path.
+	providersJSON, err := marshalJSONArray(u.AllowedProviders)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("marshal team_settings.allowed_providers: %w", err)
+	}
+	// max_daily_cost_usd and allowed_providers ride along (the cap 0 → NULL via
+	// nullFloatValue) so a read-modify-write team-settings save round-trips the
+	// org-admin-set values untouched. The team-settings handler never populates
+	// either field from its request body (a team admin cannot set their own cap,
+	// nor widen their own provider restriction), so its GetSettings→UpdateSettings
+	// flow always writes back exactly what it read. They are *changed* only by the
+	// org-admin SetDailyCostCapSystem / SetAllowedProvidersSystem paths.
 	stored, err := scanTeamSettings(s.q.QueryRowContext(ctx, `
 		INSERT INTO team_settings (
 			team_id, jira_projects, ai_reprioritize_threshold,
@@ -542,8 +556,8 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			auto_mode_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			max_daily_cost_usd, branch_template, review_posture,
-			base_branch_push_policy, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			base_branch_push_policy, allowed_providers, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(team_id) DO UPDATE SET
 			jira_projects = excluded.jira_projects,
 			ai_reprioritize_threshold = excluded.ai_reprioritize_threshold,
@@ -557,6 +571,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			branch_template = excluded.branch_template,
 			review_posture = excluded.review_posture,
 			base_branch_push_policy = excluded.base_branch_push_policy,
+			allowed_providers = excluded.allowed_providers,
 			updated_at = CURRENT_TIMESTAMP
 		RETURNING `+teamSettingsColumns,
 		teamID, projectsJSON, u.AIReprioritizeThreshold,
@@ -564,7 +579,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloatValue(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
-		u.BaseBranchPushPolicy,
+		u.BaseBranchPushPolicy, providersJSON,
 	).Scan)
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)
@@ -598,6 +613,39 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 		teamID, capArg).Scan)
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("set team daily cost cap: %w", err)
+	}
+	return stored, nil
+}
+
+// SetAllowedProvidersSystem upserts ONLY team_settings.allowed_providers for
+// teamID — the org-admin restriction on which inference providers this team may
+// spend against. SQLite is N=1 / no RLS so it's a plain write; the Postgres twin
+// runs it on the admin pool because an org admin restricting a team may not be a
+// member of it. An empty (or nil) list stores the empty array, which is the
+// unrestricted state — there is no separate "cleared" marker, because a
+// restriction naming nothing and no restriction are the same fact.
+//
+// The partial INSERT relies on the schema DEFAULT clauses for every other
+// team_settings column when no row exists yet, and ON CONFLICT touches only this
+// column so a team's other settings are never clobbered.
+func (s *teamsStore) SetAllowedProvidersSystem(ctx context.Context, teamID string, providers []string) (domain.TeamSettings, error) {
+	providersJSON, err := marshalJSONArray(providers)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("marshal team_settings.allowed_providers: %w", err)
+	}
+	// RETURNING projects the whole settings row: the insert arm fills every
+	// other column from schema defaults, so the row this lands in is one the
+	// caller has never seen.
+	stored, err := scanTeamSettings(s.q.QueryRowContext(ctx, `
+		INSERT INTO team_settings (team_id, allowed_providers, updated_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(team_id) DO UPDATE SET
+			allowed_providers = excluded.allowed_providers,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING `+teamSettingsColumns,
+		teamID, providersJSON).Scan)
+	if err != nil {
+		return domain.TeamSettings{}, fmt.Errorf("set team allowed providers: %w", err)
 	}
 	return stored, nil
 }

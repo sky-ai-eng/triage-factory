@@ -291,18 +291,20 @@ export default function OrgSettings({
   // ── Claude credentials ── Captured via the validated connectAnthropic /
   // connectBedrock endpoints (never the bulk org POST). Local shows the
   // system-vs-BYOK source radio; multi shows provider + credentials only (no
-  // system-creds option). "Configured" reflects whichever provider is stored
-  // (they're mutually exclusive server-side); the provider radio swaps the
-  // credential fields.
+  // system-creds option). The provider radio picks which credential this save
+  // binds, not which one the org holds: both can be stored at once, and the
+  // summary names every provider that is.
   const claudeWantsByok = !isLocal || draft.anthropicKeySource === 'byok'
   const claudeKeyTyped = draft.org.anthropic_api_key.trim() !== ''
-  const claudeSummary = baseline.bedrockConnected
-    ? 'Configured · Amazon Bedrock'
-    : baseline.anthropicConnected
-      ? 'Configured · Anthropic'
-      : isLocal
-        ? 'System Claude credentials'
-        : 'Not configured'
+  const connectedProviders = [
+    baseline.anthropicConnected ? 'Anthropic' : '',
+    baseline.bedrockConnected ? 'Amazon Bedrock' : '',
+  ].filter(Boolean)
+  const claudeSummary = connectedProviders.length
+    ? `Configured · ${connectedProviders.join(' + ')}`
+    : isLocal
+      ? 'System Claude credentials'
+      : 'Not configured'
   const bedrockSelected = claudeWantsByok && draft.claudeProvider === 'bedrock'
   const bedrockSecretTyped =
     draft.org.bedrock_bearer_token !== '' ||
@@ -855,13 +857,14 @@ export default function OrgSettings({
                 bedrock_model_id: draft.org.bedrock_model_id,
                 bedrock_base_url: draft.org.bedrock_base_url,
               }
+              // An Anthropic key the org already holds is untouched by this
+              // bind — both providers stay connected, and each run resolves the
+              // one its model is served by.
               const apply = (s: WizardState): WizardState => ({
                 ...s,
                 claudeProvider: 'bedrock',
                 bedrockConnected: true,
                 bedrockStoredMethod: draft.org.bedrock_auth_method,
-                // The backend cleared any Anthropic key in the same call.
-                anthropicConnected: false,
                 anthropicKeySource: isLocal ? 'byok' : s.anthropicKeySource,
                 org: { ...s.org, ...storedConfig, ...clearSecrets },
               })
@@ -894,15 +897,16 @@ export default function OrgSettings({
             await refreshOrgVersion()
             const nowConfigured = !useSystem
             const nextSource = isLocal ? (useSystem ? 'system' : 'byok') : draft.anthropicKeySource
+            // Binding an Anthropic key leaves stored Bedrock material alone;
+            // only "system credentials" removes it, and it does that by
+            // disconnecting both providers explicitly.
             const apply = (s: WizardState): WizardState => ({
               ...s,
               anthropicConnected: nowConfigured,
               anthropicKeySource: nextSource,
               claudeProvider: 'anthropic',
-              // Setting a key (and the "system" clear) both wipe the Bedrock
-              // set server-side.
-              bedrockConnected: false,
-              bedrockStoredMethod: null,
+              bedrockConnected: useSystem ? false : s.bedrockConnected,
+              bedrockStoredMethod: useSystem ? null : s.bedrockStoredMethod,
               org: { ...s.org, anthropic_api_key: '' },
             })
             setBaseline(apply)

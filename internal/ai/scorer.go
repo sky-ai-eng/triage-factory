@@ -87,7 +87,7 @@ type batchScoreFn func(ctx context.Context, tasks []TaskInput, orgID string, sec
 // mints short-lived STS creds for a role-mode Bedrock org and passes stored
 // material through otherwise. nil in local mode (ambient) and in tests, where
 // Run keeps its built-in raw-secret resolution.
-type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 // scoreTasks runs the AI scoring pipeline on a set of tasks for the Runner's
 // org. It batches into chunks of batchSize and runs them in parallel via

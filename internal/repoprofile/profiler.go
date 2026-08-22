@@ -31,7 +31,7 @@ const (
 // calls carry — the brain-side llmcred adapter minting short-lived STS creds
 // for a role-mode Bedrock org (nil in local/tests → Run's built-in
 // resolution).
-type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {

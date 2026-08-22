@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -301,16 +302,47 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 			return fmt.Errorf("load team settings: %w", err)
 		}
 		prevModel = teamSet.DefaultModel
-		if orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID); err == nil {
+		// The org row feeds two different things, and they tolerate a read
+		// failure differently. The max-tier cap only renders an advisory line
+		// after the save, so a failed read there costs a sentence. The provider
+		// check below decides whether the write happens at all, so the same
+		// failure has to stop it — see the abort inside.
+		orgSet, orgErr := tx.Orgs.GetSettings(r.Context(), orgID)
+		if orgErr == nil {
 			orgMaxTier = orgSet.MaxLLMModelTier
 		}
 		apply(&teamSet)
 		savedModel = teamSet.DefaultModel
+		// A default this team's next run would refuse is not a default worth
+		// storing, so the provider check happens here — inside the transaction,
+		// where both the org's connected providers and the team's restriction
+		// are already loaded. Only on a change: a save that re-sends a model
+		// stored before a credential was disconnected must not be blocked by
+		// something this caller did not do (that one is the dispatch's to
+		// refuse).
+		if savedModel != "" && savedModel != prevModel {
+			// A failed read is the check's input missing, not the check
+			// passing. Saving through it would persist a default the next
+			// dispatch refuses, and the caller would be told the save
+			// succeeded — so the write is abandoned and the caller retries.
+			// A missing org_settings row is not this case: the store answers
+			// that with the schema defaults, which resolve to an org holding
+			// no credential and therefore refuse nothing.
+			if orgErr != nil {
+				return fmt.Errorf("load org settings: %w", orgErr)
+			}
+			if e := modelaccess.Check(savedModel, orgSet, teamSet.AllowedProviders); e != nil {
+				return e
+			}
+		}
 		if saved, err = tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
 		return nil
 	}); err != nil {
+		if writeModelAccessError(w, err, "ai_model") {
+			return
+		}
 		internalError(w, "settings/team", err)
 		return
 	}

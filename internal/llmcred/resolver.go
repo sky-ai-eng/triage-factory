@@ -37,6 +37,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 )
 
 // Material is the neutral resolver result: the env-var map a consumer
@@ -101,23 +102,26 @@ type mintOptions struct {
 	networkBound bool
 }
 
-// ResolveForBundle resolves executor-bound Material for the conversation. Role
-// mode carries the network condition (TF_EXECUTOR_EGRESS_CIDRS /
+// ResolveForBundle resolves executor-bound Material for the conversation on
+// model. Role mode carries the network condition (TF_EXECUTOR_EGRESS_CIDRS /
 // TF_EXECUTOR_VPCE_IDS) and RoleSessionName = the conversation id
 // (per-conversation CloudTrail attribution on the customer's side).
 // Passthrough modes ignore conversationID and return the stored material
 // unchanged.
-func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, conversationID string) (Material, error) {
-	return r.resolve(ctx, orgID, mintOptions{sessionName: sessionNameForConversation(conversationID), networkBound: true})
+//
+// The bundle stays single-provider: one conversation runs on one model, which
+// names one provider, so exactly one provider's material is ever sealed.
+func (r *Resolver) ResolveForBundle(ctx context.Context, orgID, conversationID, model string) (Material, error) {
+	return r.resolve(ctx, orgID, model, mintOptions{sessionName: sessionNameForConversation(conversationID), networkBound: true})
 }
 
 // ResolveForSystem resolves brain-bound Material for a system consumer
-// (scorer / profiler / classifier / connect probe). Role mode carries NO
-// network condition — these execute from control-process egress — and the
+// (scorer / profiler / classifier / connect probe) on model. Role mode carries
+// NO network condition — these execute from control-process egress — and the
 // stable sessionName the caller passes (e.g. "tf-scorer") for CloudTrail
 // attribution. Passthrough modes return the stored material unchanged.
-func (r *Resolver) ResolveForSystem(ctx context.Context, orgID, sessionName string) (Material, error) {
-	return r.resolve(ctx, orgID, mintOptions{sessionName: clampSessionName(sanitizeSessionName(sessionName)), networkBound: false})
+func (r *Resolver) ResolveForSystem(ctx context.Context, orgID, sessionName, model string) (Material, error) {
+	return r.resolve(ctx, orgID, model, mintOptions{sessionName: clampSessionName(sanitizeSessionName(sessionName)), networkBound: false})
 }
 
 // IsRoleMode reports whether orgID is configured for Bedrock role mode
@@ -165,27 +169,37 @@ func (r *Resolver) ProbeRole(ctx context.Context, roleARN, externalID string) er
 	return err
 }
 
-func (r *Resolver) resolve(ctx context.Context, orgID string, opts mintOptions) (Material, error) {
-	roleARN, err := r.secrets.Get(ctx, orgID, integrations.KeyAWSRoleARN)
+func (r *Resolver) resolve(ctx context.Context, orgID, model string, opts mintOptions) (Material, error) {
+	// Which provider this run is on is agentproc's decision, not a second copy
+	// of it here: an org can hold an Anthropic key AND a Bedrock role at once,
+	// and minting STS credentials for a run whose model is served by Anthropic
+	// would hand it material its provider cannot use.
+	provider, err := agentproc.ProviderForRun(ctx, r.secrets, orgID, model)
 	if err != nil {
-		return Material{}, fmt.Errorf("llmcred: read role arn for org %s: %w", orgID, err)
+		return Material{}, err
 	}
-	if strings.TrimSpace(roleARN) != "" {
-		return r.mint(ctx, orgID, strings.TrimSpace(roleARN), opts)
+	if provider == modelcatalog.ProviderBedrock {
+		roleARN, err := r.secrets.Get(ctx, orgID, integrations.KeyAWSRoleARN)
+		if err != nil {
+			return Material{}, fmt.Errorf("llmcred: read role arn for org %s: %w", orgID, err)
+		}
+		if strings.TrimSpace(roleARN) != "" {
+			return r.mint(ctx, orgID, strings.TrimSpace(roleARN), model, opts)
+		}
 	}
 
 	// Passthrough: delegate to the exact env-map logic agentproc injects, so
 	// bearer / access_keys / Anthropic / local-ambient orgs resolve
 	// byte-for-byte as before this package existed (pinned by test).
-	env, err := agentproc.ResolveCredentialsForBundle(ctx, r.secrets, orgID)
+	env, err := agentproc.ResolveCredentialsForBundle(ctx, r.secrets, orgID, model)
 	if err != nil {
 		return Material{}, err
 	}
 	return Material{Env: env}, nil
 }
 
-func (r *Resolver) mint(ctx context.Context, orgID, roleARN string, opts mintOptions) (Material, error) {
-	key := cacheKey(orgID, opts)
+func (r *Resolver) mint(ctx context.Context, orgID, roleARN, model string, opts mintOptions) (Material, error) {
+	key := cacheKey(orgID, model, opts)
 	if m, ok := r.cachedFresh(key); ok {
 		return m, nil
 	}
@@ -244,6 +258,14 @@ func (r *Resolver) mint(ctx context.Context, orgID, roleARN string, opts mintOpt
 	if strings.TrimSpace(modelID) != "" {
 		env["ANTHROPIC_MODEL"] = strings.TrimSpace(modelID)
 	}
+	// The run's own model wins over the org's single pinned inference profile
+	// when the catalog names it as a Bedrock key: the model the caller picked
+	// is the model the org is billed for. The stored pin remains the answer for
+	// a caller that named no Bedrock model (the background jobs pass a CLI
+	// alias), which is what an org had before it could pick per run.
+	if p, ok := modelcatalog.ProviderFor(model); ok && p == modelcatalog.ProviderBedrock {
+		env["ANTHROPIC_MODEL"] = model
+	}
 	if strings.TrimSpace(baseURL) != "" {
 		env["ANTHROPIC_BEDROCK_BASE_URL"] = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	}
@@ -258,13 +280,15 @@ func (r *Resolver) mint(ctx context.Context, orgID, roleARN string, opts mintOpt
 // O(conversations)); brain-bound mints key on the stable session name
 // (one per org → O(orgs)). The networkBound flag is folded in so the two
 // flavors never share a cached credential (they carry different session
-// policies).
-func cacheKey(orgID string, opts mintOptions) string {
+// policies), and the model is folded in because it reaches the session policy
+// too — two models under one brain-bound session name would otherwise share a
+// credential scoped to whichever ran first.
+func cacheKey(orgID, model string, opts mintOptions) string {
 	bound := "sys"
 	if opts.networkBound {
 		bound = "exec"
 	}
-	return orgID + "|" + bound + "|" + opts.sessionName
+	return orgID + "|" + bound + "|" + opts.sessionName + "|" + model
 }
 
 func (r *Resolver) cachedFresh(key string) (Material, bool) {
@@ -314,12 +338,12 @@ func IsNoCredentials(err error) bool {
 // consumer keeps Run's built-in resolution, unchanged. A mint failure
 // surfaces from the returned func so the consumer skips just that org's cycle
 // (it never crashes the per-org loop).
-func SystemEnvResolver(r *Resolver, sessionName string) func(ctx context.Context, orgID string) (map[string]string, error) {
+func SystemEnvResolver(r *Resolver, sessionName string) func(ctx context.Context, orgID, model string) (map[string]string, error) {
 	if r == nil {
 		return nil
 	}
-	return func(ctx context.Context, orgID string) (map[string]string, error) {
-		mat, err := r.ResolveForSystem(ctx, orgID, sessionName)
+	return func(ctx context.Context, orgID, model string) (map[string]string, error) {
+		mat, err := r.ResolveForSystem(ctx, orgID, sessionName, model)
 		if err != nil {
 			return nil, err
 		}

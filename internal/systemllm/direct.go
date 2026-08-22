@@ -129,11 +129,19 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 // otherwise — else the raw secret store. Both return the same env-map shape
 // inference.ProviderCredentialsFromEnv consumes, so the provider branch is
 // unchanged either way.
+//
+// The model passed to either is empty on purpose. A model selects the provider
+// for a run the user configured, but these jobs are pinned by TF to one small
+// model that exists in every provider's vocabulary under a different spelling,
+// so their provider is whatever the org configured — and requestModel below
+// re-derives the right spelling from the credentials that resolution returned.
+// Naming the Anthropic spelling here would refuse to run the background jobs on
+// a Bedrock-only org.
 func resolveDirectCreds(ctx context.Context, opts CompleteOptions) (map[string]string, error) {
 	if opts.LLMResolver != nil {
-		return opts.LLMResolver(ctx, opts.OrgID)
+		return opts.LLMResolver(ctx, opts.OrgID, "")
 	}
-	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID)
+	return agentproc.ResolveCredentialsForBundle(ctx, opts.Secrets, opts.OrgID, "")
 }
 
 // mapDirectCreds resolves the env map onto provider credentials. The key's

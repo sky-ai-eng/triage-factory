@@ -57,8 +57,9 @@ export type GitHubAccessMode = 'app' | 'pat'
 export type GitHubAppSource = 'create' | 'existing'
 
 // The LLM provider a BYOK org connects with — Anthropic direct or Amazon
-// Bedrock. Mutually exclusive server-side (connecting one clears the other),
-// so the picker is a true either/or.
+// Bedrock. The picker chooses which credential this flow binds; an org may hold
+// both at once, and which one a run authenticates with is decided by the run's
+// model.
 export type ClaudeProvider = 'anthropic' | 'bedrock'
 
 export interface WizardState {

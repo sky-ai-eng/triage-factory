@@ -63,8 +63,12 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 	// LLM — the conversation id becomes the STS RoleSessionName for per-turn
 	// CloudTrail attribution, exactly like delegated conversations; fall back
 	// to raw-secret resolution when no llmcred resolver is wired.
+	model, err := m.conversationModel(ctx, orgID, conversationID)
+	if err != nil {
+		return err
+	}
 	if m.llm != nil {
-		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID, model)
 		if err != nil && !llmcred.IsNoCredentials(err) {
 			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (curator turn %s): %w", orgID, conversationID, err)
 		}
@@ -73,7 +77,7 @@ func (m *Manager) ProvisionForCuratorTurn(ctx context.Context, orgID, conversati
 			bundle.LLMExpiryUnix = mat.Expiry.Unix()
 		}
 	} else {
-		llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID)
+		llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID, model)
 		if err != nil && !errors.Is(err, agentproc.ErrNoCredentialsConfigured) {
 			return fmt.Errorf("credprovision: resolve LLM credentials for org %s: %w", orgID, err)
 		}

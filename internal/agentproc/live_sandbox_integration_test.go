@@ -89,7 +89,7 @@ func requireInteractiveSandbox(t *testing.T) (SecretsReader, string) {
 func prebuiltRunHarness(t *testing.T, secrets SecretsReader, orgID, conversationID string) (*sandbox.RunNetwork, []string, func()) {
 	t.Helper()
 	ctx := context.Background()
-	creds, err := resolveCredentials(ctx, secrets, orgID, nil)
+	creds, err := resolveCredentials(ctx, secrets, orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolve credentials: %v", err)
 	}

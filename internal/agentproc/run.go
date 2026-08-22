@@ -218,7 +218,12 @@ type RunOptions struct {
 	// LLMResolver keeps today's behavior in every mode. Set at the
 	// brain-side / all-local call sites (delegate, scorer, profiler,
 	// classifier); a mint failure surfaces here and the caller skips.
-	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
+	//
+	// It takes the run's model because the model is what selects the
+	// provider: an org holding both an Anthropic key and Bedrock material
+	// resolves whichever one serves this run's model, so a resolver handed
+	// only the org would have to guess.
+	LLMResolver func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 	// PrebuiltNetwork is the run network the caller stood up
 	// (sandbox.SetupRunNetwork) BEFORE calling Run, with the run's credential
@@ -963,7 +968,7 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 // go down with it. Shared by the one-shot Run and the interactive
 // RunInteractive so both spawn identically.
 func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string) (*exec.Cmd, error) {
-	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.LLMResolver)
+	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.Model, opts.LLMResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
 	}

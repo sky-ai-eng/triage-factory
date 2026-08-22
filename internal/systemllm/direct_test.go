@@ -483,7 +483,7 @@ func TestComplete_Direct_NoCredentialsConfigured(t *testing.T) {
 func TestComplete_Direct_ResolverReturnedNothing(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	opts := completeOpts("org-1", stubSecrets{})
-	opts.LLMResolver = func(context.Context, string) (map[string]string, error) {
+	opts.LLMResolver = func(context.Context, string, string) (map[string]string, error) {
 		return map[string]string{}, nil
 	}
 	_, err := NewRecorder(nil).Complete(context.Background(), opts)
@@ -617,7 +617,7 @@ func TestComplete_Direct_LLMResolverUsed(t *testing.T) {
 
 	opts := completeOpts("org-1", stubSecrets{}) // empty raw secrets
 	called := false
-	opts.LLMResolver = func(_ context.Context, orgID string) (map[string]string, error) {
+	opts.LLMResolver = func(_ context.Context, orgID, _ string) (map[string]string, error) {
 		called = true
 		if orgID != "org-1" {
 			t.Errorf("resolver got org %q", orgID)

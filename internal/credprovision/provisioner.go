@@ -36,7 +36,7 @@ import (
 // LLM material through — declared here so the provisioner's test can stub it
 // without a real STS minter. The production impl is *llmcred.Resolver.
 type llmResolver interface {
-	ResolveForBundle(ctx context.Context, orgID, conversationID string) (llmcred.Material, error)
+	ResolveForBundle(ctx context.Context, orgID, conversationID, model string) (llmcred.Material, error)
 }
 
 var log = slog.Default().With("component", "credprovision")
@@ -190,8 +190,12 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	// stored), so it fails the provision per PS-H5: no bundle is written,
 	// the executor's awaiting-credentials wait times out and requeues, and
 	// the error names AssumeRole + the role ARN (surfaced by llmcred).
+	model, err := m.conversationModel(ctx, orgID, conversationID)
+	if err != nil {
+		return err
+	}
 	if m.llm != nil {
-		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID)
+		mat, err := m.llm.ResolveForBundle(ctx, orgID, conversationID, model)
 		if err != nil && !llmcred.IsNoCredentials(err) {
 			return fmt.Errorf("credprovision: resolve LLM credentials for org %s (conversation %s): %w", orgID, conversationID, err)
 		}
@@ -200,7 +204,7 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 			bundle.LLMExpiryUnix = mat.Expiry.Unix()
 		}
 	} else {
-		llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID)
+		llm, err := agentproc.ResolveCredentialsForBundle(ctx, agentproc.NewSystemSecretsReader(m.stores.Secrets), orgID, model)
 		if err != nil && !errors.Is(err, agentproc.ErrNoCredentialsConfigured) {
 			return fmt.Errorf("credprovision: resolve LLM credentials for org %s: %w", orgID, err)
 		}
@@ -246,6 +250,26 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	log.Debug("provisioned claim credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
 	span.SetAttributes(telemetry.Outcome("sealed"))
 	return nil
+}
+
+// conversationModel reads the model the conversation runs on. It is the
+// provider selector for every bundle this package seals: the model names its
+// provider, so a conversation on a Bedrock key seals Bedrock material and one
+// on an Anthropic key seals the Anthropic key — never both, and never the org's
+// preferred provider over the conversation's own.
+//
+// A read failure is propagated rather than degraded to "no model". Resolving
+// without one falls back to the org's configured provider, which for an org
+// holding both would seal material this conversation may not be able to use.
+func (m *Manager) conversationModel(ctx context.Context, orgID, conversationID string) (string, error) {
+	conv, err := m.stores.Conversations.GetSystem(ctx, orgID, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("credprovision: read conversation %s: %w", conversationID, err)
+	}
+	if conv == nil {
+		return "", fmt.Errorf("credprovision: conversation %s not found while resolving its model", conversationID)
+	}
+	return conv.Model, nil
 }
 
 // resolveGitHub resolves the conversation's GitHub credential: nil when the org has

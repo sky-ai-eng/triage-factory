@@ -365,6 +365,15 @@ func (s *Spawner) Delegate(task domain.Task, opts DelegateOpts) (string, error) 
 			Brief:        st.Brief,
 		}
 	}
+	// Refuse a firing whose models this org/team cannot run — a provider the org
+	// never connected, or one an org admin restricted this team from. Here,
+	// because this is the last point before the commit: the plan's pins are
+	// resolved and nothing durable has been written, so the refusal leaves no
+	// blueprint_run to reap and nothing to retry.
+	if err := s.checkModelProviders(bgCtx, orgID, teamID, blueprintModels(model, stepPlan)); err != nil {
+		return "", err
+	}
+
 	brRow := domain.BlueprintRun{
 		ID:                blueprintRunID,
 		BlueprintID:       blueprint.ID,

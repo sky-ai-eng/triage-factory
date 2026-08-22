@@ -400,6 +400,22 @@ type TeamSettings struct {
 	// prompt author must not be able to opt their conversations out of the team's gate.
 	ReviewPosture string
 
+	// AllowedProviders restricts which inference providers this team may spend
+	// against — an org admin's decision, stored as modelcatalog provider ids.
+	// Empty (the default) is no restriction: every provider the org configured.
+	//
+	// Org-admin-configured, like MaxDailyCostUSD and for the same reason: a team
+	// admin who could widen their own team's restriction would not be restricted.
+	// The team-settings write path never populates this field from its request
+	// body, so a team-admin save round-trips the stored value untouched; only the
+	// org-admin write changes it.
+	//
+	// It is forward-acting. Restricting a team does not rewrite the model already
+	// pinned on its prompts or stored as its default — those are caught at the
+	// next dispatch, which refuses by name rather than substituting a model
+	// nobody chose.
+	AllowedProviders []string
+
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read
 	// by the per-run git-proxy ref gate (with the pre-push hook as a no-proxy

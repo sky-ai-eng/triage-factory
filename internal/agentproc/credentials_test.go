@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -46,7 +47,7 @@ func TestResolveCredentials_AnthropicConfigured(t *testing.T) {
 		"anthropic_api_key": "sk-ant-org1",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestResolveCredentials_BedrockConfigured(t *testing.T) {
 		"aws_region":            "us-west-2",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -92,31 +93,158 @@ func TestResolveCredentials_BedrockConfigured(t *testing.T) {
 	}
 }
 
-// TestResolveCredentials_AnthropicWinsOverBedrock pins resolver
-// precedence: when both paths are populated (malformed config that
-// slipped past the admin-UI exclusivity gate), Anthropic wins. Picks
-// one rather than erroring so a half-configured org can still run.
-func TestResolveCredentials_AnthropicWinsOverBedrock(t *testing.T) {
+// anthropicCatalogKey / bedrockCatalogKey are offered models served by each
+// provider. Read from the catalog rather than written down, so these tests
+// exercise the real selection rather than a spelling that only exists here.
+var (
+	anthropicCatalogKey = catalogKeyFor(modelcatalog.ProviderAnthropic)
+	bedrockCatalogKey   = catalogKeyFor(modelcatalog.ProviderBedrock)
+)
+
+func catalogKeyFor(provider string) string {
+	for _, e := range modelcatalog.Entries() {
+		if e.Provider == provider {
+			return e.Key
+		}
+	}
+	return ""
+}
+
+// The model selects the provider — the whole point of concurrent credentials.
+// An org holding both is not asked which it prefers: each run resolves the
+// material its own model is served by.
+func TestResolveCredentials_ModelSelectsProviderWhenBothConfigured(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	const orgID = "33333333-3333-3333-3333-333333333333"
-	secrets := newFakeSecrets(orgID, map[string]string{
+	both := map[string]string{
 		"anthropic_api_key":        "sk-ant-both",
 		"aws_bearer_token_bedrock": "bedrock-bearer-both",
-		"aws_access_key_id":        "AKIA-both",
-		"aws_secret_access_key":    "secret-both",
+		"aws_region":               "us-east-1",
+	}
+
+	t.Run("anthropic model", func(t *testing.T) {
+		env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, both), orgID, anthropicCatalogKey, nil)
+		if err != nil {
+			t.Fatalf("resolveCredentials: %v", err)
+		}
+		if env["ANTHROPIC_API_KEY"] != "sk-ant-both" {
+			t.Errorf("ANTHROPIC_API_KEY = %q, want sk-ant-both", env["ANTHROPIC_API_KEY"])
+		}
+		for _, k := range []string{"AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_USE_BEDROCK"} {
+			if _, ok := env[k]; ok {
+				t.Errorf("env[%s] set for an Anthropic model; the material must be single-provider", k)
+			}
+		}
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	t.Run("bedrock model", func(t *testing.T) {
+		env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, both), orgID, bedrockCatalogKey, nil)
+		if err != nil {
+			t.Fatalf("resolveCredentials: %v", err)
+		}
+		if env["AWS_BEARER_TOKEN_BEDROCK"] != "bedrock-bearer-both" {
+			t.Errorf("AWS_BEARER_TOKEN_BEDROCK = %q, want bedrock-bearer-both", env["AWS_BEARER_TOKEN_BEDROCK"])
+		}
+		if env["CLAUDE_CODE_USE_BEDROCK"] != "1" {
+			t.Errorf("CLAUDE_CODE_USE_BEDROCK = %q, want 1", env["CLAUDE_CODE_USE_BEDROCK"])
+		}
+		if env["ANTHROPIC_MODEL"] != bedrockCatalogKey {
+			t.Errorf("ANTHROPIC_MODEL = %q, want the run's own model %q", env["ANTHROPIC_MODEL"], bedrockCatalogKey)
+		}
+		if _, ok := env["ANTHROPIC_API_KEY"]; ok {
+			t.Error("ANTHROPIC_API_KEY set for a Bedrock model; the material must be single-provider")
+		}
+	})
+}
+
+// A run whose model is served by a provider the org has not connected is
+// refused by name. No substitution: the other provider's credential is right
+// there and must not be used.
+func TestResolveCredentials_ModelProviderNotConnected(t *testing.T) {
+	for _, mode := range []runmode.Mode{runmode.ModeMulti, runmode.ModeLocal} {
+		t.Run(string(mode), func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			const orgID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			secrets := newFakeSecrets(orgID, map[string]string{"anthropic_api_key": "sk-ant-only"})
+
+			_, err := resolveCredentials(context.Background(), secrets, orgID, bedrockCatalogKey, nil)
+			if !errors.Is(err, ErrProviderNotConfigured) {
+				t.Fatalf("err = %v, want ErrProviderNotConfigured", err)
+			}
+			if !strings.Contains(err.Error(), modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock)) {
+				t.Errorf("error %q does not name the provider the admin has to connect", err)
+			}
+			if errors.Is(err, ErrNoCredentialsConfigured) {
+				t.Errorf("err = %v, mis-classified as 'org has nothing configured' — this org can run, this model cannot", err)
+			}
+		})
+	}
+}
+
+// An org that configured nothing has nothing to select between, so local keeps
+// its zero-config subscription path whatever model the run names — the host env
+// is the credential there.
+func TestResolveCredentials_LocalAmbientIgnoresTheModel(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	secrets := newFakeSecrets(runmode.LocalDefaultOrgID, map[string]string{})
+
+	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, bedrockCatalogKey, nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
-	if env["ANTHROPIC_API_KEY"] != "sk-ant-both" {
-		t.Errorf("ANTHROPIC_API_KEY = %q, want sk-ant-both", env["ANTHROPIC_API_KEY"])
+	if len(env) != 0 {
+		t.Errorf("env = %v, want empty (host subscription fallback)", env)
 	}
-	for _, k := range []string{"AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK", "CLAUDE_CODE_USE_BEDROCK"} {
-		if _, ok := env[k]; ok {
-			t.Errorf("env[%s] set when Anthropic configured; Anthropic should win exclusively", k)
-		}
+}
+
+// A caller that names no catalog model — the background jobs pass a Claude Code
+// CLI alias — has expressed no provider, so the org's single configured one
+// answers, and the documented precedence breaks a tie.
+func TestProviderForRun_UnnamedModelFollowsPrecedence(t *testing.T) {
+	cases := []struct {
+		name       string
+		configured map[string]bool
+		model      string
+		want       string
+	}{
+		{"bedrock only", map[string]bool{modelcatalog.ProviderBedrock: true}, "haiku", modelcatalog.ProviderBedrock},
+		{"anthropic only", map[string]bool{modelcatalog.ProviderAnthropic: true}, "", modelcatalog.ProviderAnthropic},
+		{
+			"both configured",
+			map[string]bool{modelcatalog.ProviderAnthropic: true, modelcatalog.ProviderBedrock: true},
+			"haiku", modelcatalog.ProviderAnthropic,
+		},
+		{"nothing configured", map[string]bool{}, "haiku", ""},
+		{
+			"a named model outranks what the org configured",
+			map[string]bool{modelcatalog.ProviderAnthropic: true},
+			bedrockCatalogKey, modelcatalog.ProviderBedrock,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := providerForRun(tc.model, tc.configured); got != tc.want {
+				t.Errorf("providerForRun(%q) = %q, want %q", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// Role mode stores no Bedrock secret at all, so a caller that only looked for a
+// key would send an admin to connect Bedrock a second time.
+func TestConfiguredProviders_RoleModeCountsAsBedrock(t *testing.T) {
+	const orgID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	secrets := newFakeSecrets(orgID, map[string]string{"aws_role_arn": "arn:aws:iam::1:role/tf"})
+
+	got, err := configuredProviders(context.Background(), secrets, orgID)
+	if err != nil {
+		t.Fatalf("configuredProviders: %v", err)
+	}
+	if !got[modelcatalog.ProviderBedrock] {
+		t.Errorf("configuredProviders = %v, want Bedrock configured for a role-mode org", got)
+	}
+	if got[modelcatalog.ProviderAnthropic] {
+		t.Errorf("configuredProviders = %v, want Anthropic absent", got)
 	}
 }
 
@@ -134,7 +262,7 @@ func TestResolveCredentials_BedrockAPIKeyPath(t *testing.T) {
 		"bedrock_model_id":         "us.anthropic.claude-sonnet-4-6",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -172,7 +300,7 @@ func TestResolveCredentials_BedrockBearerWinsOverTriple(t *testing.T) {
 		"aws_secret_access_key":    "secret-loses",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -209,7 +337,7 @@ func TestResolveCredentials_BedrockEndpointOverride(t *testing.T) {
 	for name, kv := range cases {
 		t.Run(name, func(t *testing.T) {
 			const orgID = "99999999-9999-9999-9999-999999999999"
-			env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, kv), orgID, nil)
+			env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, kv), orgID, "", nil)
 			if err != nil {
 				t.Fatalf("resolveCredentials: %v", err)
 			}
@@ -225,7 +353,7 @@ func TestResolveCredentials_BedrockEndpointOverride(t *testing.T) {
 	env, err := resolveCredentials(context.Background(), newFakeSecrets(orgID, map[string]string{
 		"aws_access_key_id":     "AKIA-test",
 		"aws_secret_access_key": "secret-test",
-	}), orgID, nil)
+	}), orgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials (no override): %v", err)
 	}
@@ -245,16 +373,16 @@ func TestResolveCredentials_PartialBedrockIsNotConfigured(t *testing.T) {
 		"aws_access_key_id": "AKIA-partial",
 	})
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
-	if !errors.Is(err, ErrNoCredentialsConfigured) {
-		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap", err)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
+	if !errors.Is(err, ErrProviderNotConfigured) {
+		t.Fatalf("err = %v, want ErrProviderNotConfigured (an access key with no secret is a malformed Bedrock config, not an unconfigured org)", err)
 	}
 }
 
 func TestResolveCredentials_EmptyOrgIDLocalMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 
-	env, err := resolveCredentials(context.Background(), nil, "", nil)
+	env, err := resolveCredentials(context.Background(), nil, "", "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials(local, empty): %v", err)
 	}
@@ -266,7 +394,7 @@ func TestResolveCredentials_EmptyOrgIDLocalMode(t *testing.T) {
 func TestResolveCredentials_EmptyOrgIDMultiMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 
-	_, err := resolveCredentials(context.Background(), nil, "", nil)
+	_, err := resolveCredentials(context.Background(), nil, "", "", nil)
 	if !errors.Is(err, ErrNoCredentialsConfigured) {
 		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap (multi mode refuses empty orgID)", err)
 	}
@@ -277,7 +405,7 @@ func TestResolveCredentials_MultiModeOrgWithNoKey(t *testing.T) {
 	const orgID = "55555555-5555-5555-5555-555555555555"
 	secrets := newFakeSecrets(orgID, map[string]string{}) // empty vault row
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if !errors.Is(err, ErrNoCredentialsConfigured) {
 		t.Fatalf("err = %v, want ErrNoCredentialsConfigured wrap", err)
 	}
@@ -294,7 +422,7 @@ func TestResolveCredentials_LocalModeOrgWithKey(t *testing.T) {
 		"anthropic_api_key": "sk-ant-local-configured",
 	})
 
-	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, nil)
+	env, err := resolveCredentials(context.Background(), secrets, runmode.LocalDefaultOrgID, "", nil)
 	if err != nil {
 		t.Fatalf("resolveCredentials: %v", err)
 	}
@@ -309,7 +437,7 @@ func TestResolveCredentials_SecretReadErrorPropagates(t *testing.T) {
 	want := errors.New("vault unavailable")
 	secrets := &fakeSecrets{err: want}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err == nil {
 		t.Fatal("err = nil, want propagated secret-read failure")
 	}
@@ -445,7 +573,7 @@ func TestResolveCredentials_OptionalAnthropicFieldErrorsPropagate(t *testing.T) 
 		errForKey: errors.New("vault transient"),
 	}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err == nil {
 		t.Fatal("optional field error swallowed; resolver should propagate")
 	}
@@ -471,7 +599,7 @@ func TestResolveCredentials_OptionalBedrockFieldErrorsPropagate(t *testing.T) {
 		errForKey: errors.New("vault transient"),
 	}
 
-	_, err := resolveCredentials(context.Background(), secrets, orgID, nil)
+	_, err := resolveCredentials(context.Background(), secrets, orgID, "", nil)
 	if err == nil {
 		t.Fatal("optional Bedrock field error swallowed; resolver should propagate")
 	}
@@ -511,13 +639,16 @@ func TestResolveCredentials_LLMResolverPreferredOverRawPath(t *testing.T) {
 	const orgID = "22222222-2222-2222-2222-222222222222"
 	// A bag with NO anthropic/bedrock key — the raw path would error here.
 	secrets := newFakeSecrets(orgID, map[string]string{"aws_role_arn": "arn:aws:iam::1:role/r"})
-	resolver := func(_ context.Context, gotOrg string) (map[string]string, error) {
+	resolver := func(_ context.Context, gotOrg, gotModel string) (map[string]string, error) {
 		if gotOrg != orgID {
 			t.Errorf("resolver got org %q, want %q", gotOrg, orgID)
 		}
+		if gotModel != bedrockCatalogKey {
+			t.Errorf("resolver got model %q, want the run's %q", gotModel, bedrockCatalogKey)
+		}
 		return map[string]string{"AWS_ACCESS_KEY_ID": "ASIA-minted", "CLAUDE_CODE_USE_BEDROCK": "1"}, nil
 	}
-	env, err := resolveCredentials(context.Background(), secrets, orgID, resolver)
+	env, err := resolveCredentials(context.Background(), secrets, orgID, bedrockCatalogKey, resolver)
 	if err != nil {
 		t.Fatalf("resolveCredentials with resolver: %v", err)
 	}
