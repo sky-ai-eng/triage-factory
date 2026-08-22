@@ -530,11 +530,33 @@ func TestModelTest_LocalModeRefuses(t *testing.T) {
 
 // A multi-mode pod that never had the prober wired says so as a configuration
 // fault, not as a 500 — and never panics on the nil.
+//
+// Both nils are covered because they are different bugs with the same symptom.
+// A nil GETTER is the unit-test shape. A getter that RETURNS nil is the live
+// one: routes register during buildServer and SetModelProber runs afterwards,
+// so the closure over s.modelProber hands back a nil interface until it does —
+// and calling Probe on that panics rather than 409ing.
 func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
-	rig := newAvailabilityRig(t)
-	rig.mdh.prober = nil
-	rec := rig.test(t, rig.admin, modelKeyOn(t, modelcatalog.ProviderAnthropic))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	for name, wire := range map[string]func(*modelsHandler){
+		"nil_getter":         func(h *modelsHandler) { h.prober = nil },
+		"getter_returns_nil": func(h *modelsHandler) { h.prober = func() modelProber { return nil } },
+		"getter_returns_nil_ptr": func(h *modelsHandler) {
+			// The shape server.go actually builds: a closure over a field that
+			// is still the interface's zero value.
+			var unset modelProber
+			h.prober = func() modelProber { return unset }
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newAvailabilityRig(t)
+			wire(rig.mdh)
+			if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusConflict {
+				t.Errorf("single test = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+			}
+			if rec := rig.sweep(t, rig.admin, modelcatalog.ProviderAnthropic); rec.Code != http.StatusConflict {
+				t.Errorf("sweep = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }

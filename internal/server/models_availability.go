@@ -353,14 +353,29 @@ func (h *modelsHandler) requireProbing(w http.ResponseWriter) (modelProber, bool
 		})
 		return nil, false
 	}
+	// Both nils mean the same thing and both must be caught here: the getter
+	// itself is nil in a unit test that never set it, and the getter RETURNS
+	// nil on a pod where SetModelProber has not run — routes register before
+	// the app injects the seam, so the second case is the live one. Checking
+	// only the getter would hand runProbe a nil interface to call.
 	if h.prober == nil {
-		// A serving pod that never had the credential seam wired. Deployment
-		// shape, not a transient outage.
-		writeNotConfigured(w, "this deployment has no model prober configured")
+		writeNotConfigured(w, noProberConfigured)
 		return nil, false
 	}
-	return h.prober(), true
+	prober := h.prober()
+	if prober == nil {
+		// A serving pod that never had the credential seam wired. Deployment
+		// shape, not a transient outage.
+		writeNotConfigured(w, noProberConfigured)
+		return nil, false
+	}
+	return prober, true
 }
+
+// noProberConfigured is the one message both nil arms answer with. They are the
+// same fact to a caller — this deployment cannot probe — and two spellings
+// would only invite a client to tell them apart.
+const noProberConfigured = "this deployment has no model prober configured"
 
 // offeredModel resolves a {model_key} path segment against the catalog. A key
 // this build does not offer is a 404: the addressed resource does not exist,

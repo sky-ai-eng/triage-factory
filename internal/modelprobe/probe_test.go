@@ -341,9 +341,11 @@ func TestProbe_RecordsItsSpend(t *testing.T) {
 	}
 }
 
-// A refused probe is billed too — the request went out and the provider
-// answered it — so it lands in the ledger flagged as an error rather than
-// vanishing from the org's spend.
+// A probe that does not come back with a completion still lands in the ledger,
+// flagged is_error and stamped at zero — which is the TRUE cost, since a
+// request rejected at the door consumes nothing. The row is what lets an
+// operator see probes failing at all; without it a provider refusing every
+// model would leave no trace anywhere but the availability table.
 func TestProbe_RecordsARefusedCall(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	srv := httptest.NewServer(&fakeProvider{
@@ -367,6 +369,40 @@ func TestProbe_RecordsARefusedCall(t *testing.T) {
 	rows := store.Rows()
 	if len(rows) != 1 || !rows[0].IsError {
 		t.Fatalf("ledger rows = %+v, want one flagged is_error", rows)
+	}
+	if rows[0].TotalCostUSD != 0 || rows[0].InputTokens != 0 || rows[0].OutputTokens != 0 {
+		t.Errorf("refused probe recorded %v USD / %d in / %d out, want zeros — the provider rejected it before inference",
+			rows[0].TotalCostUSD, rows[0].InputTokens, rows[0].OutputTokens)
+	}
+	if rows[0].Model != anthropicEntry(t).Key {
+		t.Errorf("model = %q, want the probed key even on a failure", rows[0].Model)
+	}
+}
+
+// The same holds for a probe nobody answered: an attempt that reached no
+// verdict is still an attempt, and its row says so at zero rather than being
+// dropped. This is the ledger's half of "an inconclusive writes nothing" — it
+// writes no AVAILABILITY row; the attempt itself is still accounted for.
+func TestProbe_RecordsAnInconclusiveCall(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	srv := httptest.NewServer(&fakeProvider{status: http.StatusInternalServerError})
+	t.Cleanup(srv.Close)
+
+	secrets := stubSecrets{
+		"org-1/anthropic_api_key":  "sk-ant-probe",
+		"org-1/anthropic_base_url": srv.URL,
+	}
+	store := &recordingStore{}
+	res, err := New(secrets, nil, systemllm.NewRecorder(store)).Probe(t.Context(), "org-1", anthropicEntry(t))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if res.Verdict != VerdictInconclusive {
+		t.Fatalf("verdict = %q, want %q", res.Verdict, VerdictInconclusive)
+	}
+	rows := store.Rows()
+	if len(rows) != 1 || !rows[0].IsError || rows[0].TotalCostUSD != 0 {
+		t.Errorf("ledger rows = %+v, want one is_error row stamped at zero", rows)
 	}
 }
 

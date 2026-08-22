@@ -169,11 +169,24 @@ func (p *Prober) resolveCredentials(ctx context.Context, orgID, model string) (m
 	return agentproc.ResolveCredentialsForBundle(ctx, p.secrets, orgID, model)
 }
 
-// record lands the probe's spend in system_llm_runs under job=probe, so it
+// record lands one system_llm_runs row per probe under job=probe, so a probe
 // appears under system_overhead in usage like every other call TF makes for
-// itself. A probe is tiny — two tokens — but it is a real charge on the org's
-// bill, and an unexplained charge is exactly what the confirm dialog exists to
-// prevent.
+// itself. A successful one is tiny — a couple of tokens — but it is a real
+// charge on the org's bill, and an unexplained charge is exactly what the
+// confirm dialog exists to prevent.
+//
+// A call that produced no completion still gets a row, with zero tokens, zero
+// cost and is_error set. That is not a missing cost stamp: a request rejected
+// at the door (401/403/404) or one that never got an answer consumed nothing,
+// so zero is the true figure, and the row is what lets an operator see probes
+// failing at all. Recording the attempt rather than only the charge is the
+// same contract the three background jobs hold.
+//
+// One bound worth naming: a stream that fails PART WAY through returns no
+// completion, so tokens already generated are not counted here. That is a
+// property of the neutral streaming layer — the native loop and the system
+// jobs lose the same usage on the same failure — and for a one-token probe
+// the amount at stake is a rounding error.
 //
 // Priced on the catalog key, which is guaranteed to carry a price: the catalog
 // join drops any entry the datasheet cannot price, so a model that reached
