@@ -4,15 +4,28 @@ import Checkbox from '../checkbox/Checkbox'
 import './status-rules.css'
 
 export type StatusColumnId = 'ready' | 'inprogress' | 'review' | 'done'
-export type StatusRule = { members: string[]; primary: string | null }
+/** One status as the board holds it: the identity rules are keyed on, and the
+ *  label a human reads. Two statuses can share a label — Jira permits it
+ *  across issue types — but never an id, which is why every membership,
+ *  drag payload and ★ comparison below runs on the id. */
+export type StatusItem = { id: string; label: string }
+/** primary is a member's ID — the ★, the status TF writes back. Always null
+ *  on `ready`, which TF only ever reads from. */
+export type StatusRule = { members: StatusItem[]; primary: string | null }
 export type StatusMap = Record<StatusColumnId, StatusRule>
 export type JiraProject = { key: string; name: string; count: number; watched?: boolean }
 
 export type StatusRulesProps = {
-  /** The mapping to open with. Defaults to a worked example. */
-  map?: StatusMap | null
+  /** The mapping. With `onChange` this is the board (controlled); without it,
+   *  only the opening state of a board that poses itself — the demo mode.
+   *  Defaults to a worked example. */
+  value?: StatusMap | null
+  /** Reports the next map after every gesture — a drag landing, a ★ move, a
+   *  suggested mapping. Supplying it makes the board controlled: nothing is
+   *  stored inside, and what renders is exactly `value`. */
+  onChange?: (next: StatusMap) => void
   /** Every status the project has. Anything unmapped shows in the tray. */
-  statuses?: string[] | null
+  statuses?: StatusItem[] | null
   /** The project catalog the picker searches. Already permission-scoped. */
   projects?: JiraProject[] | null
   /** Show the project picker above the board. Off on a team sheet. */
@@ -38,7 +51,9 @@ export type StatusRulesProps = {
 // menu, so adding and removing are one verb in two directions. The tray takes
 // the height the columns are not using, up to three rows, then scrolls.
 
-const STATUSES = [
+/** Demo vocabulary: id = label, because a worked example needs no second axis. */
+const demoItem = (label: string): StatusItem => ({ id: label, label })
+const STATUSES: StatusItem[] = [
   'Backlog',
   'Selected for Dev',
   'Ready',
@@ -50,7 +65,7 @@ const STATUSES = [
   'Done',
   'Closed',
   'Won\u2019t Do',
-]
+].map(demoItem)
 const COLS: Array<[StatusColumnId, string]> = [
   ['ready', 'READY'],
   ['inprogress', 'IN PROGRESS'],
@@ -58,10 +73,10 @@ const COLS: Array<[StatusColumnId, string]> = [
   ['done', 'DONE'],
 ]
 const DEFAULT_MAP: StatusMap = {
-  ready: { members: ['Ready', 'Selected for Dev'], primary: 'Ready' },
-  inprogress: { members: ['In Progress'], primary: 'In Progress' },
-  review: { members: ['In Review', 'Code Review'], primary: 'In Review' },
-  done: { members: ['Done', 'Closed'], primary: 'Done' },
+  ready: { members: ['Ready', 'Selected for Dev'].map(demoItem), primary: null },
+  inprogress: { members: [demoItem('In Progress')], primary: 'In Progress' },
+  review: { members: ['In Review', 'Code Review'].map(demoItem), primary: 'In Review' },
+  done: { members: ['Done', 'Closed'].map(demoItem), primary: 'Done' },
 }
 const EMPTY_MAP: StatusMap = {
   ready: { members: [], primary: null },
@@ -134,7 +149,8 @@ const activates = (e: KeyboardEvent) => {
 }
 
 export function StatusRules({
-  map = null,
+  value = null,
+  onChange,
   statuses = null,
   projects = null,
   showProjects = true,
@@ -148,15 +164,22 @@ export function StatusRules({
   const readonly = !interactive
   const all = statuses || STATUSES
   const catalog = projects || PROJECTS
-  const [rules, setRules] = useState<StatusMap>(() =>
-    JSON.parse(JSON.stringify(map || DEFAULT_MAP)),
+  // Controlled when the caller listens, self-posing when it does not — the
+  // <input> convention. selfRules only ever moves in the second mode.
+  const [selfRules, setSelfRules] = useState<StatusMap>(() =>
+    JSON.parse(JSON.stringify(value || DEFAULT_MAP)),
   )
+  const rules = onChange ? (value ?? EMPTY_MAP) : selfRules
+  const apply = (next: StatusMap) => {
+    if (onChange) onChange(next)
+    else setSelfRules(next)
+  }
   const [building, setBuilding] = useState(build)
   const [query, setQuery] = useState('')
-  const [staged, setStaged] = useState<string | null>(null)
+  const [staged, setStaged] = useState<StatusItem | null>(null)
   const [peek, setPeek] = useState<{
     col: string
-    name: string
+    label: string
     canonical: boolean
     x: number
     y: number
@@ -242,7 +265,7 @@ export function StatusRules({
   )
   const [pq, setPq] = useState('')
   const [allChips, setAllChips] = useState(false)
-  const chip = useRef<{ name: string; col: StatusColumnId | null } | null>(null)
+  const chip = useRef<{ item: StatusItem; col: StatusColumnId | null } | null>(null)
   const scrollers = useRef<Record<string, HTMLElement | null>>({})
 
   // A column that scrolls says so by fading its last chip out — a mask, not a
@@ -284,11 +307,14 @@ export function StatusRules({
     return () => window.removeEventListener('resize', gauge)
   })
 
-  const used: string[] = []
-  for (const k of Object.keys(rules) as StatusColumnId[]) used.push(...rules[k].members)
-  const pool = all.filter((n) => used.indexOf(n) < 0)
-  const shown = query ? pool.filter((n) => n.toLowerCase().indexOf(query.toLowerCase()) >= 0) : pool
-  const boardEmpty = used.length === 0
+  const used = new Set<string>()
+  for (const k of Object.keys(rules) as StatusColumnId[])
+    for (const m of rules[k].members) used.add(m.id)
+  const pool = all.filter((i) => !used.has(i.id))
+  const shown = query
+    ? pool.filter((i) => i.label.toLowerCase().indexOf(query.toLowerCase()) >= 0)
+    : pool
+  const boardEmpty = used.size === 0
   // Nothing left to map: the tray keeps a shallow band so a chip dragged out of
   // a column still has somewhere to land, and drops the filter and the chip
   // area it no longer holds.
@@ -296,49 +322,46 @@ export function StatusRules({
 
   // to === null means the tray: a status that leaves every column is unmapped,
   // not deleted, so it stays visible and can come back.
-  const move = useCallback(
-    (name: string, from: StatusColumnId | null, to: StatusColumnId | null) => {
-      if (from === to) return
-      setRules((r) => {
-        const next: StatusMap = JSON.parse(JSON.stringify(r))
-        // Strip it from every column, not just the one it was dragged from: a
-        // status belongs to exactly one column, and a staged tray chip has no
-        // origin to trust.
-        for (const k of Object.keys(next) as StatusColumnId[]) {
-          if (k === to) continue
-          if (next[k].members.indexOf(name) < 0) continue
-          next[k].members = next[k].members.filter((m) => m !== name)
-          // A column whose primary just left needs a new one, or the write target
-          // silently becomes nothing.
-          if (next[k].primary === name) next[k].primary = next[k].members[0] || null
-        }
-        if (to && next[to]) {
-          if (next[to].members.indexOf(name) < 0) next[to].members.push(name)
-          if (!next[to].primary) next[to].primary = name
-        }
-        return next
-      })
-    },
-    [],
-  )
+  const move = (moved: StatusItem, from: StatusColumnId | null, to: StatusColumnId | null) => {
+    if (from === to) return
+    const next: StatusMap = JSON.parse(JSON.stringify(rules))
+    // Strip it from every column, not just the one it was dragged from: a
+    // status belongs to exactly one column, and a staged tray chip has no
+    // origin to trust.
+    for (const k of Object.keys(next) as StatusColumnId[]) {
+      if (k === to) continue
+      if (!next[k].members.some((m) => m.id === moved.id)) continue
+      next[k].members = next[k].members.filter((m) => m.id !== moved.id)
+      // A column whose primary just left needs a new one, or the write target
+      // silently becomes nothing.
+      if (next[k].primary === moved.id) next[k].primary = next[k].members[0]?.id ?? null
+    }
+    if (to && next[to]) {
+      if (!next[to].members.some((m) => m.id === moved.id)) next[to].members.push(moved)
+      // `ready` never mints a ★: TF reads work out of it and never writes it.
+      if (to !== 'ready' && !next[to].primary) next[to].primary = moved.id
+    }
+    apply(next)
+  }
 
-  const suggest = useCallback(() => {
+  const suggest = () => {
     const next: StatusMap = JSON.parse(JSON.stringify(EMPTY_MAP))
-    for (const name of all) {
+    for (const item of all) {
       for (const [col, re] of GUESS) {
-        if (re.test(name)) {
-          next[col].members.push(name)
+        if (re.test(item.label)) {
+          next[col].members.push(item)
           break
         }
       }
     }
     for (const k of Object.keys(next) as StatusColumnId[]) {
+      if (k === 'ready') continue
       const m = next[k].members
-      next[k].primary = m.indexOf(PREFERRED[k]) >= 0 ? PREFERRED[k] : m[0] || null
+      next[k].primary = (m.find((i) => i.label === PREFERRED[k]) ?? m[0])?.id ?? null
     }
-    setRules(next)
+    apply(next)
     setStaged(null)
-  }, [all])
+  }
 
   const land = (id: StatusColumnId) => {
     if (staged) {
@@ -348,12 +371,11 @@ export function StatusRules({
     }
     return false
   }
-  const setPrimary = (id: StatusColumnId, name: string) => {
-    setRules((r) => {
-      const next: StatusMap = JSON.parse(JSON.stringify(r))
-      next[id].primary = name
-      return next
-    })
+  const setPrimary = (id: StatusColumnId, memberId: string) => {
+    if (id === 'ready') return
+    const next: StatusMap = JSON.parse(JSON.stringify(rules))
+    next[id].primary = memberId
+    apply(next)
   }
 
   const on = catalog.filter((p) => watched.indexOf(p.key) >= 0)
@@ -510,7 +532,7 @@ export function StatusRules({
               style={{ '--at': colAt.toFixed(3) + 's' } as CSSProperties}
               role={staged && !readonly ? 'button' : undefined}
               tabIndex={colTab()}
-              aria-label={staged ? 'Put ' + staged + ' in ' + label : undefined}
+              aria-label={staged ? 'Put ' + staged.label + ' in ' + label : undefined}
               onDragOver={(e) => {
                 if (readonly) return
                 e.preventDefault()
@@ -526,7 +548,7 @@ export function StatusRules({
                 if (readonly) return
                 e.preventDefault()
                 setOverCol(null)
-                if (chip.current) move(chip.current.name, chip.current.col, id)
+                if (chip.current) move(chip.current.item, chip.current.col, id)
                 chip.current = null
               }}
               onClick={() => land(id)}
@@ -546,11 +568,16 @@ export function StatusRules({
                 }}
                 onScroll={gauge}
               >
-                {rule.members.map((name, si) => {
-                  const canonical = rule.primary === name
+                {rule.members.map((m, si) => {
+                  const canonical = rule.primary === m.id
+                  // `ready` chips carry no ★ affordance at all — TF reads work
+                  // out of that column and never writes it, so there is no
+                  // target to set and no button to be. They still drag, and a
+                  // click falls through to the column so a staged chip lands.
+                  const starrable = id !== 'ready'
                   return (
                     <div
-                      key={name}
+                      key={m.id}
                       className="sr-chip"
                       data-canonical={canonical || undefined}
                       data-building={building || undefined}
@@ -558,15 +585,17 @@ export function StatusRules({
                         { '--at': (colAt + 0.22 + si * 0.055).toFixed(3) + 's' } as CSSProperties
                       }
                       draggable={!readonly}
-                      role={readonly ? undefined : 'button'}
-                      tabIndex={readonly ? undefined : 0}
+                      role={readonly || !starrable ? undefined : 'button'}
+                      tabIndex={readonly || !starrable ? undefined : 0}
                       aria-label={
-                        canonical
-                          ? name + ' — the status TF writes back'
-                          : name + ' — make this the write target'
+                        !starrable
+                          ? undefined
+                          : canonical
+                            ? m.label + ' — the status TF writes back'
+                            : m.label + ' — make this the write target'
                       }
                       onDragStart={(e) => {
-                        chip.current = { name, col: id }
+                        chip.current = { item: m, col: id }
                         setPeek(null)
                         if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
                         lift(e, e.currentTarget)
@@ -584,24 +613,34 @@ export function StatusRules({
                         ) as HTMLElement | null
                         if (!l || l.scrollWidth <= l.clientWidth + 1) return
                         const r = e.currentTarget.getBoundingClientRect()
-                        setPeek({ col: id, name, canonical, x: r.left, y: r.top })
+                        setPeek({ col: id, label: m.label, canonical, x: r.left, y: r.top })
                       }}
                       onMouseLeave={() => setPeek(null)}
-                      onClick={(e) => {
-                        e.stopPropagation()
-                        if (land(id)) return
-                        setPrimary(id, name)
-                      }}
-                      onKeyDown={(e) => {
-                        if (!activates(e)) return
-                        e.stopPropagation()
-                        if (land(id)) return
-                        setPrimary(id, name)
-                      }}
+                      onClick={
+                        starrable
+                          ? (e) => {
+                              e.stopPropagation()
+                              if (land(id)) return
+                              setPrimary(id, m.id)
+                            }
+                          : undefined
+                      }
+                      onKeyDown={
+                        starrable
+                          ? (e) => {
+                              if (!activates(e)) return
+                              e.stopPropagation()
+                              if (land(id)) return
+                              setPrimary(id, m.id)
+                            }
+                          : undefined
+                      }
                       title={
-                        canonical
-                          ? 'The status TF writes back'
-                          : 'Click to make this the write target'
+                        !starrable
+                          ? 'TF reads work from this status'
+                          : canonical
+                            ? 'The status TF writes back'
+                            : 'Click to make this the write target'
                       }
                     >
                       {canonical ? (
@@ -625,7 +664,7 @@ export function StatusRules({
                           else el.removeAttribute('data-clipped')
                         }}
                       >
-                        {name}
+                        {m.label}
                       </span>
                     </div>
                   )
@@ -648,7 +687,7 @@ export function StatusRules({
         onDrop={(e) => {
           if (readonly) return
           e.preventDefault()
-          if (chip.current) move(chip.current.name, chip.current.col, null)
+          if (chip.current) move(chip.current.item, chip.current.col, null)
           chip.current = null
         }}
       >
@@ -683,11 +722,11 @@ export function StatusRules({
 
         {trayEmpty ? null : (
           <div className="sr-pool">
-            {shown.map((name) => {
-              const isStaged = staged === name
+            {shown.map((item) => {
+              const isStaged = staged?.id === item.id
               return (
                 <div
-                  key={name}
+                  key={item.id}
                   className="sr-tchip"
                   data-staged={isStaged || undefined}
                   draggable={!readonly}
@@ -695,7 +734,7 @@ export function StatusRules({
                   tabIndex={readonly ? undefined : 0}
                   aria-pressed={readonly ? undefined : isStaged}
                   onDragStart={(e) => {
-                    chip.current = { name, col: null }
+                    chip.current = { item, col: null }
                     setStaged(null)
                     if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
                     lift(e, e.currentTarget)
@@ -704,13 +743,13 @@ export function StatusRules({
                     drop()
                     setOverCol(null)
                   }}
-                  onClick={() => setStaged((s) => (s === name ? null : name))}
+                  onClick={() => setStaged((s) => (s?.id === item.id ? null : item))}
                   onKeyDown={(e) => {
-                    if (activates(e)) setStaged((s) => (s === name ? null : name))
+                    if (activates(e)) setStaged((s) => (s?.id === item.id ? null : item))
                   }}
                   title="Drag to a column, or click and then click a column"
                 >
-                  {name}
+                  {item.label}
                 </div>
               )
             })}
@@ -728,7 +767,7 @@ export function StatusRules({
             <span className="sr-spacer" />
             {staged ? (
               <span className="sr-hint" role="status">
-                pick a column for {staged}
+                pick a column for {staged.label}
               </span>
             ) : boardEmpty ? (
               <button type="button" className="sr-suggest" onClick={suggest}>
@@ -742,7 +781,7 @@ export function StatusRules({
       {peek ? (
         <span className="sr-peek" style={{ left: peek.x - 1, top: peek.y - 1 }} aria-hidden="true">
           {peek.canonical ? <span className="sr-star">★</span> : null}
-          {peek.name}
+          {peek.label}
         </span>
       ) : null}
 

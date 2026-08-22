@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Table from '../../ui/table/Table'
 import type { TableColumn, TableRow } from '../../ui/table/Table'
 import StatusRules from '../../ui/statusrules/StatusRules'
-import type { StatusMap } from '../../ui/statusrules/StatusRules'
+import type { StatusItem, StatusMap, StatusRule } from '../../ui/statusrules/StatusRules'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
 import { apiJSON } from '../../lib/apiClient'
@@ -16,7 +16,7 @@ import {
   projectIsArmed,
 } from '../settings/teamConfig'
 import type { JiraProjectConfig } from '../settings/teamConfig'
-import type { JiraStatusRef } from '../../components/JiraStatusRule'
+import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
 
 // Jira, as this team's event source.
@@ -38,14 +38,16 @@ import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProje
 // hides every other project's mapping, which is why the strip is this page's
 // own device rather than the mock's.
 //
-// The board reads and does not write. The stored rules now cover all four
-// columns, so what keeps this surface read-only is `StatusRules` itself: it
-// reports no change out to a caller, and its chips are keyed by display name
-// where a write needs the status ids. Both go together when the board becomes
-// an editor. Under `interactive={false}` the board is absent-not-disabled: no drag,
-// no staging, no grab cursor, no tab stops. Nothing is greyed out, because the
-// mapping answers "where does our work come from", which a member legitimately
-// needs.
+// FOR A TEAM ADMIN, THE BOARD IS THE EDITOR. Every gesture — a chip landing
+// in a column, a ★ moving, a suggested mapping — reports the next map, which
+// maps back onto the four stored rules and saves as a replace-set the moment
+// it lands. The rules stay valid by the board's own construction: a non-empty
+// write-target column always carries a ★ (one is minted on first landing and
+// reassigned when its chip leaves), READY never carries one, and a ★ is
+// always a member. For a member — or while the source is off — the board is
+// read-only and absent-not-disabled: no drag, no staging, no grab cursor, no
+// tab stops. Nothing is greyed out, because the mapping answers "where does
+// our work come from", which a member legitimately needs.
 
 const PROSE =
   'Watched Jira projects spawn events this team can automate, like new tickets being assigned to team ' +
@@ -61,27 +63,34 @@ const SEARCH_DEBOUNCE_MS = 250
  *  as one value. */
 const normKey = (key: string): string => key.trim().toUpperCase()
 
-/** The stored three rules, in the board's four columns. Rules are keyed by
- *  status id on the wire; the board is a display of names, so it reads the
- *  server-resolved name off each ref. */
+/** A stored ref as a board item. A legacy name-only ref — stored before
+ *  statuses were identified — falls back to its name as the identity: stable
+ *  for display and drag, and resolved to a real id at write time against the
+ *  live vocabulary, which is how such a rule gains its ids on its next save. */
+const asItem = (m: JiraStatusRef): StatusItem => ({ id: m.id || m.name, label: m.name })
+
+const primaryOf = (c: JiraStatusRef | null | undefined): string | null =>
+  c ? c.id || c.name : null
+
+/** The four stored rules, in the board's four columns. */
 function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
   if (!p) return null
   return {
-    ready: { members: (p.pickup?.members ?? []).map((m) => m.name), primary: null },
+    ready: { members: (p.pickup?.members ?? []).map(asItem), primary: null },
     inprogress: {
-      members: (p.in_progress?.members ?? []).map((m) => m.name),
-      primary: p.in_progress?.canonical?.name ?? null,
+      members: (p.in_progress?.members ?? []).map(asItem),
+      primary: primaryOf(p.in_progress?.canonical),
     },
     // Optional rule: a team that maps nothing here keeps its review-state
     // tickets In Progress on the Jira side, and the empty column is that
     // choice rendered rather than a gap.
     review: {
-      members: (p.in_review?.members ?? []).map((m) => m.name),
-      primary: p.in_review?.canonical?.name ?? null,
+      members: (p.in_review?.members ?? []).map(asItem),
+      primary: primaryOf(p.in_review?.canonical),
     },
     done: {
-      members: (p.done?.members ?? []).map((m) => m.name),
-      primary: p.done?.canonical?.name ?? null,
+      members: (p.done?.members ?? []).map(asItem),
+      primary: primaryOf(p.done?.canonical),
     },
   }
 }
@@ -201,7 +210,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const board = useMemo(() => mapFor(shown ?? undefined), [shown])
   // Never null into the board: StatusRules falls back to a demo status list
   // for null, and a demo vocabulary on a real team's page would be a claim.
-  const statuses = shown ? (statusesByKey[shownK] ?? []).map((s) => s.name) : []
+  const boardStatuses: StatusItem[] = shown
+    ? (statusesByKey[shownK] ?? []).map((st) => ({ id: st.id, label: st.name }))
+    : []
 
   const rows: TableRow[] = useMemo(() => {
     const byKey = new Map((catalog ?? []).map((c) => [normKey(c.key), c]))
@@ -264,10 +275,30 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
     [],
   )
 
-  // Which commit the adopted response may land on: the PUT answers with the
+  // Which write the adopted response may land on: the PUT answers with the
   // set AS STORED (status names re-resolved from Jira), and adopting a stale
-  // answer over a newer optimistic set would undo the newer verb.
+  // answer over a newer optimistic set would undo the newer gesture.
   const commitSeq = useRef(0)
+
+  // The one write door for this page — the table's verbs and the board's
+  // gestures alike. Optimistic, latest-wins, and honest on failure: the
+  // optimistic set rolls back rather than leaving the page rendering a
+  // configuration the server never accepted.
+  const persist = useCallback(
+    (next: JiraProjectConfig[], prev: JiraProjectConfig[]) => {
+      setProjects(next)
+      const seq = ++commitSeq.current
+      void saveTeamJiraProjects(teamId, next).then((res) => {
+        if (commitSeq.current !== seq) return
+        if (res.ok) setProjects(res.projects)
+        else {
+          setProjects(prev)
+          setError(res.error)
+        }
+      })
+    },
+    [teamId],
+  )
 
   const commit = useCallback(
     (actionId: string, ids: Array<string | number>) => {
@@ -281,25 +312,72 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
         actionId === 'watch'
           ? projects.concat([...picked].filter((k) => !have.has(k)).map((k) => emptyProject(k)))
           : projects.filter((p) => !picked.has(normKey(p.key)))
-      setProjects(next)
-      const seq = ++commitSeq.current
-      void saveTeamJiraProjects(teamId, next).then((res) => {
-        if (commitSeq.current !== seq) return
-        if (res.ok) setProjects(res.projects)
-        else setError(res.error)
-      })
+      persist(next, projects)
     },
-    [teamId, projects],
+    [projects, persist],
+  )
+
+  // A board gesture, mapped back onto the four stored rules and saved. The
+  // board's construction keeps the result valid — a non-empty write-target
+  // column always carries a ★ and READY never does — so this is a projection,
+  // not a validation site.
+  const applyBoard = useCallback(
+    (next: StatusMap) => {
+      if (!shown || projects === null) return
+      const vocab = statusesByKey[shownK] ?? []
+      const prior = [
+        ...(shown.pickup?.members ?? []),
+        ...(shown.in_progress?.members ?? []),
+        ...(shown.in_review?.members ?? []),
+        ...(shown.done?.members ?? []),
+      ]
+      // An item resolves back to a full ref through the live vocabulary — by
+      // id, then by name for a legacy chip that predates ids — falling back to
+      // the ref it was drawn from, so a status the vocabulary can no longer
+      // see survives gestures it was not part of.
+      const toRef = (it: StatusItem): JiraStatusRef =>
+        vocab.find((v) => v.id === it.id) ??
+        vocab.find((v) => v.name === it.label) ??
+        prior.find((r) => (r.id || r.name) === it.id) ?? { id: '', name: it.label }
+      const rule = (r: StatusRule, withCanonical: boolean): JiraStatusRuleValue => {
+        const members = r.members.map(toRef)
+        if (!withCanonical) return { members }
+        const at = r.primary === null ? -1 : r.members.findIndex((m) => m.id === r.primary)
+        return { members, canonical: at >= 0 ? members[at] : null }
+      }
+      const edited: JiraProjectConfig = {
+        ...shown,
+        pickup: rule(next.ready, false),
+        in_progress: rule(next.inprogress, true),
+        in_review: rule(next.review, true),
+        done: rule(next.done, true),
+      }
+      persist(
+        projects.map((p) => (normKey(p.key) === shownK ? edited : p)),
+        projects,
+      )
+    },
+    [shown, shownK, projects, statusesByKey, persist],
   )
 
   // The note under the board: the strip names the shown project when there is
   // one to pick, so the note only carries the key when it is the sole voice.
-  const note = shown
-    ? (watched.length > 1 ? '' : `showing ${shownK} · `) +
-      (projectIsArmed(shown)
-        ? 'edit the mapping in Settings'
-        : 'statuses not mapped yet · map them in Settings')
-    : ''
+  // An admin is told the board saves; a member is only told what is missing.
+  const note = (() => {
+    if (!shown) return ''
+    const parts: string[] = []
+    if (watched.length <= 1) parts.push(`showing ${shownK}`)
+    if (isAdmin && !offReason) {
+      parts.push(
+        projectIsArmed(shown)
+          ? 'drag to remap · ★ is what TF writes back · saves as it lands'
+          : 'not armed yet · drag statuses into the columns to arm it',
+      )
+    } else if (!projectIsArmed(shown)) {
+      parts.push('statuses not mapped yet')
+    }
+    return parts.join(' · ')
+  })()
 
   return (
     <SourceFrame
@@ -351,10 +429,11 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
             {board ? (
               <StatusRules
                 key={shownK}
-                map={board}
-                statuses={statuses}
+                value={board}
+                onChange={isAdmin && !offReason ? applyBoard : undefined}
+                statuses={boardStatuses}
                 showProjects={false}
-                interactive={false}
+                interactive={isAdmin && !offReason}
                 build
                 note={note}
               />

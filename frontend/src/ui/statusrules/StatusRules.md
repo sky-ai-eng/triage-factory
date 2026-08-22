@@ -8,12 +8,23 @@ the tray to unmap it.
 import StatusRules from './StatusRules'
 
 <StatusRules
-  map={rules}
+  value={rules}
+  onChange={saveRules}
   statuses={connection.statuses}
   showProjects={false}
   note="drag a status between columns, or to the tray to unmap it"
 />
 ```
+
+A status is an item — `{ id, label }` — and the id is the identity everywhere:
+membership, the drag payload, and ★ all key on it, because two statuses can
+share a label (Jira permits it across issue types) and a label can be renamed
+upstream without the status changing. The label is only ever paint.
+
+Supplying `onChange` makes the board **controlled**: `value` is the board,
+every gesture — a landing, a ★ move, a suggested mapping — reports the next
+whole map, and nothing is stored inside. Without `onChange` the board poses its
+own state seeded from `value`, which is the demo mode `/dev/ui` mounts.
 
 Requires `status-rules.css` and `Checkbox` (a normal import — it no longer
 fetches and evals the file at runtime).
@@ -22,11 +33,13 @@ fetches and evals the file at runtime).
 
 **Four columns, because TF needs four answers.** Ready is where work is picked
 up, in progress and in review are where a delegated agent parks a ticket, done is
-where it lands. `ready` has no ★: TF reads work out of it and never writes it.
-Every other column needs one canonical status to write back, which is what ★
-marks — a column with members and no ★ is a column TF can read but not move a
-ticket into. (The fourth column is design-only until the backend grows an
-`in_review` rule; `backend-needs.md` item 14.)
+where it lands. `ready` has no ★ — TF reads work out of it and never writes it —
+and the board enforces it: landing in READY never mints a primary, and READY
+chips are not buttons, because a chip with no write target to set has no action
+to offer. Every other column needs one canonical status to write back, which is
+what ★ marks; the board mints one on a first landing and hands it to the next
+member when its chip leaves, so a non-empty write-target column always carries
+one.
 
 **There is no hidden pool and no + menu.** A status is in a column or in the
 tray, so adding and removing are one verb in two directions. The tray takes the
@@ -64,7 +77,10 @@ would rather not drag; it simply was not reachable. Now it is.
   the move. Enter or space lands the chip.
 - **A column chip** is `role="button"`, `tabIndex={0}`. Enter or space makes it
   the write target, which is what clicking it does. It stops propagation, so the
-  press does not also fire the column underneath.
+  press does not also fire the column underneath. READY chips are the
+  exception — no write target to set means no action to offer, so they carry no
+  role and no tab stop, and a click falls through to the column so a staged
+  chip still lands.
 - **Escape cancels a staged chip**, which the board already did.
 - Space always calls `preventDefault()` — the board scrolls, and a staging
   gesture that also scrolls the page away from the board is no gesture at all.

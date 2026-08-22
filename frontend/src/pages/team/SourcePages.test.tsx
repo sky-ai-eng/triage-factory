@@ -339,7 +339,7 @@ describe('Jira source page', () => {
 
     // SKY's board: nothing mapped, so the page says so — and SKY's own
     // statuses were asked for, not reused from PLAT's read.
-    await waitFor(() => expect(screen.getByText(/statuses not mapped yet/)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/not armed yet/)).toBeInTheDocument())
     expect(keys[1].getAttribute('aria-selected')).toBe('true')
     const statusReads = fetchMock.mock.calls
       .map((c) => String(c[0]))
@@ -390,14 +390,78 @@ describe('Jira source page', () => {
     expect(screen.queryByText('Operations')).not.toBeInTheDocument()
   })
 
-  it('offers no drag, because nothing would persist it', async () => {
+  it('gives a member a board with nothing to reach, and an admin the drag', async () => {
     stub(SETTINGS)
-    render(<JiraSource {...BODY} />)
+    const member = render(<JiraSource {...BODY} isAdmin={false} />)
     await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
 
     // Absent, not disabled: a cursor that says "pick me up" over a chip that
     // cannot be picked up promises and then fails.
     expect(document.querySelector('[draggable="true"]')).toBeNull()
+    member.unmount()
+
+    stub(SETTINGS)
+    render(<JiraSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
+    expect(document.querySelector('[draggable="true"]')).not.toBeNull()
+  })
+
+  it('saves a board gesture as the four rules, ids on the wire', async () => {
+    // The PUT answers the stored set; echoing the gesture's outcome is what
+    // the page adopts.
+    const fetchMock = stub({
+      ...SETTINGS,
+      '/api/teams/t1/jira-projects': {
+        jira_projects: [
+          {
+            key: 'PLAT',
+            pickup: { members: [{ id: '1', name: 'Ready' }] },
+            in_progress: {
+              members: [{ id: '2', name: 'In Progress' }],
+              canonical: { id: '2', name: 'In Progress' },
+            },
+            in_review: {
+              members: [
+                { id: '4', name: 'QA' },
+                { id: '5', name: 'Blocked' },
+              ],
+              canonical: { id: '4', name: 'QA' },
+            },
+            done: { members: [{ id: '3', name: 'Done' }], canonical: { id: '3', name: 'Done' } },
+          },
+          SETTINGS['/api/teams/t1/settings'].jira_projects[1],
+        ],
+      },
+    })
+    render(<JiraSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
+
+    // Stage the tray's Blocked and land it in IN REVIEW from the keyboard.
+    fireEvent.keyDown(screen.getByRole('button', { name: /Blocked/ }), { key: 'Enter' })
+    fireEvent.keyDown(screen.getByRole('button', { name: 'Put Blocked in IN REVIEW' }), {
+      key: 'Enter',
+    })
+
+    // One replace-set PUT, the gesture expressed as status IDS: Blocked joins
+    // the in_review members, QA keeps the ★ it already had.
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(
+        (c) => String(c[0]).includes('/jira-projects') && (c[1] as RequestInit)?.method === 'PUT',
+      )
+      expect(put).toBeTruthy()
+      const body = JSON.parse(String((put![1] as RequestInit).body))
+      const plat = body.jira_projects[0]
+      expect(plat.key).toBe('PLAT')
+      expect(plat.in_review).toEqual({ member_ids: ['4', '5'], canonical_id: '4' })
+      expect(plat.pickup).toEqual({ member_ids: ['1'] })
+    })
+
+    // The landed chip sits in the review column; the tray no longer offers it.
+    const review = Array.from(document.querySelectorAll('.sr-col')).find(
+      (c) => c.querySelector('.sr-col-label')?.textContent === 'IN REVIEW',
+    )
+    expect(review?.textContent).toContain('Blocked')
+    expect(screen.queryByRole('button', { name: /^Blocked$/ })).not.toBeInTheDocument()
   })
 })
 
