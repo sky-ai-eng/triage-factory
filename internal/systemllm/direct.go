@@ -201,7 +201,7 @@ func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, m
 	var traceID string
 	var costUSD float64
 	if completion != nil {
-		usage = directUsageFrom(completion.Usage)
+		usage = DirectUsageFrom(completion.Usage)
 		traceID = completion.ID
 		// Priced on opts.DirectModel (the pinned Anthropic model id), NOT the
 		// resolved request model: a Bedrock org's model is an
@@ -230,11 +230,16 @@ func (r *Recorder) recordDirectCall(ctx context.Context, opts CompleteOptions, m
 	}, traceID, usage, costUSD, durationMs, callErr != nil)
 }
 
-// directUsageFrom projects the neutral usage onto the row's token columns,
+// DirectUsageFrom projects the neutral usage onto the row's token columns,
 // which are disjoint counts — the same projection the native loop stamps its
 // message rows through, and the same shape the local path's subprocess
 // reports. Cost is priced from the full usage, not from this.
-func directUsageFrom(u inference.Usage) DirectUsage {
+//
+// Exported for the availability prober, which makes its own inference call and
+// hands the outcome to RecordDirect: it needs the identical projection, and a
+// second copy of "which four counts, and which of them are disjoint" is how
+// two rows in one ledger come to mean different things.
+func DirectUsageFrom(u inference.Usage) DirectUsage {
 	return DirectUsage{
 		InputTokens:         u.NonCachedInputTokens(),
 		OutputTokens:        u.OutputTokens,

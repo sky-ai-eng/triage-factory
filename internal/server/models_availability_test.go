@@ -1,0 +1,540 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/zalando/go-keyring"
+
+	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
+)
+
+// probeSecrets is an agentproc.SecretsReader over a map keyed "org/key" — the
+// org's Anthropic key and, crucially, the base URL that points the probe at
+// the mock provider instead of the real one.
+type probeSecrets map[string]string
+
+func (s probeSecrets) Get(_ context.Context, orgID, key string) (string, error) {
+	return s[orgID+"/"+key], nil
+}
+
+// mockProvider answers the probe's request: a streamed one-token completion,
+// or whatever status the test set. Its status is swapped between cases, so one
+// server serves the whole table.
+type mockProvider struct {
+	mu       sync.Mutex
+	status   int
+	errBody  string
+	requests int
+}
+
+func (m *mockProvider) answerWith(status int, errBody string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.status, m.errBody = status, errBody
+}
+
+func (m *mockProvider) Requests() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.requests
+}
+
+func (m *mockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.mu.Lock()
+	m.requests++
+	status, errBody := m.status, m.errBody
+	m.mu.Unlock()
+
+	if status != 0 && status != http.StatusOK {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if errBody == "" {
+			errBody = `{"type":"error","error":{"type":"api_error","message":"stub failure"}}`
+		}
+		_, _ = w.Write([]byte(errBody))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.WriteHeader(http.StatusOK)
+	for _, frame := range []string{
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_probe\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n\n",
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"p\"}}\n\n",
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":1}}\n\n",
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	} {
+		fmt.Fprint(w, frame)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+}
+
+// availabilityRig is a multi-mode server whose probes reach a mock provider
+// instead of Anthropic: real handler, real prober, real classification, real
+// store — only the far end of the socket is a fake.
+type availabilityRig struct {
+	h        *pgtest.Harness
+	mdh      *modelsHandler
+	provider *mockProvider
+	orgID    string
+	admin    string
+	member   string
+	teamID   string
+}
+
+func newAvailabilityRig(t *testing.T) *availabilityRig {
+	t.Helper()
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	s := New(h.AdminDB, stores)
+
+	orgID, admin, teamID := pgtest.SeedOrgWithUser(t, h, "availability-api")
+	member := pgtest.SeedUser(t, h, "availability-api-member")
+	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
+
+	provider := &mockProvider{}
+	srv := httptest.NewServer(provider)
+	t.Cleanup(srv.Close)
+
+	// The org holds an Anthropic credential: the settings ref is what the
+	// handler's connected-provider gate reads, and the secret map is what the
+	// prober resolves the actual request from.
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO org_settings (org_id, anthropic_api_key_ref) VALUES ($1, 'anthropic_api_key')
+		 ON CONFLICT (org_id) DO UPDATE SET anthropic_api_key_ref = 'anthropic_api_key'`, orgID)
+
+	secrets := probeSecrets{
+		orgID + "/anthropic_api_key":  "sk-ant-probe",
+		orgID + "/anthropic_base_url": srv.URL,
+	}
+	prober := modelprobe.New(secrets, nil, systemllm.NewRecorder(stores.SystemLLMRuns))
+
+	return &availabilityRig{
+		h:        h,
+		mdh:      &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return prober }},
+		provider: provider,
+		orgID:    orgID,
+		admin:    admin,
+		member:   member,
+		teamID:   teamID,
+	}
+}
+
+// req builds a request addressed at orgID with caller's claims. body nil sends
+// none.
+func (rig *availabilityRig) req(t *testing.T, caller, orgID string, body any) *http.Request {
+	t.Helper()
+	var r *http.Request
+	if body == nil {
+		r = httptest.NewRequest(http.MethodPost, "/api/models", nil)
+	} else {
+		enc, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		r = httptest.NewRequest(http.MethodPost, "/api/models", bytes.NewReader(enc))
+		r.Header.Set("Content-Type", "application/json")
+	}
+	r.SetPathValue("org_id", orgID)
+	ctx := httpx.WithOrgID(r.Context(), orgID)
+	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: caller})
+	return r.WithContext(ctx)
+}
+
+// test calls the single-model route for modelKey.
+func (rig *availabilityRig) test(t *testing.T, caller, modelKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	r := rig.req(t, caller, rig.orgID, nil)
+	r.SetPathValue("model_key", modelKey)
+	rec := httptest.NewRecorder()
+	rig.mdh.handleModelTest(rec, r)
+	return rec
+}
+
+// sweep calls the provider-wide route.
+func (rig *availabilityRig) sweep(t *testing.T, caller, provider string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	rig.mdh.handleModelTestSweep(rec, rig.req(t, caller, rig.orgID, map[string]any{"provider": provider}))
+	return rec
+}
+
+// catalogRead is the org models list as caller sees it — where the badge this
+// whole feature exists for is published.
+func (rig *availabilityRig) catalogRead(t *testing.T, caller string) []modelCatalogRow {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	rig.mdh.handleModelsList(rec, rig.req(t, caller, rig.orgID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("models list = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	return decodeModels(t, rec.Body.Bytes()).Items
+}
+
+func (rig *availabilityRig) rowFor(t *testing.T, items []modelCatalogRow, key string) modelCatalogRow {
+	t.Helper()
+	for _, it := range items {
+		if it.Key == key {
+			return it
+		}
+	}
+	t.Fatalf("catalog read has no row for %s", key)
+	return modelCatalogRow{}
+}
+
+func decodeTestResult(t *testing.T, body []byte) modelTestResult {
+	t.Helper()
+	var out modelTestResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode test result: %v (body: %s)", err, body)
+	}
+	return out
+}
+
+// availabilityRows counts what the org has stored, straight from the table —
+// the assertion "nothing was recorded" needs a reader the handler does not
+// share a code path with.
+func (rig *availabilityRig) availabilityRows(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT count(*) FROM model_availability WHERE org_id = $1`, rig.orgID).Scan(&n); err != nil {
+		t.Fatalf("count model_availability: %v", err)
+	}
+	return n
+}
+
+// The lifecycle, end to end through the real endpoint: a provider that answers
+// records verified, one that refuses records red with its own message, and one
+// that fails records NOTHING — which is the property the whole design turns
+// on, because a save gate that a 500 could turn red would be a save gate one
+// bad minute could jam shut.
+func TestModelTest_Postgres_RecordsWhatTheProviderAnswered(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+
+	t.Run("a_stream_records_verified", func(t *testing.T) {
+		rig.provider.answerWith(http.StatusOK, "")
+		rec := rig.test(t, rig.admin, key)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		res := decodeTestResult(t, rec.Body.Bytes())
+		if res.Outcome != modelTestVerified {
+			t.Fatalf("outcome = %q, want %q", res.Outcome, modelTestVerified)
+		}
+		if res.CheckedAt == nil {
+			t.Error("a recorded result carried no checked_at")
+		}
+		row := rig.rowFor(t, rig.catalogRead(t, rig.admin), key)
+		if row.Availability != modelAvailabilityVerified {
+			t.Errorf("catalog availability = %q, want %q", row.Availability, modelAvailabilityVerified)
+		}
+		if row.AvailabilityDetail != "" {
+			t.Errorf("verified row carries detail %q, want none", row.AvailabilityDetail)
+		}
+	})
+
+	t.Run("a_refusal_records_red_with_the_detail", func(t *testing.T) {
+		rig.provider.answerWith(http.StatusForbidden,
+			`{"type":"error","error":{"type":"permission_error","message":"AccessDeniedException"}}`)
+		rec := rig.test(t, rig.admin, key)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — a refusal is a successful test with a negative answer (body: %s)", rec.Code, rec.Body.String())
+		}
+		res := decodeTestResult(t, rec.Body.Bytes())
+		if res.Outcome != modelTestRed {
+			t.Fatalf("outcome = %q, want %q", res.Outcome, modelTestRed)
+		}
+		if !strings.Contains(res.Detail, "AccessDeniedException") {
+			t.Errorf("detail = %q, want the provider's own message", res.Detail)
+		}
+		// This also pins that a manual re-test overwrites a green row: the
+		// subtest above left this exact model verified.
+		row := rig.rowFor(t, rig.catalogRead(t, rig.admin), key)
+		if row.Availability != modelAvailabilityRed {
+			t.Errorf("catalog availability = %q, want %q after a refused re-test", row.Availability, modelAvailabilityRed)
+		}
+		if !strings.Contains(row.AvailabilityDetail, "AccessDeniedException") {
+			t.Errorf("catalog detail = %q, want the refusal", row.AvailabilityDetail)
+		}
+	})
+
+	t.Run("a_failure_records_nothing", func(t *testing.T) {
+		before := rig.availabilityRows(t)
+		rig.provider.answerWith(http.StatusInternalServerError, "")
+		// A model with no row yet, so "nothing recorded" is visible as an
+		// absence rather than as an unchanged value.
+		fresh := ""
+		for _, e := range modelcatalog.Entries() {
+			if e.Provider == modelcatalog.ProviderAnthropic && e.Key != key {
+				fresh = e.Key
+				break
+			}
+		}
+		if fresh == "" {
+			t.Skip("catalog offers only one Anthropic model")
+		}
+		rec := rig.test(t, rig.admin, fresh)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if res := decodeTestResult(t, rec.Body.Bytes()); res.Outcome != modelTestInconclusive {
+			t.Fatalf("outcome = %q, want %q", res.Outcome, modelTestInconclusive)
+		}
+		if after := rig.availabilityRows(t); after != before {
+			t.Errorf("stored rows went %d → %d; a 500 must write nothing", before, after)
+		}
+		if row := rig.rowFor(t, rig.catalogRead(t, rig.admin), fresh); row.Availability != modelAvailabilityUnverified {
+			t.Errorf("availability = %q, want %q — an inconclusive probe leaves the row absent", row.Availability, modelAvailabilityUnverified)
+		}
+	})
+}
+
+// Every probe is a real charge, so every probe lands in the ledger under
+// job=probe — where the spend view rolls it up as system_overhead alongside
+// every other call TF makes for itself.
+func TestModelTest_Postgres_RecordsSpend(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	rig.provider.answerWith(http.StatusOK, "")
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusOK {
+		t.Fatalf("test = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var (
+		model string
+		cost  float64
+	)
+	if err := rig.h.AdminDB.QueryRow(
+		`SELECT model, total_cost_usd FROM system_llm_runs WHERE org_id = $1 AND job = $2`,
+		rig.orgID, systemllm.JobProbe).Scan(&model, &cost); err != nil {
+		t.Fatalf("read the probe's ledger row: %v", err)
+	}
+	if model != key {
+		t.Errorf("ledger model = %q, want the probed key %q", model, key)
+	}
+	if cost <= 0 {
+		t.Errorf("ledger cost = %v, want a real stamp", cost)
+	}
+}
+
+// The eager pass after a credential bind: it tests every candidate of the named
+// provider, skips the ones already verified (green is terminal for automatic
+// transitions), and never touches the other provider's models.
+func TestModelTestSweep_Postgres_SkipsVerifiedAndCoversTheRest(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	first := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+
+	rig.provider.answerWith(http.StatusOK, "")
+	if rec := rig.test(t, rig.admin, first); rec.Code != http.StatusOK {
+		t.Fatalf("seed verify = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	probesBefore := rig.provider.Requests()
+
+	rec := rig.sweep(t, rig.admin, modelcatalog.ProviderAnthropic)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("sweep = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp modelTestSweepResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode sweep: %v (body: %s)", err, rec.Body.String())
+	}
+
+	var anthropic int
+	for _, e := range modelcatalog.Entries() {
+		if e.Provider == modelcatalog.ProviderAnthropic {
+			anthropic++
+		}
+	}
+	if len(resp.Items) != anthropic {
+		t.Fatalf("sweep covered %d models, want every Anthropic candidate (%d)", len(resp.Items), anthropic)
+	}
+	for _, item := range resp.Items {
+		switch {
+		case item.ModelKey == first:
+			if item.Outcome != modelTestSkipped {
+				t.Errorf("%s: outcome = %q, want %q — it was already verified", item.ModelKey, item.Outcome, modelTestSkipped)
+			}
+			if item.CheckedAt == nil {
+				t.Errorf("%s: a skip carries no checked_at; the earlier verification's stamp is what makes the skip legible", item.ModelKey)
+			}
+		case item.Outcome != modelTestVerified:
+			t.Errorf("%s: outcome = %q, want %q", item.ModelKey, item.Outcome, modelTestVerified)
+		}
+		if p, _ := modelcatalog.ProviderFor(item.ModelKey); p != modelcatalog.ProviderAnthropic {
+			t.Errorf("%s is served by %s; the sweep names one provider", item.ModelKey, p)
+		}
+	}
+	// One request per unskipped candidate, and not one for the skip.
+	if spent := rig.provider.Requests() - probesBefore; spent != anthropic-1 {
+		t.Errorf("sweep spent %d requests, want %d (every candidate but the verified one)", spent, anthropic-1)
+	}
+}
+
+// A provider the org never connected refuses up front, before anything is
+// attempted — so a sweep of it writes no rows at all and the caller is sent to
+// the one page that fixes it.
+func TestModelTest_Postgres_UnconnectedProviderRefusesBeforeSpending(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	bedrock := modelKeyOn(t, modelcatalog.ProviderBedrock)
+	before := rig.provider.Requests()
+
+	rec := rig.test(t, rig.admin, bedrock)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("single test = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	sweep := rig.sweep(t, rig.admin, modelcatalog.ProviderBedrock)
+	if sweep.Code != http.StatusConflict {
+		t.Fatalf("sweep = %d, want 409 (body: %s)", sweep.Code, sweep.Body.String())
+	}
+	if rig.provider.Requests() != before {
+		t.Error("a refusal for an unconnected provider still spent a request")
+	}
+	if n := rig.availabilityRows(t); n != 0 {
+		t.Errorf("stored %d rows for a provider that is not connected, want 0", n)
+	}
+}
+
+// The gates. Spending the org's money is an org-admin act; a model this build
+// does not offer is not an address; another org's catalog is not visible.
+func TestModelTest_Postgres_Gates(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	rig.provider.answerWith(http.StatusOK, "")
+
+	t.Run("a_plain_member_cannot_spend", func(t *testing.T) {
+		before := rig.provider.Requests()
+		if rec := rig.test(t, rig.member, key); rec.Code != http.StatusForbidden {
+			t.Errorf("member single test = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if rec := rig.sweep(t, rig.member, modelcatalog.ProviderAnthropic); rec.Code != http.StatusForbidden {
+			t.Errorf("member sweep = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+		}
+		if rig.provider.Requests() != before {
+			t.Error("a refused caller still spent a request")
+		}
+	})
+
+	t.Run("a_member_still_reads_the_badge", func(t *testing.T) {
+		// The read is member-level on purpose: a team admin who cannot touch
+		// org settings still has to see why a model in their picker is badged.
+		if got := len(rig.catalogRead(t, rig.member)); got != len(modelcatalog.Entries()) {
+			t.Errorf("member read returned %d models, want the whole catalog", got)
+		}
+	})
+
+	t.Run("a_model_this_build_does_not_offer_is_404", func(t *testing.T) {
+		if rec := rig.test(t, rig.admin, "claude-not-a-model"); rec.Code != http.StatusNotFound {
+			t.Errorf("unknown model = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("an_unknown_provider_is_400", func(t *testing.T) {
+		if rec := rig.sweep(t, rig.admin, "gerrit"); rec.Code != http.StatusBadRequest {
+			t.Errorf("unknown provider = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+		}
+		rec := httptest.NewRecorder()
+		rig.mdh.handleModelTestSweep(rec, rig.req(t, rig.admin, rig.orgID, map[string]any{}))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("absent provider = %d, want 400 — the sweep never means \"all of them\" (body: %s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("another_orgs_catalog_is_404", func(t *testing.T) {
+		otherOrg, _, _ := pgtest.SeedOrgWithUser(t, rig.h, "availability-other")
+		r := rig.req(t, rig.admin, otherOrg, nil)
+		r.SetPathValue("model_key", key)
+		rec := httptest.NewRecorder()
+		rig.mdh.handleModelTest(rec, r)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("cross-org test = %d, want 404 (body: %s)", rec.Code, rec.Body.String())
+		}
+		read := httptest.NewRecorder()
+		rig.mdh.handleModelsList(read, rig.req(t, rig.admin, otherOrg, nil))
+		if read.Code != http.StatusNotFound {
+			t.Errorf("cross-org read = %d, want 404 (body: %s)", read.Code, read.Body.String())
+		}
+	})
+}
+
+// One org's verdict is not another's. The rows are the org's own inference
+// entitlements, and the read is scoped to the caller's org rather than to the
+// build's catalog.
+func TestModelAvailability_Postgres_IsPerOrg(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	rig.provider.answerWith(http.StatusOK, "")
+	key := modelKeyOn(t, modelcatalog.ProviderAnthropic)
+	if rec := rig.test(t, rig.admin, key); rec.Code != http.StatusOK {
+		t.Fatalf("test = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	otherOrg, otherAdmin, _ := pgtest.SeedOrgWithUser(t, rig.h, "availability-neighbour")
+	rec := httptest.NewRecorder()
+	rig.mdh.handleModelsList(rec, rig.req(t, otherAdmin, otherOrg, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("neighbour read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	for _, row := range decodeModels(t, rec.Body.Bytes()).Items {
+		if row.Availability != modelAvailabilityUnverified {
+			t.Errorf("%s: neighbour sees %q, want %q — the verdict belongs to the org that paid for it",
+				row.Key, row.Availability, modelAvailabilityUnverified)
+		}
+	}
+}
+
+// Local mode cannot answer the question at all: its runs go through the SDK
+// subprocess, which may hold a Claude Code subscription and no API key. The
+// route exists in the binary and says so, rather than 404ing as if it did not.
+func TestModelTest_LocalModeRefuses(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: nil}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/models", nil)
+	r.SetPathValue("org_id", runmode.LocalDefaultOrgID)
+	r.SetPathValue("model_key", modelKeyOn(t, modelcatalog.ProviderAnthropic))
+	ctx := httpx.WithOrgID(r.Context(), runmode.LocalDefaultOrgID)
+	ctx = httpx.WithClaims(ctx, &verify.Claims{Subject: runmode.LocalDefaultUserID})
+	rec := httptest.NewRecorder()
+	mdh.handleModelTest(rec, r.WithContext(ctx))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("local test = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); !strings.Contains(got, httpx.ReasonModeUnsupported) {
+		t.Errorf("body = %s, want reason %s", got, httpx.ReasonModeUnsupported)
+	}
+}
+
+// A multi-mode pod that never had the prober wired says so as a configuration
+// fault, not as a 500 — and never panics on the nil.
+func TestModelTest_Postgres_NoProberConfigured(t *testing.T) {
+	rig := newAvailabilityRig(t)
+	rig.mdh.prober = nil
+	rec := rig.test(t, rig.admin, modelKeyOn(t, modelcatalog.ProviderAnthropic))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+}

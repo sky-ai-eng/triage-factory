@@ -123,12 +123,17 @@ func TestModelsList_OrgScoping(t *testing.T) {
 	}
 }
 
-// One contract, two implementations: the catalog ships in the binary, so a
-// local deployment and a multi-tenant one answer this read byte for byte. A
-// client cannot tell which mode it is talking to, which is what keeps mode
-// differences out of the frontend.
-func TestModelsList_ByteIdenticalAcrossModes(t *testing.T) {
-	multi := func() []byte {
+// One contract, two implementations. The catalog ships in the binary, so both
+// modes answer with the same rows in the same order carrying the same facts —
+// and the single field they differ on is `availability`, which exists to carry
+// exactly this difference as DATA. A client reads the field; it never asks
+// which mode it is talking to.
+//
+// Local says "assumed" because it has nothing to probe with: its runs go
+// through the SDK subprocess, possibly on a Claude Code subscription with no
+// API key. Multi says "unverified" until a probe concludes something.
+func TestModelsList_AcrossModes_DiffersOnlyOnAvailability(t *testing.T) {
+	multi := func() []modelCatalogRow {
 		runmode.SetForTest(t, runmode.ModeMulti)
 		r := newAuthRig(t)
 		alice := r.seedUser()
@@ -143,7 +148,7 @@ func TestModelsList_ByteIdenticalAcrossModes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		return body
+		return decodeModels(t, body).Items
 	}()
 
 	runmode.SetForTest(t, runmode.ModeLocal)
@@ -152,8 +157,29 @@ func TestModelsList_ByteIdenticalAcrossModes(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("local-mode read = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
+	local := decodeModels(t, rec.Body.Bytes()).Items
 
-	if local := rec.Body.String(); local != string(multi) {
-		t.Errorf("modes answer different bodies:\nlocal: %s\nmulti: %s", local, multi)
+	if len(local) != len(multi) {
+		t.Fatalf("local returned %d models, multi %d — the catalog is the same file in both", len(local), len(multi))
+	}
+	for i := range local {
+		if local[i].Availability != modelAvailabilityAssumed {
+			t.Errorf("%s: local availability = %q, want %q", local[i].Key, local[i].Availability, modelAvailabilityAssumed)
+		}
+		if multi[i].Availability != modelAvailabilityUnverified {
+			t.Errorf("%s: multi availability = %q, want %q with nothing probed", multi[i].Key, multi[i].Availability, modelAvailabilityUnverified)
+		}
+		// Neither mode reports a detail or a check time for a state no probe
+		// produced.
+		if local[i].AvailabilityDetail != "" || local[i].AvailabilityCheckedAt != nil ||
+			multi[i].AvailabilityDetail != "" || multi[i].AvailabilityCheckedAt != nil {
+			t.Errorf("%s: an unprobed row carries a detail or a timestamp", local[i].Key)
+		}
+		// Everything else is the same fact about the same build.
+		a, b := local[i], multi[i]
+		a.Availability, b.Availability = "", ""
+		if a != b {
+			t.Errorf("modes disagree on more than availability:\n local: %+v\n multi: %+v", a, b)
+		}
 	}
 }

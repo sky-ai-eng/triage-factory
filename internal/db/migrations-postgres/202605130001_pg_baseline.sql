@@ -8508,6 +8508,92 @@ REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
 
 
+-- model_availability: per (org, provider, model) evidence that the org's
+-- credentials can actually invoke that model, established by spending one
+-- minimal real request on it.
+--
+-- A probe rather than a control-plane lookup, because no control-plane API
+-- answers the question uniformly. Anthropic's /v1/models reflects the key's
+-- access; Bedrock's ListFoundationModels reports what the REGION carries, not
+-- what the account was granted, and returns base model ids rather than the
+-- inference-profile ids that are the only invocable spelling for the current
+-- Claude models. Its per-model entitlement call needs its own IAM action on a
+-- different service endpoint and answers a weaker question. A probe needs no
+-- permission the run does not already need — if the probe fails, the run would
+-- have failed too — and it tests the exact id that will be sent on the wire.
+--
+-- Two stored states and a meaningful absence:
+--
+--   green   a probe succeeded. Terminal for automatic transitions: only a
+--           manual re-test writes the row again, and a re-test that is refused
+--           moves it to red.
+--   red     the provider ANSWERED and refused (401/403, AccessDeniedException,
+--           model-not-found). Cleared only by a later successful test.
+--   absent  never probed, or every attempt so far was inconclusive — a 5xx, a
+--           timeout, a dial failure. Those write NOTHING, so one bad provider
+--           minute can never hide a model that works.
+--
+-- There is no TTL column and nothing sweeps this table. A green row is a fact
+-- about a request that really succeeded, and re-checking would spend money to
+-- learn something a dispatch failure already reports loudly. Every transition
+-- is caused by a user gesture — connecting a credential, or pressing "test
+-- connection" — which is also why there is no writer without request claims,
+-- and why this table needs no admin-pool arm.
+--
+-- provider is part of the primary key rather than derived from model_key: what
+-- the row establishes is that a CREDENTIAL PATH works, the eager sweep
+-- addresses rows by provider, and a row must still say which credential it was
+-- tested against after the build stops offering the key.
+--
+-- model_key carries no foreign key, for the same reason org_event_sources.kind
+-- carries none: the catalog is a compiled-in file, not a table, so a row for a
+-- key this build no longer offers is inert (nothing iterates to it) rather
+-- than invalid. Its length is unconstrained beyond the CHECK: a Bedrock
+-- inference-profile id is already 40+ characters and an ARN is longer.
+CREATE TABLE public.model_availability (
+    org_id     uuid NOT NULL,
+    provider   text NOT NULL,
+    model_key  text NOT NULL,
+    state      text NOT NULL,
+    checked_at timestamp with time zone NOT NULL,
+    detail     text DEFAULT ''::text NOT NULL
+);
+
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_pkey PRIMARY KEY (org_id, provider, model_key);
+
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+-- The stored vocabulary is exactly two values. An inconclusive probe has no
+-- spelling here on purpose — it writes no row — so a third value arriving
+-- would mean some caller invented one, and the CHECK is what stops that from
+-- reaching a picker as an unrenderable badge.
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_state_check CHECK ((state = ANY (ARRAY['green'::text, 'red'::text])));
+
+ALTER TABLE public.model_availability ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT, admin write. The read is member-level because its only
+-- consumer is the model catalog read, which is itself member-level: a team
+-- admin who cannot read org settings still has to see why a model in their
+-- picker is badged unavailable. The write is admin because it SPENDS THE ORG'S
+-- MONEY — every row here is the receipt for a real, billed request — and
+-- because it is written from the same settings surface that binds the
+-- credential. A model is in no team's tracked set, so the org-wide-mutation
+-- rule reduces to plain org admin and RLS can express the whole gate; the
+-- handler's RequireOrgAdmin is still the enforcement point callers see.
+CREATE POLICY model_availability_select ON public.model_availability FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY model_availability_insert ON public.model_availability FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY model_availability_update ON public.model_availability FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY model_availability_delete ON public.model_availability FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+REVOKE ALL ON public.model_availability FROM PUBLIC;
+REVOKE ALL ON public.model_availability FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_app;
+
+
 -- placement_overrides (TFAC-587, spec §6.1): human intent that wins over the
 -- computed capacity-weighted rendezvous order for a single placement key — a
 -- manual pin, or a hot-key replica count, and nothing else (drain lives on

@@ -8,6 +8,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 )
 
 // buildRunCredentials wires the per-org run-credential seam shared by
@@ -44,6 +45,13 @@ func (a *App) buildRunCredentials() error {
 		}
 		a.llmResolver = llmcred.NewResolver(a.runSecrets, llmcred.NewAWSMinter(), ttl, egress)
 	}
+	// One ledger recorder per process, for every call TF makes on its own
+	// behalf: the three background jobs and the availability probe. Built here
+	// rather than at either use site because it also carries the shared
+	// provider circuit breaker the background jobs coordinate through, and two
+	// of those would be two independent opinions about whether the upstream is
+	// down.
+	a.llmRecorder = systemllm.NewRecorder(a.stores.SystemLLMRuns)
 	a.modelFor = func(ctx context.Context, orgID, teamID string) string {
 		return resolveAIModelForTeam(ctx, a.stores, orgID, teamID)
 	}

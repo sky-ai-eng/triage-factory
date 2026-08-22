@@ -39,6 +39,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
+	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
@@ -50,6 +51,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -122,6 +124,11 @@ type App struct {
 	// mode (built in buildRunCredentials alongside runSecrets); nil in local,
 	// where resolution stays on the ambient path exactly as before.
 	llmResolver *llmcred.Resolver
+	// llmRecorder lands one system_llm_runs row per call TF makes on its own
+	// behalf — the three background jobs and the availability probe. One per
+	// process, because it also carries the shared provider circuit breaker the
+	// background jobs coordinate through.
+	llmRecorder *systemllm.Recorder
 
 	// Subsystems.
 	scorer     *ai.Manager
@@ -330,6 +337,13 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	// role-setup endpoint reporting the method is control-service only.
 	if a.srv != nil && a.llmResolver != nil {
 		a.srv.SetBedrockRoleResolver(a.llmResolver)
+		// Model-availability probes (the settings surface's "test connection"
+		// and the eager pass after a credential bind). Same gate as the line
+		// above and for the same reason: a probe resolves credentials exactly
+		// as a run does, through the role-aware seam, so it can only exist
+		// where that seam does. Local mode leaves it nil and reports every
+		// model as "assumed".
+		a.srv.SetModelProber(modelprobe.New(a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-model-probe"), a.llmRecorder))
 	}
 	if a.plan.brain {
 		a.buildAI() // scorer + project classifier + profiler + reconciler
