@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -570,12 +571,24 @@ type orgSettingsResponse struct {
 	// frontend's N=1 collapse alongside the team member count. A property
 	// of the org, so it rides the org-scope response rather than /api/me.
 	MemberCount int `json:"member_count"`
-	// Version is the settings row's optimistic-concurrency token. The read
+	// Version is the org_settings row's optimistic-concurrency token. The read
 	// hands it out and the PATCH requires it back: the settings save is a
-	// read-modify-write over the whole form, so without it two admins editing
-	// different sections silently undo each other. A PATCH carrying a stale
-	// token is refused with 409 VERSION_CONFLICT and the loser refetches — this
-	// field is what the refetch is FOR, so it is not omitempty.
+	// read-modify-write over org_settings' own columns, so without it two
+	// admins editing different sections silently undo each other. A PATCH
+	// carrying a stale token is refused with 409 VERSION_CONFLICT and the
+	// loser refetches — this field is what the refetch is FOR, so it is not
+	// omitempty.
+	//
+	// It does NOT cover github_base_url / github_poll_interval / jira_base_url
+	// / jira_poll_interval: those live on org_event_sources now, and this
+	// route writes them in the same transaction as the guarded org_settings
+	// update — a stale token still refuses the whole save with nothing
+	// written, by ordinary transaction atomicity, with no second token
+	// needed. What it does NOT gate is a concurrent write to the same fields
+	// through the admin-only per-source route (PATCH
+	// /api/orgs/{org_id}/sources/{kind}), which is an unguarded,
+	// last-writer-wins upsert per source — the same concurrency shape that
+	// route's disabled switch already has.
 	Version int `json:"version"`
 	// Warning is advisory prose about a save that SUCCEEDED — today, that a
 	// newly-lowered model cap now clamps the default team's preference. Only the
@@ -876,12 +889,42 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	)
 	set := func(f func(*domain.OrgSettings)) { mutators = append(mutators, f) }
 
+	// base_url writes go through one shared loop, keyed by the source's own
+	// registration rather than special-cased per field: eventsource.HasHost
+	// is the same gate that decides whether ANY kind may carry a base_url
+	// override at all — a source with no self-host story must never get one,
+	// because base_url decides where a credential is sent. GitHub and Jira
+	// both declare a host today, so the check always passes for them; a
+	// future kind added to this route inherits the refusal for free rather
+	// than needing its own copy of it.
 	clearingGitHubHost := false
-	if v, st := httpx.PatchString(&shape, req.GitHubBaseURL, "github_base_url"); st != httpx.PatchAbsent {
+	for _, f := range []struct {
+		raw   json.RawMessage
+		field string
+		kind  string
+		clear *bool // set true when this field is the one being cleared
+		set   func(*domain.OrgSettings, string)
+	}{
+		{req.GitHubBaseURL, "github_base_url", eventsource.KindGitHub, &clearingGitHubHost,
+			func(o *domain.OrgSettings, v string) { o.GitHubBaseURL = v }},
+		{req.JiraBaseURL, "jira_base_url", eventsource.KindJira, nil,
+			func(o *domain.OrgSettings, v string) { o.JiraBaseURL = v }},
+	} {
+		v, st := httpx.PatchString(&shape, f.raw, f.field)
+		if st == httpx.PatchAbsent {
+			continue
+		}
+		if !eventsource.HasHost(f.kind) {
+			shape.Invalid(f.field, f.field+" cannot be set: "+f.kind+" has no self-host option")
+			continue
+		}
+		apply := f.set
 		switch st {
 		case httpx.PatchClear:
-			clearingGitHubHost = true
-			set(func(o *domain.OrgSettings) { o.GitHubBaseURL = "" })
+			if f.clear != nil {
+				*f.clear = true
+			}
+			set(func(o *domain.OrgSettings) { apply(o, "") })
 		case httpx.PatchSet:
 			// Non-empty hosts go through the same validator + canonicalizer the
 			// reachability probe uses, so what the column holds is what the probe
@@ -892,41 +935,37 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			// unusable URL.
 			base, valid := normalizeBaseURL(v)
 			if !valid {
-				shape.Invalid("github_base_url", "github_base_url must be a valid http(s) URL, or null to clear it")
+				shape.Invalid(f.field, f.field+" must be a valid http(s) URL, or null to clear it")
 			} else {
-				set(func(o *domain.OrgSettings) { o.GitHubBaseURL = base })
-			}
-		}
-	}
-	if v, st := httpx.PatchString(&shape, req.JiraBaseURL, "jira_base_url"); st != httpx.PatchAbsent {
-		switch st {
-		case httpx.PatchClear:
-			set(func(o *domain.OrgSettings) { o.JiraBaseURL = "" })
-		case httpx.PatchSet:
-			base, valid := normalizeBaseURL(v)
-			if !valid {
-				shape.Invalid("jira_base_url", "jira_base_url must be a valid http(s) URL, or null to clear it")
-			} else {
-				set(func(o *domain.OrgSettings) { o.JiraBaseURL = base })
+				set(func(o *domain.OrgSettings) { apply(o, base) })
 			}
 		}
 	}
 	// A malformed duration is rejected rather than silently ignored — the old
 	// parse-and-drop behavior meant a typo'd interval reported "saved" while
-	// keeping the previous value. null resets to that poller's shipped default.
+	// keeping the previous value. null resets to that poller's shipped
+	// default. Gated on eventsource.Polled per kind for the same reason the
+	// base_url loop above is gated on HasHost: github/jira are both polled
+	// today, so the check always passes, but it is the registry — not this
+	// route's two hardcoded fields — that decides.
 	for _, f := range []struct {
 		raw   json.RawMessage
 		field string
+		kind  string
 		def   time.Duration
 		set   func(*domain.OrgSettings, time.Duration)
 	}{
-		{req.GitHubPollInterval, "github_poll_interval", defaults.GitHubPollInterval,
+		{req.GitHubPollInterval, "github_poll_interval", eventsource.KindGitHub, defaults.GitHubPollInterval,
 			func(o *domain.OrgSettings, d time.Duration) { o.GitHubPollInterval = d }},
-		{req.JiraPollInterval, "jira_poll_interval", defaults.JiraPollInterval,
+		{req.JiraPollInterval, "jira_poll_interval", eventsource.KindJira, defaults.JiraPollInterval,
 			func(o *domain.OrgSettings, d time.Duration) { o.JiraPollInterval = d }},
 	} {
 		v, st := httpx.PatchString(&shape, f.raw, f.field)
 		if st == httpx.PatchAbsent {
+			continue
+		}
+		if !eventsource.Polled(f.kind) {
+			shape.Invalid(f.field, f.field+" cannot be set: "+f.kind+" has no poll cadence")
 			continue
 		}
 		next := f.def

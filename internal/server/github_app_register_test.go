@@ -417,11 +417,11 @@ func TestGitHubAppRegister_LaunchEndpoint_GHES(t *testing.T) {
 
 	const ghesHost = "https://git.corp.example.com"
 	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url)
-		VALUES ($1, $2)
-		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES ($1, 'github', $2)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
 	`, orgA.String(), ghesHost); err != nil {
-		t.Fatalf("seed org_settings: %v", err)
+		t.Fatalf("seed org_event_sources: %v", err)
 	}
 
 	req := httptest.NewRequest("GET",
@@ -483,11 +483,11 @@ func TestGitHubAppRegister_CallbackEndpoint_MultiMode(t *testing.T) {
 
 	// Seed the org's GitHubBaseURL to point at our stub.
 	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url)
-		VALUES ($1, $2)
-		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES ($1, 'github', $2)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
 	`, orgA.String(), ghStub.URL); err != nil {
-		t.Fatalf("seed org_settings: %v", err)
+		t.Fatalf("seed org_event_sources: %v", err)
 	}
 
 	// Sign a valid state token. owner_type=org rides the signed state — the
@@ -653,11 +653,11 @@ func TestGitHubAppRegister_Callback_HooklessNoWebhookSecret(t *testing.T) {
 	t.Cleanup(ghStub.Close)
 
 	if _, err := rig.h.AdminDB.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url)
-		VALUES ($1, $2)
-		ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES ($1, 'github', $2)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
 	`, orgA.String(), ghStub.URL); err != nil {
-		t.Fatalf("seed org_settings: %v", err)
+		t.Fatalf("seed org_event_sources: %v", err)
 	}
 
 	state := appRegisterState{
@@ -835,11 +835,11 @@ func TestGitHubAppRegister_Callback_ReturnToRedirect(t *testing.T) {
 		resp, _ := rig.driveCallback(alice)
 		sid := rig.sidFromResp(resp)
 		if _, err := rig.h.AdminDB.Exec(`
-			INSERT INTO org_settings (org_id, github_base_url)
-			VALUES ($1, $2)
-			ON CONFLICT (org_id) DO UPDATE SET github_base_url = $2
+			INSERT INTO org_event_sources (org_id, kind, base_url)
+			VALUES ($1, 'github', $2)
+			ON CONFLICT (org_id, kind) DO UPDATE SET base_url = $2
 		`, org.String(), ghStub.URL); err != nil {
-			t.Fatalf("seed org_settings: %v", err)
+			t.Fatalf("seed org_event_sources: %v", err)
 		}
 		state := appRegisterState{
 			OrgID: org.String(),

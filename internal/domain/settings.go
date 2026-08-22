@@ -112,17 +112,32 @@ func ValidBaseBranchPushPolicy(s string) bool {
 // this bound so Save blocks before the round-trip.
 const MaxConcurrentClaimsCeiling = 1_000_000
 
-// OrgSettings is the org-scope settings row (org_settings table).
+// OrgSettings is the org-scope settings row — composed from org_settings and,
+// for the four fields below, org_event_sources.
+//
+// GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval are
+// stored on org_event_sources (org_id, kind) as base_url / poll_interval,
+// not on org_settings — they are the uniform per-source settings
+// consolidated off the org_settings singleton, keyed by kind ("github" /
+// "jira") instead of by a column-name prefix. GetSettings composes them into
+// this struct so every existing reader keeps working unchanged, and
+// UpdateSettings / UpdateSettingsVersioned keep accepting and writing them —
+// they are ordinary read-write fields on this struct, exactly as before;
+// only their storage moved. NULL on org_event_sources means "no override
+// recorded", and GetSettings resolves that to "" for a base URL (not
+// configured yet) or DefaultOrgSettings()'s 5-minute cadence for a poll
+// interval — the same fallback org_settings' NOT NULL DEFAULT columns gave
+// for free, made explicit at the read.
 //
 // Field nullability:
-//   - GitHubPollInterval / JiraPollInterval / GitHubCloneProtocol ship
-//     NOT NULL with defaults; a freshly-inserted row always carries
-//     them populated.
+//   - GitHubPollInterval / JiraPollInterval / GitHubCloneProtocol always
+//     come back populated — the first two via the org_event_sources
+//     NULL-to-default resolution above, GitHubCloneProtocol as a genuine
+//     NOT NULL org_settings column.
 //   - GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
-//     BedrockCredentialsRef / MaxLLMModelTier are nullable columns.
-//     Empty string round-trips "" ↔ NULL: "not configured yet" (base
-//     URLs), "use deployment default" (vault refs), or "no cap" (max
-//     tier). Callers never need to distinguish "" from NULL.
+//     BedrockCredentialsRef / MaxLLMModelTier round-trip "" for "not
+//     configured yet" (base URLs) / "use deployment default" (vault refs) /
+//     "no cap" (max tier). Callers never need a second sentinel for absence.
 //   - MaxDailyCostUSD is a nullable numeric column (TFAC-477). 0
 //     round-trips 0 ↔ NULL — "no cap". Callers never need to
 //     distinguish 0 from NULL.

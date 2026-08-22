@@ -101,8 +101,8 @@ per user — the old column's behaviour, with a future-proof key.
 ## Runtime contract: NULL-degrades-gracefully
 
 An absent identity row is a **durable, supported state** (carried over from
-SKY-264). Reads resolve the org's scope (e.g. `org_settings.github_base_url`),
-look up `(user, scope)`, and treat a missing row exactly as the old NULL column:
+SKY-264). Reads resolve the org's scope (e.g. the org's configured GitHub base
+URL), look up `(user, scope)`, and treat a missing row exactly as the old NULL column:
 self-features (`author_in:[me]`, personal dashboard, routing-to-you) go inert;
 team reads are unaffected. Drift (rename, left-the-org) reintroduces the absent
 state post-onboarding — runtime stays tolerant regardless of the onboarding gate.
