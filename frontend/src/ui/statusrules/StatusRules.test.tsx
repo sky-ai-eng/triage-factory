@@ -86,9 +86,12 @@ describe('StatusRules', () => {
     fireEvent.keyDown(screen.getByRole('button', { name: 'Put Blocked in IN REVIEW' }), {
       key: 'Enter',
     })
-    fireEvent.keyDown(screen.getByRole('button', { name: /Blocked — make this the write target/ }), {
-      key: 'Enter',
-    })
+    fireEvent.keyDown(
+      screen.getByRole('button', { name: /Blocked — make this the write target/ }),
+      {
+        key: 'Enter',
+      },
+    )
     next = seen.mock.calls.at(-1)![0] as StatusMap
     expect(next.review.primary).toBe('id:Blocked')
     expect(next.review.members).toHaveLength(2)
