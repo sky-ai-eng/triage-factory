@@ -51,28 +51,19 @@ var ErrNoCredentials = errors.New("organization has no Claude credentials of its
 // settings page.
 var ErrProviderRestricted = errors.New("model's provider is restricted for this team")
 
-// Credentials is an org's resolved credential position: which providers TF can
-// put a credential behind for it. Resolve it once — per request, per dispatch —
-// and ask it everything.
-//
-// It exists because that one question had grown two answers. The catalog read
-// derived it one way to badge a model, the dispatch gate derived it another to
-// refuse one, and for an org that brings its own credentials and has bound none
-// the two disagreed: the badge said unconfigured while the gate allowed. Only
-// their composition was correct, and nothing made them compose. A resolved value
-// with the methods on it means a caller cannot pick the wrong derivation,
-// because there is only one.
+// Credentials says which providers this org can actually reach. Build it once
+// per request or dispatch and ask it every credential question, so the badge a
+// reader sees and the refusal a run hits come from the same answer.
 type Credentials struct {
-	// host is the org running on whatever credential the host supplies, so it
-	// is not selecting between providers at all.
+	// host: the org runs on whatever credential the machine supplies, so it is
+	// not choosing between providers at all.
 	host bool
-	// bound is what it holds of its own, read off the settings refs.
+	// bound: the providers it holds its own credentials for.
 	bound map[string]bool
 }
 
-// For resolves an org's position. multiMode is a parameter rather than a
-// runmode read so both arms are reachable in a test without touching process
-// state; ForOrg is the production spelling.
+// For builds an org's Credentials. Takes multiMode as an argument so a test can
+// exercise either mode directly; production calls ForOrg.
 func For(org domain.OrgSettings, multiMode bool) Credentials {
 	return Credentials{
 		host:  domain.EffectiveLLMAuthMethod(org.LLMAuthMethod, multiMode) == domain.LLMAuthSystem,
@@ -80,29 +71,24 @@ func For(org domain.OrgSettings, multiMode bool) Credentials {
 	}
 }
 
-// ForOrg resolves against this process's mode. Every production caller wants
-// this one; it exists so the mode read lives here once instead of at each of
-// them, which is how a caller ends up passing the wrong answer.
+// ForOrg builds an org's Credentials for the mode this process runs in. Use it
+// everywhere in production: it keeps the mode read in one place instead of at
+// every call site.
 func ForOrg(org domain.OrgSettings) Credentials {
 	return For(org, runmode.Current() == runmode.ModeMulti)
 }
 
-// Has reports whether TF can put a credential behind a call to provider.
+// Has reports whether this org can reach provider.
 //
-// What it has bound decides whenever it has bound anything: those refs name
-// exactly which providers it can reach, and a provider missing from them is
-// missing however the org authenticates. Only an org holding NOTHING of its own
-// falls through to the recorded source, and then the answer is that source's:
-// on the host's credentials every provider passes, because there is no
-// per-provider binding to be missing and the environment the runtime inherits
-// is the credential; bringing its own and having bound none, every provider
-// fails, because the alternative is spending against a credential nobody
-// configured.
+// If it holds credentials of its own, those decide: a provider it did not bind
+// is one it cannot reach. Otherwise the org's recorded source decides — on the
+// machine's credentials everything is reachable, and bringing its own with none
+// bound nothing is, since the alternative is spending on a credential nobody
+// chose.
 //
-// Reading the refs first also settles a combination the API refuses to create —
-// host credentials alongside a bound one, which the settings PATCH 422s — in
-// the direction of the more specific fact, rather than letting an unset column
-// on a hand-built value read as a pass for everything.
+// Bound credentials are checked first so that an org somehow holding both — a
+// combination the settings PATCH rejects — is read by what it bound rather than
+// waved through for every provider.
 func (c Credentials) Has(provider string) bool {
 	if len(c.bound) > 0 {
 		return c.bound[provider]
@@ -110,21 +96,18 @@ func (c Credentials) Has(provider string) bool {
 	return c.host
 }
 
-// Ready reports whether the org holds credentials any run could authenticate
-// with. Ask it before dispatching work, and only before dispatching: a save is
-// allowed to name a model the org cannot run yet, because setup picks a model
-// before it binds a credential and a settings form that refused would be
-// unusable in the order it is presented.
+// Ready reports whether the org can reach any provider at all.
 //
-// Defined as "no provider satisfies Has", so it cannot drift from the
-// per-provider answer — an org ready to run is exactly one with somewhere to
-// run, and an org on the host's credentials satisfies it at the first provider
-// asked.
+// Call it before dispatching work, and only then. A settings save must still
+// accept a model the org cannot run yet, because setup picks one before it binds
+// a credential.
 //
-// TODO(TFAC-888): "has bound anything" is as far as this can go in local,
-// where a bound credential is not the one a run actually authenticates with.
-// Once local reads the org's own material, ready and used are the same
-// credential in both modes and this doc loses its asterisk.
+// It is "no provider passes Has" rather than its own rule, so it can never
+// disagree with the per-provider answer.
+//
+// TODO(TFAC-888): in local mode a bound credential is not the one a run
+// authenticates with, so this can only report that something is bound. Once
+// local reads the org's own material, bound and used are the same credential.
 func (c Credentials) Ready() error {
 	for _, provider := range modelcatalog.SupportedProviders() {
 		if c.Has(provider) {
@@ -134,31 +117,23 @@ func (c Credentials) Ready() error {
 	return fmt.Errorf("%w: connect a provider in Settings → Claude credentials, or switch to the credentials already on this machine", ErrNoCredentials)
 }
 
-// Check reports whether model may be dispatched for a team in this org.
-// allowedProviders is the team's stored restriction (empty = unrestricted).
+// Check reports whether a team in this org may use model. allowedProviders is
+// the team's stored restriction; empty means unrestricted.
 //
-// A model the catalog does not offer passes. Whether an unoffered model is
-// acceptable is the catalog validator's question, asked wherever a model is
-// stored; answering it again here would report the wrong fault for a value
-// whose real problem is that nothing offers it.
+// Three rules, in order:
 //
-// The restriction is checked before the credential: a team told to go connect a
-// provider it is not allowed to use has been sent to do useless work.
+//   - A model the catalog does not offer passes. That fault belongs to the
+//     catalog validator wherever the model is stored; reporting it here would
+//     name the wrong problem.
+//   - The team restriction is checked first, so a team is never told to connect
+//     a provider it is not allowed to use anyway.
+//   - The credential is checked only if the org holds some. An org holding none
+//     passes every model: Ready refuses it at dispatch, and the settings save —
+//     which calls Check and not Ready — has to accept a model chosen before any
+//     credential is bound.
 //
-// An org holding NOTHING of its own is exempt from the credential half, and
-// the exemption is the reason this is not simply !Has. Whether such an org may
-// run at all is Ready's question, asked once per dispatch; this one is also
-// asked by the settings save, which must let setup name a model two steps
-// before it binds a credential. Answering here would make a fresh org's first
-// save fail on a gap it is on its way to filling. The restriction still binds,
-// because it is a decision somebody made rather than an inference from what is
-// bound.
-//
-// So a badge and this gate can differ for exactly that org — the catalog read
-// calls it unconfigured, a save allows it — and that is the division of labour,
-// not a drift: one reports capability, the other permits setup. They agree
-// everywhere a credential actually exists to disagree about, because both read
-// Has.
+// That last rule is why this is not simply !Has, and why the catalog read can
+// badge a model unconfigured while a save of it succeeds.
 func (c Credentials) Check(model string, allowedProviders []string) error {
 	provider, ok := modelcatalog.ProviderFor(model)
 	if !ok {
@@ -174,17 +149,15 @@ func (c Credentials) Check(model string, allowedProviders []string) error {
 	return nil
 }
 
-// anyBound reports whether the org holds any credential of its own. It names
-// the one condition Check exempts, so that exemption reads as the decision it
-// is rather than as a bare emptiness test.
+// anyBound reports whether the org holds any credential of its own — the
+// condition Check exempts from the credential rule.
 func (c Credentials) anyBound() bool { return len(c.bound) > 0 }
 
-// boundProviders reports which providers the org holds credentials of its own
-// for, read off the settings row's two refs rather than by probing the vault:
-// the refs are the record of what is actually bound, and they are already
-// loaded wherever this is asked. The Bedrock ref covers all three of its
-// shapes, role mode included — that one stores no secret at all, and a caller
-// looking for a key would read it as unconfigured.
+// boundProviders reads the org's own providers off the two settings refs rather
+// than the vault: the refs record what is bound and are already loaded wherever
+// this is called. The Bedrock ref covers all three of its shapes including role
+// mode, which stores no secret — a caller looking for a key would call it
+// unconfigured.
 func boundProviders(org domain.OrgSettings) map[string]bool {
 	out := map[string]bool{}
 	if org.AnthropicAPIKeyRef != "" {

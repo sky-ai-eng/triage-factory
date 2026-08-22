@@ -2,34 +2,24 @@ package delegate
 
 import "github.com/sky-ai-eng/triage-factory/internal/domain"
 
-// What the two engines need from the rows around them.
+// What each engine needs from the rows around it.
 //
-// The dispatcher forks on the runtime once, and after that the differences are
-// not "is this the SDK" but questions about the rows: what undelivered input
-// MEANS, and what a resume rebuilds FROM. Asking them by engine name at each
-// site is how six call sites came to spell the same two facts six ways, each
-// with its own implied answer for an engine nobody has taught yet.
-//
-// So each is a named answer rather than a boolean, and the unknown case is a
-// value with a name. That is what lets every caller pick the safe arm for
-// itself: some sites are safe when they do nothing to an unrecognized
-// conversation, others are safe when they refuse it loudly, and a boolean would
-// force one polarity on both. An engine added without teaching this file gets
-// the zero value everywhere and, at worst, an error naming the place to teach.
+// The dispatcher forks on the runtime once; past that the differences are not
+// "is this the SDK" but questions about the rows — what undelivered input MEANS,
+// and what a resume rebuilds FROM. Each is a named answer rather than a boolean
+// so an engine this file has not been taught lands on a value of its own: some
+// callers are safe doing nothing to a conversation they do not recognise, others
+// safe refusing it, and a boolean would force one polarity on both.
 
-// inputRole says what a conversation's undelivered `messages` rows are for.
-//
-// The same rows carry opposite meanings per engine, which is the whole reason
-// this is asked: to the native loop they are the ordinary input queue it drains
-// on its own next iteration, and to the SDK they are staged resume input read by
-// exactly one thing, the resume dispatch. Consuming the first kind silently
-// drops a turn; routing the second kind anywhere else strands a message.
+// inputRole says what a conversation's undelivered `messages` rows are for. The
+// same rows mean opposite things per engine — the native loop's own input queue,
+// or input staged for one resume dispatch — and consuming the first kind drops a
+// turn while re-routing the second strands a message.
 type inputRole int
 
 const (
-	// inputRoleUnknown — an engine this file has not been taught. Callers must
-	// treat it as "leave the rows alone": not touching them is recoverable,
-	// consuming or re-routing them is not.
+	// inputRoleUnknown — untaught engine. Callers leave the rows alone: not
+	// touching them is recoverable, consuming or re-routing them is not.
 	inputRoleUnknown inputRole = iota
 	// inputRoleLiveQueue — the loop reads undelivered rows itself, so writing
 	// one IS delivering it and nothing else may flip it delivered.
@@ -49,18 +39,16 @@ func undeliveredRowsFor(runtime string) inputRole {
 	return inputRoleUnknown
 }
 
-// resumeSource says what a waking conversation is rebuilt from.
-//
-// It decides two things that look unrelated and are the same fact: which
-// columns must be present on the row before a wake means anything, and whether
-// a conversation whose workspace is gone can be handed a fresh empty one.
+// resumeSource says what a waking conversation is rebuilt from. It decides two
+// things that look unrelated and are one fact: which columns must be on the row
+// before a wake means anything, and whether a conversation whose workspace is
+// gone can be handed a fresh empty one.
 type resumeSource int
 
 const (
-	// resumeSourceUnknown — an engine this file has not been taught. Callers
-	// must not extend either affordance to it: the stored-state requirements
-	// are the SDK's own, and a fresh workspace is only a continuation for an
-	// engine that can replay itself into one.
+	// resumeSourceUnknown — untaught engine. Neither affordance extends to it: a
+	// fresh workspace is only a continuation for an engine that can replay
+	// itself into one.
 	resumeSourceUnknown resumeSource = iota
 	// resumeSourceMessages — the transcript rows ARE the resume state, replayed
 	// into a fresh invocation by the loop. Needs nothing else on the row, and a
