@@ -83,6 +83,15 @@ func (r *rig) registerApp(t *testing.T, active bool) {
 	}
 }
 
+// pause records an org admin's disable for kind, the way the PATCH route does.
+func (r *rig) pause(t *testing.T, kind string) {
+	t.Helper()
+	if _, err := r.stores.OrgEventSources.SetDisabled(
+		t.Context(), runmode.LocalDefaultOrgID, kind, true, runmode.LocalDefaultUserID); err != nil {
+		t.Fatalf("pause %s: %v", kind, err)
+	}
+}
+
 // state pulls one kind's answer, failing the test when the kind is missing —
 // an absent source and an unconfigured one are different answers and a test
 // that conflates them proves nothing.
@@ -315,6 +324,41 @@ func TestKindOf(t *testing.T) {
 	}
 }
 
+// TestHasHostAndPolled pins the vocabulary GetSettings' base_url / poll_interval
+// write path consults: GitHub and Jira both declare a self-host story and a
+// poll cadence, the vocabulary carries them for a kind that declares neither
+// (schedule), a registered source can declare Polled without HasHost (a
+// pull-based integration with no self-host offering), and a kind outside the
+// vocabulary altogether gets false for both — there is nothing to configure a
+// host or a cadence for.
+func TestHasHostAndPolled(t *testing.T) {
+	t.Cleanup(eventsource.Reset)
+	ok := func(context.Context, db.TxStores, string) (eventsource.State, error) {
+		return eventsource.StateAvailable, nil
+	}
+	eventsource.Register("chat", eventsource.Registration{Probe: ok, Polled: true})
+
+	cases := []struct {
+		kind        string
+		wantHasHost bool
+		wantPolled  bool
+	}{
+		{eventsource.KindGitHub, true, true},
+		{eventsource.KindJira, true, true},
+		{eventsource.KindSchedule, false, false},
+		{"chat", false, true},
+		{"not-a-real-source", false, false},
+	}
+	for _, c := range cases {
+		if got := eventsource.HasHost(c.kind); got != c.wantHasHost {
+			t.Errorf("HasHost(%q) = %v, want %v", c.kind, got, c.wantHasHost)
+		}
+		if got := eventsource.Polled(c.kind); got != c.wantPolled {
+			t.Errorf("Polled(%q) = %v, want %v", c.kind, got, c.wantPolled)
+		}
+	}
+}
+
 // TestRegister_RejectsWiringBugs: every one of these is a mistake that would
 // otherwise show up as a source silently answering for another.
 func TestRegister_RejectsWiringBugs(t *testing.T) {
@@ -340,5 +384,123 @@ func TestRegister_RejectsWiringBugs(t *testing.T) {
 			}()
 			register()
 		})
+	}
+}
+
+// TestResolve_DisabledPrecedence pins D2's ordering — least-fixable first:
+//
+//	wip > unlicensed > disabled > unconfigured > available
+//
+// The two arms that matter are the ones where a pause is NOT the answer.
+// Telling a reader to bind a credential for a source an admin turned off sends
+// them to do useless work, so `disabled` beats `unconfigured`; but re-enabling
+// a source nobody is entitled to, or one TF has not built, would change
+// nothing, so it loses to both of those.
+func TestResolve_DisabledPrecedence(t *testing.T) {
+	cases := map[string]struct {
+		setup func(t *testing.T, r *rig)
+		kind  string
+		want  eventsource.State
+	}{
+		"disabled beats available": {
+			setup: func(t *testing.T, r *rig) {
+				r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"})
+				r.pause(t, eventsource.KindJira)
+			},
+			kind: eventsource.KindJira,
+			want: eventsource.StateDisabled,
+		},
+		// The one source that outranks its own row. Required beats everything,
+		// including a row somebody wrote by hand: the state feeds the UI and
+		// the handler gates, so reporting github disabled would explain away
+		// the whole product as an admin's deliberate choice.
+		"required beats disabled": {
+			setup: func(t *testing.T, r *rig) {
+				r.saveCreds(t, auth.Credentials{GitHubURL: "https://github.com", GitHubPAT: "ghp-x"})
+				r.pause(t, eventsource.KindGitHub)
+			},
+			kind: eventsource.KindGitHub,
+			want: eventsource.StateAvailable,
+		},
+		"disabled beats unconfigured": {
+			setup: func(t *testing.T, r *rig) { r.pause(t, eventsource.KindJira) },
+			kind:  eventsource.KindJira,
+			want:  eventsource.StateDisabled,
+		},
+		"unlicensed beats disabled": {
+			setup: func(t *testing.T, r *rig) {
+				eventsource.Register("gated", eventsource.Registration{
+					Probe: func(context.Context, db.TxStores, string) (eventsource.State, error) {
+						return eventsource.StateUnlicensed, nil
+					},
+				})
+				r.pause(t, "gated")
+			},
+			kind: "gated",
+			want: eventsource.StateUnlicensed,
+		},
+		"wip beats disabled": {
+			setup: func(t *testing.T, r *rig) { r.pause(t, eventsource.KindLinear) },
+			kind:  eventsource.KindLinear,
+			want:  eventsource.StateWIP,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			tc.setup(t, r)
+			if st := state(t, r.resolve(t), tc.kind); st != tc.want {
+				t.Errorf("%s = %q, want %q", tc.kind, st, tc.want)
+			}
+		})
+	}
+}
+
+// TestResolve_DisabledIsPerSource pins that a pause names one source and not
+// the org: disabling Jira must not darken GitHub, which is the whole reason
+// the row is keyed (org, kind) rather than being an org-level switch.
+func TestResolve_DisabledIsPerSource(t *testing.T) {
+	r := newRig(t)
+	r.saveCreds(t, auth.Credentials{
+		GitHubURL: "https://github.com", GitHubPAT: "ghp-x",
+		JiraURL: "https://jira.example.com", JiraPAT: "jira-pat",
+	})
+	r.pause(t, eventsource.KindJira)
+
+	got := r.resolve(t)
+	if st := state(t, got, eventsource.KindJira); st != eventsource.StateDisabled {
+		t.Errorf("jira = %q, want %q", st, eventsource.StateDisabled)
+	}
+	if st := state(t, got, eventsource.KindGitHub); st != eventsource.StateAvailable {
+		t.Errorf("github = %q, want %q", st, eventsource.StateAvailable)
+	}
+	if got.CanProduce(eventsource.KindJira) {
+		t.Error("CanProduce(jira) = true, want false — a paused source can fire nothing")
+	}
+	if !got.CanProduce(eventsource.KindGitHub) {
+		t.Error("CanProduce(github) = false, want true")
+	}
+}
+
+// TestStateFor_ReadsThePause covers the create-time gate's single-source door:
+// it asks about one source and must see the same pause the whole-vocabulary
+// read does.
+func TestStateFor_ReadsThePause(t *testing.T) {
+	r := newRig(t)
+	r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"})
+	r.pause(t, eventsource.KindJira)
+
+	var (
+		st    eventsource.State
+		known bool
+	)
+	r.withTx(t, func(tx db.TxStores) error {
+		var e error
+		st, known, e = eventsource.StateFor(t.Context(), tx, runmode.LocalDefaultOrgID, eventsource.KindJira)
+		return e
+	})
+	if !known || st != eventsource.StateDisabled {
+		t.Errorf("StateFor(jira) = (%q, %v), want (%q, true)", st, known, eventsource.StateDisabled)
 	}
 }

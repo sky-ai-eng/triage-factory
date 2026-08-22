@@ -494,12 +494,12 @@ func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
 		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github_base_url: %v", err)
+		t.Fatalf("read github base_url: %v", err)
 	}
 	if stored != host {
-		t.Errorf("github_base_url = %q, want %q — the refused save must not have partially applied", stored, host)
+		t.Errorf("github base_url = %q, want %q — the refused save must not have partially applied", stored, host)
 	}
 }
 
@@ -516,12 +516,12 @@ func TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK(t *testing.T) {
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
 		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github_base_url: %v", err)
+		t.Fatalf("read github base_url: %v", err)
 	}
 	if stored != "" {
-		t.Errorf("github_base_url = %q, want cleared", stored)
+		t.Errorf("github base_url = %q, want cleared", stored)
 	}
 }
 
@@ -539,12 +539,12 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
 		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
-		t.Fatalf("read github_base_url: %v", err)
+		t.Fatalf("read github base_url: %v", err)
 	}
 	if stored != "https://new.example.com" {
-		t.Errorf("github_base_url = %q, want the retargeted host", stored)
+		t.Errorf("github base_url = %q, want the retargeted host", stored)
 	}
 }
 

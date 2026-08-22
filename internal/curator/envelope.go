@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,6 +34,12 @@ type envelopeInputs struct {
 	JiraProjectKey     string
 	LinearProjectKey   string
 	BinaryPath         string
+	// AvailableSources are the org's reachable event sources, which decide
+	// which verb families the curator is told about. Empty falls back to core's
+	// two, which is the superset — over-inclusion costs a refused verb with an
+	// error that explains itself, and under-inclusion costs the agent a
+	// capability it needed.
+	AvailableSources []string
 }
 
 // renderEnvelope composes the --append-system-prompt payload for one curator
@@ -56,7 +63,7 @@ func renderEnvelope(in envelopeInputs) string {
 	return strings.Join([]string{
 		cli(strings.TrimSpace(agentprompt.Build(curatorSpec()))),
 		renderProjectContext(in),
-		cli("<tools>\n" + strings.TrimSpace(renderToolsReference()) + "\n</tools>"),
+		cli("<tools>\n" + strings.TrimSpace(renderToolsReference(in.AvailableSources)) + "\n</tools>"),
 	}, "\n\n")
 }
 
@@ -129,12 +136,16 @@ func renderTrackersBlock(jiraKey, linearKey string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderToolsReference inlines the GH + Jira tool docs that delegated
-// agents already see, so the curator and a delegated agent share the
-// same vocabulary for `triagefactory exec` invocations. Cheap copy —
-// these strings are kilobytes, not megabytes.
-func renderToolsReference() string {
-	return strings.TrimSpace(agentprompt.GitHubToolsReference()) + "\n\n" + strings.TrimSpace(agentprompt.JiraToolsReference())
+// renderToolsReference inlines the tool docs for the sources this org can
+// actually reach, so the curator and a delegated agent share both the same
+// vocabulary for `triagefactory exec` invocations and the same rule for which
+// families appear at all. Cheap copy — these strings are kilobytes, not
+// megabytes.
+func renderToolsReference(sources []string) string {
+	if len(sources) == 0 {
+		sources = []string{eventsource.KindGitHub, eventsource.KindJira}
+	}
+	return agentprompt.ToolsReferenceForSources(sources)
 }
 
 // pendingChangesNote renders the hidden [system note] block that gets

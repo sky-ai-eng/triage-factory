@@ -40,11 +40,12 @@ func seedStockConfig(t *testing.T, s *Server) {
 		t.Fatalf("set jira identity: %v", err)
 	}
 	// The deck read resolves the user's Jira identity against the ORG's
-	// configured host (org_settings), where the action routes read it off the
-	// credential; both have to name the same host or the identity lookup
+	// configured host (org_event_sources), where the action routes read it off
+	// the credential; both have to name the same host or the identity lookup
 	// misses and the deck reports Jira unconfigured.
 	if _, err := s.db.Exec(
-		`UPDATE org_settings SET jira_base_url = 'https://jira.example.com' WHERE org_id = ?`,
+		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', 'https://jira.example.com')
+		 ON CONFLICT(org_id, kind) DO UPDATE SET base_url = excluded.base_url`,
 		runmode.LocalDefaultOrgID,
 	); err != nil {
 		t.Fatalf("seed org jira base url: %v", err)

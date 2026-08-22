@@ -933,11 +933,12 @@ CREATE TABLE public.org_memberships (
 
 CREATE TABLE public.org_settings (
     org_id uuid NOT NULL,
-    github_base_url text,
-    github_poll_interval interval DEFAULT '00:05:00'::interval NOT NULL,
+    -- github_base_url, github_poll_interval, jira_base_url and jira_poll_interval
+    -- used to live here and have moved onto org_event_sources (base_url,
+    -- poll_interval), keyed (org_id, kind) instead of one column pair per
+    -- source — see that table's comment. github_clone_protocol stays: it is a
+    -- GitHub-only concept, not a uniform per-source setting.
     github_clone_protocol text DEFAULT 'ssh'::text NOT NULL,
-    jira_base_url text,
-    jira_poll_interval interval DEFAULT '00:05:00'::interval NOT NULL,
     -- org_secrets key refs (not raw secrets) for Anthropic / Bedrock credentials.
     -- NULL means "use deployment default" on hosted SaaS or "not configured
     -- yet" on self-host. The SecretStore API resolves the ref to a live
@@ -1010,6 +1011,23 @@ CREATE TABLE public.org_settings (
     -- SetGitHubCredentialClass — the surgical single-column write the
     -- credential transitions use — deliberately does not, so a credential
     -- transition never invalidates an admin's in-flight settings edit.
+    --
+    -- SCOPE: this token covers org_settings alone, not org_event_sources. A
+    -- settings-page save (PATCH /api/orgs/{org_id}/settings) still writes that
+    -- table's base_url/poll_interval columns for github and jira inside the
+    -- SAME transaction as this row's guarded write, so a stale token still
+    -- refuses the whole save with nothing written — ordinary transaction
+    -- atomicity gives that for free, with no second token to invent. What the
+    -- token does NOT cover is the admin-only per-source surface (PATCH
+    -- /api/orgs/{org_id}/sources/{kind}, the org-admin disable switch): that
+    -- route's writes are an unguarded, last-writer-wins upsert
+    -- per (org_id, kind) row, the same concurrency shape `disabled` already
+    -- shipped with. Extending this token across a second table keyed by a
+    -- runtime-registry column (kind) would mean fabricating a whole-table
+    -- version for a table whose whole point is that absence is meaningful and
+    -- rows come and go per source — the smaller, more honest answer is to leave
+    -- it scoped here and accept that the per-source route races the way
+    -- `disabled` already does.
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
@@ -8386,6 +8404,95 @@ REVOKE ALL ON public.poll_readiness FROM PUBLIC;
 REVOKE ALL ON public.poll_readiness FROM anon, authenticated, service_role;
 
 
+-- org_event_sources: declared per-(org, source) POLICY — today, whether an org
+-- admin has turned a source off: it is not polled, produces no events, mints no
+-- tasks, and resolves no credential for an agent. The credential itself is left
+-- bound, which is what makes this reversible where unbinding it is not.
+-- Whether a given source may be turned off at all is a vocabulary question the
+-- application answers (internal/eventsource.Disableable), not a constraint
+-- here: kind is FK-free on purpose, and a row naming a source that has no off
+-- switch is read as inert rather than obeyed.
+--
+-- Its own table, not a column on org_settings, for two reasons. The source
+-- vocabulary is a RUNTIME REGISTRY (internal/eventsource.Register lets a source
+-- outside core declare itself), so a column per source would make every new
+-- source a DDL change in both dialects and would leave a source core holds no
+-- symbol for with nowhere to record the fact. And org_settings is a whole-row
+-- read-modify-write behind a `version` optimistic-concurrency token, whose
+-- consequence this schema already records at github_credential_class: a
+-- surgical single-column write from a different surface either fights that
+-- token or mints a second bypass of it.
+--
+-- Not poll_readiness either, though that table is keyed (org_id, source) too:
+-- its rows are OBSERVED RUNTIME STATE, written by the poll tracker and pruned
+-- when an org stops polling. This is declared admin policy, and a prune of
+-- bookkeeping that silently re-enabled a source is a bad failure mode to design
+-- in.
+--
+-- `disabled` is an explicit column rather than presence-is-off. A bare
+-- disabled-sources table would be tighter for this one fact, but the row was
+-- expected to grow — base_url and poll_interval below are that growth — and
+-- the moment a row exists for a configuration reason "row present" stops
+-- meaning "off". With more than one fact on the row, an ABSENT row reads
+-- honestly as "no per-source overrides recorded" — which is what every
+-- deployment has until an admin opts in, so the derivation stays byte-identical
+-- to a build without this table.
+--
+-- kind carries no foreign key on purpose: the vocabulary is a registry, not a
+-- table, so a row naming a source this build does not carry is inert (nothing
+-- resolves it) rather than invalid. disabled_by carries none either — the
+-- who-did-what trail lives in access_changes, and a departed admin's deletion
+-- must not quietly rewrite the org's policy.
+--
+-- base_url / poll_interval are the four org_settings columns
+-- (github_base_url, github_poll_interval, jira_base_url, jira_poll_interval)
+-- collapsed onto one column pair per uniform setting, keyed by kind instead of
+-- by a column-name prefix. Both are NULLABLE, and NULL means "no override
+-- recorded" here too — never "use a default". Not every kind may carry a
+-- non-null base_url: it names where a credential is sent, so it is only
+-- meaningful for a source with a self-host story (internal/eventsource's
+-- registration declares this; GitHub Enterprise Server and Jira Data Center
+-- have one, Slack does not and the write path refuses a value for it). Not
+-- every kind may carry a meaningful poll_interval either — a push source has
+-- no cadence. These two columns are owned by OrgsStore (the settings writer);
+-- disabled / disabled_at / disabled_by above stay owned by
+-- OrgEventSourceStore's SetDisabled — same row, disjoint columns, same split
+-- org_settings already has between UpdateSettings and SetGitHubCredentialClass.
+CREATE TABLE public.org_event_sources (
+    org_id        uuid NOT NULL,
+    kind          text NOT NULL,
+    disabled      boolean DEFAULT false NOT NULL,
+    disabled_at   timestamp with time zone,
+    disabled_by   uuid,
+    base_url      text,
+    poll_interval interval
+);
+
+ALTER TABLE ONLY public.org_event_sources
+    ADD CONSTRAINT org_event_sources_pkey PRIMARY KEY (org_id, kind);
+
+ALTER TABLE ONLY public.org_event_sources
+    ADD CONSTRAINT org_event_sources_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE public.org_event_sources ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT, admin write — the same split as org_settings, and here RLS
+-- really can express the write gate (a source belongs to no team, so the
+-- org-wide-mutation rule reduces to plain org admin). The handler's
+-- RequireOrgAdmin is still the enforcement point callers see; this is the
+-- backstop underneath it. A member must be able to READ it, because that is
+-- what renders why their own event handler is sitting inert.
+CREATE POLICY org_event_sources_select ON public.org_event_sources FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY org_event_sources_insert ON public.org_event_sources FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_event_sources_update ON public.org_event_sources FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY org_event_sources_delete ON public.org_event_sources FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+REVOKE ALL ON public.org_event_sources FROM PUBLIC;
+REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
+
+
 -- placement_overrides (TFAC-587, spec §6.1): human intent that wins over the
 -- computed capacity-weighted rendezvous order for a single placement key — a
 -- manual pin, or a hot-key replica count, and nothing else (drain lives on
@@ -9279,6 +9386,11 @@ GRANT SELECT ON TABLE public.agents TO tf_system;
 -- Read-only reference data the dispatcher resolves per run.
 GRANT SELECT ON TABLE public.orgs TO tf_system;
 GRANT SELECT ON TABLE public.org_settings TO tf_system;
+-- OrgsStore.GetSettingsSystem composes github_base_url / github_poll_interval
+-- / jira_base_url / jira_poll_interval from here now (moved off org_settings
+-- above), so the github/jira resolvers' per-run host + credential lookups
+-- need the same read tf_system already had on org_settings for those fields.
+GRANT SELECT ON TABLE public.org_event_sources TO tf_system;
 GRANT SELECT ON TABLE public.teams TO tf_system;
 GRANT SELECT ON TABLE public.team_settings TO tf_system;
 GRANT SELECT ON TABLE public.users TO tf_system;

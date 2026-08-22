@@ -1,5 +1,10 @@
 package agentprompt
 
+import (
+	"slices"
+	"strings"
+)
+
 // The tools reference is agent-facing prompt text that varies on the run's
 // entity sources rather than on any Spec axis — a Jira run sees the Jira verbs,
 // a Slack-thread run sees the Slack verbs, and both see GitHub's. So it is not
@@ -68,6 +73,57 @@ func RegisterToolsReference(source, text string) {
 		panic("agentprompt.RegisterToolsReference: " + source + " is already registered")
 	}
 	toolsReferenceRegistry[source] = text
+}
+
+// ToolsReferenceForSources composes the <tools> section for a set of sources.
+//
+// The set is the ORG's, not the run's. What a delegated agent may be told about
+// follows from what this deployment can reach — a run working a pull request
+// that references a ticket needs the Jira verbs, and the kind of entity that
+// triggered it says nothing about whether the org has Jira. Selecting on the
+// trigger is how an agent ends up unable to touch the ticket its own PR names.
+//
+// Over-inclusion is the safe direction and under-inclusion is not, which is why
+// callers union rather than intersect and fall back to a superset when they
+// cannot resolve. This block is DOCUMENTATION; the gate that actually stops a
+// verb is the credential funnel it resolves through, and an advertised verb
+// that refuses tells the agent exactly what happened. A missing one just makes
+// it improvise.
+//
+// Order is canonical, not the caller's: core first, then registered sources
+// alphabetically, deduplicated. Two callers assembling the same set produce the
+// same bytes, which is what keeps a cached prefix cached.
+func ToolsReferenceForSources(kinds []string) string {
+	seen := make(map[string]bool, len(kinds))
+	var core, registered []string
+	for _, k := range kinds {
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		switch {
+		case coreToolsReferenceSources[k]:
+			core = append(core, k)
+		case toolsReferenceRegistry[k] != "":
+			registered = append(registered, k)
+		}
+	}
+	slices.Sort(core) // "github" before "jira"
+	slices.Sort(registered)
+
+	parts := make([]string, 0, len(core)+len(registered))
+	for _, k := range core {
+		switch k {
+		case "github":
+			parts = append(parts, strings.TrimSpace(githubTools))
+		case "jira":
+			parts = append(parts, strings.TrimSpace(jiraTools))
+		}
+	}
+	for _, k := range registered {
+		parts = append(parts, strings.TrimSpace(toolsReferenceRegistry[k]))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // ToolsReferenceFor returns the registered tools-reference text for source

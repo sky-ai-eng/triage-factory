@@ -135,7 +135,7 @@ These are internal signals, not shown in the triage UI.
 | **Delegation Blocked: Subtasks** | `system:task:delegation_blocked_by_subtasks` | Auto-delegation was skipped for a Jira issue because its parent has open subtasks |
 | **Conversation Status** | `system:conversation:status` | A delegated run's status changed (mirrors the `conversation_update` websocket event) |
 | **Conversation Activity** | `system:conversation:activity` | A delegated run invoked a tool (mirrors the `message` websocket event, `tool_use` messages only) |
-| **Routing Disposition** | `system:routing:disposition` | `Router.HandleEvent` finished handling one event — frozen, taskless (no handler/owner/unroutable), task created/bumped, or an internal error. Lets an async event source (e.g. Slack) learn synchronously-unavailable routing outcomes |
+| **Routing Disposition** | `system:routing:disposition` | `Router.HandleEvent` finished handling one event — frozen, source turned off by an org admin, taskless (no handler/owner/unroutable), task created/bumped, or an internal error. Lets an async event source (e.g. Slack) learn synchronously-unavailable routing outcomes |
 
 ## Snapshot fields
 

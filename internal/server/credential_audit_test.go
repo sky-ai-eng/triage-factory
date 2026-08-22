@@ -366,12 +366,12 @@ func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
 	}
 	var settingsHost string
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(github_base_url, '') FROM org_settings WHERE org_id = ?`,
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
 		runmode.LocalDefaultOrgID).Scan(&settingsHost); err != nil {
-		t.Fatalf("read github_base_url: %v", err)
+		t.Fatalf("read github base_url: %v", err)
 	}
 	if settingsHost != host {
-		t.Errorf("github_base_url = %q, want %q kept for the staged App", settingsHost, host)
+		t.Errorf("github base_url = %q, want %q kept for the staged App", settingsHost, host)
 	}
 	if secretHost, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubURL); secretHost != host {
 		t.Errorf("github_url secret = %q, want %q — it is the resolver's fallback", secretHost, host)
@@ -412,9 +412,9 @@ func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
 	}
 	var url string
 	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(jira_base_url, '') FROM org_settings WHERE org_id = ?`,
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'jira'`,
 		runmode.LocalDefaultOrgID).Scan(&url); err != nil {
-		t.Fatalf("read jira_base_url: %v", err)
+		t.Fatalf("read jira base_url: %v", err)
 	}
 	if url != "" {
 		t.Errorf("jira_base_url = %q, want cleared by the same request", url)

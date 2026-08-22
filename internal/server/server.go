@@ -163,6 +163,13 @@ type Server struct {
 	// can't fire one org's poller restart with another org's PAT.
 	onGitHubChanged func(orgID string) // GitHub creds/access changed — evict the reachable-repo cache + re-due the org's GitHub poll (profiling is driven by the system:poll "profiler" subscriber, not here)
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
+	// onSourcesChanged fires after an org admin pauses or resumes one event
+	// source. It carries the kind because both reactions are per-source: the
+	// router's disabled-source gate is invalidated for this org (in process
+	// when this pod runs the brain, over the tf_ctl relay otherwise), and a
+	// resumed polled source is re-dued so it starts again on the next wake
+	// rather than after a full interval. Nil until SetOnSourcesChanged runs.
+	onSourcesChanged func(orgID, kind string)
 	// kbChangedDoorbell rings the tf_ctl "kb_changed" cross-pod nudge after a
 	// KB upload/delete/project-delete so the home executor materializes the
 	// panel write into a live session's dir. Wired only in multi mode; nil in
@@ -1305,6 +1312,12 @@ func (s *Server) routes() {
 	// the authoring surfaces and the source cards render from, and every
 	// member renders those. See sources_handler.go.
 	s.api("GET /api/orgs/{org_id}/sources", s.handleOrgSources)
+	// The same collection addressed one element at a time. The read is
+	// member-gated like the list; the write is org admin, because a source is
+	// in no team's tracked set and pausing one lands on every team in the org —
+	// and because unbinding its credential already takes an org admin.
+	s.api("GET /api/orgs/{org_id}/sources/{kind}", s.handleOrgSource)
+	s.apiMutating("PATCH /api/orgs/{org_id}/sources/{kind}", s.handleOrgSourcePatch)
 
 	// The org's LLM provider credential — one resource per credential SHAPE, so
 	// a route's required fields are fixed and a blank secret never selects a
@@ -1544,6 +1557,12 @@ func (s *Server) SetOnGitHubChanged(fn func(orgID string)) {
 			fn(orgID)
 		}
 	}
+}
+
+// SetOnSourcesChanged registers the callback for an event-source pause/resume.
+// See the field.
+func (s *Server) SetOnSourcesChanged(fn func(orgID, kind string)) {
+	s.onSourcesChanged = fn
 }
 
 // SetOnJiraChanged registers a callback for Jira config changes.

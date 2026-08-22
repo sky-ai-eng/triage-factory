@@ -355,9 +355,9 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	// discover its installations for the cutover preflight + install
 	// verification. The poller gates its own backfill on active separately.
 	err := s.q.QueryRowContext(ctx, `
-		SELECT a.app_id, a.pem_ref, COALESCE(s.github_base_url, '')
+		SELECT a.app_id, a.pem_ref, COALESCE(es.base_url, '')
 		  FROM org_github_apps a
-		  LEFT JOIN org_settings s ON s.org_id = a.org_id
+		  LEFT JOIN org_event_sources es ON es.org_id = a.org_id AND es.kind = 'github'
 		 WHERE a.org_id = ?
 	`, orgID).Scan(&appID, &pemRef, &baseURL)
 	if errors.Is(err, sql.ErrNoRows) {

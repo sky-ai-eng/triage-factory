@@ -840,3 +840,19 @@ func scanEntityList(rows *sql.Rows) ([]domain.Entity, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *entityStore) ClearSnapshotsForSourceSystem(ctx context.Context, orgID, source string) (int, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		UPDATE entities
+		SET snapshot_json = NULL, poll_seq = poll_seq + 1
+		WHERE org_id = $1 AND source = $2 AND state = 'active'
+	`, orgID, source)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}

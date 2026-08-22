@@ -30,9 +30,14 @@ export function sourceLabel(kind: string): string {
  * source outside this deployment's vocabulary — neither is a reason, so both
  * answer null rather than a guess.
  *
- * The three sentences differ because the remedies do: connecting an
- * integration is the reader's to do (or to ask an org admin for), a licence is
- * a purchasing decision, and an unbuilt source is nobody's to fix.
+ * The four sentences differ because the remedies do: connecting an integration
+ * is the reader's to do (or to ask an org admin for), a pause is an org admin's
+ * to undo, a licence is a purchasing decision, and an unbuilt source is
+ * nobody's to fix.
+ *
+ * `disabled` and `unconfigured` are deliberately not one sentence. Telling
+ * someone to go connect a source an admin turned off on purpose sends them to
+ * do useless work — and the two are undone by different people.
  */
 export function sourceUnavailableReason(
   kind: string,
@@ -41,6 +46,8 @@ export function sourceUnavailableReason(
   switch (state) {
     case 'unconfigured':
       return `${sourceLabel(kind)} is not connected for this workspace.`
+    case 'disabled':
+      return `${sourceLabel(kind)} is turned off — an org admin paused it.`
     case 'unlicensed':
       return `${sourceLabel(kind)} is not enabled for this workspace.`
     case 'wip':

@@ -35,6 +35,7 @@ func TestSettingsStores_Postgres(t *testing.T) {
 				JiraStatusRules:  stores.JiraStatusRules,
 				TeamGitHubGroups: stores.TeamGitHubGroups,
 				TeamGitHubRepos:  stores.TeamGitHubRepos,
+				OrgEventSources:  stores.OrgEventSources,
 			}, dbtest.SettingsIDs{
 				OrgID:  orgID,
 				TeamID: teamID,

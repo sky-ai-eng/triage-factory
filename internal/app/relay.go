@@ -45,6 +45,32 @@ func (a *App) triggerProfiler(orgID string, force bool) { a.triggerManager("prof
 func (a *App) triggerClassifier(orgID string)           { a.triggerManager("classifier", orgID, false) }
 func (a *App) triggerReach(orgID string, force bool)    { a.triggerManager("reach", orgID, force) }
 
+// sourcesChanged relays an org admin's event-source pause/resume the way
+// pollSoon relays PollSoon. Wired as the server's SetOnSourcesChanged callback,
+// and its caller is a request handler that lands wherever the load balancer put
+// it — so the pod that served the PATCH is very often not the one whose router
+// holds the stale answer.
+func (a *App) sourcesChanged(orgID, kind string) {
+	if a.isBrainHolder() {
+		a.applySourcesChanged(orgID, kind)
+		return
+	}
+	a.publishCtl(ctlbus.Message{Kind: "sources_changed", OrgID: orgID, Source: kind})
+}
+
+// applySourcesChanged is the brain-side effect of a pause/resume: drop the
+// router's cached policy for the org, and re-due the source's poll so a resumed
+// source restarts on the next wake instead of after a full interval. PollSoon
+// on a source nothing polls just clears a key nobody set.
+func (a *App) applySourcesChanged(orgID, kind string) {
+	if a.router != nil {
+		a.router.InvalidateSourceGate(orgID)
+	}
+	if a.pollerMgr != nil {
+		a.pollerMgr.PollSoon(kind, orgID)
+	}
+}
+
 // triggerManager is the shared relay body: dispatch in-process when this
 // pod holds the brain, else publish the tf_ctl relay message for the
 // holder to pick up.
@@ -113,6 +139,8 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 		if a.pollerMgr != nil {
 			a.pollerMgr.PollSoon(msg.Source, msg.OrgID)
 		}
+	case "sources_changed":
+		a.applySourcesChanged(msg.OrgID, msg.Source)
 	case "cred_request":
 		// nil at TF_ROLE=executor (buildCredProvisioner never constructs
 		// a.credProvisioner there) and in local mode — an executor is

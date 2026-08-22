@@ -388,6 +388,8 @@ func sourceUnavailableMessage(kind string, state eventsource.State) string {
 	switch state {
 	case eventsource.StateUnconfigured:
 		return kind + " is not configured for this organization"
+	case eventsource.StateDisabled:
+		return kind + " is turned off for this organization by an org admin"
 	case eventsource.StateUnlicensed:
 		return kind + " is not enabled for this organization"
 	case eventsource.StateWIP:

@@ -1,15 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiJSON } from '../lib/apiClient'
+import { setWsSourcesInvalidator } from './useWebSocket'
 import { useApiOrgId } from './useApiOrgId'
 
 /** The closed vocabulary GET /api/orgs/{org}/sources answers with. Each value
  *  names a different thing the reader can do about it: `unconfigured` is
- *  theirs to fix, `unlicensed` is an org admin's, `wip` is nobody's. */
-export type EventSourceState = 'available' | 'unconfigured' | 'unlicensed' | 'wip'
+ *  theirs to fix, `disabled` is an org admin's to undo, `unlicensed` is a
+ *  purchasing decision, `wip` is nobody's. */
+export type EventSourceState = 'available' | 'unconfigured' | 'disabled' | 'unlicensed' | 'wip'
 
 export interface EventSourceAvailability {
   kind: string
   state: EventSourceState
+  // Whether this source has an off switch at all. GitHub does not — every core
+  // surface is built on it — and the server answers this rather than the client
+  // holding its own copy of the list, so a control is never offered for a write
+  // the PATCH refuses.
+  disableable: boolean
 }
 
 // The read is one org-scoped singleton, and several surfaces need it at once
@@ -20,6 +27,13 @@ export interface EventSourceAvailability {
 const cache = new Map<string, EventSourceAvailability[]>()
 const inFlight = new Map<string, Promise<void>>()
 const listeners = new Set<() => void>()
+// Orgs whose cached answer is known stale and not yet refetched. Invalidation
+// marks rather than deletes, because deleting takes `loaded` back to false and
+// every consumer collapses to its loading state — the whole settings section
+// flashing on a toggle, the event picker emptying on a websocket ping. The
+// stale answer is a better thing to show for the length of one refetch than a
+// spinner: it is what was true a moment ago, and it converges.
+const staleOrgs = new Set<string>()
 // Bumped PER ORG whenever that org's cached answer is dropped. A read captures
 // its org's generation at dispatch and discards its answer if an invalidation
 // has since bumped it, so a request already in flight when a credential
@@ -32,6 +46,16 @@ const generations = new Map<string, number>()
 
 function generationOf(orgId: string): number {
   return generations.get(orgId) ?? 0
+}
+
+// ensureFresh starts a read when this org has no answer or a stale one, and
+// nothing is already fetching it. Both entry points go through it: an org can
+// be invalidated while nothing is mounted, and a component mounting afterwards
+// would otherwise find a populated cache and render the stale answer forever.
+function ensureFresh(orgId: string): void {
+  if (inFlight.has(orgId)) return
+  if (cache.has(orgId) && !staleOrgs.has(orgId)) return
+  void load(orgId)
 }
 
 function notify() {
@@ -48,6 +72,7 @@ function load(orgId: string): Promise<void> {
     .then((data) => {
       if (gen !== generationOf(orgId)) return // superseded — a newer invalidation won
       cache.set(orgId, data.sources ?? [])
+      staleOrgs.delete(orgId)
       notify()
     })
     .catch(() => {
@@ -67,24 +92,37 @@ function load(orgId: string): Promise<void> {
   return tracked
 }
 
-/** Drop the cached availability and refetch for any mounted subscriber. Call
+/** Mark the cached availability stale and refetch for any mounted subscriber.
+ *  The previous answer keeps rendering until the new one lands — see staleOrgs.
+ *  Call
  *  after a change that can move a source — binding or unbinding a credential,
- *  connecting a workspace. Pass an orgId to invalidate just that org; omit it
- *  to invalidate every org this page has read. */
+ *  connecting a workspace, an org admin pausing or resuming one. Pass an orgId
+ *  to invalidate just that org; omit it to invalidate every org this page has
+ *  read.
+ *
+ *  The `sources_updated` websocket ping lands here too: the server sends it
+ *  payload-free and org-scoped, and the refetch through the REST read is what
+ *  carries the scoping. */
 export function invalidateEventSources(orgId?: string): void {
   const targets = orgId ? [orgId] : [...cache.keys(), ...inFlight.keys()]
   for (const id of new Set(targets)) {
-    // Bump before dropping: a read still in flight for this org has captured
-    // the old generation and must not write its pre-change answer into the
-    // cache we are about to empty.
+    // Bump first: a read still in flight for this org has captured the old
+    // generation and must not write its pre-change answer over the refetch this
+    // is about to start.
     generations.set(id, generationOf(id) + 1)
     inFlight.delete(id)
-    cache.delete(id)
+    staleOrgs.add(id)
   }
   // Mounted consumers refetch from their own subscription (below) rather than
   // this function knowing which orgs are on screen.
   notify()
 }
+
+// Answer the server's `sources_updated` ping by dropping every cached org.
+// Registered at module load, alongside the cache it clears: a page that never
+// read availability never loaded this module, and has nothing stale to drop.
+// The ping carries no payload — the REST refetch is what carries the scoping.
+setWsSourcesInvalidator(() => invalidateEventSources())
 
 export interface UseEventSources {
   /** Every source this deployment can report on for the org, in wire order.
@@ -123,13 +161,13 @@ export function useEventSources(): UseEventSources {
 
   useEffect(() => {
     const cb = () => {
-      // An invalidation drops the cache and notifies; a mounted consumer
+      // An invalidation marks the cache stale and notifies; a mounted consumer
       // refills it. That keeps the refetch with whoever is actually rendering.
-      if (orgId && !cache.has(orgId) && !inFlight.has(orgId)) void load(orgId)
+      if (orgId) ensureFresh(orgId)
       forceRender((n) => n + 1)
     }
     listeners.add(cb)
-    if (orgId && !cache.has(orgId)) void load(orgId)
+    if (orgId) ensureFresh(orgId)
     return () => {
       listeners.delete(cb)
     }
@@ -158,5 +196,6 @@ export function resetEventSourcesForTest(): void {
   cache.clear()
   inFlight.clear()
   generations.clear()
+  staleOrgs.clear()
   listeners.clear()
 }

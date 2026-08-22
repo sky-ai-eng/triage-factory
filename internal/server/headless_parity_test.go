@@ -60,9 +60,11 @@ func TestOrgSettingsPost_BaseURLCanonicalized(t *testing.T) {
 	})
 
 	var gh, jira string
-	if err := s.db.QueryRowContext(t.Context(),
-		`SELECT COALESCE(github_base_url, ''), COALESCE(jira_base_url, '') FROM org_settings WHERE org_id = ?`,
-		runmode.LocalDefaultOrgID).Scan(&gh, &jira); err != nil {
+	if err := s.db.QueryRowContext(t.Context(), `
+		SELECT
+			COALESCE((SELECT base_url FROM org_event_sources WHERE org_id = ? AND kind = 'github'), ''),
+			COALESCE((SELECT base_url FROM org_event_sources WHERE org_id = ? AND kind = 'jira'), '')
+	`, runmode.LocalDefaultOrgID, runmode.LocalDefaultOrgID).Scan(&gh, &jira); err != nil {
 		t.Fatalf("read base urls: %v", err)
 	}
 	if gh != "https://github.example.com" {

@@ -355,10 +355,10 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 	const pemRef = "github_app_777_pem"
 	seedSQLiteApp(t, conn, orgID, "777", pemRef)
 	if _, err := conn.Exec(`
-		INSERT INTO org_settings (org_id, github_base_url) VALUES (?, ?)
-		ON CONFLICT(org_id) DO UPDATE SET github_base_url = excluded.github_base_url
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)
+		ON CONFLICT(org_id, kind) DO UPDATE SET base_url = excluded.base_url
 	`, orgID, srv.URL); err != nil {
-		t.Fatalf("seed org_settings: %v", err)
+		t.Fatalf("seed org_event_sources: %v", err)
 	}
 	// Store the App PEM the backfill reads via SecretStore.GetSystem.
 	if err := stores.Secrets.Put(ctx, orgID, pemRef, testRSAPEM(t), "test app pem"); err != nil {

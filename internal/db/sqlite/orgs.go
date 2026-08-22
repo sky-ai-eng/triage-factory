@@ -87,74 +87,24 @@ func (s *orgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain
 }
 
 // orgSettingsColumns is the canonical projection of an org_settings row, in
-// the order scanOrgSettings reads them. GetSettings SELECTs it and every
+// the order db.ScanOrgSettingsCore reads them. GetSettings SELECTs it and every
 // writer below RETURNs it, so the write shape cannot drift from the read
 // shape.
-const orgSettingsColumns = `github_base_url, github_poll_interval, github_clone_protocol,
-	       jira_base_url, jira_poll_interval,
+//
+// github_base_url / github_poll_interval / jira_base_url / jira_poll_interval
+// are NOT here — they moved onto org_event_sources.base_url /
+// poll_interval, keyed by kind. getOrgSettings composes them in from
+// readSourceOverrides below; every writer merges u.GitHubBaseURL etc. (or,
+// for SetGitHubCredentialClass which doesn't touch them, a fresh read) into
+// what it returns, so the struct this file hands back is unchanged even
+// though the row it comes from is now two tables.
+const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 	       github_credential_class, version`
 
-// scanOrgSettings decodes one org_settings row in orgSettingsColumns order.
-func scanOrgSettings(scan func(...any) error) (domain.OrgSettings, error) {
-	var (
-		ghURL, jiraURL, anthRef, bedRef, maxTier sql.NullString
-		ghInterval, jiraInterval                 string
-		cloneProto                               string
-		maxDailyCost                             sql.NullFloat64
-		maxConcurrentRuns                        sql.NullInt64
-		marketplaceEnabled                       bool
-		credentialClass                          string
-		version                                  int
-	)
-	if err := scan(
-		&ghURL, &ghInterval, &cloneProto,
-		&jiraURL, &jiraInterval,
-		&anthRef, &bedRef, &maxTier,
-		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled,
-		&credentialClass, &version,
-	); err != nil {
-		return domain.OrgSettings{}, err
-	}
-	ghDur, err := time.ParseDuration(ghInterval)
-	if err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("parse org_settings github_poll_interval %q: %w", ghInterval, err)
-	}
-	jiraDur, err := time.ParseDuration(jiraInterval)
-	if err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("parse org_settings jira_poll_interval %q: %w", jiraInterval, err)
-	}
-	// Clamp a stray negative up to 0. No DB CHECK guards this column, and
-	// everything downstream (the claim) reads <= 0 as unlimited — so surface a
-	// negative as 0 here too, keeping "unlimited" consistently 0 and never
-	// handing the settings UI a value it rejects.
-	concurrentRuns := int(maxConcurrentRuns.Int64) // NULL → 0 (unlimited)
-	if concurrentRuns < 0 {
-		concurrentRuns = 0
-	}
-	return domain.OrgSettings{
-		GitHubBaseURL:         ghURL.String,
-		GitHubPollInterval:    ghDur,
-		GitHubCloneProtocol:   cloneProto,
-		JiraBaseURL:           jiraURL.String,
-		JiraPollInterval:      jiraDur,
-		AnthropicAPIKeyRef:    anthRef.String,
-		BedrockCredentialsRef: bedRef.String,
-		MaxLLMModelTier:       maxTier.String,
-		MaxDailyCostUSD:       maxDailyCost.Float64, // NULL → 0 (no cap)
-		MaxConcurrentRuns:     concurrentRuns,
-		MarketplaceEnabled:    marketplaceEnabled,
-		// Surfaced verbatim, never coerced to a known value: callers switch on
-		// it and refuse what they don't recognise, which is the whole point of
-		// storing the class instead of inferring it.
-		GitHubCredentialClass: domain.GitHubCredentialClass(credentialClass),
-		Version:               version,
-	}, nil
-}
-
 func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
-	set, err := scanOrgSettings(q.QueryRowContext(ctx, `
+	set, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
 		SELECT `+orgSettingsColumns+`
 		FROM org_settings WHERE org_id = ?
 	`, orgID).Scan)
@@ -166,12 +116,73 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 		// that build a raw DB without going through provisioning
 		// still see sensible values (5m poll intervals, ssh clone
 		// protocol). Matches the schema DEFAULT clauses.
-		return domain.DefaultOrgSettings(), nil
-	}
-	if err != nil {
+		set = domain.DefaultOrgSettings()
+	} else if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_settings: %w", err)
 	}
+	github, jira, err := readSourceOverrides(ctx, q, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
+	}
+	db.ApplyOrgSourceOverrides(&set, github, jira)
 	return set, nil
+}
+
+// readSourceOverrides reads the github + jira org_event_sources rows'
+// base_url / poll_interval in one query. A NULL column, or an altogether
+// absent row, reports the zero db.SourceOverride for that column — applied by
+// db.ApplyOrgSourceOverrides.
+func readSourceOverrides(ctx context.Context, q queryer, orgID string) (github, jira db.SourceOverride, err error) {
+	rows, err := q.QueryContext(ctx, `
+		SELECT kind, base_url, poll_interval FROM org_event_sources
+		WHERE org_id = ? AND kind IN ('github', 'jira')`, orgID)
+	if err != nil {
+		return db.SourceOverride{}, db.SourceOverride{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			kind    string
+			baseURL sql.NullString
+			pollRaw sql.NullString
+		)
+		if err := rows.Scan(&kind, &baseURL, &pollRaw); err != nil {
+			return db.SourceOverride{}, db.SourceOverride{}, err
+		}
+		ov := db.SourceOverride{BaseURL: baseURL.String}
+		if pollRaw.Valid {
+			d, perr := time.ParseDuration(pollRaw.String)
+			if perr != nil {
+				return db.SourceOverride{}, db.SourceOverride{}, fmt.Errorf("parse org_event_sources poll_interval %q: %w", pollRaw.String, perr)
+			}
+			ov.Interval, ov.HasInterval = d, true
+		}
+		switch kind {
+		case "github":
+			github = ov
+		case "jira":
+			jira = ov
+		}
+	}
+	return github, jira, rows.Err()
+}
+
+// upsertSourceOverride writes org_event_sources.base_url + poll_interval for
+// one (org, kind) — the two columns OrgsStore owns on this table. A partial
+// upsert: disabled / disabled_at / disabled_by are absent from both the
+// INSERT column list and the SET list, so this can never touch the pause
+// SetDisabled owns, and a fresh row relies on disabled's schema
+// DEFAULT the same way SetGitHubCredentialClass's partial insert already
+// relies on org_settings' other defaults.
+func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind, baseURL string, pollInterval time.Duration) error {
+	_, err := q.ExecContext(ctx, `
+		INSERT INTO org_event_sources (org_id, kind, base_url, poll_interval)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET
+			base_url      = excluded.base_url,
+			poll_interval = excluded.poll_interval`,
+		orgID, kind, nullStringValue(baseURL), pollInterval.String())
+	return err
 }
 
 // UpdateSettings upserts every org_settings column this writer owns.
@@ -247,11 +258,7 @@ func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u
 // see upsertSettings.
 const orgSettingsConflictUpdate = `
 		ON CONFLICT(org_id) DO UPDATE SET
-			github_base_url = excluded.github_base_url,
-			github_poll_interval = excluded.github_poll_interval,
 			github_clone_protocol = excluded.github_clone_protocol,
-			jira_base_url = excluded.jira_base_url,
-			jira_poll_interval = excluded.jira_poll_interval,
 			anthropic_api_key_ref = excluded.anthropic_api_key_ref,
 			bedrock_credentials_ref = excluded.bedrock_credentials_ref,
 			max_llm_model_tier = excluded.max_llm_model_tier,
@@ -264,18 +271,17 @@ const orgSettingsConflictUpdate = `
 // orgSettingsValues is the ordered column values this writer owns, without the
 // org id — SQLite placeholders are positional, so the INSERT (org first) and
 // the UPDATE (org in the WHERE, so last) need the same values in different
-// places, and this is the one list both build from.
+// places, and this is the one list both build from. GitHubBaseURL /
+// GitHubPollInterval / JiraBaseURL / JiraPollInterval are NOT here — they are
+// org_event_sources columns now; finishSettingsWrite below writes them
+// separately, in the same transaction.
 func orgSettingsValues(u domain.OrgSettings) []any {
 	cloneProto := u.GitHubCloneProtocol
 	if cloneProto == "" {
 		cloneProto = "ssh"
 	}
 	return []any{
-		nullStringValue(u.GitHubBaseURL),
-		u.GitHubPollInterval.String(),
 		cloneProto,
-		nullStringValue(u.JiraBaseURL),
-		u.JiraPollInterval.String(),
 		nullStringValue(u.AnthropicAPIKeyRef),
 		nullStringValue(u.BedrockCredentialsRef),
 		nullStringValue(u.MaxLLMModelTier),
@@ -293,15 +299,15 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 // written" case UpdateSettingsVersioned's create arm relies on).
 func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (domain.OrgSettings, error) {
 	args := append([]any{orgID}, orgSettingsValues(u)...)
-	return scanOrgSettings(s.q.QueryRowContext(ctx, `
+	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_settings (
-			org_id, github_base_url, github_poll_interval, github_clone_protocol,
-			jira_base_url, jira_poll_interval,
+			org_id, github_clone_protocol,
 			anthropic_api_key_ref, bedrock_credentials_ref, max_llm_model_tier,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
 		RETURNING `+orgSettingsColumns, args...).Scan)
+	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
 
 // updateSettingsAtVersion writes the same columns as an ordinary UPDATE under
@@ -316,13 +322,9 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 // UpdateSettings' doc gives.
 func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	args := append(orgSettingsValues(u), orgID, expected)
-	return scanOrgSettings(s.q.QueryRowContext(ctx, `
+	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		UPDATE org_settings SET
-			github_base_url = ?,
-			github_poll_interval = ?,
 			github_clone_protocol = ?,
-			jira_base_url = ?,
-			jira_poll_interval = ?,
 			anthropic_api_key_ref = ?,
 			bedrock_credentials_ref = ?,
 			max_llm_model_tier = ?,
@@ -333,6 +335,36 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			updated_at = CURRENT_TIMESTAMP
 		WHERE org_id = ? AND version = ?
 		RETURNING `+orgSettingsColumns, args...).Scan)
+	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
+}
+
+// finishSettingsWrite is the shared tail of upsertSettings and
+// updateSettingsAtVersion: given the org_settings statement's own result, it
+// either propagates a failed/no-match write untouched (a version conflict or
+// a losing create must write NOTHING, org_event_sources included, so this
+// returns before touching it) or, on success, upserts the
+// github/jira org_event_sources rows from u and merges those four fields into
+// the row it hands back. Both writes land in the same transaction as the
+// org_settings statement (the shared s.q), so a rollback after this point
+// undoes both halves together — ordinary transaction atomicity is what gives
+// the guarded caller its "nothing written on conflict" contract; there is no
+// second version token to invent (see the org_settings.version schema
+// comment).
+func (s *orgsStore) finishSettingsWrite(ctx context.Context, orgID string, u domain.OrgSettings, stored domain.OrgSettings, err error) (domain.OrgSettings, error) {
+	if err != nil {
+		return domain.OrgSettings{}, err
+	}
+	if err := upsertSourceOverride(ctx, s.q, orgID, "github", u.GitHubBaseURL, u.GitHubPollInterval); err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("upsert github source config: %w", err)
+	}
+	if err := upsertSourceOverride(ctx, s.q, orgID, "jira", u.JiraBaseURL, u.JiraPollInterval); err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("upsert jira source config: %w", err)
+	}
+	stored.GitHubBaseURL = u.GitHubBaseURL
+	stored.GitHubPollInterval = u.GitHubPollInterval
+	stored.JiraBaseURL = u.JiraBaseURL
+	stored.JiraPollInterval = u.JiraPollInterval
+	return stored, nil
 }
 
 // SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —
@@ -345,7 +377,7 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 // org_settings column when no row exists yet, and ON CONFLICT touches only the
 // class, so the org's other settings are never clobbered.
 func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.OrgSettings, error) {
-	stored, err := scanOrgSettings(s.q.QueryRowContext(ctx, `
+	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_settings (org_id, github_credential_class, updated_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id) DO UPDATE SET
@@ -356,6 +388,14 @@ func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, 
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("set org github credential class: %w", err)
 	}
+	// This writer doesn't touch org_event_sources — read the org's current
+	// base_url / poll_interval rather than leave them zero, so the row this
+	// hands back still matches what a follow-up GetSettings finds.
+	github, jira, err := readSourceOverrides(ctx, s.q, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
+	}
+	db.ApplyOrgSourceOverrides(&stored, github, jira)
 	return stored, nil
 }
 

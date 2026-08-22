@@ -22,6 +22,40 @@ func TestRenderEnvelope_TrackerBlockReadsBothFields(t *testing.T) {
 	}
 }
 
+// TestRenderEnvelope_ToolsSection_DefaultsToBothCoreFamilies pins
+// renderToolsReference's fallback: envelopeInputs with no AvailableSources set
+// (the zero value every existing caller had before this field existed) still
+// documents both core verb families, so a curator turn never regresses to
+// silently dropping one.
+func TestRenderEnvelope_ToolsSection_DefaultsToBothCoreFamilies(t *testing.T) {
+	got := renderEnvelope(envelopeInputs{ProjectName: "P", BinaryPath: "/x"})
+	if !strings.Contains(got, "exec gh") {
+		t.Errorf("expected github verbs in the default envelope: %q", got)
+	}
+	if !strings.Contains(got, "exec jira") {
+		t.Errorf("expected jira verbs in the default envelope: %q", got)
+	}
+}
+
+// TestRenderEnvelope_ToolsSection_OmitsWhatTheOrgCannotReach is the point of
+// wiring AvailableSources through at all: an org with no Jira must not be
+// handed the Jira verbs on every curator turn, which is what happened before
+// this field existed — renderToolsReference inlined both core families
+// unconditionally.
+func TestRenderEnvelope_ToolsSection_OmitsWhatTheOrgCannotReach(t *testing.T) {
+	got := renderEnvelope(envelopeInputs{
+		ProjectName:      "P",
+		BinaryPath:       "/x",
+		AvailableSources: []string{"github"},
+	})
+	if !strings.Contains(got, "exec gh") {
+		t.Errorf("expected github verbs: %q", got)
+	}
+	if strings.Contains(got, "exec jira") {
+		t.Errorf("jira verbs present for an org that cannot reach jira: %q", got)
+	}
+}
+
 func TestRenderEnvelope_NoTrackersFallback(t *testing.T) {
 	got := renderEnvelope(envelopeInputs{ProjectName: "P", BinaryPath: "/x"})
 	if !strings.Contains(got, "No issue tracker") {

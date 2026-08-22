@@ -23,9 +23,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
@@ -1222,11 +1222,11 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 	)
 	switch task.EntitySource {
 	case "github":
-		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar, localGit)
+		cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
 	case "jira":
-		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+		cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 	case "slack":
-		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+		cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 	default:
 		return "", fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
@@ -1257,11 +1257,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// per-run identity for the worktree_path / conversation_worktrees records.
 		switch task.EntitySource {
 		case "github":
-			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh, sidecar, localGit)
+			cfg, err = s.setupGitHub(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh, sidecar, localGit)
 		case "jira":
-			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+			cfg, err = s.setupJira(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 		case "slack":
-			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, task, gh)
+			cfg, err = s.setupSlack(ctx, orgID, conv.ID, conv.ClaimID, br.ID, conv.CreatorUserID, task, gh)
 		default:
 			err = fmt.Errorf("unsupported task source: %s", task.EntitySource)
 		}
@@ -1291,7 +1291,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		owner, repo, prNumber := parseGitHubTask(task)
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
-		cfg.toolsRef = agentprompt.GitHubToolsReference()
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, eventsource.KindGitHub)
 		cfg.hasWT = true
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
@@ -1310,7 +1310,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
-		cfg.toolsRef = agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, eventsource.KindJira)
 		cfg.hasWT = false
 		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {
@@ -1322,11 +1322,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
-		toolsRef := agentprompt.GitHubToolsReference()
-		if ref, ok := agentprompt.ToolsReferenceFor("slack"); ok {
-			toolsRef += "\n\n" + ref
-		}
-		cfg.toolsRef = toolsRef
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.ID, "slack")
 		cfg.hasWT = false
 		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {

@@ -1251,6 +1251,10 @@ export type WSEvent =
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
+  // Which event sources can reach the org changed. Payload-free and
+  // org-scoped: the client refetches GET /api/orgs/{org}/sources, which is
+  // where the scoping lives.
+  | { type: 'sources_updated'; data: Record<string, never> }
   // The workspace's reachable-repo mirror was refreshed. Payload-free: the
   // repository picker refetches through the REST read, which carries the
   // scoping — the cheap tier, and what turns a first-ever open's "discovering

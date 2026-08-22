@@ -1,18 +1,32 @@
 // Package eventsource answers one question, per org: which event sources can
 // actually reach this organization, and when one cannot, why not.
 //
-// The answer is DERIVED on every read and never stored. Every way a source can
-// be off already exists and is meaningful somewhere else — the credential is
-// unbound, the workspace was disconnected, the licence lapsed, the source has
-// not shipped — so mirroring one of those into a stored flag would be one more
-// way to be off, free to disagree with the fact it copies. Nothing here has a
-// setter.
+// The answer is DERIVED on every read. Every CAPABILITY way a source can be off
+// already exists and is meaningful somewhere else — the credential is unbound,
+// the workspace was disconnected, the licence lapsed, the source has not
+// shipped — so mirroring one of those into a stored flag would be one more way
+// to be off, free to disagree with the fact it copies. None of them is stored
+// here, and nothing here sets one.
 //
-// TODO(TFAC-882): an org admin cannot pause a source without unbinding its
-// credential, which also cuts the agent's own access to it. What that wants is
-// not a mirror of anything above but a deliberate control of its own: a fifth
-// state resolved here ahead of the probes, a drop in the router, and a skip in
-// both poll cycles. Every consumer of State picks it up unchanged.
+// The one stored input is POLICY, not capability: an org admin's deliberate
+// off switch (org_event_sources.disabled), read ahead of the probes below. It
+// mirrors nothing, because the alternative way to turn a source off is to
+// unbind its credential, and that destroys the configuration rather than
+// suspending it. It is read here rather than checked by each consumer so that
+// a source registered from outside core gets it for free.
+//
+// Off means off: a turned-off source is not polled, produces no events, mints
+// no tasks, and resolves no credential for an agent. Those gates live with the
+// machinery they guard and share one check (Disabled, policy.go) — this package
+// derives the STATE, and a state that meant "off for some purposes" would be a
+// permission for every gate to pick its own reading. What survives is the
+// stored configuration: the bound credential, the tracked repos, the authored
+// handlers. That is the whole distinction between this and a disconnect, and it
+// is what makes turning a source back on one switch instead of re-onboarding.
+//
+// Not every source has that switch. GitHub is REQUIRED — see Disableable — so
+// the vocabulary of things an org can turn off is a strict subset of the
+// vocabulary it can read a state for.
 //
 // Its readers want different slices of the same derivation: the org
 // availability read hands the whole vocabulary to the UI, an event-handler
@@ -70,8 +84,13 @@ func KindOf(eventType string) string {
 	return eventType
 }
 
-// State is a source's answer for one org — a closed vocabulary of four values,
+// State is a source's answer for one org — a closed vocabulary of five values,
 // each naming a different thing the reader can do about it.
+//
+// `disabled` joins the vocabulary rather than riding alongside it as a second
+// boolean, even though capability and policy really are different facts. Every
+// consumer keys on `state == available`, and a consumer that forgot to check a
+// second field would silently ignore the pause. One field cannot be forgotten.
 type State string
 
 const (
@@ -81,6 +100,10 @@ const (
 	// missing. The one state a reader can fix themselves, or ask an org admin
 	// to.
 	StateUnconfigured State = "unconfigured"
+	// StateDisabled — an org admin turned it off: no polling, no events, no
+	// tasks, and no credential resolved for an agent. The stored credential
+	// itself is untouched, so this is reversible where a disconnect is not.
+	StateDisabled State = "disabled"
 	// StateUnlicensed — the entitlement is absent. Not the reader's to fix.
 	StateUnlicensed State = "unlicensed"
 	// StateWIP — TF has not shipped this source. Nobody's to fix.
@@ -92,6 +115,17 @@ const (
 type Source struct {
 	Kind  string `json:"kind"`
 	State State  `json:"state"`
+	// Disableable carries the vocabulary rule to the client, so a caller can
+	// know which sources have an off switch without holding a copy of the list
+	// that decides. A UI that hardcoded the answer would offer a control the
+	// PATCH refuses the moment a second source becomes required.
+	Disableable bool `json:"disableable"`
+}
+
+// NewSource builds one source's answer with the vocabulary-derived fields
+// filled in, so a caller that resolved a state cannot forget one of them.
+func NewSource(kind string, state State) Source {
+	return Source{Kind: kind, State: state, Disableable: Disableable(kind)}
 }
 
 // Availability is one org's whole resolved vocabulary, in wire order.
@@ -136,6 +170,19 @@ type Registration struct {
 	// deployment's setup or its licensing, and neither question is being asked
 	// in a mode where the source structurally cannot run.
 	MultiOnly bool
+	// HasHost declares whether this source has a self-host story — an
+	// alternate origin org_event_sources.base_url may target, the way GitHub
+	// Enterprise Server and Jira Data Center do. base_url decides
+	// where a credential is SENT, so a false HasHost is not just a UI hint:
+	// the write path that persists it refuses a value for a kind that
+	// declares none, because there is no legitimate host to redirect a
+	// SaaS-only source's credential to.
+	HasHost bool
+	// Polled declares whether this source has a poll cadence at all —
+	// org_event_sources.poll_interval is meaningful only where this is true.
+	// A push source (webhook-delivered) has none; the column stays null and
+	// nothing reads it.
+	Polled bool
 }
 
 // probeFn is a declaration's resolution step. It takes the pass's resolver
@@ -153,15 +200,31 @@ type declaration struct {
 	// probe is nil for a source TF has declared but not built: its state is
 	// the constant StateWIP and nothing is read.
 	probe probeFn
+	// required marks a source the product is built on, which therefore has no
+	// off switch. It is not a registration option and never will be: a source
+	// declared from outside core is by construction one this deployment works
+	// without, or core could not ship without it.
+	required bool
+	// hasHost / polled mirror Registration's fields of the same name for
+	// core's own builtins — see HasHost / Polled below for what each gates.
+	hasHost bool
+	polled  bool
 }
 
 // builtins are the sources core ships or has declared. github and jira resolve
 // through this package's own probes; linear and schedule are declared and not
 // built, which is a fact the UI needs to render rather than an omission.
+//
+// linear's hasHost is false: Linear is SaaS-only with no self-host offering,
+// so org_event_sources.base_url has nothing to target for it — same reasoning
+// as Slack, stated here ahead of Linear actually shipping so the day it does,
+// HasHost is a registration decision already made rather than a default
+// nobody chose. schedule is TF's own internal cron trigger: no host, no poll
+// cadence, nothing external to configure.
 var builtins = []declaration{
-	{kind: KindGitHub, probe: githubState},
-	{kind: KindJira, probe: jiraState},
-	{kind: KindLinear},
+	{kind: KindGitHub, probe: githubState, required: true, hasHost: true, polled: true},
+	{kind: KindJira, probe: jiraState, hasHost: true, polled: true},
+	{kind: KindLinear, polled: true},
 	{kind: KindSchedule},
 }
 
@@ -207,7 +270,7 @@ func declarations() []declaration {
 		if local && reg.MultiOnly {
 			continue
 		}
-		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe)})
+		out = append(out, declaration{kind: kind, probe: adapt(reg.Probe), hasHost: reg.HasHost, polled: reg.Polled})
 	}
 	slices.SortFunc(out, func(a, b declaration) int {
 		if (a.probe == nil) != (b.probe == nil) {
@@ -238,7 +301,7 @@ func Resolve(ctx context.Context, tx db.TxStores, orgID string) (Availability, e
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, Source{Kind: d.kind, State: st})
+		out = append(out, Source{Kind: d.kind, State: st, Disableable: !d.required})
 	}
 	return out, nil
 }
@@ -260,17 +323,90 @@ func StateFor(ctx context.Context, tx db.TxStores, orgID, kind string) (State, b
 	return st, true, nil
 }
 
+// Declared reports whether kind is a source this deployment can report on at
+// all — a built-in, a declared-but-unbuilt source, or one registered from
+// outside core and not omitted by run mode.
+//
+// It is the vocabulary membership test, and it reads nothing: the admin write
+// surface needs to answer "is this even an address" before it stores a policy
+// against it, and a source's STATE is not the question there. A kind this build
+// does not carry is a 404, not a silently stored row.
+func Declared(kind string) bool {
+	return slices.ContainsFunc(declarations(), func(d declaration) bool { return d.kind == kind })
+}
+
+// Disableable reports whether kind is a source an org may turn off.
+//
+// GitHub is not, and that is a product fact rather than a caution: repositories,
+// pull requests, the git channel a delegated run pushes through, and every
+// artifact a run produces are GitHub. An org with GitHub turned off is an org
+// where nothing works, so the switch would only ever be a way to break a
+// deployment silently — an admin who wants that outcome is looking for uninstall.
+//
+// A kind outside this deployment's vocabulary is not disableable either, for the
+// same reason it is not addressable: there is nothing to turn off.
+//
+// This is the whole of the rule, and every gate inherits it through Disabled,
+// so a stored row naming a required source is inert rather than dangerous.
+func Disableable(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && !decls[i].required
+}
+
+// HasHost reports whether kind declares a self-host story — whether
+// org_event_sources.base_url is a value this kind may legitimately carry.
+// False for a kind outside this deployment's vocabulary, the same as
+// Disableable: there is nothing to configure a host for.
+//
+// This is the mechanism the base_url write path consults before persisting a
+// value for any kind — see the settings handler's per-source validation loop.
+// GitHub (Enterprise Server) and Jira (Data Center) both declare one; a
+// SaaS-only source like Slack must not, because base_url decides where a
+// credential is sent and a host field for a source with no alternate host is
+// a redirection surface with no legitimate use.
+func HasHost(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && decls[i].hasHost
+}
+
+// Polled reports whether kind has a poll cadence at all — whether
+// org_event_sources.poll_interval means anything for it. False for
+// a kind outside this deployment's vocabulary, and false for a push source
+// (webhook-delivered): it has no cadence, and the column stays null.
+func Polled(kind string) bool {
+	decls := declarations()
+	i := slices.IndexFunc(decls, func(d declaration) bool { return d.kind == kind })
+	return i >= 0 && decls[i].polled
+}
+
 // resolver carries one pass's shared reads. The github and jira answers are
 // both cut from the same credential bundle, so it is loaded lazily and at most
-// once — a pass that resolves neither never touches the secret store.
+// once — a pass that resolves neither never touches the secret store. The org's
+// paused-source set is loaded the same way, once for the whole pass however
+// many sources it answers for.
 type resolver struct {
 	tx    db.TxStores
 	orgID string
 
 	creds       auth.Credentials
 	credsLoaded bool
+
+	paused       map[string]bool
+	pausedLoaded bool
 }
 
+// state resolves one declaration, applying the vocabulary's precedence:
+//
+//	wip > unlicensed > disabled > unconfigured > available
+//
+// Least-fixable first. `disabled` outranks `unconfigured` because telling a
+// reader to go bind a credential for a source an admin deliberately turned off
+// sends them to do useless work. It does NOT outrank `unlicensed` or `wip`,
+// which is why the probe still runs for a paused source: a registered source's
+// licence is a fact only its own probe holds, and re-enabling a source nobody
+// is entitled to would change nothing.
 func (r *resolver) state(ctx context.Context, d declaration) (State, error) {
 	if d.probe == nil {
 		return StateWIP, nil
@@ -279,7 +415,37 @@ func (r *resolver) state(ctx context.Context, d declaration) (State, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
 	}
+	if st == StateUnlicensed || d.required {
+		return st, nil
+	}
+	paused, err := r.pausedKinds(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve event source %q: %w", d.kind, err)
+	}
+	if paused[d.kind] {
+		return StateDisabled, nil
+	}
 	return st, nil
+}
+
+// pausedKinds loads the org's admin-paused sources once per pass. A read
+// failure is returned rather than answered as "nothing is paused": reporting a
+// paused source available is the one wrong answer that lets events through
+// after an admin turned them off.
+func (r *resolver) pausedKinds(ctx context.Context) (map[string]bool, error) {
+	if r.pausedLoaded {
+		return r.paused, nil
+	}
+	kinds, err := r.tx.OrgEventSources.ListDisabled(ctx, r.orgID)
+	if err != nil {
+		return nil, err
+	}
+	r.paused = make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		r.paused[k] = true
+	}
+	r.pausedLoaded = true
+	return r.paused, nil
 }
 
 // credentials loads the org's integration bundle once per pass.
