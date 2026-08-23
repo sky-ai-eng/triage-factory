@@ -89,6 +89,9 @@ const ROLE_LABELS: Record<string, string> = {
 }
 
 /** What this deployment can run. Org-level today; the per-team override is not built. */
+// TODO(TFAC-879): the CONFIGURED MODELS panel is a static sketch — replace
+// this array with the org model catalog read once per-team enable-sets exist,
+// and delete the hardcoded prices with it. Blocked on TFAC-703.
 const MODELS = [
   { name: 'Claude Opus 5', tag: '(default)', price: '$25 / M' },
   { name: 'Claude Sonnet 5', tag: '', price: '$15 / M' },
@@ -742,7 +745,9 @@ export default function TeamSettings() {
                 <span>EVENT SOURCES</span>
               </button>
               <span className="ts-lead-flex" />
-              <span className="ts-panelview-n">{SOURCES.length} sources · — events in 7 days</span>
+              <span className="ts-panelview-n">
+                {SOURCES.length} sources · {flowEvents ?? '—'} events in 7 days
+              </span>
             </div>
 
             <div className="ts-panelview-body">
@@ -757,12 +762,12 @@ export default function TeamSettings() {
                 </div>
                 <div className="ts-intro-figs">
                   <div className="ts-intro-fig">
-                    <span className="ts-intro-fig-v">—</span>
+                    <span className="ts-intro-fig-v">{flowEvents ?? '—'}</span>
                     <span className="ts-intro-fig-l">events · 7d</span>
                   </div>
                   <div className="ts-intro-fig">
                     <span className="ts-intro-fig-v" data-tone="warm">
-                      —
+                      {flowTasks ?? '—'}
                     </span>
                     <span className="ts-intro-fig-l">became tasks</span>
                   </div>
@@ -776,8 +781,8 @@ export default function TeamSettings() {
                   state={sourceOff('github') ? 'unavailable' : 'configured'}
                   scope="repositories this team tracks"
                   stats={[
-                    ['events · 7d', '—'],
-                    ['became tasks', '—'],
+                    ['events · 7d', activitySource(activity, 'github')?.events ?? '—'],
+                    ['became tasks', activitySource(activity, 'github')?.tasks ?? '—'],
                   ]}
                   note={sourceOff('github')}
                   onClick={() => openSource('github')}
@@ -788,8 +793,8 @@ export default function TeamSettings() {
                   state={sourceOff('jira') ? 'unavailable' : 'configured'}
                   scope="projects this team watches"
                   stats={[
-                    ['events · 7d', '—'],
-                    ['became tasks', '—'],
+                    ['events · 7d', activitySource(activity, 'jira')?.events ?? '—'],
+                    ['became tasks', activitySource(activity, 'jira')?.tasks ?? '—'],
                   ]}
                   note={sourceOff('jira')}
                   onClick={() => openSource('jira')}
@@ -799,7 +804,7 @@ export default function TeamSettings() {
                   source="slack"
                   state={sourceOff('slack') ? 'unavailable' : 'configured'}
                   scope="channels this team watches"
-                  stats={[['mentions · 7d', '—']]}
+                  stats={[['mentions · 7d', activitySource(activity, 'slack')?.events ?? '—']]}
                   note={sourceOff('slack')}
                   onClick={() => openSource('slack')}
                 />
