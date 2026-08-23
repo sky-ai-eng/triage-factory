@@ -15,6 +15,65 @@ import (
 // is what a partial write materializes a row from.
 const DefaultModel = ModelSonnet
 
+// LocalBackgroundJobsModel is the background-jobs model a local install starts
+// with. Local mode is a single-user, zero-configuration first run, so its knob
+// arrives already filled in — the SQLite org_settings column carries this value
+// as its DEFAULT, which is what materializes it both for a fresh tenant and for
+// a row that predates the column. Multi mode has no such default: an org there
+// picks its model during setup, and until it does its background jobs skip.
+//
+// It is a pre-fill, not a fallback. Nothing resolves to it at job time; the only
+// thing that reads it is the schema.
+const LocalBackgroundJobsModel = ModelHaiku
+
+// Where an org's Claude credentials come from — the value of
+// org_settings.llm_auth_method, and the answer to what it means that an org has
+// bound no provider.
+//
+// The two are not symmetric in how they are established. LLMAuthBYOK is implied
+// by the act of binding, because an org cannot hold its own credential and still
+// be running on the host's. LLMAuthSystem is only ever an explicit selection (or
+// the local column default), and it holds only while no provider ref is bound:
+// credential resolution reaches for a stored key whenever one exists, so the two
+// together would describe a run that does not happen.
+const (
+	// LLMAuthSystem — the host's credentials. TF supplies the agent subprocess
+	// nothing, and the Claude Code SDK resolves authentication from the
+	// inherited environment: a Claude Code subscription login, an exported
+	// ANTHROPIC_API_KEY, Bedrock or Vertex variables. Which of those it is, TF
+	// cannot see, which is why models under it are reported as assumed rather
+	// than as anything a probe could establish.
+	//
+	// Local mode only. See EffectiveLLMAuthMethod.
+	LLMAuthSystem = "system"
+	// LLMAuthBYOK — the org's own bound material, whichever provider serves the
+	// model. Multi mode is always this.
+	LLMAuthBYOK = "byok"
+)
+
+// EffectiveLLMAuthMethod resolves the credential source actually in force,
+// given the stored org setting and whether the deployment is multi-mode.
+//
+// Multi-mode is ALWAYS LLMAuthBYOK, independent of the stored value: there are
+// no host credentials for a hosted deployment to lend, because the operator's
+// environment is one environment shared by every tenant. Storing the other
+// value there is refused on the way in, so the disagreement should not arise;
+// resolving it here as well is what makes a row that arrived some other way
+// inert instead of a cross-tenant credential leak.
+//
+// Local mode treats only the literal LLMAuthBYOK as BYOK and resolves empty or
+// any unrecognised value to LLMAuthSystem — the same shape EffectiveCloneProtocol
+// uses, and for the same reason: the column is app-validated rather than
+// CHECK-constrained, so the read is where a value nothing wrote is decided. It
+// resolves toward the host because that is what a local run with nothing bound
+// does regardless.
+func EffectiveLLMAuthMethod(stored string, multiMode bool) string {
+	if multiMode || stored == LLMAuthBYOK {
+		return LLMAuthBYOK
+	}
+	return LLMAuthSystem
+}
+
 // DefaultBranchTemplate is the branch-name convention suggested to delegated
 // agents as envelope guidance (not enforced). The literal "<ticket-id>" is
 // substituted with the conversation's ticket id at prompt-render time.
@@ -174,6 +233,35 @@ type OrgSettings struct {
 	// ceiling has to make and the catalog declines to.
 	MaxLLMModelTier string
 
+	// BackgroundJobsModel is the model the three headless system jobs — the
+	// scorer, the project classifier and the repo profiler — run on. A catalog
+	// key (internal/modelcatalog), validated on write against the catalog and
+	// against the providers the org has connected.
+	//
+	// One knob for all three, org-level: they are the same kind of work (short,
+	// toolless, no transcript) bought from the same budget, and a per-job knob
+	// would be three ways to answer one question.
+	//
+	// "" is unset, and unset means the jobs do not run: there is no shipped
+	// fallback model anywhere in TF, so a job with no model skips its cycle and
+	// says so rather than spending someone's money on a model nobody chose.
+	// Local installs are pre-filled by the column default (see
+	// LocalBackgroundJobsModel); a multi-mode org picks one during setup.
+	BackgroundJobsModel string
+
+	// LLMAuthMethod is where this org's Claude credentials come from:
+	// LLMAuthSystem (the host's, resolved by the SDK from the inherited
+	// environment) or LLMAuthBYOK (the org's own bound material). Read through
+	// EffectiveLLMAuthMethod, which is what makes multi mode's single legal
+	// value hold whatever the column says.
+	//
+	// It is a separate fact from AnthropicAPIKeyRef / BedrockCredentialsRef,
+	// not a summary of them: those name WHICH providers are bound, and this
+	// names what it means that none are. An org on LLMAuthBYOK with neither ref
+	// set has said it brings its own key and has not bound one — a setup gap,
+	// where the same emptiness under LLMAuthSystem is a working configuration.
+	LLMAuthMethod string
+
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477). 0 = no
 	// cap (round-trips 0 ↔ NULL). When today's org spend (UTC calendar day,
 	// summed across every category) is >= this value, the delegation choke
@@ -313,6 +401,10 @@ func DefaultOrgSettings() OrgSettings {
 		// settings row has bound no credential at all, and "the PAT system,
 		// with nothing in it yet" is the state a fresh org is in.
 		GitHubCredentialClass: GitHubCredentialClassPAT,
+		// Matches the SQLite column's NOT NULL DEFAULT, and correct for local
+		// the way GitHubCloneProtocol above is: multi mode overrides it at the
+		// read (EffectiveLLMAuthMethod) rather than storing something else.
+		LLMAuthMethod: LLMAuthSystem,
 	}
 }
 
@@ -399,6 +491,22 @@ type TeamSettings struct {
 	// persists. Deliberately team-grained, with no per-prompt override: a
 	// prompt author must not be able to opt their conversations out of the team's gate.
 	ReviewPosture string
+
+	// AllowedProviders restricts which inference providers this team may spend
+	// against — an org admin's decision, stored as modelcatalog provider ids.
+	// Empty (the default) is no restriction: every provider the org configured.
+	//
+	// Org-admin-configured, like MaxDailyCostUSD and for the same reason: a team
+	// admin who could widen their own team's restriction would not be restricted.
+	// The team-settings write path never populates this field from its request
+	// body, so a team-admin save round-trips the stored value untouched; only the
+	// org-admin write changes it.
+	//
+	// It is forward-acting. Restricting a team does not rewrite the model already
+	// pinned on its prompts or stored as its default — those are caught at the
+	// next dispatch, which refuses by name rather than substituting a model
+	// nobody chose.
+	AllowedProviders []string
 
 	// BaseBranchPushPolicy is whether this team's delegated agents may push to
 	// a repo's base / default branch — one of ValidBaseBranchPushPolicies, read

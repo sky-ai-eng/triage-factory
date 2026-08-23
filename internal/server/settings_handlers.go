@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -301,16 +302,47 @@ func (s *Server) handleTeamSettingsPatch(w http.ResponseWriter, r *http.Request)
 			return fmt.Errorf("load team settings: %w", err)
 		}
 		prevModel = teamSet.DefaultModel
-		if orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID); err == nil {
+		// The org row feeds two different things, and they tolerate a read
+		// failure differently. The max-tier cap only renders an advisory line
+		// after the save, so a failed read there costs a sentence. The provider
+		// check below decides whether the write happens at all, so the same
+		// failure has to stop it — see the abort inside.
+		orgSet, orgErr := tx.Orgs.GetSettings(r.Context(), orgID)
+		if orgErr == nil {
 			orgMaxTier = orgSet.MaxLLMModelTier
 		}
 		apply(&teamSet)
 		savedModel = teamSet.DefaultModel
+		// A default this team's next run would refuse is not a default worth
+		// storing, so the provider check happens here — inside the transaction,
+		// where both the org's connected providers and the team's restriction
+		// are already loaded. Only on a change: a save that re-sends a model
+		// stored before a credential was disconnected must not be blocked by
+		// something this caller did not do (that one is the dispatch's to
+		// refuse).
+		if savedModel != "" && savedModel != prevModel {
+			// A failed read is the check's input missing, not the check
+			// passing. Saving through it would persist a default the next
+			// dispatch refuses, and the caller would be told the save
+			// succeeded — so the write is abandoned and the caller retries.
+			// A missing org_settings row is not this case: the store answers
+			// that with the schema defaults, which resolve to an org holding
+			// no credential and therefore refuse nothing.
+			if orgErr != nil {
+				return fmt.Errorf("load org settings: %w", orgErr)
+			}
+			if e := modelaccess.ForOrg(orgSet).Check(savedModel, teamSet.AllowedProviders); e != nil {
+				return e
+			}
+		}
 		if saved, err = tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
 		return nil
 	}); err != nil {
+		if writeModelAccessError(w, err, "ai_model") {
+			return
+		}
 		internalError(w, "settings/team", err)
 		return
 	}
@@ -545,6 +577,11 @@ type orgSettingsResponse struct {
 	// a promise Settings can't keep. Local mode only.
 	JiraCredentialEnvProvided bool   `json:"jira_credential_env_provided,omitempty"`
 	MaxLLMModelTier           string `json:"max_llm_model_tier,omitempty"`
+	// BackgroundJobsModel is the model the scorer, project classifier and repo
+	// profiler run on — a catalog key. Always emitted (not omitempty): "" is
+	// the org's "not picked yet", which is the state the settings form has to
+	// render, and an omitted field would read to a client as "unchanged".
+	BackgroundJobsModel string `json:"background_jobs_model"`
 	// MaxDailyCostUSD is the org-wide daily LLM spend cap (TFAC-477); 0 = no
 	// cap. Always emitted (not omitempty) so the Settings form can render the
 	// numeric input's current value, including an explicit "0 / no cap".
@@ -553,9 +590,22 @@ type orgSettingsResponse struct {
 	// Always emitted (not omitempty) for the same reason as MaxDailyCostUSD —
 	// the form renders the numeric input's current value, "0 / unlimited"
 	// included.
-	MaxConcurrentRuns  int  `json:"max_concurrent_runs"`
-	HasAnthropicAPIKey bool `json:"has_anthropic_api_key"`
-	HasBedrockCreds    bool `json:"has_bedrock_credentials"`
+	MaxConcurrentRuns int `json:"max_concurrent_runs"`
+	// LLMAuthMethod is where this org's Claude credentials come from:
+	// "system" (the host's, resolved by the SDK from the environment the agent
+	// subprocess inherits) or "byok" (the org's own bound material). The
+	// EFFECTIVE value, so a multi-mode deployment always reads "byok" — the
+	// client never has to know that "system" is local-only to render the right
+	// control, which is the mode difference travelling as data.
+	//
+	// Read alongside has_anthropic_api_key / has_bedrock_credentials, never
+	// derived from them: those say which providers are bound, this says what it
+	// means that none are. Always emitted — a client rendering the source
+	// picker has to know the current selection, and an omitted field would read
+	// as "unchanged".
+	LLMAuthMethod      string `json:"llm_auth_method"`
+	HasAnthropicAPIKey bool   `json:"has_anthropic_api_key"`
+	HasBedrockCreds    bool   `json:"has_bedrock_credentials"`
 	// Bedrock non-secret config (TFAC-68). The credential itself never
 	// leaves the vault — presence rides has_bedrock_credentials and the
 	// method marker below; these three let the Settings form render the
@@ -723,8 +773,10 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		HasJiraCredential:         hasJiraCred,
 		JiraCredentialEnvProvided: jiraCredEnv,
 		MaxLLMModelTier:           orgSet.MaxLLMModelTier,
+		BackgroundJobsModel:       orgSet.BackgroundJobsModel,
 		MaxDailyCostUSD:           orgSet.MaxDailyCostUSD,
 		MaxConcurrentRuns:         orgSet.MaxConcurrentRuns,
+		LLMAuthMethod:             domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, !local),
 		HasAnthropicAPIKey:        orgSet.AnthropicAPIKeyRef != "",
 		HasBedrockCreds:           orgSet.BedrockCredentialsRef != "",
 		BedrockAuthMethod:         bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
@@ -758,6 +810,8 @@ type orgSettingsPatch struct {
 	JiraBaseURL         json.RawMessage `json:"jira_base_url"`
 	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
 	MaxLLMModelTier     json.RawMessage `json:"max_llm_model_tier"`
+	BackgroundJobsModel json.RawMessage `json:"background_jobs_model"`
+	LLMAuthMethod       json.RawMessage `json:"llm_auth_method"`
 	MaxDailyCostUSD     json.RawMessage `json:"max_daily_cost_usd"`
 	MaxConcurrentRuns   json.RawMessage `json:"max_concurrent_runs"`
 	// Version is the token the caller read this row at. Required, and a plain
@@ -812,9 +866,52 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		}
 		prevOrgSet = cur
 		apply(&cur)
+		// A background-jobs model whose provider this org has not connected is
+		// a model its next cycle would refuse, so it is not worth storing —
+		// checked here, inside the transaction, against the row the write is
+		// landing on rather than the one the client last read. Only on a
+		// change: a save that re-sends a model stored before a credential was
+		// disconnected must not be blocked by something this caller did not do.
+		// No team restriction is consulted, and there is no team to consult one
+		// for — these jobs are the org's own work.
+		if cur.BackgroundJobsModel != "" && cur.BackgroundJobsModel != prevOrgSet.BackgroundJobsModel {
+			if e := modelaccess.ForOrg(cur).Check(cur.BackgroundJobsModel, nil); e != nil {
+				return e
+			}
+		}
+		// Running on the host's credentials means holding none of your own:
+		// credential resolution reaches for a stored key whenever one exists,
+		// so a row claiming "system" beside a bound provider would describe a
+		// run that does not happen. Removing the material is its own act on its
+		// own resource — this refuses rather than reaching across and deleting
+		// it, which is exactly the overloaded write the LLM credential routes
+		// were split up to stop.
+		//
+		// Checked here, against the row the write is landing on, and only when
+		// this write is the one asking for it: a save that re-sends a method
+		// stored before someone else bound a key must not be blamed for a state
+		// it did not create.
+		if cur.LLMAuthMethod == domain.LLMAuthSystem && cur.LLMAuthMethod != prevOrgSet.LLMAuthMethod {
+			if bound := boundLLMProviders(cur); len(bound) > 0 {
+				return fmt.Errorf("%w: disconnect %s first", errLLMAuthMethodHasCredentials, strings.Join(bound, " and "))
+			}
+		}
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
 	})
+	if writeModelAccessError(w, err, "background_jobs_model") {
+		return
+	}
+	if errors.Is(err, errLLMAuthMethodHasCredentials) {
+		// 422, not 400: the value is a legal one and the body is well formed —
+		// what is wrong is the state of the resource it would land on, which is
+		// the same distinction the credential binds draw for a key the provider
+		// rejects.
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "llm_auth_method",
+		})
+		return
+	}
 	if errors.Is(err, db.ErrOrgSettingsVersion) {
 		// No server-side merge: the two writers disagree about fields neither of
 		// them named, so the only honest resolution is for the loser to see the
@@ -875,7 +972,7 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	if !httpx.PatchNamed(
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
 		req.JiraBaseURL, req.JiraPollInterval, req.MaxLLMModelTier,
-		req.MaxDailyCostUSD, req.MaxConcurrentRuns,
+		req.BackgroundJobsModel, req.LLMAuthMethod, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
 	) {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
 			Reason:  httpx.ReasonMissingField,
@@ -985,7 +1082,12 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		set(func(o *domain.OrgSettings) { apply(o, next) })
 	}
 	if v, st := httpx.PatchString(&shape, req.GitHubCloneProtocol, "github_clone_protocol"); st != httpx.PatchAbsent {
-		next := defaults.GitHubCloneProtocol
+		// The cleared-to-default value goes through the same resolver the read
+		// side does, so a null clears to what this deployment can actually
+		// honor. The package default is "ssh" (right for local), and writing it
+		// unresolved would plant, via an explicit clear, exactly the value the
+		// PatchSet arm below refuses to accept in multi.
+		next := domain.EffectiveCloneProtocol(defaults.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti)
 		if st == httpx.PatchSet {
 			switch {
 			case v != "ssh" && v != "https":
@@ -1010,6 +1112,57 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			shape.Invalid("max_llm_model_tier", "max_llm_model_tier must be haiku, sonnet, or opus, or null for no cap")
 		case st == httpx.PatchSet:
 			set(func(o *domain.OrgSettings) { o.MaxLLMModelTier = v })
+		}
+	}
+	// background_jobs_model must name a model this deployment offers. The picker
+	// draws from the same catalog and the jobs dispatch the stored value
+	// verbatim, so there is no room for a spelling nothing can invoke. The R5
+	// delegation gates (tool support, a 64k window) deliberately do NOT narrow
+	// it — these jobs are toolless and short-context, so every catalog entry is
+	// a legitimate choice.
+	//
+	// Whether the org has connected the provider that serves it is checked in
+	// the transaction below, against the row this write is landing on.
+	//
+	// Null clears it, and clearing is a real intent: it turns the background
+	// jobs off, which is the only way to stop them short of unbinding the
+	// credential every other feature shares. The jobs then skip with a warning
+	// naming this setting — never a model of TF's choosing.
+	if v, st := httpx.PatchString(&shape, req.BackgroundJobsModel, "background_jobs_model"); st != httpx.PatchAbsent {
+		switch {
+		case st == httpx.PatchClear:
+			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = "" })
+		case !modelcatalog.Offers(strings.TrimSpace(v)):
+			shape.Invalid("background_jobs_model", "background_jobs_model must name a model this deployment offers, or be null to stop running background jobs: "+strings.Join(modelcatalog.Keys(), ", "))
+		default:
+			set(func(o *domain.OrgSettings) { o.BackgroundJobsModel = strings.TrimSpace(v) })
+		}
+	}
+	// llm_auth_method names where the org's Claude credentials come from, and
+	// it is the one settings field whose legal values depend on the deployment:
+	// "system" means the agent subprocess inherits the host's environment, and
+	// a hosted deployment's environment is one environment shared by every
+	// tenant. Refused there rather than stored-and-ignored, so an admin is told
+	// no instead of being left with a row that reads one way and runs another.
+	//
+	// Not nullable. There is no third state to clear TO — an org's credentials
+	// come from one of the two places — so an explicit null is a rejected value
+	// rather than a spelling of "unset".
+	//
+	// Whether the org still holds material that "system" would contradict is
+	// checked in the transaction below, against the row this write is landing
+	// on.
+	if v, st := httpx.PatchString(&shape, req.LLMAuthMethod, "llm_auth_method"); st != httpx.PatchAbsent {
+		method := strings.TrimSpace(v)
+		switch {
+		case st == httpx.PatchClear:
+			shape.Invalid("llm_auth_method", "llm_auth_method cannot be cleared: an organization's Claude credentials come from the host (\"system\") or from its own bound material (\"byok\")")
+		case method != domain.LLMAuthSystem && method != domain.LLMAuthBYOK:
+			shape.Invalid("llm_auth_method", "llm_auth_method must be \""+domain.LLMAuthSystem+"\" or \""+domain.LLMAuthBYOK+"\"")
+		case method == domain.LLMAuthSystem && runmode.Current() == runmode.ModeMulti:
+			shape.Invalid("llm_auth_method", "this deployment has no host credentials to run under — every organization brings its own, so llm_auth_method must be \""+domain.LLMAuthBYOK+"\"")
+		default:
+			set(func(o *domain.OrgSettings) { o.LLMAuthMethod = method })
 		}
 	}
 	// "No cap" is null. An explicit 0 is refused rather than quietly read as

@@ -15,6 +15,15 @@ export type CloneProtocol = 'ssh' | 'https'
 // token) served by the SigV4 re-signing proxy.
 export type BedrockAuthMethod = 'role' | 'bearer' | 'access_keys'
 
+// ClaudeCredentialSource mirrors org_settings.llm_auth_method: 'system' is the
+// credentials already on the host (TF hands the agent subprocess nothing and
+// the Claude Code SDK resolves auth from the inherited environment — a
+// subscription login, an exported ANTHROPIC_API_KEY, Bedrock or Vertex vars),
+// 'byok' is the org's own bound material. Local only offers the first; multi
+// always reads 'byok', because a hosted deployment has no host credentials to
+// lend and the backend refuses to store the other value there.
+export type ClaudeCredentialSource = 'system' | 'byok'
+
 // OrgConfigForm is the editable org-level field set the shared components
 // drive. Field names match the GET/PATCH /api/orgs/{org}/settings wire keys so
 // a container can spread component patches straight into its form state.
@@ -38,6 +47,15 @@ export interface OrgConfigForm {
   jira_api_token: string
   jira_poll_interval: string
   max_llm_model_tier: string
+  // The model the three background jobs — scoring, project classification, repo
+  // profiling — run on. A catalog key. Empty means nobody has picked one, and
+  // those jobs do not run until somebody does: there is no fallback model.
+  background_jobs_model: string
+  // Where runs get their Claude credentials. Ordinary org config, not a
+  // secret — it is the selection the source picker makes, persisted through the
+  // settings PATCH like any other field, so a reload shows what was chosen
+  // instead of re-guessing it from what happens to be bound.
+  llm_auth_method: ClaudeCredentialSource
   // Org-wide daily LLM spend cap (TFAC-477), held as the raw text input. Empty =
   // "no cap"; a numeric string is the per-day USD ceiling. Stored as a string
   // (not a number) so the input can be cleared to "" cleanly and partial typing
@@ -106,10 +124,22 @@ export interface OrgSettingsData {
   // partly or wholly unobservable.
   jira_credential_env_provided?: boolean
   max_llm_model_tier?: string
+  // The background-jobs model as a catalog key; "" = not picked. Always
+  // present — "" is a state the form renders, not an absent field.
+  background_jobs_model: string
   // Org-wide daily spend cap in USD (TFAC-477); 0 = no cap. Always present.
   max_daily_cost_usd: number
   // Org-wide concurrent-run limit; 0 = unlimited. Always present.
   max_concurrent_runs: number
+  // Where the org's Claude credentials come from: 'system' (the host's,
+  // resolved by the SDK from the environment the agent subprocess inherits) or
+  // 'byok' (the org's own bound material). The EFFECTIVE value — multi always
+  // reads 'byok', so no caller has to know that 'system' is local-only.
+  //
+  // Read alongside has_anthropic_api_key / has_bedrock_credentials, never
+  // derived from them: those say which providers are bound, this says what it
+  // means that none are.
+  llm_auth_method: ClaudeCredentialSource
   has_anthropic_api_key: boolean
   has_bedrock_credentials: boolean
   // Bedrock non-secret config — echoed by the GET so the form renders the
@@ -146,6 +176,11 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_api_token: '',
   jira_poll_interval: '5m0s',
   max_llm_model_tier: '',
+  background_jobs_model: '',
+  // The blank-form value only; every real form is seeded from the GET, which
+  // always carries the org's own. 'byok' rather than 'system' because it is the
+  // value legal in both modes.
+  llm_auth_method: 'byok',
   max_daily_cost_usd: '',
   max_concurrent_runs: '',
   anthropic_api_key: '',
@@ -180,6 +215,8 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
     max_llm_model_tier: org.max_llm_model_tier || '',
+    background_jobs_model: org.background_jobs_model || '',
+    llm_auth_method: org.llm_auth_method === 'system' ? 'system' : 'byok',
     // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
     // the numeric string the input edits.
     max_daily_cost_usd: org.max_daily_cost_usd ? String(org.max_daily_cost_usd) : '',
@@ -304,6 +341,8 @@ export type OrgSettingsPatch = Partial<
     | 'jira_url'
     | 'jira_poll_interval'
     | 'max_llm_model_tier'
+    | 'background_jobs_model'
+    | 'llm_auth_method'
     | 'max_daily_cost_usd'
     | 'max_concurrent_runs'
   >
@@ -339,6 +378,14 @@ export async function patchOrgSettings(
   if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
   if (fields.max_llm_model_tier !== undefined)
     body.max_llm_model_tier = blankAsNull(fields.max_llm_model_tier)
+  // Blank sends null, which is not "leave it alone" here — it stops the
+  // background jobs. That is the only way to turn them off short of unbinding
+  // the Claude credential every other feature shares.
+  if (fields.background_jobs_model !== undefined)
+    body.background_jobs_model = blankAsNull(fields.background_jobs_model)
+  // Sent verbatim: there is no third credential source, so this field has no
+  // clearing spelling and the backend rejects null.
+  if (fields.llm_auth_method !== undefined) body.llm_auth_method = fields.llm_auth_method
   if (fields.max_daily_cost_usd !== undefined)
     body.max_daily_cost_usd = numericOrNull(fields.max_daily_cost_usd)
   if (fields.max_concurrent_runs !== undefined)

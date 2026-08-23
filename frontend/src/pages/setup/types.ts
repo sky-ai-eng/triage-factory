@@ -11,7 +11,7 @@
 // downstream step can read upstream state.
 
 import type { ReactNode } from 'react'
-import type { OrgConfigForm } from '../settings/orgConfig'
+import type { ClaudeCredentialSource, OrgConfigForm } from '../settings/orgConfig'
 import type { JiraDeployment } from '../settings/jiraConnect'
 import type { TeamConfigForm } from '../settings/teamConfig'
 import type { GitHubAppStatus } from '../../lib/githubApp'
@@ -57,8 +57,9 @@ export type GitHubAccessMode = 'app' | 'pat'
 export type GitHubAppSource = 'create' | 'existing'
 
 // The LLM provider a BYOK org connects with — Anthropic direct or Amazon
-// Bedrock. Mutually exclusive server-side (connecting one clears the other),
-// so the picker is a true either/or.
+// Bedrock. The picker chooses which credential this flow binds; an org may hold
+// both at once, and which one a run authenticates with is decided by the run's
+// model.
 export type ClaudeProvider = 'anthropic' | 'bedrock'
 
 export interface WizardState {
@@ -166,15 +167,17 @@ export interface WizardState {
   tracker: TrackerKind
 
   // ── Org Claude credentials ──
-  // How the org's delegated runs (and the scorer) authenticate with Claude.
-  //   'system' — use the machine's Claude Code subscription / inherited
-  //              ANTHROPIC_API_KEY (local only; no key stored).
-  //   'byok'   — a stored, validated org Anthropic API key.
-  //   null     — not yet chosen (pre-load only; loadOrg seeds it from whether a
-  //              key is stored, defaulting fresh-local to 'system').
+  // How the org's delegated runs (and the scorer) authenticate with Claude —
+  // the in-flow mirror of the stored llm_auth_method.
+  //   'system' — the credentials already on the machine: a Claude Code
+  //              subscription login, an exported ANTHROPIC_API_KEY, Bedrock or
+  //              Vertex vars. TF stores none of its own (local only).
+  //   'byok'   — the org's own bound provider material.
+  //   null     — pre-load only; loadOrg seeds it from the stored value, never
+  //              from whether a credential happens to be bound.
   // The source picker step is local-only — multi has no system-creds option
-  // (cross-tenant bleed), so multi is always effectively 'byok'.
-  anthropicKeySource: 'system' | 'byok' | null
+  // (cross-tenant bleed), and its stored value is always 'byok'.
+  anthropicKeySource: ClaudeCredentialSource | null
   // Whether a validated org Anthropic key is stored — the in-flow mirror of
   // has_anthropic_api_key. Drives the key step's isComplete (mandatory in multi
   // and local-BYOK) and the "leave blank to keep current" guard on its persist.

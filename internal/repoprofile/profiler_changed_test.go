@@ -49,7 +49,7 @@ func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
 	}
 
@@ -137,20 +137,20 @@ func TestRunOrg_ChangedTracksBatchUpserts(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	batchOK := func(_ context.Context, _ string, batch []repoWithDocs, _ agentproc.SecretsReader) ([]repoProfileResult, error) {
+	batchOK := func(_ context.Context, _ string, _ string, batch []repoWithDocs, _ agentproc.SecretsReader) ([]repoProfileResult, error) {
 		out := make([]repoProfileResult, len(batch))
 		for i, d := range batch {
 			out[i] = repoProfileResult{Repo: d.profile.ID, Profile: "a profile"}
 		}
 		return out, nil
 	}
-	batchFail := func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	batchFail := func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
 	}
 
 	cases := []struct {
 		name       string
-		batchFn    func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error)
+		batchFn    func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error)
 		failUpsert func(call int) bool // docs-flags is call 1; the batch-path upsert is call 2
 		want       bool
 	}{
@@ -247,7 +247,7 @@ func TestRunOrg_BatchFailLeavesProfiledAtUnset(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, nil)
-	p.batchFn = func(context.Context, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
 		return nil, stubErr("simulated batch failure")
 	}
 	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {

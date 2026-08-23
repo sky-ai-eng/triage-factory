@@ -61,6 +61,26 @@ func TestCatalog_PinnedAgainstCommittedSnapshot(t *testing.T) {
 			Prices:        PricesPerMTok{Input: 10, Output: 50, CacheRead: 1, CacheWrite: 12.5},
 			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 3,
 		},
+		{
+			Key: "us.anthropic.claude-haiku-4-5-20251001-v1:0", DisplayName: "Claude Haiku 4.5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 1.1, Output: 5.5, CacheRead: 0.11, CacheWrite: 1.375},
+			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 4,
+		},
+		{
+			Key: "us.anthropic.claude-sonnet-5", DisplayName: "Claude Sonnet 5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 2.2, Output: 11, CacheRead: 0.22, CacheWrite: 2.75},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 5,
+		},
+		{
+			Key: "us.anthropic.claude-opus-5", DisplayName: "Claude Opus 5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 5.5, Output: 27.5, CacheRead: 0.55, CacheWrite: 6.875},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 6,
+		},
+		{
+			Key: "us.anthropic.claude-fable-5", DisplayName: "Claude Fable 5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 11, Output: 55, CacheRead: 1.1, CacheWrite: 13.75},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 7,
+		},
 	}
 
 	got := Entries()

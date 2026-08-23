@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -173,37 +171,19 @@ func isTransientFailure(ctx context.Context, err error) bool {
 	if errors.Is(err, inference.ErrContextOverflow) {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
 	// A rendered status is the authoritative signal and settles the question
 	// either way: an error carrying one is classified on it alone, so a 400
 	// whose body happens to quote "connection reset" stays permanent.
-	if status, ok := renderedHTTPStatus(msg); ok {
+	if status, ok := inference.RenderedStatus(err); ok {
 		return status == 408 || status == 409 || status == 429 || status >= 500
 	}
+	msg := strings.ToLower(err.Error())
 	for _, m := range transportFailureMarkers {
 		if strings.Contains(msg, m) {
 			return true
 		}
 	}
 	return false
-}
-
-// renderedHTTPStatusPattern matches the status marker internal/inference
-// renders into a provider error. Anchored on that exact spelling rather than
-// on a bare three-digit number, so a request id or a token count in the
-// message can't be read as a status.
-var renderedHTTPStatusPattern = regexp.MustCompile(`\(http (\d{3})\)`)
-
-func renderedHTTPStatus(msg string) (int, bool) {
-	m := renderedHTTPStatusPattern.FindStringSubmatch(msg)
-	if m == nil {
-		return 0, false
-	}
-	status, err := strconv.Atoi(m[1])
-	if err != nil {
-		return 0, false
-	}
-	return status, true
 }
 
 // transportFailureMarkers classify a failure that never reached the provider

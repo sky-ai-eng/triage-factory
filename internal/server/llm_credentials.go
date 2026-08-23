@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -31,19 +32,20 @@ import (
 //     were silently dropped. As three routes, strict decoding makes sending the
 //     wrong flavor's field a 400 that names it.
 //
-// Provider exclusivity is unchanged and now VISIBLE. The credential resolver
-// prefers an Anthropic key over Bedrock, so material left behind by the losing
-// provider would be dead config the settings page still renders as configured —
-// binding one therefore clears the other. That used to happen silently; every
-// bind now enumerates what it removed in its `cleared` list, and records the
-// removal in the access change log beside the bind.
+// An org holds BOTH providers at once. Nothing here clears the other one,
+// because there is no longer a losing provider to clean up after: a run resolves
+// whichever provider serves its own model, so an Anthropic key and Bedrock
+// material are both live configuration. What a bind still replaces is material
+// of its OWN provider that it supersedes — a different Bedrock shape — and it
+// enumerates that in its `cleared` list.
 
 // llmCredentialResponse is the shape every bind on this surface answers with.
-// Cleared names the stored material this write removed — the other provider's,
-// or a different Bedrock flavor's — using the same identifiers the read surface
-// uses ("anthropic", "bedrock:role"). It is always present, empty list
-// included, so a client renders "we also disconnected X" without having to
-// distinguish absent from empty.
+// Cleared names the stored material this write removed — a different Bedrock
+// flavor's — using the same identifiers the read surface uses ("anthropic",
+// "bedrock:role"). It is always present, empty list included, so a client
+// renders "we also disconnected X" without having to distinguish absent from
+// empty. The other provider is never in it: binding one no longer disturbs the
+// other.
 type llmCredentialResponse struct {
 	Status  string   `json:"status"`
 	Cleared []string `json:"cleared"`
@@ -55,6 +57,35 @@ type llmCredentialResponse struct {
 const llmCredentialAnthropic = "anthropic"
 
 func llmCredentialBedrock(method string) string { return "bedrock:" + method }
+
+// errLLMAuthMethodHasCredentials is a settings write moving the org to
+// domain.LLMAuthSystem while it still holds provider material. Lives here
+// rather than beside that handler because what makes it true is this file's
+// subject — which credentials are bound — and the fix is a DELETE on one of
+// this file's routes.
+var errLLMAuthMethodHasCredentials = errors.New("an organization running on the host's Claude credentials can hold none of its own")
+
+// onOwnCredentials records that the org's Claude credentials are now its own.
+// Every bind stamps it, because holding provider material and running on the
+// host's environment are mutually exclusive and the bind is the act that
+// settles which one this org is doing — there is nothing left to ask an admin
+// to confirm. The refs still say WHICH provider is bound; this says the org is
+// not on the host's.
+func onOwnCredentials(o *domain.OrgSettings) { o.LLMAuthMethod = domain.LLMAuthBYOK }
+
+// boundLLMProviders names the providers an org holds material for, in the words
+// an admin would use to go find them. Empty means the org has bound nothing,
+// which is the only state domain.LLMAuthSystem is true in.
+func boundLLMProviders(o domain.OrgSettings) []string {
+	var bound []string
+	if o.AnthropicAPIKeyRef != "" {
+		bound = append(bound, modelcatalog.ProviderDisplayName(modelcatalog.ProviderAnthropic))
+	}
+	if o.BedrockCredentialsRef != "" {
+		bound = append(bound, modelcatalog.ProviderDisplayName(modelcatalog.ProviderBedrock))
+	}
+	return bound
+}
 
 // storedLLMCredentials lists the LLM material an org currently holds, read off
 // the settings row's two refs rather than by probing the vault: the refs are the
@@ -111,57 +142,50 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var cleared []string
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
-		_, bedrock := storedLLMCredentials(orgSet)
 		if err := tx.Secrets.Put(r.Context(), orgID, secretKeyAnthropicAPIKey, key, "Org's Anthropic API key"); err != nil {
 			return fmt.Errorf("store Anthropic key: %w", err)
 		}
-		// Provider exclusivity: a stored Bedrock set would be dead config under
-		// the resolver's Anthropic-first precedence.
-		if err := clearBedrockSecrets(r, tx, orgID); err != nil {
-			return err
-		}
+		// The org's Bedrock material, if any, is untouched: both providers are
+		// live at once, and each run resolves the one its model is served by.
 		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-		orgSet.BedrockCredentialsRef = ""
+		onOwnCredentials(&orgSet)
 		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
-		if err := tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
+		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
 			Action:      domain.AccessActionCredentialSet,
 			DetailJSON:  accessDetailCredential(domain.CredentialKindAnthropicKey, ""),
-		}); err != nil {
-			return err
-		}
-		// The exclusivity sweep revoked a stored Bedrock credential — record it
-		// as its own removal rather than leaving it implied by the bind.
-		if bedrock == "" {
-			return nil
-		}
-		cleared = append(cleared, bedrock)
-		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
-			[]string{domain.CredentialKindBedrock})
+		})
 	}); err != nil {
 		internalError(w, "llm-credentials", fmt.Errorf("persist anthropic credentials: %w", err))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: nonNil(cleared)})
+	writeJSON(w, http.StatusOK, llmCredentialResponse{Status: "connected", Cleared: []string{}})
 }
 
 // handleAnthropicDelete removes the org's Anthropic API key. Idempotent — a
 // delete with nothing stored is a 200 and no audit row, because a removal that
 // removed nothing is not an access change.
 //
-// It removes the Anthropic key ALONE. Selecting "use the system Claude Code
-// credentials" means holding no org-level LLM credential of any provider, and
-// that is two deletes because it is two credentials; folding the Bedrock sweep
-// in here is how a route that says "anthropic" ended up wiping AWS material.
+// It removes the Anthropic key ALONE, and it does not move the org onto the
+// host's credentials: a delete says this key is gone, not where the next run
+// should get one, and an org that still holds Bedrock material plainly has an
+// answer already. Folding the Bedrock sweep in here is how a route that says
+// "anthropic" ended up wiping AWS material. After it, runs whose model is
+// served by Bedrock keep working and runs on an Anthropic model are refused by
+// name — the org disconnected the one, not both.
+//
+// Selecting "use the host's Claude Code credentials" is therefore a delete per
+// bound credential and then the settings write that records the selection,
+// which is what makes it a stored choice rather than an inference from what is
+// left behind.
 //
 // DELETE /api/orgs/{org_id}/llm/anthropic
 func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.Request) {
@@ -450,9 +474,9 @@ type bedrockBinding struct {
 }
 
 // bindBedrock performs the parts every Bedrock flavor shares: the flavor's own
-// writes, the non-secret config, the sweep of the material this bind replaces,
-// provider exclusivity against Anthropic, the settings refs, and the audit rows
-// — all in one transaction, so a half-bound org is not a state that exists.
+// writes, the non-secret config, the sweep of the Bedrock material this bind
+// replaces, the settings ref, and the audit row — all in one transaction, so a
+// half-bound org is not a state that exists.
 func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, orgID, userID string, b bedrockBinding) {
 	var cleared []string
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -460,7 +484,7 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
-		anthropic, bedrock := storedLLMCredentials(orgSet)
+		_, bedrock := storedLLMCredentials(orgSet)
 
 		// Sweep BEFORE writing, not after. A shape's own optional key can be in
 		// its clear set — the access-key pair's session token is, because an
@@ -468,19 +492,19 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		// sweep that ran second would delete the token this very request just
 		// stored.
 		//
-		// The other shapes' material must not linger either. The resolver
-		// detects role mode by aws_role_arn presence, so a stale ARN would make
-		// it try to mint instead of using the material stored here, and stale
-		// IAM keys in the vault are wrong regardless of precedence.
+		// The other Bedrock shapes' material must not linger either. The
+		// resolver detects role mode by aws_role_arn presence, so a stale ARN
+		// would make it try to mint instead of using the material stored here,
+		// and stale IAM keys in the vault are wrong regardless of precedence.
+		// The sweep stops at Bedrock: the org's Anthropic key, if any, stays —
+		// it serves that provider's models and this write says nothing about
+		// them.
 		clear := b.clear
 		if b.ref != integrations.KeyAWSRoleARN {
 			// Leaving role mode drops the role ARN and its External ID together;
 			// keeping an orphan ID would name a trust policy nothing presents.
 			clear = append(append([]string{}, clear...), integrations.KeyAWSRoleARN, integrations.KeyAWSExternalID)
 		}
-		// Provider exclusivity: an Anthropic key would win in the resolver,
-		// silently ignoring everything stored below.
-		clear = append(clear, secretKeyAnthropicAPIKey)
 		for _, k := range clear {
 			if _, err := tx.Secrets.Delete(r.Context(), orgID, k); err != nil {
 				return fmt.Errorf("clear stale %s: %w", k, err)
@@ -501,8 +525,8 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 			return err
 		}
 
-		orgSet.AnthropicAPIKeyRef = ""
 		orgSet.BedrockCredentialsRef = b.ref
+		onOwnCredentials(&orgSet)
 		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
 			return err
 		}
@@ -516,24 +540,14 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 			return err
 		}
 
-		var removed []string
-		if anthropic != "" {
-			// An admin auditing "when did we stop using the Anthropic key"
-			// should find it here, not have to infer it from the Bedrock bind.
-			cleared = append(cleared, anthropic)
-			removed = append(removed, domain.CredentialKindAnthropicKey)
-		}
-		// A different Bedrock shape is also material this write removed. It is
-		// the same credential KIND for the change log, so it doesn't earn a
-		// removal row beside its own bind — but the caller is told, because a
-		// settings page that showed "IAM role" a moment ago has to stop.
+		// A different Bedrock shape is material this write removed. It is the
+		// same credential KIND for the change log, so it doesn't earn a removal
+		// row beside its own bind — but the caller is told, because a settings
+		// page that showed "IAM role" a moment ago has to stop.
 		if bedrock != "" && bedrock != llmCredentialBedrock(bedrockAuthMethodFromRef(b.ref)) {
 			cleared = append(cleared, bedrock)
 		}
-		if len(removed) == 0 {
-			return nil
-		}
-		return recordCredentialRemovals(r.Context(), tx, orgID, userID, removed)
+		return nil
 	}); err != nil {
 		internalError(w, "llm-credentials", fmt.Errorf("persist bedrock credentials: %w", err))
 		return

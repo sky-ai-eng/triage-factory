@@ -16,7 +16,6 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -323,13 +322,8 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 	return pickerPreflight{class: class}, true
 }
 
-// isOrgAdmin reports whether userID is an org admin of orgID, short-circuiting
-// to true under local mode (N=1 has a single implicit owner and no team
-// boundary — mirrors the org-admin gates elsewhere in this package).
+// isOrgAdmin reports whether userID is an org admin of orgID.
 func (s *Server) isOrgAdmin(ctx context.Context, orgID, userID string) (bool, error) {
-	if runmode.Current() == runmode.ModeLocal {
-		return true, nil
-	}
 	return s.az.UserIsOrgAdmin(ctx, userID, orgID)
 }
 

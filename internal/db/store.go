@@ -433,6 +433,14 @@ type Stores struct {
 	// JWT-less readers.
 	OrgEventSources OrgEventSourceStore
 
+	// ModelAvailability owns the model_availability table — per (org,
+	// provider, model) evidence that the org's credentials can actually invoke
+	// that model, established by spending one minimal real request on it.
+	// App-pool-only in Postgres (member SELECT, admin write): every write is a
+	// user gesture on the settings surface, so there is no JWT-less writer to
+	// give an admin-pool arm to.
+	ModelAvailability ModelAvailabilityStore
+
 	// PollReadiness owns the poll_readiness table — the org-scoped
 	// readiness gate for /api/jira/stock and the one-shot "config took
 	// effect" announce toast (TFAC-583). Admin-pool-only, same shape as
@@ -537,6 +545,7 @@ type TxStores struct {
 	ConversationPendingInput ConversationPendingInputStore
 	Permissions              PermissionStore
 	OrgEventSources          OrgEventSourceStore
+	ModelAvailability        ModelAvailabilityStore
 
 	// Ext carries opaque store bundles built by registered
 	// StoreExtension factories (see storeext.go), tx-bound to the same

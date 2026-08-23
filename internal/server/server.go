@@ -107,6 +107,11 @@ type Server struct {
 	// via SetPlacementResolver after construction; nil until then so the
 	// endpoint 503s rather than panicking if a request races startup.
 	placement placementResolver
+	// modelProber spends one minimal request establishing whether an org's
+	// credentials can invoke a given model. Wired via SetModelProber after
+	// construction; nil in local mode, where nothing probes and the test
+	// routes say the deployment cannot answer.
+	modelProber modelProber
 	// fleetQueue backs the GET /api/fleet/queue view: per-org conversation-queue shares
 	// (active/queued + cap). Satisfied by the ConversationQueue store; a narrow
 	// interface so the handler test can inject canned shares.
@@ -1322,8 +1327,8 @@ func (s *Server) routes() {
 	// The org's LLM provider credential — one resource per credential SHAPE, so
 	// a route's required fields are fixed and a blank secret never selects a
 	// second behaviour. Rotation is the PUT with a new value; removal is the
-	// DELETE. Binding one provider clears the other's stored material (the
-	// resolver can only use one) and says so in the response. See
+	// DELETE. An org may hold both providers at once: a bind replaces only
+	// material of its own provider, and says so in the response. See
 	// llm_credentials.go.
 	s.apiMutating("PUT /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/llm/anthropic", se.handleAnthropicDelete)
@@ -1338,8 +1343,23 @@ func (s *Server) routes() {
 	// team admin who cannot see org settings but must know what the org
 	// enabled. Unpaginated for the same reason /api/event-types is — a
 	// compile-time vocabulary, not a collection that grows with use.
-	mdh := &modelsHandler{az: s.az}
+	//
+	// The team-scoped read is the same node one scope down (as /usage is
+	// mounted at both): the org's catalog minus the providers an org admin
+	// restricted that team from spending against. The restriction itself is
+	// written beside it and is org-admin-only — a team that could widen its own
+	// would not be restricted.
+	mdh := &modelsHandler{az: s.az, tx: s.tx, prober: func() modelProber { return s.modelProber }}
 	s.api("GET /api/orgs/{org_id}/models", mdh.handleModelsList)
+	s.api("GET /api/teams/{team_id}/models", mdh.handleTeamModelsList)
+	s.apiMutating("PUT /api/teams/{team_id}/models/providers", mdh.handleTeamProvidersPut)
+	// The availability probes: the same verb on the item and on the
+	// collection, because "test this model" and "test this provider's
+	// candidates" are two nameable things with two response shapes. Both are
+	// POSTs for an effect no field write can express — each one calls the
+	// provider and is billed for it.
+	s.apiMutating("POST /api/orgs/{org_id}/models/{model_key}/test", mdh.handleModelTest)
+	s.apiMutating("POST /api/orgs/{org_id}/models/tests", mdh.handleModelTestSweep)
 
 	// "Connect GitHub" user-to-server OAuth — binds a host-verified GitHub
 	// login to the signed-in user (identity, not access, not login).
@@ -1638,6 +1658,14 @@ func (s *Server) SetReconciler(rc *reconcile.Reconciler) {
 // role-setup endpoint reports the method is control-service only.
 func (s *Server) SetBedrockRoleResolver(r bedrockRoleResolver) {
 	s.bedrockRole = r
+}
+
+// SetModelProber wires the model-availability prober. Called once at startup on
+// every serving process, in either mode — the transport differs (a direct call
+// in multi, the agent runtime in local) but the question and the verdicts do
+// not. Nil until wired: the test routes report the deployment cannot probe.
+func (s *Server) SetModelProber(p modelProber) {
+	s.modelProber = p
 }
 
 // SetDashboardBackfiller registers the per-user dashboard-history backfill

@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 )
 
 // SettingsStoresFactory hands the conformance suite a wired bundle of
@@ -302,6 +303,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			MaxLLMModelTier:       "sonnet",
+			BackgroundJobsModel:   domain.ModelSonnet,
+			LLMAuthMethod:         domain.LLMAuthBYOK,
 			MaxDailyCostUSD:       12.50,
 			MaxConcurrentRuns:     8,
 			MarketplaceEnabled:    true,
@@ -614,6 +617,81 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// The background-jobs model is the one org setting whose column DEFAULT
+	// differs per dialect — SQLite pre-fills a local install, Postgres leaves a
+	// fresh org to pick during setup — so what has to hold on BOTH is that the
+	// value a caller writes is the value it reads back, empty included. Empty is
+	// a real intent here (it turns the three system jobs off), and a store that
+	// coalesced it to NULL and back to the column default would silently turn
+	// them on again.
+	t.Run("OrgSettings_BackgroundJobsModel_RoundTripsIncludingEmpty", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		for _, want := range []string{domain.ModelOpus, "", domain.ModelHaiku} {
+			in := base
+			in.BackgroundJobsModel = want
+			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			if err != nil {
+				t.Fatalf("UpdateSettings(%q): %v", want, err)
+			}
+			if stored.BackgroundJobsModel != want {
+				t.Errorf("write returned BackgroundJobsModel %q, want %q", stored.BackgroundJobsModel, want)
+			}
+			got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				t.Fatalf("GetSettingsSystem: %v", err)
+			}
+			if got.BackgroundJobsModel != want {
+				t.Errorf("read back BackgroundJobsModel %q, want %q", got.BackgroundJobsModel, want)
+			}
+		}
+	})
+
+	// llm_auth_method is the other org setting whose column DEFAULT differs per
+	// dialect — SQLite defaults a local install onto the host's credentials,
+	// Postgres onto the org's own, which is multi's only legal value. Both real
+	// values must round-trip on both dialects, and neither may store the empty
+	// string: a caller that built the struct without naming the field gets the
+	// column's own default, because "" is not a third credential source and a
+	// read left to guess at one is what this column exists to prevent.
+	t.Run("OrgSettings_LLMAuthMethod_RoundTripsAndNeverStoresBlank", func(t *testing.T) {
+		stores, ids := factory(t)
+		base := domain.OrgSettings{
+			GitHubPollInterval:  5 * time.Minute,
+			JiraPollInterval:    5 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+		}
+		for _, want := range []string{domain.LLMAuthBYOK, domain.LLMAuthSystem, domain.LLMAuthBYOK} {
+			in := base
+			in.LLMAuthMethod = want
+			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			if err != nil {
+				t.Fatalf("UpdateSettings(%q): %v", want, err)
+			}
+			if stored.LLMAuthMethod != want {
+				t.Errorf("write returned LLMAuthMethod %q, want %q", stored.LLMAuthMethod, want)
+			}
+			got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				t.Fatalf("GetSettingsSystem: %v", err)
+			}
+			if got.LLMAuthMethod != want {
+				t.Errorf("read back LLMAuthMethod %q, want %q", got.LLMAuthMethod, want)
+			}
+		}
+		blank, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base)
+		if err != nil {
+			t.Fatalf("UpdateSettings(unset): %v", err)
+		}
+		if blank.LLMAuthMethod != domain.LLMAuthSystem && blank.LLMAuthMethod != domain.LLMAuthBYOK {
+			t.Errorf("an unset LLMAuthMethod stored %q, want this dialect's column default", blank.LLMAuthMethod)
+		}
+	})
+
 	t.Run("OrgSettings_Update_Overwrites", func(t *testing.T) {
 		stores, ids := factory(t)
 		first := domain.OrgSettings{
@@ -622,6 +700,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
 			MaxLLMModelTier:     "haiku",
+			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
 			// Not written by UpdateSettings; the row's default reads back.
@@ -825,6 +904,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			BranchTemplate:                  "team/<ticket-id>-wip",
 			ReviewPosture:                   domain.ReviewPostureAutoUnlessBlocking,
 			BaseBranchPushPolicy:            domain.BaseBranchPushManualOnly,
+			AllowedProviders:                []string{modelcatalog.ProviderAnthropic},
 		}
 		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, want); err != nil {
 			t.Fatalf("UpdateSettings: %v", err)
@@ -856,10 +936,12 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		want := domain.DefaultTeamSettings()
 		want.MaxDailyCostUSD = 42.50
-		// A materialized row reads jira_projects back as an empty (non-nil) slice,
-		// whereas DefaultTeamSettings leaves it nil — normalize so DeepEqual checks
-		// the fields that matter, not the nil-vs-empty distinction.
+		// A materialized row reads its array columns back as empty (non-nil)
+		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
+		// DeepEqual checks the fields that matter, not the nil-vs-empty
+		// distinction.
 		want.JiraProjects = []string{}
+		want.AllowedProviders = []string{}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after SetDailyCostCapSystem on a fresh team\n got: %+v\nwant: %+v (defaults + cap)", got, want)
 		}
@@ -891,6 +973,75 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if cleared.MaxDailyCostUSD != 0 {
 			t.Errorf("cleared cap = %v, want 0 (NULL)", cleared.MaxDailyCostUSD)
+		}
+	})
+
+	// SetAllowedProvidersSystem is the org-admin write path for the per-team
+	// provider restriction: surgical (touches only that column), creates the row
+	// from schema defaults when none exists, and the team-settings
+	// read-modify-write path preserves it — a team admin cannot widen their own
+	// restriction. An empty list is the unrestricted state.
+	t.Run("TeamSettings_AllowedProviders_SetClearAndPreserve", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		// Fresh team, no settings row yet → the partial INSERT must materialize the
+		// row from defaults + the restriction, touching only allowed_providers.
+		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, []string{modelcatalog.ProviderAnthropic}); err != nil {
+			t.Fatalf("SetAllowedProvidersSystem (insert): %v", err)
+		}
+		got, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		want := domain.DefaultTeamSettings()
+		want.AllowedProviders = []string{modelcatalog.ProviderAnthropic}
+		// A materialized row reads its array columns back as empty (non-nil)
+		// slices, whereas DefaultTeamSettings leaves them nil — normalize so
+		// DeepEqual checks the fields that matter.
+		want.JiraProjects = []string{}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("after SetAllowedProvidersSystem on a fresh team\n got: %+v\nwant: %+v (defaults + restriction)", got, want)
+		}
+
+		// A read-modify-write team-settings save that changes another field must
+		// preserve the restriction — the team-admin path can never alter it.
+		got.DefaultModel = domain.ModelHaiku
+		if _, err := stores.Teams.UpdateSettings(ctx, ids.TeamID, got); err != nil {
+			t.Fatalf("UpdateSettings (rmw): %v", err)
+		}
+		after, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after rmw: %v", err)
+		}
+		if !reflect.DeepEqual(after.AllowedProviders, []string{modelcatalog.ProviderAnthropic}) {
+			t.Errorf("UpdateSettings clobbered the restriction: got %v, want [%s] preserved", after.AllowedProviders, modelcatalog.ProviderAnthropic)
+		}
+		if after.DefaultModel != domain.ModelHaiku {
+			t.Errorf("UpdateSettings didn't apply the unrelated change: got %q, want %q", after.DefaultModel, domain.ModelHaiku)
+		}
+
+		// Several providers round-trip in order, and an empty list clears the
+		// restriction back to unrestricted.
+		both := []string{modelcatalog.ProviderAnthropic, modelcatalog.ProviderBedrock}
+		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, both); err != nil {
+			t.Fatalf("SetAllowedProvidersSystem (both): %v", err)
+		}
+		multi, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after both: %v", err)
+		}
+		if !reflect.DeepEqual(multi.AllowedProviders, both) {
+			t.Errorf("AllowedProviders = %v, want %v", multi.AllowedProviders, both)
+		}
+		if _, err := stores.Teams.SetAllowedProvidersSystem(ctx, ids.TeamID, nil); err != nil {
+			t.Fatalf("SetAllowedProvidersSystem (clear): %v", err)
+		}
+		cleared, err := stores.Teams.GetSettingsSystem(ctx, ids.TeamID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem after clear: %v", err)
+		}
+		if len(cleared.AllowedProviders) != 0 {
+			t.Errorf("cleared restriction = %v, want empty (unrestricted)", cleared.AllowedProviders)
 		}
 	})
 

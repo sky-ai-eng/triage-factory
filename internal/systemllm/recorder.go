@@ -1,10 +1,16 @@
-// Package systemllm records per-call cost + token accounting for the
-// headless LLM jobs (scorer, repo-profiler, project-classifier) into the
+// Package systemllm records per-call cost + token accounting for the calls TF
+// makes on its own behalf — the headless jobs (scorer, repo-profiler,
+// project-classifier) and the model-availability probe — into the
 // system_llm_runs table. It sits one layer above agentproc + db so the
 // runtime stays storage-agnostic (agentproc takes a SecretsReader rather
 // than importing db, by deliberate convention) while the recording logic
 // — which needs both the Run outcome/usage and the db store — lives in
-// one place instead of being duplicated at each of the three call sites.
+// one place instead of being duplicated at each call site.
+//
+// The three jobs run their whole completion through here (Complete). The probe
+// makes its own inference call, because the model it must send is the exact id
+// under test rather than the one this package pins, and comes back only for
+// RecordDirect — the ledger row is the shared part.
 // See TFAC-451.
 package systemllm
 
@@ -31,6 +37,14 @@ const (
 	JobScorer       = "scorer"
 	JobRepoProfiler = "repo_profiler"
 	JobClassifier   = "classifier"
+	// JobProbe is a model-availability probe: one minimal request TF spends to
+	// learn whether an org's credentials can invoke a given model. It is not a
+	// background job like the three above — a person pressed a button — but it
+	// is TF-initiated spend against the org's account, so it belongs in the
+	// same ledger and rolls up under system_overhead like every other call TF
+	// makes for itself. A probe that stayed off the ledger would be the one
+	// charge on the bill with nothing in the product to explain it.
+	JobProbe = "probe"
 )
 
 // Recorder writes one system_llm_runs row per agentproc.Run call. A nil
@@ -41,7 +55,10 @@ const (
 // breaker.go) — one Recorder is constructed once per process and handed to
 // all three system jobs (scorer, repo-profiler, classifier), so it doubles
 // as the natural shared home for state that needs to be visible across all
-// of them.
+// of them. The availability probe holds the same Recorder for the ledger row
+// and deliberately does not consult that breaker: a person pressed a button,
+// and answering them with a skip a cooldown decided on would look like the
+// button did nothing.
 type Recorder struct {
 	store   db.SystemLLMRunStore
 	breaker *providerBreaker

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -81,6 +82,13 @@ const (
 	// Claude Code docs). Simpler than the AWS triple — no IAM, no
 	// SigV4 — but only valid for Bedrock model invocation.
 	secretAWSBearerTokenBedrock = "aws_bearer_token_bedrock"
+
+	// AWS Bedrock auth — assumed-role path. The org stores no Bedrock
+	// secret at all under this shape: the ARN is the record that an
+	// admin bound Bedrock, and internal/llmcred mints a short-lived STS
+	// session credential against it per run. Read here only to answer
+	// "is Bedrock configured", never to build an env map.
+	secretAWSRoleARN = "aws_role_arn"
 
 	// Bedrock model identification (inference profile ID or
 	// application inference profile ARN). Maps to ANTHROPIC_MODEL
@@ -201,66 +209,184 @@ var credentialEnvKeys = []string{
 	"AWS_BEARER_TOKEN_BEDROCK",
 }
 
-// resolveCredentials looks up the env vars to inject into the Node
-// subprocess for a given orgID. Anthropic and Bedrock paths are
-// mutually exclusive: Anthropic key wins when both are configured
-// (defensive — the admin-UI write path is expected to enforce
-// exclusivity at config time, but resolver order matters if a
-// malformed install ends up with both).
+// The credential resolution below answers one question: which provider's
+// material does THIS run authenticate with, and what env does that render as.
+//
+// The model decides the provider. A conversation minted on an Anthropic catalog
+// key resolves the org's Anthropic key; one minted on a Bedrock key resolves the
+// org's Bedrock material. An org holding both is not asked which it prefers,
+// because its picker already asked — and a global preference applied over the
+// model's own provider is how a Bedrock-only run ended up authenticating with an
+// Anthropic key.
+//
+// A model this build does not offer — the empty string, a stored id from an
+// older catalog — names no provider, so there is nothing for it to decide. Those
+// resolve the org's single configured provider, and fall back to
+// unnamedModelPrecedence when several are configured. That is not the
+// model-blind global winner this replaced: it applies only where the caller
+// expressed no model at all, and a run always carries one.
 //
 // Local-mode behavior:
 //
-//   - empty OrgID OR OrgID == LocalDefaultOrgID with no Anthropic /
-//     Bedrock secret set → returns an empty map. The subprocess
-//     inherits the host's env unchanged (preserves the existing
-//     "Claude Code subscription handles auth" flow + the
-//     TRIAGE_FACTORY_*-style env-overlay paths some users rely on).
-//   - LocalDefaultOrgID with a configured Anthropic / Bedrock key →
-//     returns the matching env map; Run filters credentialEnvKeys
-//     from os.Environ so a stale shell var can't override the
-//     keychain value.
+//   - empty OrgID, or an org with NO provider configured → returns an empty map.
+//     The subprocess inherits the host's env unchanged (preserves the existing
+//     "Claude Code subscription handles auth" flow + the TRIAGE_FACTORY_*-style
+//     env-overlay paths some users rely on). The model is not consulted: an org
+//     that configured nothing has nothing to select between, and the host env is
+//     the credential.
+//   - an org with a provider configured → returns that provider's env map; Run
+//     filters credentialEnvKeys from os.Environ so a stale shell var can't
+//     override the keychain value.
 //
 // Multi-mode behavior:
 //
-//   - empty OrgID → error. Hard caller bug; refuse loudly rather
-//     than silently leaking the parent process's env (which in a
-//     hosted container would be the operator-supplied shared key,
-//     which is the exact cross-tenant bleed the ticket exists to
-//     prevent).
-//   - orgID set, no credentials configured →
-//     ErrNoCredentialsConfigured. Caller surfaces however its UX
-//     dictates; we don't fall back to the parent env.
+//   - empty OrgID → error. Hard caller bug; refuse loudly rather than silently
+//     leaking the parent process's env (which in a hosted container would be the
+//     operator-supplied shared key, which is the exact cross-tenant bleed this
+//     path exists to prevent).
+//   - orgID set, no credentials configured at all → ErrNoCredentialsConfigured.
+//     Caller surfaces however its UX dictates; we don't fall back to the parent
+//     env.
 //
-// ResolveCredentialsForBundle is resolveCredentials, exported for TFAC-614's
-// brain-side credential provisioner: it needs the exact same LLM env-var map
-// this package injects into the sandbox subprocess, but resolved BY the
-// brain (which still holds the real secret store) and sealed into a run's
-// credential bundle rather than read by the executor directly.
-func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
-	return resolveCredentials(ctx, secrets, orgID, nil)
+// In BOTH modes, an org that configured one provider and a run whose model needs
+// the other is ErrProviderNotConfigured — see that sentinel.
+
+// ErrProviderNotConfigured is what a run gets when its model is served by a
+// provider the org has not connected, while it HAS connected another. The
+// message names the provider and where to connect it, because the fix is a
+// specific act an admin performs in a specific place.
+//
+// It deliberately does NOT wrap ErrNoCredentialsConfigured. That sentinel means
+// "this org cannot run anything", and its tolerant handlers (the bundle
+// provisioner seals an empty LLM map and lets the run fail downstream) are the
+// wrong response here: the org can run, this model can't, and the answer is to
+// say so once rather than to hand the executor a bundle with nothing in it.
+//
+// There is no fallback behind it and no retry: no other model is substituted,
+// because spending someone's money on a model they did not choose is worse than
+// refusing.
+var ErrProviderNotConfigured = errors.New("agentproc: no credential for this model's provider")
+
+// unnamedModelPrecedence orders the providers consulted for a caller that named
+// no catalog model and an org that configured more than one. Anthropic first:
+// it is the direct path, and the one this deployment's own tooling was built
+// against. Nothing TF dispatches reaches it — a run and a system job both carry
+// a catalog key — so it covers a stored id from an older catalog and nothing
+// else.
+var unnamedModelPrecedence = []string{modelcatalog.ProviderAnthropic, modelcatalog.ProviderBedrock}
+
+// ResolveCredentialsForBundle is resolveCredentials, exported for the brain-side
+// credential provisioner: it needs the exact same LLM env-var map this package
+// injects into the sandbox subprocess, but resolved BY the brain (which still
+// holds the real secret store) and sealed into a run's credential bundle rather
+// than read by the executor directly.
+//
+// model is the conversation's model — the provider selector. The bundle stays
+// single-provider per claim: one conversation, one model, one provider's
+// material.
+func ResolveCredentialsForBundle(ctx context.Context, secrets SecretsReader, orgID, model string) (map[string]string, error) {
+	return resolveCredentials(ctx, secrets, orgID, model, nil)
 }
 
-// resolveCredentials resolves the LLM env map for a run. resolver, when
+// ProviderForRun reports which provider a run on model authenticates through for
+// orgID, or the empty string when the org has configured none (local ambient).
+//
+// Exported for the one caller that has to know the provider WITHOUT resolving
+// the material: internal/llmcred, which mints STS session credentials for a
+// role-mode Bedrock org and must not mint for a run whose model is served by
+// Anthropic. Keeping the choice here rather than restating it there is what
+// stops the two from disagreeing about which provider a run is on.
+func ProviderForRun(ctx context.Context, secrets SecretsReader, orgID, model string) (string, error) {
+	if secrets == nil || orgID == "" {
+		return "", nil
+	}
+	configured, err := configuredProviders(ctx, secrets, orgID)
+	if err != nil {
+		return "", err
+	}
+	return providerForRun(model, configured), nil
+}
+
+// providerForRun picks the provider from the model and what the org configured.
+// Split from ProviderForRun so the decision is testable without a secret store,
+// and so resolveCredentials can reuse it after ONE pass over the vault.
+func providerForRun(model string, configured map[string]bool) string {
+	if p, ok := modelcatalog.ProviderFor(model); ok {
+		// The model names its provider. Whether the org holds that credential is
+		// the caller's next question, not this one's — answering "the other one"
+		// here is exactly the substitution that must not happen.
+		return p
+	}
+	if len(configured) == 0 {
+		return ""
+	}
+	for _, p := range unnamedModelPrecedence {
+		if configured[p] {
+			return p
+		}
+	}
+	// A provider outside the precedence list — impossible today (it names both),
+	// and a silent empty answer would read as "ambient" to the caller.
+	for p := range configured {
+		return p
+	}
+	return ""
+}
+
+// configuredProviders reports which providers the org holds usable material for.
+//
+// Bedrock counts as configured under any of its three shapes, INCLUDING role
+// mode, which stores no Bedrock secret at all — the role ARN is the record that
+// an admin bound it, and internal/llmcred mints against it per run. A caller that
+// only asked "is there a key" would read a role-mode org as unconfigured and send
+// its admin to connect something they already connected.
+func configuredProviders(ctx context.Context, secrets SecretsReader, orgID string) (map[string]bool, error) {
+	out := map[string]bool{}
+
+	apiKey, err := secrets.Get(ctx, orgID, secretAnthropicAPIKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve anthropic_api_key: %w", err)
+	}
+	if apiKey != "" {
+		out[modelcatalog.ProviderAnthropic] = true
+	}
+
+	for _, probe := range []struct{ key string }{
+		{secretAWSBearerTokenBedrock},
+		{secretAWSAccessKeyID},
+		{secretAWSRoleARN},
+	} {
+		v, err := secrets.Get(ctx, orgID, probe.key)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", probe.key, err)
+		}
+		if v != "" {
+			out[modelcatalog.ProviderBedrock] = true
+			break
+		}
+	}
+	return out, nil
+}
+
+// resolveCredentials resolves the LLM env map for a run on model. resolver, when
 // non-nil (RunOptions.LLMResolver), is the brain-side role-aware resolver
 // (internal/llmcred): it fully replaces the built-in raw-secret path so a
-// role-mode Bedrock org mints STS session credentials rather than reading a
-// key that doesn't exist. It is consulted only when the run carries no
-// sealed bundle on ctx — the executor bundle path still wins, unchanged.
-func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string, resolver func(ctx context.Context, orgID string) (map[string]string, error)) (map[string]string, error) {
+// role-mode Bedrock org mints STS session credentials rather than reading a key
+// that doesn't exist.
+func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID, model string, resolver func(ctx context.Context, orgID, model string) (map[string]string, error)) (map[string]string, error) {
 	// The executor never reaches here (agentproc.Run launches into the prebuilt
 	// network and never resolves credentials — the per-run sidecar holds them),
 	// so there is no ctx-carried bundle to read: this path is all/local + the
 	// brain-side ResolveCredentialsForBundle only, resolving through the live
 	// secret store or the role-aware resolver. The orchestrator STRUCTURALLY
-	// cannot read a run credential from ctx (TFAC-631) — the former bundle-first
-	// branch is gone, not just unreachable.
+	// cannot read a run credential from ctx — there is no bundle-first branch.
 
 	// Brain-side / all-local role-aware resolution (internal/llmcred). When
 	// wired, it owns resolution outright — it reproduces the raw-secret env
 	// map for bearer/access_keys/anthropic/local-ambient orgs byte-for-byte
 	// (it delegates to ResolveCredentialsForBundle) and mints for role orgs.
 	if resolver != nil {
-		return resolver(ctx, orgID)
+		return resolver(ctx, orgID, model)
 	}
 
 	multi := runmode.Current() == runmode.ModeMulti
@@ -278,103 +404,117 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		}
 		// Local with no SecretsReader plumbed (test path or pre-sweep
 		// caller) — degrade to inherited-env subscription fallback.
+		//
+		// TODO(TFAC-888): in local this arm is taken for EVERY run, because
+		// nothing builds a reader there — so an org that bound its own key
+		// still authenticates from the operator's environment, and the key it
+		// stored decides nothing.
 		return map[string]string{}, nil
 	}
 
-	// Anthropic direct: API key alone is sufficient. Optional base
-	// URL + auth-token-style bearer let advanced setups front the
-	// SDK through a gateway, but neither is required.
+	configured, err := configuredProviders(ctx, secrets, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if len(configured) == 0 {
+		// Nothing to select between. Local mode: subscription fallback. Multi
+		// mode: hard error so the caller surfaces it.
+		if multi {
+			return nil, fmt.Errorf("%w: org %s has no anthropic_api_key or AWS credentials in vault", ErrNoCredentialsConfigured, orgID)
+		}
+		return map[string]string{}, nil
+	}
+
+	provider := providerForRun(model, configured)
+	if !configured[provider] {
+		return nil, fmt.Errorf("%w: model %q is served by %s, which org %s has not connected — connect it in Settings → Claude credentials",
+			ErrProviderNotConfigured, model, modelcatalog.ProviderDisplayName(provider), orgID)
+	}
+
+	switch provider {
+	case modelcatalog.ProviderAnthropic:
+		return anthropicEnv(ctx, secrets, orgID)
+	case modelcatalog.ProviderBedrock:
+		return bedrockEnv(ctx, secrets, orgID, model)
+	default:
+		// configuredProviders only ever reports providers this switch handles;
+		// a new one reaching here means a resolver arm was not written for it.
+		return nil, fmt.Errorf("%w: org %s is configured for %s, which this build cannot resolve credentials for", ErrProviderNotConfigured, orgID, provider)
+	}
+}
+
+// anthropicEnv renders the org's direct-Anthropic material. The API key alone is
+// sufficient; the optional base URL + auth-token bearer let advanced setups front
+// the SDK through a gateway.
+//
+// A Get error on an optional field is a real backend failure (the primary key
+// read already succeeded, so the backend is reachable). Propagate it so a
+// transient vault hiccup surfaces at the call site instead of silently dropping
+// the gateway URL or proxy bearer and continuing with partial config — which
+// would manifest later as opaque SDK auth errors. Missing secrets come back as
+// ("", nil) and are handled by the non-empty checks.
+func anthropicEnv(ctx context.Context, secrets SecretsReader, orgID string) (map[string]string, error) {
 	apiKey, err := secrets.Get(ctx, orgID, secretAnthropicAPIKey)
 	if err != nil {
 		return nil, fmt.Errorf("resolve anthropic_api_key: %w", err)
 	}
-	if apiKey != "" {
-		env := map[string]string{"ANTHROPIC_API_KEY": apiKey}
-		// Optional fields: a Get error here is a real backend failure
-		// (the primary key read above already succeeded, so the backend
-		// is reachable). Propagate so a transient vault hiccup surfaces
-		// at the call site instead of silently dropping the gateway URL
-		// or proxy bearer and continuing with partial config — which
-		// would manifest later as opaque SDK auth errors. Missing
-		// secrets come back as ("", nil) and are handled by the
-		// non-empty checks below.
-		baseURL, err := secrets.Get(ctx, orgID, secretAnthropicBaseURL)
-		if err != nil {
-			return nil, fmt.Errorf("resolve anthropic_base_url: %w", err)
-		}
-		if baseURL != "" {
-			env["ANTHROPIC_BASE_URL"] = baseURL
-		}
-		authToken, err := secrets.Get(ctx, orgID, secretAnthropicAuthMode)
-		if err != nil {
-			return nil, fmt.Errorf("resolve anthropic_auth_token: %w", err)
-		}
-		if authToken != "" {
-			env["ANTHROPIC_AUTH_TOKEN"] = authToken
-		}
-		return env, nil
+	if apiKey == "" {
+		return nil, fmt.Errorf("%w: org %s has no anthropic_api_key in vault", ErrProviderNotConfigured, orgID)
 	}
+	env := map[string]string{"ANTHROPIC_API_KEY": apiKey}
+	baseURL, err := secrets.Get(ctx, orgID, secretAnthropicBaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve anthropic_base_url: %w", err)
+	}
+	if baseURL != "" {
+		env["ANTHROPIC_BASE_URL"] = baseURL
+	}
+	authToken, err := secrets.Get(ctx, orgID, secretAnthropicAuthMode)
+	if err != nil {
+		return nil, fmt.Errorf("resolve anthropic_auth_token: %w", err)
+	}
+	if authToken != "" {
+		env["ANTHROPIC_AUTH_TOKEN"] = authToken
+	}
+	return env, nil
+}
 
-	// Bedrock API key (Option E in the Claude Code docs): a single
-	// bearer token that skips the AWS SigV4 chain. Strictly simpler
-	// than the AWS triple and increasingly the recommended path for
-	// orgs that don't need full IAM roles. Region is still required
-	// for the SDK to construct the Bedrock endpoint URL.
+// bedrockEnv renders the org's Bedrock material under whichever shape it stored.
+//
+// The Bedrock API key (Option E in the Claude Code docs) is a single bearer that
+// skips the AWS SigV4 chain; the access-key triple is the IAM path. Role mode
+// stores neither — internal/llmcred mints for it — so this path reports it as
+// unconfigured, which is correct for the only caller that can reach it: raw
+// resolution with no llmcred wired.
+//
+// Partial access-key credentials (access key set, secret missing) mean a
+// malformed admin config. Treat them as not-configured rather than
+// half-injecting, so the caller sees a TF error and not an AWS-SDK one from
+// inside the Node subprocess.
+func bedrockEnv(ctx context.Context, secrets SecretsReader, orgID, model string) (map[string]string, error) {
+	env := map[string]string{"CLAUDE_CODE_USE_BEDROCK": "1"}
+
 	bedrockBearer, err := secrets.Get(ctx, orgID, secretAWSBearerTokenBedrock)
 	if err != nil {
 		return nil, fmt.Errorf("resolve aws_bearer_token_bedrock: %w", err)
 	}
-	if bedrockBearer != "" {
-		env := map[string]string{
-			"AWS_BEARER_TOKEN_BEDROCK": bedrockBearer,
-			"CLAUDE_CODE_USE_BEDROCK":  "1",
-		}
-		region, err := secrets.Get(ctx, orgID, secretAWSRegion)
+	switch {
+	case bedrockBearer != "":
+		env["AWS_BEARER_TOKEN_BEDROCK"] = bedrockBearer
+	default:
+		accessKey, err := secrets.Get(ctx, orgID, secretAWSAccessKeyID)
 		if err != nil {
-			return nil, fmt.Errorf("resolve aws_region: %w", err)
+			return nil, fmt.Errorf("resolve aws_access_key_id: %w", err)
 		}
-		if region != "" {
-			env["AWS_REGION"] = region
-		}
-		modelID, err := secrets.Get(ctx, orgID, secretBedrockModelID)
+		secretKey, err := secrets.Get(ctx, orgID, secretAWSSecretKey)
 		if err != nil {
-			return nil, fmt.Errorf("resolve bedrock_model_id: %w", err)
+			return nil, fmt.Errorf("resolve aws_secret_access_key: %w", err)
 		}
-		if modelID != "" {
-			env["ANTHROPIC_MODEL"] = modelID
+		if accessKey == "" || secretKey == "" {
+			return nil, fmt.Errorf("%w: org %s has no usable Bedrock credential in vault (a role-mode org resolves through the STS minter, not here)", ErrProviderNotConfigured, orgID)
 		}
-		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
-		if err != nil {
-			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
-		}
-		if baseURL != "" {
-			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
-		}
-		return env, nil
-	}
-
-	// Bedrock access-key triple: require both access key + secret.
-	// Session token + region are optional (region defaults to
-	// us-east-1 in some setups; the SDK has its own region resolution
-	// chain). Partial creds (e.g. access
-	// key set, secret missing) means a malformed admin config —
-	// treat as not-configured rather than half-injecting, so the
-	// caller sees ErrNoCredentialsConfigured and not an AWS-SDK
-	// error from inside the Node subprocess.
-	accessKey, err := secrets.Get(ctx, orgID, secretAWSAccessKeyID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve aws_access_key_id: %w", err)
-	}
-	secretKey, err := secrets.Get(ctx, orgID, secretAWSSecretKey)
-	if err != nil {
-		return nil, fmt.Errorf("resolve aws_secret_access_key: %w", err)
-	}
-	if accessKey != "" && secretKey != "" {
-		env := map[string]string{
-			"AWS_ACCESS_KEY_ID":       accessKey,
-			"AWS_SECRET_ACCESS_KEY":   secretKey,
-			"CLAUDE_CODE_USE_BEDROCK": "1",
-		}
+		env["AWS_ACCESS_KEY_ID"] = accessKey
+		env["AWS_SECRET_ACCESS_KEY"] = secretKey
 		sessionTok, err := secrets.Get(ctx, orgID, secretAWSSessionToken)
 		if err != nil {
 			return nil, fmt.Errorf("resolve aws_session_token: %w", err)
@@ -382,36 +522,49 @@ func resolveCredentials(ctx context.Context, secrets SecretsReader, orgID string
 		if sessionTok != "" {
 			env["AWS_SESSION_TOKEN"] = sessionTok
 		}
-		region, err := secrets.Get(ctx, orgID, secretAWSRegion)
-		if err != nil {
-			return nil, fmt.Errorf("resolve aws_region: %w", err)
-		}
-		if region != "" {
-			env["AWS_REGION"] = region
-		}
-		modelID, err := secrets.Get(ctx, orgID, secretBedrockModelID)
-		if err != nil {
-			return nil, fmt.Errorf("resolve bedrock_model_id: %w", err)
-		}
-		if modelID != "" {
-			env["ANTHROPIC_MODEL"] = modelID
-		}
-		baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
-		if err != nil {
-			return nil, fmt.Errorf("resolve bedrock_base_url: %w", err)
-		}
-		if baseURL != "" {
-			env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
-		}
-		return env, nil
 	}
 
-	// No Anthropic, no Bedrock. Local mode: subscription fallback.
-	// Multi mode: hard error so the caller surfaces it.
-	if multi {
-		return nil, fmt.Errorf("%w: org %s has no anthropic_api_key or AWS credentials in vault", ErrNoCredentialsConfigured, orgID)
+	if err := addBedrockConfig(ctx, secrets, orgID, model, env); err != nil {
+		return nil, err
 	}
-	return map[string]string{}, nil
+	return env, nil
+}
+
+// addBedrockConfig adds the non-secret Bedrock configuration both shapes share:
+// the region (endpoint + SigV4 signing scope), the model, and the endpoint
+// override a VPC-interface / GovCloud / China-partition org needs.
+//
+// ANTHROPIC_MODEL is the run's own model when the catalog names it as a Bedrock
+// key — the model the caller chose is the model the org is billed for. The
+// stored bedrock_model_id is the fallback for a run that named no Bedrock model:
+// it is the org's single pinned inference profile, which is what an org had
+// before it could pick per run.
+func addBedrockConfig(ctx context.Context, secrets SecretsReader, orgID, model string, env map[string]string) error {
+	region, err := secrets.Get(ctx, orgID, secretAWSRegion)
+	if err != nil {
+		return fmt.Errorf("resolve aws_region: %w", err)
+	}
+	if region != "" {
+		env["AWS_REGION"] = region
+	}
+	modelID, err := secrets.Get(ctx, orgID, secretBedrockModelID)
+	if err != nil {
+		return fmt.Errorf("resolve bedrock_model_id: %w", err)
+	}
+	if p, ok := modelcatalog.ProviderFor(model); ok && p == modelcatalog.ProviderBedrock {
+		modelID = model
+	}
+	if modelID != "" {
+		env["ANTHROPIC_MODEL"] = modelID
+	}
+	baseURL, err := secrets.Get(ctx, orgID, secretBedrockBaseURL)
+	if err != nil {
+		return fmt.Errorf("resolve bedrock_base_url: %w", err)
+	}
+	if baseURL != "" {
+		env["ANTHROPIC_BEDROCK_BASE_URL"] = baseURL
+	}
+	return nil
 }
 
 // mergeEnv composes the subprocess env. When per-org credentials are

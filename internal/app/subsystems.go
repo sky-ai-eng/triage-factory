@@ -53,26 +53,27 @@ func (a *App) buildInfra() {
 // Trigger (driven by the system:poll: bus subscribers), never an explicit
 // Start in startWorkers.
 func (a *App) buildAI() {
-	// Shared across the three headless LLM jobs: each records its per-call
-	// cost + token breakdown into system_llm_runs (TFAC-451). One recorder
-	// over the single org-scoped store; a nil store would make Record a
-	// no-op, but the bundle always wires one.
-	llmRecorder := systemllm.NewRecorder(a.stores.SystemLLMRuns)
-
 	// Shared system-job sandbox cap: one limiter injected into all
 	// three background Managers so their per-org runners can't fan out an
 	// unbounded number of gVisor sandboxes across tenants in multi-mode. It
 	// deliberately does NOT gate the curator, interactive sessions, or
 	// delegated runs (delegated has its own cap). Threaded the same way
-	// llmRecorder is.
+	// a.llmRecorder is.
 	//
 	// Applied in both modes (a real cap, not nil): in multi it bounds gVisor
 	// sandboxes; in local — where agentproc.Run is a direct subprocess with no
-	// sandbox — it's still a modest ceiling on concurrent background Haiku
+	// sandbox — it's still a modest ceiling on concurrent background LLM
 	// processes. nil (unlimited) is reserved for callers that opt out (tests).
 	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
 
-	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), llmRecorder, sysLimiter, ai.RunnerCallbacks{
+	// The org's background-jobs model, read per cycle from org_settings. One
+	// resolver shared by the scorer and the classifier; the profiler resolves
+	// from the settings row it already reads for the clone protocol. A cycle
+	// whose org has no usable model skips and says so — there is no fallback
+	// model to substitute.
+	systemJobModel := systemllm.NewModelFunc(a.stores.Orgs)
+
+	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, ai.RunnerCallbacks{
 		OnScoringStarted: func(orgID string, taskIDs []string) {
 			a.wsHub.Broadcast(websocket.Event{
 				Type:  "scoring_started",
@@ -129,13 +130,13 @@ func (a *App) buildAI() {
 	// poller isn't running. triggerScorer relays over tf_ctl instead when
 	// this pod isn't the holder (TFAC-583).
 	a.srv.SetScorerTrigger(a.triggerScorer)
-	aiLog.Info("scorer manager ready (per-org runners)", "model", ai.SystemJobModel)
+	aiLog.Info("scorer manager ready (per-org runners)")
 
 	// Repo-profiling manager: per-org Runners profiling configured repos off
 	// the system:poll: "profiler" subscriber (TTL-gated per cycle) and the
 	// explicit re-profile button (force). Sibling to the scorer — both react
 	// to poll sentinels independently; scoring does NOT gate on profiling.
-	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, llmRecorder, sysLimiter, a.wsHub)
+	a.profiler = repoprofile.NewManager(a.ghResolver, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-profiler"), a.stores.Repos, a.stores.Orgs, a.llmRecorder, sysLimiter, a.wsHub)
 	// Multi only: scope repository_updated delivery to each repo's REST
 	// visibility (org admins + tracking-team members), resolved per
 	// emission — the hub has no team axis, so an unscoped broadcast would
@@ -157,16 +158,16 @@ func (a *App) buildAI() {
 	// above — the re-profile button may be clicked against a standby
 	// control pod.
 	a.srv.SetProfilerTrigger(a.triggerProfiler)
-	repoprofileLog.Info("repo-profiling manager ready (per-org runners)", "model", ai.SystemJobModel)
+	repoprofileLog.Info("repo-profiling manager ready (per-org runners)")
 
 	// Project classifier: per-org Runners, classifying newly-
-	// discovered entities against existing projects via per-project Haiku
-	// quorum vote off the system:poll: subscriber. Sticky — only fires on
+	// discovered entities against existing projects via a per-project quorum
+	// vote off the system:poll: subscriber. Sticky — only fires on
 	// entities with classified_at IS NULL. Sibling to the scorer/profiler:
 	// per-org isolation so a large org's backlog can't head-of-line-block
 	// another tenant's classification.
-	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), llmRecorder, sysLimiter)
-	classifyLog.Info("project classifier manager ready (per-org runners)", "model", ai.SystemJobModel)
+	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), a.llmRecorder, sysLimiter, systemJobModel)
+	classifyLog.Info("project classifier manager ready (per-org runners)")
 
 	// Artifact reconciler: per-org Runners mirroring artifacts against live
 	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling

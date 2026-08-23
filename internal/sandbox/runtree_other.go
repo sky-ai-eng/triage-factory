@@ -5,6 +5,7 @@ package sandbox
 import (
 	"context"
 	"os"
+	"path/filepath"
 )
 
 // chownRunTree off Linux is a no-op — the sandbox path isn't reachable
@@ -16,6 +17,13 @@ func chownRunTree(_ context.Context, _, _ string) error { return nil }
 // this seam existed — no sandbox identity ever owns these trees there.
 func removeRunTree(_ context.Context, path string) error {
 	return os.RemoveAll(path)
+}
+
+// mkdirRunTreeScaffold off Linux is a plain MkdirAll: the scaffold's
+// group-write bit exists so an orchestrator that handed a tree to the sandbox
+// identity can still write into it, and no such hand-off happens here.
+func mkdirRunTreeScaffold(root, rel string) error {
+	return os.MkdirAll(filepath.Join(root, rel), 0o755)
 }
 
 // captureRunDelta has no non-Linux implementation; the delegate caller

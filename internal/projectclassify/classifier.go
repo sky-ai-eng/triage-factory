@@ -1,7 +1,7 @@
 // Package projectclassify decides which project (if any) a newly-
 // discovered entity belongs to.
 //
-// Single stage, toolless: per project, parallel, single-shot Haiku.
+// Single stage, toolless: per project, parallel, one call each.
 // Prompt inlines name + description + KB content truncated at
 // kbInlineMaxBytes. Returns {score, rationale}. ~1 model turn per
 // project. An exact tie for the top above-threshold score resolves to
@@ -46,13 +46,13 @@ var stage1SystemPrompt string
 //go:embed prompts/classify_stage1_user.txt
 var stage1UserPrompt string
 
-// ConfidenceThreshold is the minimum Haiku score (0-100) required to
+// ConfidenceThreshold is the minimum vote score (0-100) required to
 // auto-assign an entity to a project. Below this, project_id stays
 // NULL and the entity resurfaces in future project-creation backfill
 // popups. 60 is a launch default; tune from real votes.
 const ConfidenceThreshold = 60
 
-// maxConcurrentVotes caps the number of in-flight Haiku calls per
+// maxConcurrentVotes caps the number of in-flight vote calls per
 // classification cycle. Most installs have <10 projects so the cap
 // rarely fires; the bound exists to avoid swamping the local `claude`
 // CLI on pathological setups.
@@ -86,24 +86,26 @@ type Vote struct {
 // projects) plus the per-project vote slice.
 //
 // The org context is r.orgID — it scopes the per-org credentials
-// agentproc.Run resolves for each Haiku invocation. Billing the wrong
+// agentproc.Run resolves for each vote invocation. Billing the wrong
 // tenant in multi-mode would mean a mis-routed Runner; the Manager keys
 // runners by org so that can't happen. r.secrets is the per-org
 // LLM-credential reader read off the receiver (nil in local → ambient
 // subscription; system-door reader in multi).
-func (r *Runner) classify(ctx context.Context, projects []domain.Project, entity domain.Entity) (*string, []Vote) {
+func (r *Runner) classify(ctx context.Context, projects []domain.Project, entity domain.Entity, model string) (*string, []Vote) {
 	if len(projects) == 0 {
 		return nil, nil
 	}
 
-	votes := r.runVotes(ctx, projects, entity, r.voteStage1)
+	votes := r.runVotes(ctx, projects, entity, func(ctx context.Context, p domain.Project, e domain.Entity) Vote {
+		return r.voteStage1(ctx, p, e, model)
+	})
 	return pickWinner(votes, entity.ID), votes
 }
 
-// runVotes fans out one Haiku call per project using the provided
+// runVotes fans out one vote call per project using the provided
 // vote method value. Concurrency is capped at maxConcurrentVotes — the
 // inner per-entity cap; the shared system-job limiter (acquired inside
-// runHaiku) is the outer global ceiling. The two compose without
+// runVote) is the outer global ceiling. The two compose without
 // deadlock: a worker holds the inner slot while waiting on the outer
 // one, but nothing holds the outer slot while waiting on the inner, so
 // there's no hold-and-wait cycle.
@@ -169,22 +171,22 @@ func pickWinner(votes []Vote, entityID string) *string {
 	return &winner
 }
 
-// haikuPrompt bundles the local-mode combined message alongside the
+// votePrompt bundles the local-mode combined message alongside the
 // multi-mode system+user split. voteStage1 builds all three from the same
-// project/entity/kb inputs so runHaiku (via systemllm.Complete) can pick
+// project/entity/kb inputs so runVote (via systemllm.Complete) can pick
 // the shape each mode needs without re-deriving one from the other — the
 // data is sandwiched between two instruction sections in Message, which
 // rules out reconstructing SystemPrompt/UserMessage from Message by simple
 // string splitting.
-type haikuPrompt struct {
+type votePrompt struct {
 	Message      string
 	SystemPrompt string
 	UserMessage  string
 }
 
-// voteStage1 is the single-shot Haiku call. KB inlined up to
+// voteStage1 is the single-shot classification call. KB inlined up to
 // kbInlineMaxBytes.
-func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity domain.Entity) Vote {
+func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity domain.Entity, model string) Vote {
 	v := Vote{ProjectID: project.ID}
 
 	kb, _, err := r.readProjectKB(ctx, project.ID)
@@ -203,13 +205,13 @@ func (r *Runner) voteStage1(ctx context.Context, project domain.Project, entity 
 		entity.Title,
 		truncateDescription(entity.Description),
 	}
-	prompt := haikuPrompt{
+	prompt := votePrompt{
 		Message:      fmt.Sprintf(stage1Prompt, fields...),
 		SystemPrompt: stage1SystemPrompt,
 		UserMessage:  fmt.Sprintf(stage1UserPrompt, fields...),
 	}
 
-	score, rationale, err := r.stage1Fn(ctx, r.orgID, prompt)
+	score, rationale, err := r.stage1Fn(ctx, r.orgID, prompt, model)
 	if err != nil {
 		v.Err = err
 		return v
@@ -373,21 +375,21 @@ func readProjectKBFromStore(ctx context.Context, kb *kbstore.Store, orgID, proje
 	return buf.String(), truncated, nil
 }
 
-// realRunStage1Haiku runs a single-shot Haiku classification. It is the
+// realRunStage1 runs a single-shot classification. It is the
 // default value of the Runner's stage1Fn seam (set in NewRunner); tests
 // swap stage1Fn for a stub. It reads the per-org credentials off the
 // receiver.
-func (r *Runner) realRunStage1Haiku(ctx context.Context, orgID string, p haikuPrompt) (int, string, error) {
-	return r.runHaiku(ctx, orgID, p)
+func (r *Runner) realRunStage1(ctx context.Context, orgID string, p votePrompt, model string) (int, string, error) {
+	return r.runVote(ctx, orgID, p, model)
 }
 
-// runHaiku drives one classification call through systemllm.Complete —
+// runVote drives one classification call through systemllm.Complete —
 // local mode via the shared agent runtime, multi mode via a direct
 // Anthropic/Bedrock API call — and parses the {score, rationale} JSON the
 // model emits. ctx propagates from the Runner's stop channel so server
 // shutdown aborts in-flight calls instead of waiting for the model to time
 // out.
-func (r *Runner) runHaiku(ctx context.Context, orgID string, p haikuPrompt) (int, string, error) {
+func (r *Runner) runVote(ctx context.Context, orgID string, p votePrompt, model string) (int, string, error) {
 	// Bound concurrent background sandboxes across all orgs + jobs. This is
 	// the outer global ceiling; maxConcurrentVotes (in runVotes) is the inner
 	// per-entity fan-out cap. Each vote acquires here, runs, and releases —
@@ -405,8 +407,7 @@ func (r *Runner) runHaiku(ctx context.Context, orgID string, p haikuPrompt) (int
 		Message:      p.Message,
 		SystemPrompt: p.SystemPrompt,
 		UserMessage:  p.UserMessage,
-		Model:        ai.SystemJobModel,
-		DirectModel:  ai.SystemJobModelDirect,
+		Model:        model,
 		MaxTokens:    2048,
 		Temperature:  0.1,
 		TraceID:      "classify-stage1",

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -19,55 +20,69 @@ import (
 // to describe the endpoint that will actually be dialed — a key derived from
 // the raw map instead can name a configuration the call doesn't have.
 func TestProviderKey(t *testing.T) {
+	// Each case names a model its credentials actually serve: the mapping
+	// refuses a model whose provider the credentials don't match, so the
+	// provider a case is about has to be the one its model names.
+	anthropicModel := modelOn(t, modelcatalog.ProviderAnthropic)
+	bedrockModel := modelOn(t, modelcatalog.ProviderBedrock)
 	cases := []struct {
 		name  string
 		creds map[string]string
+		model string
 		want  string
 	}{
 		{
 			name:  "bedrock with no configured region keys on the region the call defaults to",
 			creds: map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "tok"},
+			model: bedrockModel,
 			want:  "bedrock:us-east-1",
 		},
 		{
 			name:  "anthropic direct, default endpoint",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1"},
+			model: anthropicModel,
 			want:  "anthropic-direct:default",
 		},
 		{
 			name:  "anthropic direct, custom base url",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1", "ANTHROPIC_BASE_URL": "https://Gateway.Example.com/v1/"},
+			model: anthropicModel,
 			want:  "anthropic-direct:https://gateway.example.com/v1",
 		},
 		{
 			name:  "two orgs on the default anthropic endpoint share one key regardless of api key",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-a-completely-different-key"},
+			model: anthropicModel,
 			want:  "anthropic-direct:default",
 		},
 		{
 			name:  "bedrock bearer, region only",
 			creds: map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_REGION": "us-east-1"},
+			model: bedrockModel,
 			want:  "bedrock:us-east-1",
 		},
 		{
 			name:  "bedrock sigv4, region only",
 			creds: map[string]string{"AWS_ACCESS_KEY_ID": "AKIA", "AWS_SECRET_ACCESS_KEY": "secret", "AWS_REGION": "eu-central-1"},
+			model: bedrockModel,
 			want:  "bedrock:eu-central-1",
 		},
 		{
 			name:  "bedrock with a VPC/gateway base url override gets its own key",
 			creds: map[string]string{"AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_REGION": "us-east-1", "ANTHROPIC_BEDROCK_BASE_URL": "https://vpce-123.bedrock.us-east-1.vpce.amazonaws.com"},
+			model: bedrockModel,
 			want:  "bedrock:us-east-1@https://vpce-123.bedrock.us-east-1.vpce.amazonaws.com",
 		},
 		{
 			name:  "anthropic direct wins over bedrock when both are somehow present",
 			creds: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-1", "AWS_BEARER_TOKEN_BEDROCK": "tok", "AWS_REGION": "us-east-1"},
+			model: anthropicModel,
 			want:  "anthropic-direct:default",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			pc, err := mapDirectCreds(tc.creds, "claude-haiku-4-5-20251001")
+			pc, err := mapDirectCreds(tc.creds, tc.model)
 			if err != nil {
 				t.Fatalf("mapDirectCreds: %v", err)
 			}
@@ -81,7 +96,7 @@ func TestProviderKey(t *testing.T) {
 		// There is no "unknown" key any more: credentials that name no
 		// provider fail the mapping, and the call is over before there is
 		// anything to open a cooldown on.
-		if _, err := mapDirectCreds(map[string]string{}, "claude-haiku-4-5-20251001"); err == nil {
+		if _, err := mapDirectCreds(map[string]string{}, anthropicModel); err == nil {
 			t.Fatal("expected an error for credentials naming no provider")
 		}
 	})

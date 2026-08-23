@@ -222,48 +222,6 @@ func (s *Server) withSession(next http.Handler) http.Handler {
 	})
 }
 
-// withOrg wraps a handler in the org-membership check. Reads
-// r.PathValue("org_id"), confirms the caller is a member, and 404s
-// otherwise (404 not 403 — don't leak the org's existence).
-//
-// Must be composed *after* withSession; uses ClaimsFrom to read the
-// caller's sub. Routes without {org_id} in the pattern pass through
-// unchanged.
-func (s *Server) withOrg(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		orgID := r.PathValue("org_id")
-		if orgID == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		// Cheap validation before the DB hit — malformed UUID in the
-		// path is a 404 (same response as "no such org").
-		if _, err := uuid.Parse(orgID); err != nil {
-			httpx.NotFound(w, "org")
-			return
-		}
-		claims := ClaimsFrom(r.Context())
-		if claims == nil {
-			// Programmer error: withOrg mounted without withSession.
-			// Don't reveal the misconfiguration to the caller.
-			authLog.Error("withorg saw no claims, route missing withsession wrapper", "path", r.URL.Path)
-			httpx.NotFound(w, "org")
-			return
-		}
-		ok, err := s.az.UserHasOrgAccess(r.Context(), claims.Subject, orgID)
-		if err != nil {
-			httpx.InternalError(w, "auth", fmt.Errorf("membership check %s/%s: %w", claims.Subject, orgID, err))
-			return
-		}
-		if !ok {
-			httpx.NotFound(w, "org")
-			return
-		}
-		ctx := httpx.WithOrgID(r.Context(), orgID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 // needsRefresh is true when the JWT will expire within the refresh
 // window (60s). Keeps the threshold in one place; tests can shadow it.
 func needsRefresh(sess *sessions.Session) bool {

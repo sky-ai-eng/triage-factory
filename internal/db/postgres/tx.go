@@ -310,6 +310,9 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// stays pinned to s.admin so the router's and poller's ...System read
 		// routes around RLS the way every other claims-less read does.
 		OrgEventSources: newOrgEventSourceStore(tx, s.admin),
+		// ModelAvailability has no admin half: every write is a request-path
+		// gesture, so the tx IS the whole store.
+		ModelAvailability: newModelAvailabilityStore(tx),
 		// Opaque extension bundles (the Enterprise Edition SSO stores) built
 		// from the same (app=tx, admin=s.admin) handles, so their app/admin
 		// pool split is identical to core's own stores — the login-time reads

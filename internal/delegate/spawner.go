@@ -931,16 +931,21 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	repoID := owner + "/" + repo
+	// The three reads below each fail the decision closed, and the only thing
+	// that reaches an operator is the proxy's one log line at the far end of a
+	// relay. Name which read broke: the bare driver error they used to return
+	// ("column X does not exist") says what went wrong without saying where,
+	// and these three are answering quite different questions.
 	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
 	if err != nil {
-		return gitproxy.Decision{}, err
+		return gitproxy.Decision{}, fmt.Errorf("tracked-set read: %w", err)
 	}
 	if !tracks {
 		return gitDenyNotTracked(repoID), nil
 	}
 	rows, err := stores.ConversationWorktrees.ListSystem(ctx, info.OrgID, info.ConversationID)
 	if err != nil {
-		return gitproxy.Decision{}, err
+		return gitproxy.Decision{}, fmt.Errorf("worktree ledger read: %w", err)
 	}
 
 	// Base / protected refs are not pushable regardless of what the worktree is
@@ -952,7 +957,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	// is exactly when we must not allow the push.
 	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, domain.RepoRef{Owner: owner, Repo: repo}, info.IsEventTriggered)
 	if err != nil {
-		return gitproxy.Decision{}, err
+		return gitproxy.Decision{}, fmt.Errorf("push policy read: %w", err)
 	}
 
 	var allowedRefs []string

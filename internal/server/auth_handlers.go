@@ -678,8 +678,8 @@ func (s *Server) handleLogoutAll(w http.ResponseWriter, r *http.Request) {
 // in the URL path. The next request's withSession reads the new value
 // into ctxKeyOrgID; tab B sees the switch on its next round trip.
 //
-// 404-on-non-member mirrors withOrg's posture — don't disclose whether
-// the org exists to a user who isn't in it.
+// 404-on-non-member mirrors the org-membership gate's posture — don't disclose
+// whether the org exists to a user who isn't in it.
 func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 	if s.authDeps == nil {
 		// The whole hosted-auth surface is absent in local mode: a route that
@@ -726,8 +726,8 @@ func (s *Server) handleActiveOrgUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		// 404 not 403 — same posture as withOrg: an org the caller isn't a
-		// member of must not be confirmed to exist.
+		// 404 not 403 — same posture RequireOrgMember takes: an org the caller
+		// isn't a member of must not be confirmed to exist.
 		notFound(w, "org")
 		return
 	}

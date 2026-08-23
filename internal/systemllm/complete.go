@@ -37,15 +37,13 @@ type CompleteOptions struct {
 	SystemPrompt string
 	UserMessage  string
 
-	// Model is the CLI model alias (e.g. "haiku") passed verbatim to
-	// agentproc.Run in local mode.
+	// Model is the org's background-jobs model — a modelcatalog key, resolved
+	// from the org settings row before the call (see ModelForSettings), never
+	// defaulted here. One field for both paths: local passes it to
+	// `claude -p --model`, which accepts concrete ids, and multi sends it as
+	// the request model and prices the call on it. Required; a call with no
+	// model is refused rather than run on one nobody chose.
 	Model string
-	// DirectModel is the pinned model id used as the Anthropic-direct
-	// request model and, for every provider, the cost-accounting key —
-	// required regardless of which auth branch resolves. The Bedrock branches
-	// resolve their own request model independently (see bedrockModel) and
-	// never use DirectModel for the request itself.
-	DirectModel string
 
 	MaxTokens   int64
 	Temperature float64
@@ -61,7 +59,10 @@ type CompleteOptions struct {
 	// triple; the local path forwards it to agentproc.Run. nil keeps the
 	// built-in raw-secret resolution (bearer/access_keys/Anthropic, local
 	// ambient) — byte-for-byte unchanged.
-	LLMResolver func(ctx context.Context, orgID string) (map[string]string, error)
+	//
+	// The model argument selects the provider, so the org's background-jobs
+	// model is what decides which credential a system job resolves.
+	LLMResolver func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 	// Metadata is optional per-job context (e.g. {"batch_size": 10}),
 	// threaded through to the system_llm_runs row.
@@ -91,6 +92,17 @@ func (r *Recorder) Complete(ctx context.Context, opts CompleteOptions) (*Complet
 	ctx, span := tracer.Start(ctx, "systemllm.complete",
 		trace.WithAttributes(telemetry.OrgID(opts.OrgID), telemetry.Job(opts.Job)))
 	defer span.End()
+
+	// Both paths, before the mode branch: an unresolved model is the one input
+	// neither can improvise. Local would hand `claude -p` an empty --model and
+	// get whatever that CLI's own default happens to be; multi would send an
+	// empty request model. Both are a model nobody chose, which is the
+	// substitution the no-fallback rule forbids.
+	if opts.Model == "" {
+		span.SetStatus(codes.Error, "completion failed")
+		span.SetAttributes(telemetry.Outcome("error"))
+		return nil, fmt.Errorf("%w: Complete was called for org %s with no model", ErrNoModel, opts.OrgID)
+	}
 
 	var (
 		res *CompleteResult

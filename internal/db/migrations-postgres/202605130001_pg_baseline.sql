@@ -938,7 +938,19 @@ CREATE TABLE public.org_settings (
     -- poll_interval), keyed (org_id, kind) instead of one column pair per
     -- source — see that table's comment. github_clone_protocol stays: it is a
     -- GitHub-only concept, not a uniform per-source setting.
-    github_clone_protocol text DEFAULT 'ssh'::text NOT NULL,
+    --
+    -- Defaults to https where the SQLite twin defaults to ssh, and the
+    -- divergence is the point rather than drift: Postgres means multi mode,
+    -- where an SSH clone has nothing to authenticate with — a GitHub App
+    -- installation token is an HTTPS bearer credential, and the runtime
+    -- container carries no key, agent or known_hosts. Provisioning names only
+    -- org_id and takes every other column from its DEFAULT, so this literal is
+    -- the value every multi org is actually born with; seeding ssh would put a
+    -- value in the column that the settings PATCH beside it refuses to accept,
+    -- safe to read only through domain.EffectiveCloneProtocol. The CHECK below
+    -- still admits both — the column's vocabulary is the product's, not this
+    -- deployment's.
+    github_clone_protocol text DEFAULT 'https'::text NOT NULL,
     -- org_secrets key refs (not raw secrets) for Anthropic / Bedrock credentials.
     -- NULL means "use deployment default" on hosted SaaS or "not configured
     -- yet" on self-host. The SecretStore API resolves the ref to a live
@@ -946,6 +958,32 @@ CREATE TABLE public.org_settings (
     -- without touching this row.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
+    -- Where the org's Claude credentials come from, stated rather than inferred
+    -- from the two refs above being empty. 'system' is the host's credentials
+    -- (TF supplies the subprocess nothing and the Claude Code SDK resolves auth
+    -- from the inherited environment); 'byok' is the org's own bound material,
+    -- whichever provider serves the model. The refs stay the record of WHICH
+    -- providers are bound; this column answers what it means when none are —
+    -- deliberately on the host's credentials, or not set up.
+    --
+    -- App-validated, not CHECK-constrained, the max_llm_model_tier /
+    -- background_jobs_model precedent: the SQLite tree adds this column with
+    -- ALTER TABLE, where widening a CHECK later means a full table rebuild, and
+    -- a constraint that exists on one dialect only is worse than one on
+    -- neither.
+    --
+    -- DEFAULT 'byok', and here that is not a default so much as the only value:
+    -- a hosted deployment has no host credentials to lend — the operator's
+    -- environment would be shared by every tenant, and credential resolution
+    -- refuses an org with nothing bound outright — so the settings PATCH
+    -- refuses 'system' in multi mode and domain.EffectiveLLMAuthMethod resolves
+    -- to 'byok' whatever the column says. The SQLite tree defaults to 'system'
+    -- instead (202608260003_org_llm_auth_method.sql): local mode is
+    -- single-user and zero-configuration, so a fresh install arrives already on
+    -- the host's credentials and is never asked to pick. Rolled into the
+    -- baseline (not a forward migration) because multi-mode / Postgres is
+    -- net-new and unshipped, so there are no existing rows to backfill.
+    llm_auth_method text DEFAULT 'byok'::text NOT NULL,
     -- Max model tier the org permits teams/users to pick. NULL means no cap.
     -- App-validated, not CHECK-constrained (the max_llm_model_tier_check was
     -- dropped in this baseline, both dialects): an opaque, provider-agnostic
@@ -954,6 +992,27 @@ CREATE TABLE public.org_settings (
     -- future families be added with zero DDL; a richer provider/model split stays
     -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
+    -- The model the three headless system jobs — scorer, project classifier,
+    -- repo profiler — run on. One knob for all three: they are the same kind of
+    -- work (short, toolless, no transcript) bought from the same budget, so a
+    -- per-job column would be three ways to answer one question.
+    --
+    -- A modelcatalog key, validated app-side against the catalog and against the
+    -- providers the org has connected — not CHECK-constrained, the
+    -- max_llm_model_tier precedent above: the accepted set is the build's
+    -- catalog, which changes with the binary rather than with the schema.
+    --
+    -- NOT NULL with an EMPTY default, and the empty string is the load-bearing
+    -- part: it means the org has not picked yet, and until it does those jobs
+    -- skip their cycles. TF ships no fallback model, so a default here would be
+    -- a model nobody chose being bought with somebody's money. A fresh org is
+    -- therefore forced through the setup pick. The SQLite tree defaults to
+    -- 'claude-haiku-4-5-20251001' instead (202608260001_org_background_jobs_model.sql):
+    -- local mode is single-user and zero-configuration, with no setup step to
+    -- make someone choose. Rolled into the baseline (not a forward migration)
+    -- because multi-mode / Postgres is net-new and unshipped, so there are no
+    -- existing rows to seed.
+    background_jobs_model text DEFAULT ''::text NOT NULL,
     -- Org-wide daily LLM spend cap (TFAC-477). NULL = no cap; the app layer also
     -- treats 0 as "no cap". When the org's spend for the current UTC calendar day
     -- (summed across every category — autonomous + manual + curator + system
@@ -1856,6 +1915,21 @@ CREATE TABLE public.team_settings (
     -- forward migration) because multi-mode / Postgres is net-new and unshipped;
     -- the SQLite tree carries 202607270001_team_base_branch_push_policy.sql.
     base_branch_push_policy text DEFAULT 'never'::text NOT NULL,
+    -- Which inference providers this team may spend against, as modelcatalog
+    -- provider ids. Empty (the default) is no restriction — every provider the
+    -- org configured; absent and "all of them" therefore store the same value,
+    -- which is correct, since an admin who has narrowed nothing has narrowed
+    -- nothing and a team whose restriction happened to name every provider
+    -- would silently become restricted the day the org connects a third. An org
+    -- admin's decision, not the team's: the team-settings write path
+    -- round-trips this column untouched and only the admin-pool
+    -- SetAllowedProvidersSystem changes it (an org admin restricting a team
+    -- need not be a member of it). NOT NULL with a literal DEFAULT so partial
+    -- upserts materialize it without the writer naming the column. Rolled into
+    -- the baseline (not a forward migration) because multi-mode / Postgres is
+    -- net-new and unshipped; the SQLite tree, which HAS shipped, carries
+    -- 202608250001_team_allowed_providers.sql.
+    allowed_providers text[] DEFAULT '{}'::text[] NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -8491,6 +8565,92 @@ REVOKE ALL ON public.org_event_sources FROM PUBLIC;
 REVOKE ALL ON public.org_event_sources FROM anon, authenticated, service_role;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_event_sources TO tf_app;
+
+
+-- model_availability: per (org, provider, model) evidence that the org's
+-- credentials can actually invoke that model, established by spending one
+-- minimal real request on it.
+--
+-- A probe rather than a control-plane lookup, because no control-plane API
+-- answers the question uniformly. Anthropic's /v1/models reflects the key's
+-- access; Bedrock's ListFoundationModels reports what the REGION carries, not
+-- what the account was granted, and returns base model ids rather than the
+-- inference-profile ids that are the only invocable spelling for the current
+-- Claude models. Its per-model entitlement call needs its own IAM action on a
+-- different service endpoint and answers a weaker question. A probe needs no
+-- permission the run does not already need — if the probe fails, the run would
+-- have failed too — and it tests the exact id that will be sent on the wire.
+--
+-- Two stored states and a meaningful absence:
+--
+--   green   a probe succeeded. Terminal for automatic transitions: only a
+--           manual re-test writes the row again, and a re-test that is refused
+--           moves it to red.
+--   red     the provider ANSWERED and refused (401/403, AccessDeniedException,
+--           model-not-found). Cleared only by a later successful test.
+--   absent  never probed, or every attempt so far was inconclusive — a 5xx, a
+--           timeout, a dial failure. Those write NOTHING, so one bad provider
+--           minute can never hide a model that works.
+--
+-- There is no TTL column and nothing sweeps this table. A green row is a fact
+-- about a request that really succeeded, and re-checking would spend money to
+-- learn something a dispatch failure already reports loudly. Every transition
+-- is caused by a user gesture — connecting a credential, or pressing "test
+-- connection" — which is also why there is no writer without request claims,
+-- and why this table needs no admin-pool arm.
+--
+-- provider is part of the primary key rather than derived from model_key: what
+-- the row establishes is that a CREDENTIAL PATH works, the eager sweep
+-- addresses rows by provider, and a row must still say which credential it was
+-- tested against after the build stops offering the key.
+--
+-- model_key carries no foreign key, for the same reason org_event_sources.kind
+-- carries none: the catalog is a compiled-in file, not a table, so a row for a
+-- key this build no longer offers is inert (nothing iterates to it) rather
+-- than invalid. Its length is unconstrained beyond the CHECK: a Bedrock
+-- inference-profile id is already 40+ characters and an ARN is longer.
+CREATE TABLE public.model_availability (
+    org_id     uuid NOT NULL,
+    provider   text NOT NULL,
+    model_key  text NOT NULL,
+    state      text NOT NULL,
+    checked_at timestamp with time zone NOT NULL,
+    detail     text DEFAULT ''::text NOT NULL
+);
+
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_pkey PRIMARY KEY (org_id, provider, model_key);
+
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+-- The stored vocabulary is exactly two values. An inconclusive probe has no
+-- spelling here on purpose — it writes no row — so a third value arriving
+-- would mean some caller invented one, and the CHECK is what stops that from
+-- reaching a picker as an unrenderable badge.
+ALTER TABLE ONLY public.model_availability
+    ADD CONSTRAINT model_availability_state_check CHECK ((state = ANY (ARRAY['green'::text, 'red'::text])));
+
+ALTER TABLE public.model_availability ENABLE ROW LEVEL SECURITY;
+
+-- Member SELECT, admin write. The read is member-level because its only
+-- consumer is the model catalog read, which is itself member-level: a team
+-- admin who cannot read org settings still has to see why a model in their
+-- picker is badged unavailable. The write is admin because it SPENDS THE ORG'S
+-- MONEY — every row here is the receipt for a real, billed request — and
+-- because it is written from the same settings surface that binds the
+-- credential. A model is in no team's tracked set, so the org-wide-mutation
+-- rule reduces to plain org admin and RLS can express the whole gate; the
+-- handler's RequireOrgAdmin is still the enforcement point callers see.
+CREATE POLICY model_availability_select ON public.model_availability FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+CREATE POLICY model_availability_insert ON public.model_availability FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY model_availability_update ON public.model_availability FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+CREATE POLICY model_availability_delete ON public.model_availability FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+REVOKE ALL ON public.model_availability FROM PUBLIC;
+REVOKE ALL ON public.model_availability FROM anon, authenticated, service_role;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_app;
 
 
 -- placement_overrides (TFAC-587, spec §6.1): human intent that wins over the

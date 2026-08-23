@@ -44,6 +44,7 @@ func TestBedrockKeysMatchIntegrations(t *testing.T) {
 		{"aws_bearer_token_bedrock", integrations.KeyAWSBearerTokenBedrock, secretAWSBearerTokenBedrock},
 		{"bedrock_model_id", integrations.KeyBedrockModelID, secretBedrockModelID},
 		{"bedrock_base_url", integrations.KeyBedrockBaseURL, secretBedrockBaseURL},
+		{"aws_role_arn", integrations.KeyAWSRoleARN, secretAWSRoleARN},
 	}
 	for _, p := range pairs {
 		if p.integrations != p.agentproc {

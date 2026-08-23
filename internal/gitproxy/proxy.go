@@ -447,6 +447,17 @@ func (s *Server) Handler() http.Handler {
 			if err != nil {
 				// An authz outage/misconfig blocks the op just as a hard deny
 				// does — record it so the audit trail isn't silent on outages.
+				//
+				// Log the cause: this is the only place it survives. The audit
+				// record's Reason is a fixed vocabulary with no room for it, the
+				// 502 body deliberately tells the agent nothing about server
+				// internals, and git prints that body as the whole explanation.
+				// A gate error stops every git operation the run makes, and it
+				// is always a server-side fault — a broken store read, a relay
+				// outage — so an operator reading these logs needs the error the
+				// way an operator reading a failed clone needs the exit status.
+				gitproxyLog.Error("authorize gate errored; failing closed",
+					"owner", owner, "repo", repo, "op", op, "error", err)
 				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "authorize-error"})
 				http.Error(w, "gitproxy: authorization check failed", http.StatusBadGateway)
 				return

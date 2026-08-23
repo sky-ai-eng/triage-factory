@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -27,16 +28,16 @@ const (
 	reprofileTTL     = 3 * 24 * time.Hour // skip repos profiled within the last 3 days
 )
 
-// llmResolveFunc is the RunOptions.LLMResolver shape the profiler's Haiku
+// llmResolveFunc is the RunOptions.LLMResolver shape the profiler's model
 // calls carry — the brain-side llmcred adapter minting short-lived STS creds
 // for a role-mode Bedrock org (nil in local/tests → Run's built-in
 // resolution).
-type llmResolveFunc func(ctx context.Context, orgID string) (map[string]string, error)
+type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]string, error)
 
 // Profiler builds and persists AI-generated profiles for GitHub repositories.
 type Profiler struct {
 	resolver   github.Resolver         // per-(org, owner) GitHub client source — App-installation token in multi, keychain PAT in local.
-	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling Haiku calls (nil in local → ambient subscription; system-door reader in multi).
+	secrets    agentproc.SecretsReader // per-org LLM-credential reader for the profiling model calls (nil in local → ambient subscription; system-door reader in multi).
 	llmResolve llmResolveFunc          // brain-side role-aware LLM resolver (nil in local/tests).
 	repos      db.RepositoryStore      // profile reads + upserts go through the store
 	orgs       db.OrgsStore            // iterate active orgs at the top of each profile run
@@ -52,12 +53,15 @@ type Profiler struct {
 	// data just like the event payloads.
 	recipients repoevent.RecipientsFunc
 
-	// batchFn runs one Haiku profiling batch. Defaulted (in NewProfiler) to a
+	// batchFn runs one profiling batch. Defaulted (in NewProfiler) to a
 	// closure over profileBatch that captures the recorder + system-job
 	// limiter, so the field signature stays free of both and test overrides
 	// need no change. Overridable so tests can exercise the with-docs upsert /
 	// fallback paths without spawning a real agent subprocess.
-	batchFn func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error)
+	// model is the org's background-jobs model, resolved once at the top of
+	// the cycle and passed down rather than read per batch — a cycle spends on
+	// one model, and every batch it runs is recorded against that one.
+	batchFn func(ctx context.Context, orgID, model string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error)
 }
 
 // NewProfiler creates a Profiler with the given GitHub resolver, per-org
@@ -70,8 +74,8 @@ type Profiler struct {
 func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, repos db.RepositoryStore, orgs db.OrgsStore, recorder *systemllm.Recorder, limiter *syslimit.Limiter, ws *websocket.Hub) *Profiler {
 	p := &Profiler{resolver: resolver, secrets: secrets, llmResolve: llmResolve, repos: repos, orgs: orgs, recorder: recorder, ws: ws}
 	p.notify = repoevent.NewNotifier(ws, nil)
-	p.batchFn = func(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
-		return profileBatch(ctx, orgID, batch, secrets, llmResolve, recorder, limiter)
+	p.batchFn = func(ctx context.Context, orgID, model string, batch []repoWithDocs, secrets agentproc.SecretsReader) ([]repoProfileResult, error) {
+		return profileBatch(ctx, orgID, model, batch, secrets, llmResolve, recorder, limiter)
 	}
 	return p
 }
@@ -214,17 +218,31 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	// a clone_url that never landed.
 	touched := false
 
-	// Resolve the clone protocol once for the whole run rather than
-	// re-reading per-org settings inside the per-repo loop. The setting
-	// can't change mid-run — handleOrgSettingsPatch serializes the org-
-	// settings write behind the same `onGitHubChanged` callback that
-	// owns this goroutine — so capturing it here matches actual
-	// semantics and avoids N redundant DB reads.
-	preferSSH := false
-	if orgSet, oErr := p.orgs.GetSettingsSystem(ctx, orgID); oErr != nil {
-		repoprofileLog.Warn("load org settings to pick clone protocol failed, defaulting to https", "org", orgID, "error", oErr)
-	} else {
-		preferSSH = orgSet.GitHubCloneProtocol == "ssh"
+	// One read, two answers: the clone protocol below and the model every
+	// profiling batch in this cycle runs on. The settings can't change mid-run —
+	// handleOrgSettingsPatch serializes the org-settings write behind the same
+	// `onGitHubChanged` callback that owns this goroutine — so capturing both
+	// here matches actual semantics and avoids N redundant DB reads.
+	orgSet, err := p.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("load org settings: %w", err)
+	}
+	// Through the resolver, never the stored column: the value is the org's
+	// policy, and multi mode cannot honor an SSH one at all — the clone URL this
+	// picks is what a host-side clone runs against, and an App installation
+	// token is an HTTPS bearer credential no SSH remote can carry.
+	preferSSH := domain.EffectiveCloneProtocol(orgSet.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
+
+	// A cycle with no usable background-jobs model has no profile it can write,
+	// so it skips before spending a single GitHub call on doc fetches — and
+	// never substitutes a model of TF's choosing. WARN rather than the error
+	// return above, because every failure this can produce is an unusable
+	// setting (ErrNoModel) whose remedy is an org admin picking a model: the
+	// read that could have failed as a fault already did so, one statement up.
+	model, err := systemllm.ModelForSettings(orgSet)
+	if err != nil {
+		repoprofileLog.Warn("skipping repo-profiling cycle", "org", orgID, "error", err)
+		return false, nil
 	}
 
 	var withDocs []repoWithDocs
@@ -405,7 +423,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		repoprofileLog.Debug("doc scan complete", "with_docs", len(withDocs), "without_docs", len(withoutDocs))
 	}
 
-	// Batch-profile repos that have docs through Haiku.
+	// Batch-profile repos that have docs through the model.
 	profiled := 0
 	for i := 0; i < len(withDocs); i += profileBatchSize {
 		if err := ctx.Err(); err != nil {
@@ -418,7 +436,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		}
 		batch := withDocs[i:end]
 
-		results, err := p.batchFn(ctx, orgID, batch, p.secrets)
+		results, err := p.batchFn(ctx, orgID, model, batch, p.secrets)
 		if err != nil {
 			// A provider-backoff skip (systemllm's circuit breaker) is an
 			// anticipated, self-healing deferral, not a genuine failure —
@@ -533,7 +551,7 @@ type repoProfileResult struct {
 	Profile string `json:"profile"`
 }
 
-func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]repoProfileResult, error) {
+func profileBatch(ctx context.Context, orgID, model string, batch []repoWithDocs, secrets agentproc.SecretsReader, llmResolve llmResolveFunc, recorder *systemllm.Recorder, limiter *syslimit.Limiter) ([]repoProfileResult, error) {
 	inputs := make([]repoProfileInput, len(batch))
 	for i, d := range batch {
 		inputs[i] = repoProfileInput{
@@ -571,8 +589,7 @@ func profileBatch(ctx context.Context, orgID string, batch []repoWithDocs, secre
 		Message:      fmt.Sprintf(repoProfilePrompt, string(inputJSON)),
 		SystemPrompt: repoProfileSystemPrompt,
 		UserMessage:  fmt.Sprintf(repoProfileUserPrompt, string(inputJSON)),
-		Model:        ai.SystemJobModel,
-		DirectModel:  ai.SystemJobModelDirect,
+		Model:        model,
 		MaxTokens:    16384,
 		Temperature:  0.1,
 		TraceID:      "repoprofile-batch",
