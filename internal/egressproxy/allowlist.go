@@ -147,10 +147,11 @@ func upstreamHostname(upstream string) string {
 // host: a registry nobody allowlisted has no sanctioned alternative to point
 // at, and inventing one would send the agent to do useless work.
 //
-// The verbs are named without an invocation prefix, like ghwrite's refusal
-// explanations, because the spelling differs per runtime (`tfac gh …` in the
-// native jail, `<binary> exec gh …` under the SDK) and the agent's own
-// prompt teaches the right one. host must already be normalizeHost'd.
+// The verbs are spelled under the `tfac` applet because that is the one
+// invocation every reader of this refusal can run: the proxy serves only the
+// sandboxed (multi-mode) cell, whose agent is the native jail with the applet
+// on PATH — local mode runs no egress proxy. host must already be
+// normalizeHost'd.
 func (s *Server) deniedHostGuidance(host string) string {
 	_, api := s.ghAPIHosts[host]
 	_, git := s.ghGitHosts[host]
@@ -159,14 +160,15 @@ func (s *Server) deniedHostGuidance(host string) string {
 		return "this host serves this run's GitHub, and its API and git access go through the run's " +
 			"credential channels, which direct connections (including gh following an absolute URL from " +
 			"an API response) bypass. Use the Triage Factory exec verbs instead — CI logs: " +
-			"`gh actions download-logs <run_id>` — and git with the worktree's existing remotes"
+			"`tfac gh actions download-logs <run_id>` — and git with the worktree's existing remotes"
 	case api:
 		return "GitHub API access goes through this run's credential channel, " +
 			"which direct connections (including gh following an absolute URL from an API response) bypass. " +
-			"Use the Triage Factory exec verbs instead — CI logs: `gh actions download-logs <run_id>`"
+			"Use the Triage Factory exec verbs instead — CI logs: `tfac gh actions download-logs <run_id>`"
 	case git:
 		return "git reaches GitHub through this run's preconfigured credential proxy. " +
-			"Use git with the worktree's existing remotes, or the workspace exec verbs to add a checkout"
+			"Use git with the worktree's existing remotes, or `tfac workspace add <owner>/<repo>` for a " +
+			"checkout you don't have"
 	}
 	return ""
 }
