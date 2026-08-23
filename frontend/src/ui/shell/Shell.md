@@ -24,7 +24,7 @@ section heading becomes a hairline rule — and gives up its height, or the clos
 rail ends up taller than the open one. Four short runs of glyphs read cold in a
 way one column of twelve does not.
 
-The maximal rail is twelve routes in four groups, which needs about 700px of
+The maximal rail is eleven routes in four groups, which needs about 700px of
 window: roughly 520px of rows and rules, plus 185px of mark, counts and foot.
 Below that the column scrolls, and because its scrollbar is suppressed a fade at
 the foot is what says so. Do not add an overflow menu — a route that is one
@@ -68,8 +68,8 @@ draws immediately and never guesses at what is about to fill it.
 
 A row may carry a tail: a count, a figure, or an alert. The rule is that a tail
 states a **fact about the destination**, never a notification about the app —
-`12` projects, `23` open pull requests, `$41` spent today, `6` machines. They
-are quiet, mono, and the same weight as the row's label.
+`23` open pull requests, `$41` spent today, `6` machines. They are quiet, mono,
+and the same weight as the row's label.
 
 Governance is the exception, and deliberately so. Its tail is a warm alert glyph
 and a count, because an org credential changing is not a tally that drifts, it is

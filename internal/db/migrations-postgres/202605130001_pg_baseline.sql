@@ -44,8 +44,8 @@
 --      (user_settings, user_github/jira_identities, memberships,
 --      org_memberships), which carry the users(id) FK in BOTH dialects.
 --   4. Tables that exist in one dialect only. instance_config is SQLite-only
---      (host port lives in container env under multi mode). sessions and
---      project_knowledge are Postgres-only (multi-mode auth + shared KB).
+--      (host port lives in container env under multi mode). sessions is
+--      Postgres-only (multi-mode auth).
 --   5. PG-only RLS apparatus. Row-level-security policies, the tf.* helper
 --      functions, the auth.users FK, and admin-only columns
 --      (orgs.owner_user_id, teams.created_by_user_id, users.default_org_id,
@@ -134,53 +134,6 @@ CREATE TYPE public.org_role AS ENUM (
     'member'
 );
 
-
---
--- Name: update_project_knowledge(uuid, integer, text, uuid); Type: FUNCTION; Schema: public; Owner: -
---
-
--- +goose StatementBegin
-CREATE FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid DEFAULT NULL::uuid) RETURNS integer
-    LANGUAGE plpgsql
-    SET search_path TO 'pg_catalog', 'public'
-    AS $$
-DECLARE
-  v_new_version INT;
-  v_user_id     UUID := tf.current_user_id();
-BEGIN
-  IF v_user_id IS NULL THEN
-    RAISE EXCEPTION 'no current_user_id (request.jwt.claims unset)'
-      USING ERRCODE = '42501';
-  END IF;
-
-  -- If a conversation is being attributed, it must be one the caller can see
-  -- through conversations RLS (their own, in their current org). A forged
-  -- p_updated_by_conversation from another user fails this check because the
-  -- conversations SELECT policy gates on the caller's org + visibility arm.
-  IF p_updated_by_conversation IS NOT NULL
-     AND NOT EXISTS (SELECT 1 FROM conversations WHERE id = p_updated_by_conversation) THEN
-    RAISE EXCEPTION 'conversation % not accessible to caller', p_updated_by_conversation
-      USING ERRCODE = '42501';
-  END IF;
-
-  UPDATE project_knowledge
-     SET content = p_content,
-         version = version + 1,
-         last_updated_by = v_user_id,
-         last_updated_by_conversation = p_updated_by_conversation,
-         updated_at = now()
-   WHERE id = p_id
-     AND version = p_expected_version
-  RETURNING version INTO v_new_version;
-
-  IF v_new_version IS NULL THEN
-    RAISE EXCEPTION 'concurrent update of project_knowledge %', p_id
-      USING ERRCODE = '40001';
-  END IF;
-  RETURN v_new_version;
-END;
-$$;
--- +goose StatementEnd
 
 
 --
@@ -406,7 +359,7 @@ $$;
 -- An archived team (teams.deleted_at IS NOT NULL) is write-blocked end-to-end
 -- (TFAC-448): the membership join to teams adds deleted_at IS NULL, so every
 -- team-scoped write policy keyed on user_can_write_team (tasks, conversations,
--- prompts, blueprints, event_handlers, projects, team_agents) — plus the
+-- prompts, blueprints, event_handlers, team_agents) — plus the
 -- RequireTeamWrite / RequireTaskWrite handler gates that call it — reject the
 -- write at the row level. This is the DB backstop that covers the task-scoped
 -- mutations (swipe / snooze / requeue / advance) whose team is derived from the
@@ -534,9 +487,9 @@ CREATE TABLE public.agents (
 -- Name: system_llm_runs; Type: TABLE; Schema: public; Owner: -
 --
 
--- One row per agentproc.Run made by a headless system job (the scorer,
--- repo-profiler, and project-classifier each run a Haiku call every poll
--- cycle). Captures the cost + token breakdown the subprocess already
+-- One row per agentproc.Run made by a headless system job (the scorer and
+-- repo-profiler each run a Haiku call every poll cycle). Captures the
+-- cost + token breakdown the subprocess already
 -- computed so org spend reconciles with the Anthropic bill and a "system
 -- overhead" line exists alongside conversation / claim spend rows.
 -- Org-level, no team_id by design: scorer batches mix teams, and
@@ -668,10 +621,7 @@ CREATE TABLE public.entities (
     snapshot_json jsonb,
     description text DEFAULT ''::text NOT NULL,
     state text DEFAULT 'active'::text NOT NULL,
-    project_id uuid,
     owning_team_id uuid,
-    classified_at timestamp with time zone,
-    classification_rationale text,
     last_polled_at timestamp with time zone,
     closed_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -885,8 +835,8 @@ CREATE TABLE public.team_github_groups (
 -- The direction of the two lifetimes is the reason for the ON DELETE below.
 -- A tracking row is a statement ABOUT a repository, so it cannot outlive the
 -- registry row (CASCADE). The converse does not hold: untracking deletes a row
--- HERE and leaves the registry row standing, because a worktree ledger entry,
--- a pinned project or a task may still name that repository. Tracking is
+-- HERE and leaves the registry row standing, because a worktree ledger entry
+-- or a task may still name that repository. Tracking is
 -- forward-only in both directions.
 --
 -- org_id is denormalized from the team so both references can be COMPOSITE
@@ -992,10 +942,10 @@ CREATE TABLE public.org_settings (
     -- future families be added with zero DDL; a richer provider/model split stays
     -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
-    -- The model the three headless system jobs — scorer, project classifier,
-    -- repo profiler — run on. One knob for all three: they are the same kind of
+    -- The model the two headless system jobs — scorer, repo profiler —
+    -- run on. One knob for both: they are the same kind of
     -- work (short, toolless, no transcript) bought from the same budget, so a
-    -- per-job column would be three ways to answer one question.
+    -- per-job column would be two ways to answer one question.
     --
     -- A modelcatalog key, validated app-side against the catalog and against the
     -- providers the org has connected — not CHECK-constrained, the
@@ -1167,78 +1117,6 @@ CREATE TABLE public.poller_state (
 
 
 --
--- Name: project_knowledge; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.project_knowledge (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    project_id uuid NOT NULL,
-    key text NOT NULL,
-    content text DEFAULT ''::text NOT NULL,
-    version integer DEFAULT 1 NOT NULL,
-    last_updated_by uuid,
-    last_updated_by_conversation uuid,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: projects; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.projects (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    org_id uuid NOT NULL,
-    creator_user_id uuid NOT NULL,
-    team_id uuid,
-    visibility text DEFAULT 'team'::text NOT NULL,
-    name text NOT NULL,
-    description text DEFAULT ''::text NOT NULL,
-    jira_project_key text,
-    linear_project_key text,
-    spec_authorship_blueprint_id text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT projects_team_visibility_requires_team CHECK (((visibility <> 'team'::text) OR (team_id IS NOT NULL))),
-    CONSTRAINT projects_visibility_check CHECK ((visibility = ANY (ARRAY['private'::text, 'team'::text, 'org'::text])))
-);
-
-
---
--- Name: project_pinned_repos; Type: TABLE; Schema: public; Owner: -
---
-
--- The repositories a project pins, one row per (project, repository).
---
--- This was a jsonb array of "owner/repo" strings on projects. An array of
--- strings cannot carry a foreign key at all, which made it the one repository
--- reference in this schema that nothing could check: a pin naming a repository
--- no row exists for was indistinguishable from a live one, and a rename had to
--- rewrite the array element by element. A join table is what makes it
--- checkable.
---
--- position preserves the order the pins were saved in. The API surfaces
--- pinned_repos as an ordered list and a project round-trips through bundle
--- export/import, so ordering by slug instead would silently reshuffle a list
--- somebody arranged.
---
--- CASCADE on both sides: a pin is project configuration, not durable work, so
--- it follows whichever end goes away. That is the opposite of
--- conversation_worktrees, and deliberately so — a ledger entry is a record of
--- something that happened, a pin is a preference.
---
--- No org_id column: org scope rides the projects FK, mirroring
--- team_github_repos' teams FK.
-CREATE TABLE public.project_pinned_repos (
-    project_id uuid NOT NULL,
-    repository_id uuid NOT NULL,
-    "position" integer NOT NULL
-);
-
-
---
 -- Name: prompts; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1278,8 +1156,8 @@ CREATE TABLE public.prompts (
 --
 
 -- The registry of the repositories TF works with, and the target every
--- repository reference in this schema now points at: team_github_repos,
--- conversation_worktrees and project_pinned_repos all carry this row's id. The
+-- repository reference in this schema now points at: team_github_repos and
+-- conversation_worktrees carry this row's id. The
 -- slug survives only where it is genuinely something else's natural key
 -- (entities.source_id is a pull request's, "owner/repo#18") or where a human
 -- reads it (an API payload, a CLI argument, a directory name).
@@ -1290,7 +1168,7 @@ CREATE TABLE public.prompts (
 --
 -- The row is durable. It is created when a repository is first tracked and it
 -- is NOT deleted when the last team untracks it, because a worktree ledger
--- entry, a pinned project or a task may still name the repository. "Which
+-- entry or a task may still name the repository. "Which
 -- repositories does TF poll and profile" is a question about tracking, and
 -- team_github_repos is what answers it.
 --
@@ -2283,38 +2161,6 @@ ALTER TABLE ONLY public.poller_state
 
 
 --
--- Name: project_knowledge project_knowledge_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_pkey PRIMARY KEY (id);
-
-
---
--- Name: project_knowledge project_knowledge_project_id_key_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_project_id_key_key UNIQUE (project_id, key);
-
-
---
--- Name: projects projects_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_id_org_id_key UNIQUE (id, org_id);
-
-
---
--- Name: projects projects_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_pkey PRIMARY KEY (id);
-
-
---
 -- Name: prompts prompts_id_org_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -2349,14 +2195,6 @@ ALTER TABLE ONLY public.prompts
 
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_pkey PRIMARY KEY (org_id, id);
-
-
---
--- Name: project_pinned_repos project_pinned_repos_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_pinned_repos
-    ADD CONSTRAINT project_pinned_repos_pkey PRIMARY KEY (project_id, repository_id);
 
 
 --
@@ -2647,13 +2485,6 @@ CREATE INDEX idx_entities_org_state ON public.entities USING btree (org_id, stat
 
 
 --
--- Name: idx_entities_project_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_entities_project_id ON public.entities USING btree (project_id) WHERE (project_id IS NOT NULL);
-
-
---
 -- Name: idx_entity_links_from_kind; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -2779,16 +2610,6 @@ CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (or
 -- Kept alongside the folded key: it serves the ordered org-wide list
 -- (WHERE org_id ORDER BY owner, repo), which the folded index cannot.
 CREATE INDEX idx_repositories_org_owner_repo ON public.repositories USING btree (org_id, owner, repo);
-
-
---
--- Name: project_pinned_repos_repository_idx; Type: INDEX; Schema: public; Owner: -
---
-
--- The reverse lookup, "which projects pin this repository". The primary key
--- leads with project_id and cannot serve it; the FK's own delete-time check
--- reads it, as does any future "what would untracking break" report.
-CREATE INDEX project_pinned_repos_repository_idx ON public.project_pinned_repos USING btree (repository_id);
 
 
 --
@@ -3060,13 +2881,6 @@ CREATE INDEX idx_tasks_rederive_owed ON public.tasks USING btree (org_id, create
 
 
 --
--- Name: project_knowledge_org_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX project_knowledge_org_idx ON public.project_knowledge USING btree (org_id, project_id);
-
-
---
 -- Name: conversations_actor_agent_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3202,20 +3016,6 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.orgs FOR EACH ROW EXECUTE 
 
 
 --
--- Name: project_knowledge set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.project_knowledge FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
-
-
---
--- Name: projects set_updated_at; Type: TRIGGER; Schema: public; Owner: -
---
-
-CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.projects FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
-
-
---
 -- Name: prompts set_updated_at; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -3313,14 +3113,6 @@ ALTER TABLE ONLY public.agents
 
 ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: entities entities_project_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.entities
-    ADD CONSTRAINT entities_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE SET NULL;
 
 
 --
@@ -3562,68 +3354,6 @@ ALTER TABLE ONLY public.poller_state
 
 
 --
--- Name: project_knowledge project_knowledge_last_updated_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_last_updated_by_fkey FOREIGN KEY (last_updated_by) REFERENCES public.users(id) ON DELETE SET NULL;
-
-
---
--- Name: project_knowledge project_knowledge_last_updated_by_conversation_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_last_updated_by_conversation_fkey FOREIGN KEY (last_updated_by_conversation, org_id) REFERENCES public.conversations(id, org_id) ON DELETE SET NULL;
-
-
---
--- Name: project_knowledge project_knowledge_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
---
--- Name: project_knowledge project_knowledge_project_id_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_knowledge
-    ADD CONSTRAINT project_knowledge_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE CASCADE;
-
-
---
--- Name: projects projects_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_creator_user_id_fkey FOREIGN KEY (creator_user_id) REFERENCES public.users(id) ON DELETE CASCADE;
-
-
---
--- Name: projects projects_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
-
-
--- projects.spec_authorship_blueprint_id -> blueprints FK
--- (projects_spec_authorship_blueprint_id_org_id_fkey) is added in the
--- Blueprints section near the bottom of this file, after the blueprints table
--- exists.
-
-
---
--- Name: projects projects_team_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE SET NULL;
-
-
---
 -- Name: prompts prompts_creator_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3645,22 +3375,6 @@ ALTER TABLE ONLY public.prompts
 
 ALTER TABLE ONLY public.prompts
     ADD CONSTRAINT prompts_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
-
-
---
--- Name: project_pinned_repos project_pinned_repos_project_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_pinned_repos
-    ADD CONSTRAINT project_pinned_repos_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id) ON DELETE CASCADE;
-
-
---
--- Name: project_pinned_repos project_pinned_repos_repository_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.project_pinned_repos
-    ADD CONSTRAINT project_pinned_repos_repository_id_fkey FOREIGN KEY (repository_id) REFERENCES public.repositories(id) ON DELETE CASCADE;
 
 
 --
@@ -4535,55 +4249,6 @@ CREATE POLICY poller_state_all ON public.poller_state USING (((org_id = tf.curre
 
 
 --
--- Name: project_knowledge; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.project_knowledge ENABLE ROW LEVEL SECURITY;
-
---
--- Name: project_knowledge project_knowledge_all; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY project_knowledge_all ON public.project_knowledge USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
-
-
---
--- Name: projects; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.projects ENABLE ROW LEVEL SECURITY;
-
---
--- Name: projects projects_delete; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY projects_delete ON public.projects FOR DELETE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)))));
-
-
---
--- Name: projects projects_insert; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY projects_insert ON public.projects FOR INSERT WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (creator_user_id = tf.current_user_id()) AND ((visibility <> 'team'::text) OR ((team_id IS NOT NULL) AND tf.user_can_write_team(team_id))) AND ((visibility <> 'org'::text) OR tf.user_is_org_admin(org_id))));
-
-
---
--- Name: projects projects_select; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY projects_select ON public.projects FOR SELECT USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND ((creator_user_id = tf.current_user_id()) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND (EXISTS ( SELECT 1
-   FROM public.memberships m
-  WHERE ((m.user_id = tf.current_user_id()) AND (m.team_id = projects.team_id))))) OR (visibility = 'org'::text))));
-
-
---
--- Name: projects projects_update; Type: POLICY; Schema: public; Owner: -
---
-
-CREATE POLICY projects_update ON public.projects FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id))))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND (((visibility = 'private'::text) AND (creator_user_id = tf.current_user_id())) OR ((visibility = 'team'::text) AND (team_id IS NOT NULL) AND tf.user_can_write_team(team_id)) OR ((visibility = 'org'::text) AND tf.user_is_org_admin(org_id)))));
-
-
---
 -- Name: prompts; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -4617,28 +4282,6 @@ CREATE POLICY prompts_select ON public.prompts FOR SELECT USING (((org_id = tf.c
 --
 
 CREATE POLICY prompts_update ON public.prompts FOR UPDATE USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id))) WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id) AND tf.user_can_write_team(team_id)));
-
-
---
--- Name: project_pinned_repos; Type: ROW SECURITY; Schema: public; Owner: -
---
-
-ALTER TABLE public.project_pinned_repos ENABLE ROW LEVEL SECURITY;
-
---
--- Name: project_pinned_repos project_pinned_repos_all; Type: POLICY; Schema: public; Owner: -
---
-
--- Visibility rides the parent project, the same EXISTS shape
--- conversation_worktrees_all uses for its parent conversation: the projects
--- policies already encode private/team/org visibility per operation, so
--- restating them here would be a second copy to keep in step. A pin is
--- readable and writable exactly when the project it belongs to is.
-CREATE POLICY project_pinned_repos_all ON public.project_pinned_repos USING ((EXISTS ( SELECT 1
-   FROM public.projects p
-  WHERE (p.id = project_pinned_repos.project_id)))) WITH CHECK ((EXISTS ( SELECT 1
-   FROM public.projects p
-  WHERE (p.id = project_pinned_repos.project_id))));
 
 
 --
@@ -5182,19 +4825,6 @@ GRANT USAGE ON SCHEMA tf TO tf_app;
 
 
 --
--- Name: FUNCTION update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid); Type: ACL; Schema: public; Owner: -
---
-
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM PUBLIC;
--- supabase_admin's ALTER DEFAULT PRIVILEGES auto-grants public-schema
--- functions to anon/authenticated/service_role at CREATE time. Strip them —
--- only tf_app should call this OCC helper.
-REVOKE ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) FROM anon, authenticated, service_role;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO postgres;
-GRANT ALL ON FUNCTION public.update_project_knowledge(p_id uuid, p_expected_version integer, p_content text, p_updated_by_conversation uuid) TO tf_app;
-
-
---
 -- Name: FUNCTION current_org_id(); Type: ACL; Schema: tf; Owner: -
 --
 
@@ -5469,28 +5099,6 @@ GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.poller_state TO tf_app;
 
 
 --
--- Name: TABLE project_knowledge; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.project_knowledge TO postgres;
-GRANT ALL ON TABLE public.project_knowledge TO anon;
-GRANT ALL ON TABLE public.project_knowledge TO authenticated;
-GRANT ALL ON TABLE public.project_knowledge TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.project_knowledge TO tf_app;
-
-
---
--- Name: TABLE projects; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.projects TO postgres;
-GRANT ALL ON TABLE public.projects TO anon;
-GRANT ALL ON TABLE public.projects TO authenticated;
-GRANT ALL ON TABLE public.projects TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.projects TO tf_app;
-
-
---
 -- Name: TABLE prompts; Type: ACL; Schema: public; Owner: -
 --
 
@@ -5499,17 +5107,6 @@ GRANT ALL ON TABLE public.prompts TO anon;
 GRANT ALL ON TABLE public.prompts TO authenticated;
 GRANT ALL ON TABLE public.prompts TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.prompts TO tf_app;
-
-
---
--- Name: TABLE project_pinned_repos; Type: ACL; Schema: public; Owner: -
---
-
-GRANT ALL ON TABLE public.project_pinned_repos TO postgres;
-GRANT ALL ON TABLE public.project_pinned_repos TO anon;
-GRANT ALL ON TABLE public.project_pinned_repos TO authenticated;
-GRANT ALL ON TABLE public.project_pinned_repos TO service_role;
-GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.project_pinned_repos TO tf_app;
 
 
 --
@@ -5946,14 +5543,11 @@ GRANT ALL ON TABLE public.blueprints TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.blueprints TO tf_app;
 
 -- Retargeted FKs deferred from the main section (blueprints didn't exist yet):
--- a trigger fires a blueprint its own team owns; a project's spec-authorship
--- blueprint resolves same-org.
+-- a trigger fires a blueprint its own team owns.
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_blueprint_id_org_id_fkey FOREIGN KEY (blueprint_id, org_id) REFERENCES public.blueprints(id, org_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.event_handlers
     ADD CONSTRAINT event_handlers_blueprint_id_team_id_fkey FOREIGN KEY (blueprint_id, team_id) REFERENCES public.blueprints(id, team_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.projects
-    ADD CONSTRAINT projects_spec_authorship_blueprint_id_org_id_fkey FOREIGN KEY (spec_authorship_blueprint_id, org_id) REFERENCES public.blueprints(id, org_id) ON DELETE SET NULL;
 
 CREATE TABLE public.blueprint_steps (
     org_id uuid NOT NULL,

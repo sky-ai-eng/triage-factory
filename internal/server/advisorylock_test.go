@@ -11,15 +11,21 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
+// testLockSalt is an arbitrary hashtextextended salt used only by this file's
+// generic acquireKeyedLock exercises — not a registered production salt (see
+// advisorylock.go's salt registry), and chosen well outside that keyspace so
+// it can never collide with one.
+const testLockSalt int64 = 90001
+
 // TestAcquireKeyedLock_Multi_SerializesSameKey is the pgtest acceptance
 // criterion for TFAC-579 item 6: two concurrent acquireKeyedLock calls for
-// the SAME key (project id / org id) must serialize — the second blocks
-// until the first releases — even though each comes from a distinct
-// connection, mirroring two control pods each with their own in-process
-// sync.Map. This is the primitive both the project-autosave and
-// github-app-registration RMW guards are built on (same function, only the
-// salt differs), so proving it here covers both without needing to drive
-// the full app-registration handler (which calls out to GitHub's API).
+// the SAME key must serialize — the second blocks until the first releases —
+// even though each comes from a distinct connection, mirroring two control
+// pods each with their own in-process sync.Map. This is the primitive the
+// github-app-registration RMW guard (and, historically, the projects RMW
+// guard) is built on, so proving it here with a generic map+salt covers
+// every caller without needing to drive the full app-registration handler
+// (which calls out to GitHub's API).
 func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -28,9 +34,10 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
-	const key = "same-project-id"
+	var mu sync.Map
+	const key = "same-id"
 
-	releaseA, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, key)
+	releaseA, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
@@ -39,7 +46,7 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	// acquires before A releases, the lock isn't actually serializing.
 	acquiredB := make(chan struct{})
 	go func() {
-		releaseB, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, key)
+		releaseB, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
 		if err != nil {
 			t.Errorf("acquire B: %v", err)
 			return
@@ -66,8 +73,8 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 }
 
 // TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock confirms the lock is
-// keyed, not a single global mutex: two different keys (e.g. two distinct
-// project ids) must acquire concurrently without waiting on each other.
+// keyed, not a single global mutex: two different keys must acquire
+// concurrently without waiting on each other.
 func TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -76,7 +83,8 @@ func TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock(t *testing.T) {
 	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
-	releaseA, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, "project-a")
+	var mu sync.Map
+	releaseA, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, "id-a")
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
@@ -84,7 +92,7 @@ func TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		releaseB, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, "project-b")
+		releaseB, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, "id-b")
 		if err != nil {
 			t.Errorf("acquire B: %v", err)
 			return
@@ -101,11 +109,10 @@ func TestAcquireKeyedLock_Multi_DifferentKeysDoNotBlock(t *testing.T) {
 	}
 }
 
-// TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide confirms the
-// project and github-app-registration lock domains (distinct salts, same
-// key value) never contend with each other — an org id used as a
-// project-lock key must not block an unrelated github-app-registration
-// lock for the "same" string value.
+// TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide confirms two distinct
+// lock domains (distinct salts, same key value) never contend with each
+// other — a generic caller's key must not block an unrelated
+// github-app-registration lock for the "same" string value.
 func TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	h := pgtest.Shared(t)
@@ -114,12 +121,13 @@ func TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide(t *testing.T) {
 	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
+	var mu sync.Map
 	const key = "shared-id-value"
-	releaseProject, err := s.acquireKeyedLock(ctx, &s.projectMutexes, projectRMWLockSalt, key)
+	releaseGeneric, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
 	if err != nil {
-		t.Fatalf("acquire project lock: %v", err)
+		t.Fatalf("acquire generic lock: %v", err)
 	}
-	defer releaseProject()
+	defer releaseGeneric()
 
 	done := make(chan struct{})
 	go func() {
@@ -136,7 +144,7 @@ func TestAcquireKeyedLock_Multi_DifferentSaltsDoNotCollide(t *testing.T) {
 	case <-done:
 		// Expected: distinct salt, no collision.
 	case <-time.After(5 * time.Second):
-		t.Fatal("github-app-registration lock blocked behind the project lock's identical key value")
+		t.Fatal("github-app-registration lock blocked behind the generic lock's identical key value")
 	}
 }
 
@@ -157,7 +165,7 @@ func TestAcquireKeyedLock_Local_UsesInProcessMutex(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			release, err := s.acquireKeyedLock(ctx, &mu, projectRMWLockSalt, key)
+			release, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
 			if err != nil {
 				t.Errorf("acquire: %v", err)
 				return

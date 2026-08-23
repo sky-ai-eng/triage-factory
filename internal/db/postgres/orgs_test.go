@@ -48,7 +48,7 @@ func TestOrgsStore_Postgres_ReturnedRowConformance(t *testing.T) {
 //     across poll cycles
 //
 // This is the contract the background-service callers (poller,
-// tracker, projectclassify, repoprofile) iterate at the top of each
+// tracker, repoprofile) iterate at the top of each
 // cycle.
 func TestOrgsStore_Postgres_ListActiveSystem_ExcludesSoftDeleted(t *testing.T) {
 	h := pgtest.Shared(t)

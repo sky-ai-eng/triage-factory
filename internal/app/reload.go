@@ -100,7 +100,7 @@ func (r *reloader) onJiraChanged(orgID string) {
 // initialPoll starts polling — RestartAll in both modes. The poll loops fan
 // out over ListActiveSystem each wake, so orgs and repos added via the UI /
 // admin API are picked up without a restart, and the poll-complete
-// sentinels drive the scorer + profiler + classifier subscribers per org.
+// sentinels drive the scorer + profiler subscribers per org.
 // First-boot profiling therefore needs no explicit kick here: the first
 // github poll cycle's completion triggers it. Request handlers resolve
 // GitHub clients per-request through the credential resolver, so there is no

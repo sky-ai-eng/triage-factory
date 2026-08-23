@@ -109,21 +109,15 @@ type Entity struct {
 	// someone else's thread. Set once at creation from whichever caller
 	// first resolves the entity (ingest.go's root-mention check, or exec
 	// slack send's root-post op) and never rewritten afterward.
-	Kind         string  `json:"kind"`
-	Title        string  `json:"title"`
-	URL          string  `json:"url"`
-	SnapshotJSON string  `json:"snapshot_json"`        // opaque poller state — diff scope only, kept small
-	Description  string  `json:"description"`          // flattened issue/PR body; NOT diffed
-	State        string  `json:"state"`                // "active" | "closed"
-	ProjectID    *string `json:"project_id,omitempty"` // nil = unassigned. FK ON DELETE SET NULL.
-	// ClassificationRationale is the highest-scoring project's one-sentence
-	// rationale from the classifier, regardless of whether the
-	// score crossed threshold. Empty until the classifier has run for
-	// this entity. Useful for surfacing "why is this unassigned?" in UI.
-	ClassificationRationale string     `json:"classification_rationale,omitempty"`
-	CreatedAt               time.Time  `json:"created_at"`
-	LastPolledAt            *time.Time `json:"last_polled_at"`
-	ClosedAt                *time.Time `json:"closed_at"`
+	Kind         string     `json:"kind"`
+	Title        string     `json:"title"`
+	URL          string     `json:"url"`
+	SnapshotJSON string     `json:"snapshot_json"` // opaque poller state — diff scope only, kept small
+	Description  string     `json:"description"`   // flattened issue/PR body; NOT diffed
+	State        string     `json:"state"`         // "active" | "closed"
+	CreatedAt    time.Time  `json:"created_at"`
+	LastPolledAt *time.Time `json:"last_polled_at"`
+	ClosedAt     *time.Time `json:"closed_at"`
 	// PollSeq backs the tracker's snapshot-write CAS (TFAC-579):
 	// UpdateSnapshotCASSystem bumps it by 1 on every successful write and
 	// requires the caller's last-observed value to still match, so a

@@ -46,7 +46,6 @@ func TestMigrate_FreshInstall(t *testing.T) {
 
 	for _, table := range []string{
 		"entities", "events", "tasks", "conversations", "messages", "claims",
-		"projects",
 		"orgs", "users", "event_handlers",
 		"org_settings", "team_settings", "user_settings",
 		"jira_project_status_rules",
@@ -60,13 +59,12 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		}
 	}
 
-	// The conversations refactor dissolved these; a fresh install must not
-	// resurrect them.
+	// A fresh install must not resurrect any dissolved table.
 	for _, table := range []string{
 		"runs", "run_messages", "curator_requests", "curator_messages",
 		"curator_pending_context", "run_pending_input",
 		"staged_agent_injections", "run_credentials", "curator_turn_credentials",
-		"curator_homes",
+		"curator_homes", "projects", "project_pinned_repos",
 	} {
 		exists, err := tableExists(database, table)
 		if err != nil {

@@ -31,8 +31,6 @@ type RepositoryStoreFactory func(t *testing.T) (store db.RepositoryStore, orgID 
 //     failure on one); GetByRef takes a name and answers a miss with nil.
 //   - The id-keyed writers refuse an id no row answers to, so a resolve-then-
 //     write caller cannot report success for a write that did nothing.
-//   - SeedCloneURL fills an empty clone_url, leaves a stored one alone, and
-//     tells those two apart from a missing row.
 //   - Upsert + GetByRef round-trip across the full field surface.
 //   - Upsert preserves user-configured base_branch on a re-profile
 //     (the conflict update list explicitly excludes base_branch).
@@ -129,33 +127,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("UpdateCloneStatusByRefSystem: got=%v err=%v", stampedSys, err)
 		}
 		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRefSystem", *stampedSys, read(created.ID))
-
-		// Both halves of the seed, because they differ in what the row ends up
-		// saying and agree on it being the row that comes back: the first fills
-		// an empty column, the second is outranked by what the first stored.
-		bare, err := s.Upsert(ctx, orgID, domain.Repository{
-			Owner: "octo", Repo: "bare", DefaultBranch: "main", ProfiledAt: &profiled,
-		})
-		if err != nil {
-			t.Fatalf("seed a repository with no clone url: %v", err)
-		}
-		seeded, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git")
-		if err != nil {
-			t.Fatalf("SeedCloneURL (fills): %v", err)
-		}
-		if seeded.CloneURL != "https://example.test/octo/bare.git" {
-			t.Errorf("SeedCloneURL returned clone url %q, want the seeded one", seeded.CloneURL)
-		}
-		AssertWriteReturnedStoredRow(t, "SeedCloneURL (fills)", seeded, read(bare.ID))
-
-		kept, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/second-guess.git")
-		if err != nil {
-			t.Fatalf("SeedCloneURL (never clobbers): %v", err)
-		}
-		if kept.CloneURL != "https://example.test/octo/bare.git" {
-			t.Errorf("SeedCloneURL returned clone url %q, want the stored one kept", kept.CloneURL)
-		}
-		AssertWriteReturnedStoredRow(t, "SeedCloneURL (never clobbers)", kept, read(bare.ID))
 	})
 
 	t.Run("Upsert_then_GetByRef_round_trips", func(t *testing.T) {
@@ -266,46 +237,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID := mk(t)
 		if _, err := s.UpdateBaseBranch(ctx, orgID, unknownRepoID, "develop"); !errors.Is(err, db.ErrNoSuchRepository) {
 			t.Errorf("UpdateBaseBranch on an unknown id = %v, want db.ErrNoSuchRepository", err)
-		}
-		if _, err := s.SeedCloneURL(ctx, orgID, unknownRepoID, "https://example.test/o/r.git"); !errors.Is(err, db.ErrNoSuchRepository) {
-			t.Errorf("SeedCloneURL on an unknown id = %v, want db.ErrNoSuchRepository", err)
-		}
-	})
-
-	t.Run("SeedCloneURL_fills_an_empty_url_and_never_clobbers_one", func(t *testing.T) {
-		// The project-bundle import's warm-cache seed: the URL was discovered
-		// during import preflight, so it is a hint, and anything the profiler
-		// or a clone hook already wrote outranks it. Leaving a stored URL in
-		// place is a success — only a missing ROW is a miss, which is why the
-		// never-clobber rule cannot live in the WHERE clause.
-		s, orgID := mk(t)
-		if err := s.SetConfigured(ctx, orgID, []string{"octo/bare", "octo/known"}); err != nil {
-			t.Fatalf("SetConfigured: %v", err)
-		}
-		bare, _ := s.GetByRef(ctx, orgID, repoRef("octo/bare"))
-		known, _ := s.GetByRef(ctx, orgID, repoRef("octo/known"))
-		if bare == nil || known == nil {
-			t.Fatal("seed rows missing")
-		}
-		if _, err := s.Upsert(ctx, orgID, domain.Repository{
-			Owner: "octo", Repo: "known",
-			CloneURL: "git@github.com:octo/known.git", DefaultBranch: "main",
-		}); err != nil {
-			t.Fatalf("seed a clone url: %v", err)
-		}
-
-		if _, err := s.SeedCloneURL(ctx, orgID, bare.ID, "https://example.test/octo/bare.git"); err != nil {
-			t.Fatalf("SeedCloneURL onto an empty url: %v", err)
-		}
-		if got, _ := s.Get(ctx, orgID, bare.ID); got == nil || got.CloneURL != "https://example.test/octo/bare.git" {
-			t.Errorf("clone url = %+v, want the seeded one", got)
-		}
-
-		if _, err := s.SeedCloneURL(ctx, orgID, known.ID, "https://example.test/octo/known.git"); err != nil {
-			t.Fatalf("SeedCloneURL over an existing url should be a no-op, got %v", err)
-		}
-		if got, _ := s.Get(ctx, orgID, known.ID); got == nil || got.CloneURL != "git@github.com:octo/known.git" {
-			t.Errorf("clone url = %+v, want the stored one kept", got)
 		}
 	})
 

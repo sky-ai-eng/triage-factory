@@ -65,7 +65,7 @@ var (
 //
 // The registry is not the tracked set. A row is created when a repository is
 // first tracked and survives the last team untracking it, because
-// team_github_repos, conversation_worktrees and project_pinned_repos all
+// team_github_repos and conversation_worktrees both
 // reference this row by id and a reference must not outlive what it names.
 // ListTrackedNamesSystem is the read that means "what does TF poll".
 //
@@ -85,7 +85,7 @@ var (
 // So every method here is keyed one of two ways, and which one it is, is in
 // its name:
 //
-//   - id-keyed (Get, UpdateBaseBranch, SeedCloneURL) takes the registry
+//   - id-keyed (Get, UpdateBaseBranch) takes the registry
 //     id. A miss is ErrNoSuchRepository, never a silent no-op — see that
 //     error's doc for why the two halves differ.
 //   - ref-keyed (…ByRef) takes a domain.RepoRef, the provider's own name
@@ -96,21 +96,20 @@ var (
 //
 // No method takes a bare "owner/repo" string. domain.RepoRefFromSlug is the
 // edge parser for the surfaces that still speak one — HTTP path segments, an
-// agent's argv, a bundle's pinned list — and each of those resolves once, at
-// its own boundary, next to whatever access gate it already runs.
+// agent's argv — and each of those resolves once, at its own boundary, next
+// to whatever access gate it already runs.
 //
 // # Every single-row write returns the row it persisted
 //
-// Upsert, UpdateBaseBranch, SeedCloneURL and UpdateCloneStatusByRef all hand
+// Upsert, UpdateBaseBranch and UpdateCloneStatusByRef all hand
 // back the stored row, read off RETURNING on the write statement itself rather
 // than from a follow-up SELECT. This store is the reason the rule exists:
 //
 //   - The writes deliberately do not persist what the caller passed. Upsert
 //     COALESCEs external_id, preserves the user's base_branch and the clone
-//     status, and keeps the stored casing of owner/repo; SeedCloneURL keeps a
-//     URL already on file. A caller's input struct is designed to be wrong as
-//     a picture of the row, so anything that renders, publishes or caches it
-//     after the write is holding a lie.
+//     status, and keeps the stored casing of owner/repo. A caller's input
+//     struct is designed to be wrong as a picture of the row, so anything
+//     that renders, publishes or caches it after the write is holding a lie.
 //   - RETURNING is atomic where a read-back races. The row that comes back is
 //     the one the statement produced, not whatever answers the same key a
 //     moment later.
@@ -209,19 +208,6 @@ type RepositoryStore interface {
 	// which answers with the returned row, so the response is the resource
 	// rather than a status stub or an echo of the request body.
 	UpdateBaseBranch(ctx context.Context, orgID, id, baseBranch string) (domain.Repository, error)
-
-	// SeedCloneURL sets clone_url for the repository with this registry id
-	// ONLY when the stored value is NULL/empty — the project-bundle import's
-	// warm-cache seed (the URL was discovered during import preflight via the
-	// importing org's own GitHub client). Never clobbers a URL the
-	// profiler/clone hooks already wrote, and leaving one in place is a
-	// success, not a miss. ErrNoSuchRepository when no row carries the id.
-	//
-	// The returned row is what makes the never-clobber rule observable: it
-	// carries the URL that is now on file, which is cloneURL only when the
-	// column was empty. A blank cloneURL writes nothing and still resolves
-	// the row.
-	SeedCloneURL(ctx context.Context, orgID, id, cloneURL string) (domain.Repository, error)
 
 	// Get returns the repository with this registry id, or
 	// ErrNoSuchRepository. Its ref-keyed sibling is GetByRef.

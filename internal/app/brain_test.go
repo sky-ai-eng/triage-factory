@@ -122,7 +122,7 @@ func TestApp_TriggerManager_EmptyOrgIsNoop(t *testing.T) {
 // bug) must not panic.
 func TestApp_DispatchManagerTrigger_NilManagersAreSafe(t *testing.T) {
 	a := &App{}
-	for _, m := range []string{"scorer", "classifier", "profiler", "reconciler", "unknown-manager"} {
+	for _, m := range []string{"scorer", "profiler", "reconciler", "reach", "unknown-manager"} {
 		a.dispatchManagerTrigger(m, "org-1", false)
 	}
 }

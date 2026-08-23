@@ -154,9 +154,10 @@ the entrypoint explicitly sets `HOME` to the orchestrator's own directory
 (`/home/tf-orchestrator` by default, owned by uid `10001`) right before the exec —
 the container's inherited `HOME=/root` would otherwise persist and become
 unreadable/unwritable once the process is no longer root. This matters beyond the
-obvious: a few paths (skills import, project-bundle export/import)
-deliberately resolve Claude Code SDK session state from the real `$HOME`
-even in multi mode (see `internal/paths.go`), so getting this wrong breaks
+obvious: a few paths (skills import, the Claude Code SDK's own
+`~/.claude/projects` session-cache directory for a direct, unsandboxed run)
+deliberately resolve state from the real `$HOME`
+even in multi mode (see `internal/paths/paths.go`), so getting this wrong breaks
 those, not just an edge case.
 
 ## No rollback flag

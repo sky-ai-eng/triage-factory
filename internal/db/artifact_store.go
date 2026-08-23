@@ -200,10 +200,11 @@ type ArtifactStore interface {
 	// out, so the set shrinks as work resolves.
 	//
 	// Admin-pool / org-wide in Postgres — the same BYPASSRLS, org-scoped
-	// shape the scorer's UnscoredTasks and the classifier's
-	// ListUnclassifiedSystem use: the reconciler is a background system job
-	// with no JWT-claims context, and it must see every team's non-terminal
-	// artifacts to keep them fresh. org_id stays bound as defense in depth.
+	// shape the scorer's UnscoredTasks and EntityStore's
+	// ListActiveTerminalCandidatesSystem use: the reconciler is a background
+	// system job with no JWT-claims context, and it must see every team's
+	// non-terminal artifacts to keep them fresh. org_id stays bound as
+	// defense in depth.
 	// Identical to a plain org read in SQLite (single-tenant, no RLS).
 	ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error)
 

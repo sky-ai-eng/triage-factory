@@ -5,7 +5,7 @@ import "time"
 // Spend categories — the axis the llm_spend view (TFAC-472) normalizes its
 // sources onto. A delegated conversation is 'manual' (per-user) or
 // 'autonomous' (event-triggered) by its trigger_type; a headless system job
-// (scorer / repo-profiler / classifier) is 'system_overhead'. The dashboards
+// (scorer / repo-profiler) is 'system_overhead'. The dashboards
 // + safety cap group on these.
 const (
 	SpendCategoryManual         = "manual"

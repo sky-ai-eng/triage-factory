@@ -12,7 +12,7 @@
 //     artifact.
 //   - System job prompts. Toolless LLM calls TF makes for itself; they live
 //     next to their consumer (internal/ai for scoring, internal/repoprofile
-//     for profiling, internal/projectclassify for classification).
+//     for profiling).
 //
 // The composition rules that keep the four axes below from becoming a
 // combinatorial directory tree:

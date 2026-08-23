@@ -4,9 +4,7 @@ import "time"
 
 // SystemLLMRun is one row in system_llm_runs — the per-call accounting
 // for a headless LLM invocation made by a background system job (the
-// scorer, repo-profiler, or project-classifier). One row per
-// agentproc.Run call: the classifier fans out per-entity-per-project, so
-// it produces many rows per cycle; that is expected.
+// scorer or repo-profiler). One row per agentproc.Run call.
 //
 // Org-level, no team_id by design — scorer batches mix teams, and
 // repositories/entities carry no team. The token breakdown (input /
@@ -18,7 +16,7 @@ import "time"
 type SystemLLMRun struct {
 	ID    string `json:"id"`
 	OrgID string `json:"org_id"`
-	// Job is the discriminator: "scorer" | "repo_profiler" | "classifier".
+	// Job is the discriminator: "scorer" | "repo_profiler".
 	// Free text (extensible — no CHECK constraint).
 	Job   string `json:"job"`
 	Model string `json:"model"`

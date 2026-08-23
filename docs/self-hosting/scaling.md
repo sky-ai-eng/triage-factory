@@ -51,7 +51,7 @@ Both roles run the **same image and entrypoint**, but **only executors carry the
 sandbox caps** (and the broker-then-drop privilege separation that contains them)
 — every sandboxed workload, every delegated run, executes
 on executors. A control pod is an ordinary unprivileged web service: its own
-background LLM work (task scoring, project classification, repo profiling) is
+background LLM work (task scoring, repo profiling) is
 toolless direct API calls that never spawn a sandbox. Each executor
 replica gets its **own** `TF_STATE_ROOT` (`/data`) and rootfs-cache volume: the
 fleet is shared-nothing, and two processes sharing one state root would collide on

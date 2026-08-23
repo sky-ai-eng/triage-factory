@@ -39,10 +39,9 @@ func claudeHome() (string, error) {
 // <resolvedCwd>/.claude/projects/-work/... . Tenant scoping there is
 // structural: the transcript lives inside the run's own (org-scoped)
 // directory, and the orchestrator's $HOME is never involved. Host-side
-// consumers (project bundle export/import, delegate snapshot/resume)
-// MUST resolve through this function rather than assuming the
-// home-relative layout, or they silently miss every sandboxed
-// transcript.
+// consumers (delegate snapshot/resume) MUST resolve through this function
+// rather than assuming the home-relative layout, or they silently miss
+// every sandboxed transcript.
 func ClaudeProjectDir(resolvedCwd string) (string, error) {
 	if agentproc.WillSandbox() {
 		return filepath.Join(resolvedCwd, claudeProjectsDir, encodeClaudeProjectDir(agentproc.SandboxWorkRoot)), nil
@@ -73,14 +72,6 @@ func ClaudeProjectDir(resolvedCwd string) (string, error) {
 // to a path with other special characters, revisit.
 func encodeClaudeProjectDir(resolvedAbs string) string {
 	return strings.NewReplacer("/", "-", ".", "-").Replace(resolvedAbs)
-}
-
-// EncodeClaudeProjectDir exposes Claude Code's cwd-encoding rule to
-// non-worktree packages that need to locate session artifacts (for
-// example project bundle import/export). Input must already be the
-// symlink-resolved absolute cwd.
-func EncodeClaudeProjectDir(resolvedAbs string) string {
-	return encodeClaudeProjectDir(resolvedAbs)
 }
 
 // claudeProjectEncoding combines symlink resolution and encoding for

@@ -621,10 +621,10 @@ func addExcludesOrRollback(rootKey, wtDir string) error {
 }
 
 // ScratchDir is the one directory TF claims inside a run tree: CI log archives,
-// ephemeral downloads, the agent's own memory.md, the entity-memory /
-// project-knowledge subdirs the spawner populates, and whatever intermediates
-// the agent writes. Every producer of a path under it — spawner, exec verbs,
-// prompts — names it through this constant.
+// ephemeral downloads, the agent's own memory.md, the entity-memory subdir
+// the spawner populates, and whatever intermediates the agent writes. Every
+// producer of a path under it — spawner, exec verbs, prompts — names it
+// through this constant.
 //
 // The name is deliberately ours rather than descriptive. For a GitHub PR run
 // the run tree IS the repo checkout, so this directory lands in someone else's

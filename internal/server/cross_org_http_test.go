@@ -68,19 +68,6 @@ func TestCrossOrgHTTP_TaskGet(t *testing.T) {
 	}
 }
 
-func TestCrossOrgHTTP_ProjectGet(t *testing.T) {
-	r := newAuthRig(t)
-	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
-	projectA := seedProjectInOrg(t, r, orgA, alice, "proj-get")
-
-	if got := r.requestWithSid("GET", "/api/projects/"+projectA, sidA).StatusCode; got != http.StatusOK {
-		t.Errorf("alice GET /api/projects/%s = %d, want 200", projectA, got)
-	}
-	if got := r.requestWithSid("GET", "/api/projects/"+projectA, sidB).StatusCode; got != http.StatusNotFound {
-		t.Errorf("bob GET /api/projects/%s = %d, want 404 (cross-org leak)", projectA, got)
-	}
-}
-
 func TestCrossOrgHTTP_ConversationGet(t *testing.T) {
 	r := newAuthRig(t)
 	alice, _, orgA, sidA, sidB := setupTwoOrgSession(t, r)
@@ -179,23 +166,6 @@ func seedTaskInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix str
 		t.Fatalf("seed task: %v", err)
 	}
 	return taskID
-}
-
-// seedProjectInOrg inserts a project owned by the given user/team via
-// admin pool. Projects need creator_user_id + team_id; the visibility
-// is 'team' so the team membership RLS policy admits the owner.
-func seedProjectInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, name string) string {
-	t.Helper()
-	projectID := uuid.NewString()
-	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, description)
-		VALUES ($1, $2, $3,
-		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        $4, '')
-	`, projectID, orgID, userID, name); err != nil {
-		t.Fatalf("seed project: %v", err)
-	}
-	return projectID
 }
 
 // seedConversationInOrg inserts a full entity → event → task → prompt → run

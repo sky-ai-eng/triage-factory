@@ -33,7 +33,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
-	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
@@ -41,7 +40,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/modelprobe"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
-	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -132,7 +130,6 @@ type App struct {
 	// Subsystems.
 	scorer     *ai.Manager
 	profiler   *repoprofile.Manager
-	classifier *projectclassify.Manager
 	reconciler *reconcile.Manager
 	// reachCache refreshes the reachable-repo mirror the repository picker and
 	// the team-repos write gate read. grantReconciler is the App-installation
@@ -153,16 +150,9 @@ type App struct {
 	srv              *server.Server
 
 	// blobStore is the process-wide durable blob seam (storage.New): the
-	// blueprint workspace snapshots plus, in multi mode, the project
-	// knowledge base. Built once in buildExecution and shared — the spawner
-	// gets it via SetStorage and kbStore wraps the same instance.
+	// blueprint workspace snapshots. Built once in buildExecution and
+	// shared — the spawner gets it via SetStorage.
 	blobStore storage.Storage
-	// kbStore is the multi-mode knowledge-base source of truth, wrapping
-	// blobStore with the KB key convention. Non-nil on every role (cheap to
-	// build); its consumers — the KB handlers, the executor syncer, the
-	// classifier, project bundle import/export — only reach for it on the
-	// multi-mode path, so in local mode it exists but is never read.
-	kbStore *kbstore.Store
 
 	// placementResolver computes the capacity-weighted rendezvous placement
 	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue
@@ -349,7 +339,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 		a.srv.SetModelProber(modelprobe.New(a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-model-probe"), a.llmRecorder))
 	}
 	if a.plan.brain {
-		a.buildAI() // scorer + project classifier + profiler + reconciler
+		a.buildAI() // scorer + profiler + reconciler
 	}
 	if err = a.buildExecution(); err != nil { // delegation spawner
 		return nil, err

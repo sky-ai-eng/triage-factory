@@ -23,7 +23,6 @@ export type Flags = {
 }
 
 export type RailCounts = {
-  projects?: number
   repos?: number
   pulls?: number
   usage?: string
@@ -70,7 +69,6 @@ export function routes({
         // destination — you land on your last page, not here.
         { id: 'overview', name: 'Overview', icon: 'overview' },
         { id: 'board', name: 'Board', icon: 'board', counts: true },
-        { id: 'projects', name: 'Projects', icon: 'projects', tail: num(n.projects) },
         { id: 'factory', name: 'Factory', icon: 'factory' },
       ],
     },

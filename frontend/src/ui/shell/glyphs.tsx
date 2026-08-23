@@ -9,8 +9,6 @@ const G = {
   overview: 'M2.5 7.2L8 2.8l5.5 4.4M3.8 8.4v4.8h8.4V8.4',
   board: 'M3 3v10M8 3v10M13 3v6',
   queue: 'M3 4h10M3 8h10M3 12h6',
-  projects:
-    'M2 4.5A1.5 1.5 0 013.5 3h3l1.2 1.6h4.8A1.5 1.5 0 0114 6v6a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12z',
   factory: 'M2.5 13.5V7l4 2.4V7l4 2.4V3.5h3v10z',
   // Lucide book-marked: a repository is a book you keep, not a branch —
   // branches belong to a single repo, so the old glyph named the wrong thing.

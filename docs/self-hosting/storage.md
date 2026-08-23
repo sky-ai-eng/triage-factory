@@ -87,15 +87,3 @@ override (and remove `seaweedfs-postinit` from `triagefactory`'s `depends_on` in
 that override) if you don't want it running. Pre-create the bucket on the hosted
 side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled
 SeaweedFS).
-
-## Project knowledge base (multi mode)
-
-In multi mode the same blob store is also the source of truth for each project's
-**knowledge base** (KB) — the files users upload in the Knowledge panel — under
-keys of the form `<orgID>/projects/<projectID>/kb/<filename>`. Control pods
-read and write it through the store; a delegated run copies it into its own
-worktree before the agent starts. Pod-local KB files are a cache; the durable
-copy is the object store (local mode keeps KB as plain files and uses no blob
-store). KB is binary-safe: images and videos captured during PR testing stream
-through the same multipart uploader as workspace snapshots, and the Knowledge
-panel serves single HTTP byte ranges so video scrubbing works.

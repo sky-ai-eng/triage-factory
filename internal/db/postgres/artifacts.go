@@ -453,9 +453,9 @@ func (s *artifactStore) ListByOrgSystem(ctx context.Context, orgID string, opts 
 // ListNonTerminalBySystem runs on the admin pool (BYPASSRLS), org-scoped — the
 // reconciler is a background system job with no JWT-claims context and must see
 // every team's non-terminal artifacts to keep them fresh against GitHub. Same
-// org-wide admin shape the scorer's UnscoredTasks and the classifier's
-// ListUnclassifiedSystem use. org_id stays in the WHERE clause as defense in
-// depth. TFAC-464.
+// org-wide admin shape the scorer's UnscoredTasks and EntityStore's
+// ListActiveTerminalCandidatesSystem use. org_id stays in the WHERE clause as
+// defense in depth.
 func (s *artifactStore) ListNonTerminalBySystem(ctx context.Context, orgID string) ([]domain.Artifact, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`

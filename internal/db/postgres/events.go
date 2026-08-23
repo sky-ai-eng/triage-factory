@@ -50,8 +50,7 @@ func (s *eventStore) RecordSystem(ctx context.Context, orgID string, evt domain.
 // recordEvent runs the INSERT and returns the generated event ID.
 //
 // metadata_json casts to jsonb at the placeholder so the caller
-// hands a marshalled string — same pattern ProjectStore uses for
-// pinned_repos. Empty MetadataJSON binds as NULL since jsonb rejects
+// hands a marshalled string. Empty MetadataJSON binds as NULL since jsonb rejects
 // the empty string as invalid JSON; downstream reads COALESCE the
 // column back to "" so the domain-level contract (empty = no
 // metadata) stays intact.

@@ -19,17 +19,13 @@ import (
 //     poll cycle, then UpdateSnapshot / UpdateTitle / UpdateDescription
 //     when the snapshot diff shows a drift, and MarkClosed / Close /
 //     Reactivate on lifecycle transitions.
-//   - Project classifier (internal/projectclassify) +
-//     factory_delegate backfill — ListUnclassified to find candidates,
-//     AssignProject to record the winner with rationale.
 //   - Delegation memory + resume + materialize (internal/delegate) —
 //     Get to fetch entity context attached to a task.
 //   - AI scorer (internal/ai) — Descriptions to bulk-load the
 //     flattened body text for prompt context without pulling
 //     snapshot_json.
-//   - Server panels (factory snapshot, dashboard, projects panel) —
-//     Get / GetBySource / ListActive / ListProjectPanel for the
-//     entity views the UI renders.
+//   - Server panels (factory snapshot, dashboard) — Get / GetBySource /
+//     ListActive for the entity views the UI renders.
 //
 // Wired against the app pool in Postgres (RLS-active): every
 // consumer is request-equivalent or runs inside a server-side
@@ -52,16 +48,16 @@ import (
 // # Every single-row write returns the row it persisted
 //
 // UpdateSnapshot, PatchSnapshot, UpdateTitle, UpdateDescription, UpdateURL,
-// AssignProject, MarkClosed and Close — and each one's ...System twin — hand
-// back the stored row, read off RETURNING on the write statement itself rather
-// than from a follow-up SELECT, projecting the point read's column list and
-// scanner so the write shape cannot drift from the read shape. Several of
-// these stamp a column the caller never supplied (last_polled_at, closed_at,
-// classified_at), and the row is the only place those are visible.
+// MarkClosed and Close — and each one's ...System twin — hand back the stored
+// row, read off RETURNING on the write statement itself rather than from a
+// follow-up SELECT, projecting the point read's column list and scanner so
+// the write shape cannot drift from the read shape. Several of these stamp a
+// column the caller never supplied (last_polled_at, closed_at), and the row
+// is the only place those are visible.
 //
-// A miss is sql.ErrNoRows — this store's existing miss sentinel, the one
-// AssignProject already documented and its callers already branch on — rather
-// than a new typed error. Close and CloseSystem are the exception in shape,
+// A miss is sql.ErrNoRows — this store's existing miss sentinel, which every
+// id-keyed write's callers already branch on — rather than a new typed error.
+// Close and CloseSystem are the exception in shape,
 // not in rule: their guard makes "not active" a legitimate outcome, so they
 // answer (nil, nil) the way GetBySource does.
 //
@@ -71,21 +67,6 @@ import (
 // answers whether the write landed), and RekeyOrMergeSystem (a composition
 // across tables that answers with the surviving id). FindOrCreate /
 // FindOrCreateSystem already return the row.
-// BackfillCandidateFilter is the project-scope filter
-// EntityStore.ListBackfillCandidates applies. Its fields mirror a project's
-// own scoping columns; see the method doc for the empty-means-unfiltered rule.
-type BackfillCandidateFilter struct {
-	// ExcludeProjectID is the project doing the claiming. Its own entities
-	// are not candidates.
-	ExcludeProjectID string
-	// GitHubRepos are the project's pinned "owner/repo" slugs. Empty means
-	// every GitHub entity qualifies.
-	GitHubRepos []string
-	// JiraProjectKey is the project's tracked Jira key. Empty means every
-	// Jira entity qualifies.
-	JiraProjectKey string
-}
-
 type EntityStore interface {
 	// --- Lookup ---
 
@@ -104,24 +85,6 @@ type EntityStore interface {
 	// through the call. Dedupes IDs and chunks the IN clause in
 	// the SQLite impl to respect the variable-bind limit.
 	Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error)
-
-	// ListUnclassified returns active entities that have not been
-	// project-classified yet (project_id IS NULL AND classified_at
-	// IS NULL AND state='active'), ordered by created_at ASC. Once
-	// the classifier has processed an entity with any outcome —
-	// including below-threshold — classified_at is set and the
-	// entity stops surfacing here. Reassignment via the backfill
-	// popup also sets classified_at.
-	//
-	// Intentionally org-wide (no team scoping) in both backends: the
-	// project classifier (internal/projectclassify) is a system job
-	// that must see *every* unclassified entity in the org to assign
-	// it a project — narrowing this to a viewer's teams would leave
-	// entities permanently unclassified. It runs through the admin
-	// pool (ListUnclassifiedSystem) outside any user's identity, so
-	// there is no viewer to scope to. Do NOT add a task-membership or
-	// team gate here.
-	ListUnclassified(ctx context.Context, orgID string) ([]domain.Entity, error)
 
 	// ListActive returns every state='active' entity for the given
 	// source ("github" / "jira"), ordered by last_polled_at ASC so
@@ -164,32 +127,6 @@ type EntityStore interface {
 	// contents — so the local impl applies no scoping, mirroring the
 	// FactoryReadStore.Entities asymmetry.
 	ListActiveJiraTeamScoped(ctx context.Context, orgID, teamID string) ([]domain.Entity, error)
-
-	// ListBackfillCandidates returns one page of the entities a project's
-	// create-flow popup can claim, plus the unpaged total. It replaces two
-	// whole-org ListActive scans the handler used to filter in Go — the
-	// scan-everything read the list contract exists to retire.
-	//
-	// The scope rules are the popup's, moved into SQL unchanged:
-	//
-	//   - active entities only, from the github and jira sources;
-	//   - entities already assigned to this project are excluded (there is
-	//     nothing to backfill for them), while entities in ANOTHER project
-	//     stay — claiming one is a legitimate reassignment;
-	//   - GitHubRepos empty means "no filter on GitHub", not "exclude
-	//     GitHub"; likewise JiraProjectKey. A project that scopes only one
-	//     tracker still wants candidates from the other.
-	//
-	// Ordering is (source, last_polled_at, id): a total order, so the pages
-	// partition the candidate set.
-	ListBackfillCandidates(ctx context.Context, orgID string, f BackfillCandidateFilter, opts ListOpts) ([]domain.Entity, int, error)
-
-	// ListProjectPanel returns the trimmed-column projection used
-	// by the Projects panel: id, source, source_id, kind, title,
-	// url, state, classification_rationale, created_at,
-	// last_polled_at — no snapshot_json / description blob. Ordered
-	// by last_polled_at DESC with NULLs last.
-	ListProjectPanel(ctx context.Context, orgID, projectID string, opts ListOpts) ([]domain.ProjectPanelEntity, int, error)
 
 	// --- Mutation ---
 
@@ -236,20 +173,6 @@ type EntityStore interface {
 	// Returns the updated row, or sql.ErrNoRows.
 	UpdateDescription(ctx context.Context, orgID, id, description string) (domain.Entity, error)
 
-	// AssignProject sets project_id (NULL when projectID is nil
-	// or ""), records the classifier's rationale, and stamps
-	// classified_at = now so the classifier won't re-fire on this
-	// entity. Returns sql.ErrNoRows when the UPDATE matches no
-	// row — callers that ingest user input (e.g. the backfill
-	// HTTP handler) need this signal to report per-row failures
-	// rather than silently counting bogus ids as applied.
-	//
-	// Returns the reclassified row. That row is what makes the
-	// nil-or-empty projectID rule observable: both clear project_id, and
-	// only the row says so. The miss is now the write's own answer rather
-	// than a rows-affected probe followed by an existence check.
-	AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error)
-
 	// MarkClosed unconditionally sets state='closed' and stamps
 	// closed_at = now. Used at discovery time when the initial
 	// snapshot is already terminal (merged PR / done issue) — the
@@ -286,10 +209,9 @@ type EntityStore interface {
 	// methods but route through the admin pool (BYPASSRLS) in
 	// Postgres. They exist for system services that need to operate
 	// on every user's entities without impersonating any one of them
-	// — the tracker (which writes entities for every polled repo
-	// regardless of which user configured it) and the project
-	// classifier (which reads every org's unclassified entities to
-	// triage them). Same admin/app split pattern as ConversationStore's.
+	// — the tracker, which writes entities for every polled repo
+	// regardless of which user configured it. Same admin/app split
+	// pattern as ConversationStore's.
 	//
 	// Behavior contract is identical to the non-System variants:
 	// org_id is still filtered in every WHERE clause as defense in
@@ -345,7 +267,6 @@ type EntityStore interface {
 	// org_id stays in the WHERE clause as defense in depth.
 	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, limit int) ([]domain.Entity, error)
 
-	ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error)
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 
 	// UpdateSnapshotCASSystem writes the tracker snapshot under a
@@ -418,9 +339,8 @@ type EntityStore interface {
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
 	// RekeyOrMergeSystem follows an external object's changed natural key.
-	// When newSourceID is free, the existing entity is re-keyed in place and
-	// its project classification is cleared for re-evaluation. When that key
-	// already belongs to another entity, that canonically-keyed row survives
+	// When newSourceID is free, the existing entity is re-keyed in place.
+	// When that key already belongs to another entity, that canonically-keyed row survives
 	// and every entity-id referent is moved to it. The operation is atomic.
 	// Returns the surviving entity id and whether a merge occurred.
 	//
@@ -445,7 +365,6 @@ type EntityStore interface {
 	// moments earlier, so a miss means the row went away underneath it, which
 	// is worth its best-effort log line rather than a silent success.
 	UpdateURLSystem(ctx context.Context, orgID, id, url string) (domain.Entity, error)
-	AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error)
 	MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error)
 	CloseSystem(ctx context.Context, orgID, id string) (*domain.Entity, error)
 	ReactivateSystem(ctx context.Context, orgID, id string) (bool, error)
@@ -460,44 +379,14 @@ type EntityStore interface {
 	// prioritization; the System variant prevents that.
 	DescriptionsSystem(ctx context.Context, orgID string, ids []string) (map[string]string, error)
 
-	// ClassificationStatusSystem reports whether the entity has been
-	// project-classified yet — (classified, exists, err). It backs the
-	// delegation spawner's pre-launch wait (internal/projectclassify
-	// WaitFor), which blocks until the classifier has decided an entity
-	// before reading project_id for knowledge-base injection.
+	// OwningTeamForEntitySystem resolves an entity's *structural* owning
+	// team for author-centric task routing: entities.owning_team_id, an
+	// explicit override set by the transfer op / the TF-origin PR stamp.
 	//
-	//   - classified is true iff classified_at IS NOT NULL. The wait
-	//     deliberately keys on classified_at, NOT project_id: a
-	//     below-threshold entity is "classified" (classified_at stamped)
-	//     with project_id still NULL, and the wait must release for it.
-	//     That's why this can't reuse Get/GetSystem — domain.Entity does
-	//     not carry classified_at.
-	//   - exists is false (with err nil) when no row matches — a deleted
-	//     or never-seen entity will never be classified, so the caller
-	//     stops polling rather than burning the full timeout.
-	//
-	// System-only (admin pool) by design: WaitFor runs in the background
-	// spawner with no request JWT claims, so routing through the app pool
-	// would be RLS-denied (current_org_id() is NULL). There is no app-pool
-	// variant because there is no claims-bearing caller. org_id is still
-	// filtered in the WHERE clause as defense in depth.
-	ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error)
-
-	// OwningTeamForEntitySystem resolves an entity's *structural* owning team
-	// for author-centric task routing — the first two tiers of the router's
-	// owning-team ladder, in one query:
-	//
-	//  1. entities.owning_team_id — an explicit override (set by the transfer
-	//     op / the TF-origin PR stamp); takes precedence when present.
-	//  2. else the entity's project team, for a *team-visibility* project only
-	//     (entities.project_id → projects.team_id WHERE visibility='team'):
-	//     a private/org-visibility project has no single owning team.
-	//
-	// Returns "" when neither resolves so the router falls through to its
+	// Returns "" when it is unset so the router falls through to its
 	// prior-task and author-identity tiers. Admin-pool (BYPASSRLS): the
-	// router resolves ownership on the eventbus goroutine with no JWT claims,
-	// mirroring the store's other ...System reads; org_id stays in the WHERE
-	// clause as defense in depth.
+	// router resolves ownership on the eventbus goroutine with no JWT claims;
+	// org_id stays in the WHERE clause as defense in depth.
 	OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error)
 
 	// StampOwningTeamIfUnsetSystem writes entities.owning_team_id, but only
