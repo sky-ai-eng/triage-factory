@@ -1,0 +1,60 @@
+/* Type.
+   Sans for human content, mono for machine data. The split is semantic: if a
+   number came from the system it is mono and tabular.
+   Tracking scales INVERSELY with size — the smaller the label, the wider the
+   letterspacing.
+
+   --font-*, --text-*, --font-weight-*, --tracking-*, --leading-* and
+   --container-* are all Tailwind v4 namespaces, so each of these also
+   generates its utility: font-sans, text-body, font-weight-semi,
+   tracking-label, leading-prose, max-w-prose.
+
+   The faces themselves are vendored — see src/fonts.css and
+   public/fonts/README.md. Inter is gone; there is no legacy stack to fall
+   back to, because the whole surface moves at once. */
+
+@theme {
+  --font-sans: 'Archivo', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: 'DM Mono', ui-monospace, 'SF Mono', 'Fira Code', Menlo, monospace;
+
+  --text-page-title: 27px;
+  --text-section: 17px;
+  --text-column: 15px;
+  --text-body: 13.5px;
+  --text-card-title: 12.5px;
+  --text-ui: 12px;
+  --text-secondary: 11.5px;
+  --text-reported: 11px;
+  --text-readout: 11px;
+  --text-label: 10px;
+  --text-label-sm: 9px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semi: 600;
+  --font-weight-bold: 700;
+
+  --tracking-page-title: -0.025em;
+  --tracking-section: -0.015em;
+  --tracking-card-title: -0.008em;
+  --tracking-body: 0;
+  --tracking-readout: 0.06em;
+  --tracking-label: 0.12em;
+  --tracking-label-sm: 0.18em;
+
+  --leading-tight: 1.3;
+  --leading-snug: 1.5;
+  --leading-body: 1.6;
+  --leading-prose: 1.62;
+
+  /* Measures — max line length, in Tailwind's --container-* namespace, so
+     these are max-w-measure and max-w-measure-wide.
+
+     NOT --container-prose, which the design bundle proposes: `max-w-prose` is
+     a Tailwind built-in pinned at 65ch, and a theme token of that name is
+     silently shadowed by it rather than overriding it. The collision is
+     invisible — you get 65ch and no warning. "Measure" is the typographic
+     term for the thing anyway. */
+  --container-measure: 68ch;
+  --container-measure-wide: 76ch;
+}

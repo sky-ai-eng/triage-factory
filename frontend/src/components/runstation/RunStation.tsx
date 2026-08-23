@@ -157,7 +157,7 @@ export default function RunStation({
       initial={reduce ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-      className="relative flex h-full min-h-[34rem] flex-col overflow-hidden rounded-[6px] border border-border-subtle bg-surface-overlay backdrop-blur-xl"
+      className="relative flex h-full min-h-[34rem] flex-col overflow-hidden rounded-[6px] border border-line-1 bg-raised backdrop-blur-xl"
     >
       <StateFrame light={st.light} live={st.live} />
       <CornerBrackets light={st.light} />
@@ -285,16 +285,14 @@ function LabelPlate({
             onClick={onBack}
             aria-label="Back to floor"
             title="Back to floor (Esc)"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] text-text-tertiary transition-colors hover:bg-black/[0.04] hover:text-text-primary"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[4px] text-ink-3 transition-colors hover:bg-tint-3 hover:text-ink-1"
           >
             <ArrowLeft size={15} />
           </button>
           {task && <SourceTag task={task} />}
           {task && <EventTag eventType={task.event_type} />}
           {task?.source_id && (
-            <span className="truncate font-mono text-[11px] text-text-tertiary/80">
-              {task.source_id}
-            </span>
+            <span className="truncate font-mono text-reported text-ink-3/80">{task.source_id}</span>
           )}
         </div>
 
@@ -308,7 +306,7 @@ function LabelPlate({
                 target="_blank"
                 rel="noopener noreferrer"
                 title="Open source"
-                className="inline-flex items-center gap-1 text-[11px] font-semibold text-accent transition-colors hover:text-accent/70"
+                className="inline-flex items-center gap-1 text-reported font-semibold text-warm transition-colors hover:text-warm/70"
               >
                 Open
                 <ExternalLink size={11} />
@@ -325,7 +323,7 @@ function LabelPlate({
           className="mt-1 inline-block h-3 w-[3px] shrink-0 rounded-full"
           style={{ background: state.light, boxShadow: `0 0 8px ${state.light}` }}
         />
-        <h1 className="truncate text-[20px] font-semibold leading-tight tracking-tight text-text-primary">
+        <h1 className="truncate text-[20px] font-semibold leading-tight tracking-tight text-ink-1">
           {task?.title || 'Untitled run'}
         </h1>
       </div>
@@ -333,7 +331,7 @@ function LabelPlate({
       {hasChain && <ChainTrack steps={chain} />}
 
       {/* The plate's closing hairline. */}
-      <span aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-border-subtle" />
+      <span aria-hidden className="absolute inset-x-0 bottom-0 h-px bg-line-1" />
       <span
         aria-hidden
         className="absolute bottom-0 left-5 h-px w-10"
@@ -363,19 +361,19 @@ function StateReadout({
         }}
       />
       <span
-        className="font-mono text-[11px] font-semibold uppercase tracking-[0.16em]"
+        className="font-mono text-reported font-semibold uppercase tracking-[0.16em]"
         style={{ color: state.light }}
       >
         {state.label}
       </span>
-      <span className="font-mono text-[11px] tabular-nums text-text-tertiary/80">{elapsed}</span>
+      <span className="font-mono text-reported tabular-nums text-ink-3/80">{elapsed}</span>
       {active && <span className="sr-only">live</span>}
     </span>
   )
 }
 
 function PlateDivider() {
-  return <span aria-hidden className="h-3.5 w-px shrink-0 bg-text-tertiary/20" />
+  return <span aria-hidden className="h-3.5 w-px shrink-0 bg-ink-3/20" />
 }
 
 // ChainTrack — the blueprint chain as a segmented bar riding the plate's bottom
@@ -423,11 +421,11 @@ function ChainTrack({ steps }: { steps: ChainStep[] }) {
       </div>
       {here?.label && (
         <div className="mt-0.5 flex min-w-0 items-baseline gap-2">
-          <span className="truncate text-[11px] font-medium text-text-secondary">
+          <span className="truncate text-reported font-medium text-ink-2">
             {here.label.name || here.label.brief}
           </span>
           {here.label.name && here.label.brief && (
-            <span className="truncate text-[11px] text-text-tertiary/80">{here.label.brief}</span>
+            <span className="truncate text-reported text-ink-3/80">{here.label.brief}</span>
           )}
         </div>
       )}
@@ -453,7 +451,7 @@ function ConveyorLane({ speed }: { speed: number }) {
   return (
     <div
       aria-hidden
-      className="relative w-3 shrink-0 overflow-hidden border-r border-border-subtle/70"
+      className="relative w-3 shrink-0 overflow-hidden border-r border-line-1/70"
       style={{ background: 'rgba(0,0,0,0.025)' }}
     >
       <div
@@ -558,7 +556,7 @@ function IntakeDock({
             : conversation.Status
 
   return (
-    <div className="relative z-10 shrink-0 border-t border-border-subtle px-4 py-2.5">
+    <div className="relative z-10 shrink-0 border-t border-line-1 px-4 py-2.5">
       {active && <StreamShimmer light={state.light} />}
 
       {/* Permission prompt — priority: it's blocking the agent's turn. */}
@@ -584,12 +582,12 @@ function IntakeDock({
             }}
           />
           <span
-            className="shrink-0 font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em]"
+            className="shrink-0 font-mono text-label font-semibold uppercase leading-none tracking-[0.14em]"
             style={{ color: state.light }}
           >
             {state.label}
           </span>
-          <span className="truncate text-[12px] leading-none text-text-tertiary">{sublabel}</span>
+          <span className="truncate text-ui leading-none text-ink-3">{sublabel}</span>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -611,7 +609,7 @@ function IntakeDock({
           )}
           {active && actions.onCancel && (
             <DockButton
-              tone="var(--color-dismiss)"
+              tone="var(--color-alarm)"
               onClick={actions.onCancel}
               icon={<Square size={11} />}
             >
@@ -619,7 +617,7 @@ function IntakeDock({
             </DockButton>
           )}
           {(isTerminal || isParked || hasUnresolved) && actions.onRequeue && (
-            <DockButton tone="var(--color-text-tertiary)" onClick={actions.onRequeue}>
+            <DockButton tone="var(--color-ink-3)" onClick={actions.onRequeue}>
               Return to queue
             </DockButton>
           )}
@@ -643,7 +641,7 @@ function IntakeDock({
       {resumeBlocked && actions.onMessage && (
         <p
           role="status"
-          className="mt-2.5 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-2 text-[12px] leading-relaxed text-text-tertiary"
+          className="mt-2.5 rounded-[5px] border border-line-1 bg-tint-2 px-2.5 py-2 text-ui leading-relaxed text-ink-3"
         >
           {resumeBlockedCopy(conversation)}
         </p>
@@ -675,7 +673,7 @@ function ApprovalAffordance({
   if (counts.total === 1 && ids.length > 0) {
     return (
       <DockButton
-        tone="var(--color-snooze)"
+        tone="var(--color-warm)"
         solid
         onClick={() =>
           actions.onOpenArtifact?.(
@@ -692,7 +690,7 @@ function ApprovalAffordance({
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <DockButton tone="var(--color-snooze)" solid>
+        <DockButton tone="var(--color-warm)" solid>
           {approvalAction(counts)} →
         </DockButton>
       </Popover.Trigger>
@@ -701,9 +699,9 @@ function ApprovalAffordance({
           side="top"
           align="end"
           sideOffset={8}
-          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-border-glass bg-surface-raised/95 p-2.5 shadow-lg shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
+          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-line-1 bg-raised/95 p-2.5 shadow-float shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
         >
-          <div className="mb-1.5 px-1 font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+          <div className="mb-1.5 px-1 font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
             Artifacts
           </div>
           <ArtifactList
@@ -716,7 +714,7 @@ function ApprovalAffordance({
             }}
             onResolved={actions.onArtifactResolved}
           />
-          <Popover.Arrow className="fill-surface-raised" />
+          <Popover.Arrow className="fill-raised" />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -771,7 +769,7 @@ function DockComposer({
   return (
     <div
       aria-hidden={hidden}
-      className={`mt-2.5 flex items-end gap-2 rounded-[5px] border border-border-subtle bg-black/[0.02] px-2.5 py-1.5 transition-colors focus-within:border-[color:var(--hmi-cyan)] ${hidden ? 'hidden' : ''}`}
+      className={`mt-2.5 flex items-end gap-2 rounded-[5px] border border-line-1 bg-tint-2 px-2.5 py-1.5 transition-colors focus-within:border-[color:var(--hmi-cyan)] ${hidden ? 'hidden' : ''}`}
     >
       <textarea
         ref={ref}
@@ -783,7 +781,7 @@ function DockComposer({
         tabIndex={hidden ? -1 : undefined}
         placeholder={placeholder}
         aria-label={placeholder.replace(/…$/, '')}
-        className="flex-1 resize-none bg-transparent py-1 text-[13px] leading-relaxed text-text-primary placeholder:text-text-tertiary/70 focus:outline-none"
+        className="flex-1 resize-none bg-transparent py-1 text-body leading-relaxed text-ink-1 placeholder:text-ink-3/70 focus:outline-none"
       />
       <button
         type="button"
@@ -852,7 +850,7 @@ function DockButton({
     <button
       type="button"
       {...rest}
-      className="inline-flex items-center gap-1.5 rounded-[4px] px-2.5 py-1 font-mono text-[10px] font-semibold uppercase tracking-[0.1em] transition-colors disabled:cursor-wait disabled:opacity-60"
+      className="inline-flex items-center gap-1.5 rounded-[4px] px-2.5 py-1 font-mono text-label font-semibold uppercase tracking-[0.1em] transition-colors disabled:cursor-wait disabled:opacity-60"
       style={
         solid
           ? { color: 'var(--hmi-screen)', background: tone, boxShadow: `0 0 16px -4px ${tone}` }

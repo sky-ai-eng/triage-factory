@@ -9,7 +9,7 @@ export default function ViewOnlyBadge({ className = '' }: { className?: string }
   return (
     <span
       title="You have view-only access to this team. Ask a team admin for write access to make changes."
-      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border-subtle bg-surface-raised px-2.5 py-1 text-[11px] font-medium text-text-tertiary ${className}`}
+      className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border border-line-1 bg-raised px-2.5 py-1 text-reported font-medium text-ink-3 ${className}`}
     >
       <Eye size={12} aria-hidden />
       View only

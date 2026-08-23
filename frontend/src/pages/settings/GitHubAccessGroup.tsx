@@ -92,7 +92,7 @@ export default function GitHubAccessGroup({
 
   const inner = (
     <>
-      {showHeading && <h2 className="text-[13px] font-medium text-text-secondary mb-4">GitHub</h2>}
+      {showHeading && <h2 className="text-body font-medium text-ink-2 mb-4">GitHub</h2>}
       <div className="space-y-3">
         {showBaseUrl && (
           <Field label="Base URL">
@@ -113,24 +113,23 @@ export default function GitHubAccessGroup({
             onChange={(e) => onChange({ github_pat: e.target.value })}
             className={fieldCls}
           />
-          <p className="text-[11px] text-text-tertiary mt-1">
+          <p className="text-reported text-ink-3 mt-1">
             Requires a{' '}
             <a
               href="https://github.com/settings/tokens/new?scopes=repo,read:org,user:email&description=Triage+Factory"
               target="_blank"
               rel="noopener noreferrer"
-              className="text-accent hover:underline"
+              className="text-warm hover:underline"
             >
               classic PAT
             </a>{' '}
-            with <code className="text-text-secondary">repo</code>,{' '}
-            <code className="text-text-secondary">read:org</code>, and{' '}
-            <code className="text-text-secondary">user:email</code> scopes — the token Triage
-            Factory&rsquo;s bots poll your organization with.{' '}
-            <code className="text-text-secondary">read:org</code> lets them resolve your
-            organization&rsquo;s team memberships so review requests routed to teams (e.g.
-            CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly are
-            visible.
+            with <code className="text-ink-2">repo</code>,{' '}
+            <code className="text-ink-2">read:org</code>, and{' '}
+            <code className="text-ink-2">user:email</code> scopes — the token Triage Factory&rsquo;s
+            bots poll your organization with. <code className="text-ink-2">read:org</code> lets them
+            resolve your organization&rsquo;s team memberships so review requests routed to teams
+            (e.g. CODEOWNERS) surface as tasks — without it, only PRs that name a reviewer directly
+            are visible.
           </p>
         </Field>
         {/* Clone protocol is local-mode-only: multi-mode deployments
@@ -165,19 +164,19 @@ export default function GitHubAccessGroup({
                   type="button"
                   onClick={testSSH}
                   disabled={sshTestState.kind === 'running'}
-                  className="text-[11px] text-accent hover:underline disabled:opacity-50"
+                  className="text-reported text-warm hover:underline disabled:opacity-50"
                 >
                   {sshTestState.kind === 'running' ? 'Testing...' : 'Test SSH connection'}
                 </button>
               )}
             </div>
-            <p className="text-[11px] text-text-tertiary mt-1.5 leading-relaxed">
+            <p className="text-reported text-ink-3 mt-1.5 leading-relaxed">
               Your token is still required for the GitHub API. The protocol only affects how Triage
               Factory clones repos to your machine. Saving the toggle re-clones bare repos with the
               new origin URL.
             </p>
             {sshTestState.kind === 'ok' && (
-              <p className="text-[11px] text-[var(--color-claim)] mt-1.5">
+              <p className="text-reported text-warm mt-1.5">
                 ✓ SSH preflight succeeded — git@
                 {(() => {
                   try {
@@ -193,8 +192,8 @@ export default function GitHubAccessGroup({
               <pre
                 className="
                 mt-1.5 max-h-[120px] overflow-auto rounded
-                bg-[var(--color-dismiss)]/10 p-2 text-[11px]
-                text-[var(--color-dismiss)] whitespace-pre-wrap break-words
+                bg-[var(--color-alarm)]/10 p-2 text-reported
+                text-[var(--color-alarm)] whitespace-pre-wrap break-words
               "
               >
                 {sshTestState.stderr}

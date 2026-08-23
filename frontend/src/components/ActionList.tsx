@@ -70,13 +70,13 @@ export default function ActionList({ conversationId, refreshKey }: Props) {
   // and this is an audit surface, so blanking it on a transient error is worse
   // than showing a slightly stale copy.
   if (error && !loaded) {
-    return <p className="text-[11.5px] leading-relaxed text-dismiss">{error}</p>
+    return <p className="text-secondary leading-relaxed text-alarm">{error}</p>
   }
   if (!loaded) {
-    return <p className="text-[11.5px] text-text-tertiary/70">Loading actions…</p>
+    return <p className="text-secondary text-ink-3/70">Loading actions…</p>
   }
   if (actions.length === 0) {
-    return <p className="text-[11.5px] text-text-tertiary/70">No external actions yet.</p>
+    return <p className="text-secondary text-ink-3/70">No external actions yet.</p>
   }
 
   return (
@@ -91,7 +91,7 @@ export default function ActionList({ conversationId, refreshKey }: Props) {
           type="button"
           onClick={loadMore}
           disabled={loading}
-          className="mt-1.5 text-[10px] text-accent transition-colors hover:text-accent/70 disabled:opacity-50"
+          className="mt-1.5 text-label text-warm transition-colors hover:text-warm/70 disabled:opacity-50"
         >
           {loading ? 'Loading…' : `Load more (${actions.length} of ${total ?? actions.length})`}
         </button>

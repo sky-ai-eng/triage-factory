@@ -64,16 +64,16 @@ function statusChip(channel: SlackChannelView): ChipInfo {
 }
 
 const CHIP_STYLE: Record<ChipKind, { dot: string; text: string }> = {
-  unclaimed: { dot: 'bg-amber-500', text: 'text-amber-700' },
-  'tracked-other': { dot: 'bg-text-tertiary/40', text: 'text-text-tertiary' },
-  watching: { dot: 'bg-sky-500', text: 'text-sky-700' },
-  primary: { dot: 'bg-emerald-500', text: 'text-emerald-700' },
+  unclaimed: { dot: 'bg-warm', text: 'text-warm' },
+  'tracked-other': { dot: 'bg-ink-3/40', text: 'text-ink-3' },
+  watching: { dot: 'bg-ink-3', text: 'text-ink-3' },
+  primary: { dot: 'bg-ink-1', text: 'text-ink-1' },
 }
 
 function Chip({ label, dot, text }: { label: string; dot: string; text: string }) {
   return (
     <span
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium ${text}`}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium ${text}`}
     >
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
       {label}
@@ -146,7 +146,7 @@ export default function SlackChannelPicker({
       />
       <div className="max-h-80 overflow-y-auto">
         {filtered.length === 0 ? (
-          <p className="py-8 text-center text-[13px] text-text-tertiary">
+          <p className="py-8 text-center text-body text-ink-3">
             {search ? `No channels match "${search}"` : 'No channels found'}
           </p>
         ) : (
@@ -177,15 +177,13 @@ export default function SlackChannelPicker({
                   }
                 }}
                 className={`flex items-start gap-3 rounded-xl px-3 py-2.5 transition-colors ${
-                  disabled
-                    ? 'cursor-not-allowed opacity-60'
-                    : 'cursor-pointer hover:bg-black/[0.02]'
-                } ${checked ? 'bg-accent/[0.04]' : ''}`}
+                  disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:bg-tint-2'
+                } ${checked ? 'bg-warm/[0.04]' : ''}`}
               >
                 <span
                   aria-hidden
                   className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
-                    checked ? 'border-accent bg-accent text-white' : 'border-border-subtle'
+                    checked ? 'border-warm bg-warm text-warm-ink' : 'border-line-1'
                   }`}
                 >
                   {checked && (
@@ -206,7 +204,7 @@ export default function SlackChannelPicker({
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span
-                      className={`truncate text-[12.5px] font-medium text-text-primary ${
+                      className={`truncate text-card-title font-medium text-ink-1 ${
                         channel.name ? '' : 'font-mono'
                       }`}
                     >
@@ -216,11 +214,11 @@ export default function SlackChannelPicker({
                       <Lock
                         size={11}
                         aria-label="private channel"
-                        className="shrink-0 text-text-tertiary"
+                        className="shrink-0 text-ink-3"
                       />
                     )}
                     {showWorkspaceChip && channel.workspace_id && (
-                      <span className="shrink-0 rounded bg-black/[0.05] px-1 py-0.5 text-[10px] text-text-tertiary">
+                      <span className="shrink-0 rounded bg-tint-3 px-1 py-0.5 text-label text-ink-3">
                         {channel.workspace_id}
                       </span>
                     )}
@@ -228,8 +226,8 @@ export default function SlackChannelPicker({
                     {botMissing && (
                       <Chip
                         label="bot not in channel — /invite @bot"
-                        dot="bg-rose-500"
-                        text="text-rose-700"
+                        dot="bg-alarm"
+                        text="text-alarm"
                       />
                     )}
                     {canMakePrimary && (
@@ -246,7 +244,7 @@ export default function SlackChannelPicker({
                         // while ANY row's reassignment is in flight, not just
                         // this one, so two "Make primary" clicks can't race.
                         disabled={disabled || makingPrimaryId !== null}
-                        className="shrink-0 text-[11px] font-medium text-accent underline-offset-2 hover:underline disabled:opacity-40"
+                        className="shrink-0 text-reported font-medium text-warm underline-offset-2 hover:underline disabled:opacity-40"
                       >
                         {makingPrimaryId === channel.channel_id
                           ? 'Making primary…'
@@ -255,7 +253,7 @@ export default function SlackChannelPicker({
                     )}
                   </div>
                   {activity && (
-                    <p className="mt-0.5 text-[11px] text-text-tertiary">
+                    <p className="mt-0.5 text-reported text-ink-3">
                       mentions seen · {timeAgo(channel.last_mention_at!)}
                     </p>
                   )}

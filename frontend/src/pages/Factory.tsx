@@ -18,6 +18,7 @@ import { toast } from '../components/Toast/toastStore'
 import { createIsoScene, type ClickedStationInfo, type IsoSceneHandle } from '../factory/iso-scene'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
+import { useImmersive } from '../contexts/ChromeContext'
 import {
   useTeams,
   useTeamFilter,
@@ -95,6 +96,11 @@ export default function Factory() {
   const [pendingDelegate, setPendingDelegate] = useState<PendingDelegate | null>(null)
   const [draggingEntity, setDraggingEntity] = useState<FactoryEntity | null>(null)
   const [cinematic, setCinematic] = useState(false)
+
+  // Ask the frame to fade with the rest of the HUD. Declarative rather than a
+  // call in enterCinematic/exitCinematic: navigating away mid-cinematic would
+  // otherwise leave the app with no rail and no explanation.
+  useImmersive(cinematic)
 
   // multi-team. teamFilter is the per-page read scope (narrows the
   // entity belt via ?team_id); delegateTeam is the acting team the
@@ -406,17 +412,33 @@ export default function Factory() {
 
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-      <div className="relative -mx-8 -my-8 overflow-hidden">
-        <div
-          ref={containerRef}
-          className="relative w-full overflow-hidden"
-          style={{ height: 'calc(100vh - 69px)' }}
-        />
+      {/* The HUD layer. Sized to the page area — inside the rail and below the
+          header — so every control below sits clear of the chrome, the way it
+          would on any other page. */}
+      <div className="relative -mx-8 -my-8 h-[calc(100%+4rem)] overflow-hidden">
+        {/* The world. Fixed to the VIEWPORT, not to the page area, and it is the
+            only element here that is.
+
+            The rail animates its width over 220ms. A canvas sized to the page
+            area follows that, which means a ResizeObserver firing every frame
+            of the transition and engine.resize() reallocating the framebuffer
+            each time — the scene visibly tearing down and coming back. Sizing
+            it to the window instead means the rail moving is simply not an
+            event the scene can observe: no resize, no reallocation, nothing to
+            flash.
+
+            It also reads better. This is the most game-like surface in the
+            product, and in a game the world does not disappear when the HUD
+            changes — the HUD is drawn over a world that was already there. The
+            rail and header now pass over the scene rather than displacing it,
+            which costs the pixels they cover and buys a world that holds
+            still. */}
+        <div ref={containerRef} className="fixed inset-0 z-0" />
         {/* Per-page team filter — narrows the entity belt.
             Gated on ≥2 teams so solo users get no empty overlay box. */}
         {teams.length >= 2 && (
           <div
-            className={`absolute top-4 left-4 rounded-md bg-white/92 px-1 py-0.5 shadow transition-opacity duration-300 ${
+            className={`absolute top-4 left-4 rounded-md bg-raised px-1 py-0.5 shadow transition-opacity duration-[var(--dur-content)] ${
               cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
             }`}
           >
@@ -424,7 +446,7 @@ export default function Factory() {
           </div>
         )}
         <div
-          className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-300 ${
+          className={`absolute right-4 bottom-4 flex items-center gap-2 transition-opacity duration-[var(--dur-content)] ${
             cinematic ? 'pointer-events-none opacity-0' : 'opacity-100'
           }`}
         >
@@ -433,24 +455,29 @@ export default function Factory() {
             onClick={enterCinematic}
             title="Cinematic mode"
             aria-label="Cinematic mode"
-            className="rounded-md bg-white/92 p-2 text-text-primary shadow transition hover:bg-white"
+            className="rounded-md bg-raised p-2 text-ink-1 shadow transition hover:bg-sunk"
           >
             <Clapperboard className="h-4 w-4" strokeWidth={2} aria-hidden />
           </button>
           <button
             type="button"
             onClick={() => sceneRef.current?.resetView()}
-            className="rounded-md bg-white/92 px-3 py-2 text-[11px] font-semibold text-text-primary shadow transition hover:bg-white"
+            className="rounded-md bg-raised px-3 py-2 text-reported font-semibold text-ink-1 shadow transition hover:bg-sunk"
           >
             Reset view
           </button>
         </div>
         <StationDrawer info={picked} />
-        {/* Exit catcher — full-viewport layer that swallows the first
-            click (so it exits instead of orbiting). The cursor stays
-            visible; key/wheel exits are wired in an effect. */}
+        {/* Exit catcher — swallows the first click (so it exits instead of
+            orbiting). The cursor stays visible; key/wheel exits are wired in an
+            effect.
+
+            Fixed, not absolute: the world now fills the window and the chrome
+            has faded off it, so the whole window is scene. An absolute catcher
+            covered only the page area, which left the strip where the rail used
+            to be as the one place a click did nothing. */}
         {cinematic && (
-          <div className="absolute inset-0 z-40" onPointerDown={exitCinematic} aria-hidden />
+          <div className="fixed inset-0 z-40" onPointerDown={exitCinematic} aria-hidden />
         )}
       </div>
       <DragOverlay dropAnimation={null}>
@@ -500,13 +527,13 @@ function StationDrawer({ info }: { info: ClickedStationInfo | null }) {
   return (
     <Tooltip.Provider delayDuration={250}>
       <div
-        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-300 ease-out ${
+        className={`pointer-events-none absolute inset-x-0 bottom-0 z-40 transition-transform duration-[var(--dur-content)] ease-out ${
           open ? 'translate-y-0' : 'translate-y-full'
         }`}
         style={{ height: '46vh' }}
         aria-hidden={!open}
       >
-        <div className="pointer-events-auto relative h-full bg-surface-raised/95 backdrop-blur-xl border-t border-border-glass shadow-2xl shadow-black/[0.12] flex items-stretch p-5">
+        <div className="pointer-events-auto relative h-full bg-raised/95 backdrop-blur-xl border-t border-line-1 shadow-float shadow-black/[0.12] flex items-stretch p-5">
           <StationChassis info={info} />
         </div>
       </div>
@@ -646,13 +673,13 @@ function Tray({
           className="inline-block h-1.5 w-1.5 rounded-full"
           style={{ background: accent, boxShadow: `0 0 4px ${hexToRgba(accent, 0.55)}` }}
         />
-        <span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-text-secondary">
+        <span className="text-reported font-semibold uppercase tracking-[0.18em] text-ink-2">
           {label}
         </span>
       </header>
       <ul className="flex flex-1 flex-col gap-1.5 overflow-y-auto px-3 py-3">
         {items.length === 0 ? (
-          <li className="px-2 py-1 text-[11px] italic text-text-tertiary">{emptyMessage}</li>
+          <li className="px-2 py-1 text-reported italic text-ink-3">{emptyMessage}</li>
         ) : (
           items.map((it) => <TrayRow key={it.key} item={it} />)
         )}
@@ -708,7 +735,7 @@ function TrayRow({ item }: { item: TrayItem }) {
       {...(draggable ? drag.attributes : {})}
       {...(draggable ? drag.listeners : {})}
       className={`flex items-center gap-2.5 rounded-md px-2.5 py-1.5 transition-all ${
-        interactive ? 'hover:-translate-y-px hover:bg-white' : ''
+        interactive ? 'hover:-translate-y-px hover:bg-raised' : ''
       } ${draggable ? 'cursor-grab active:cursor-grabbing' : ''} ${
         drag.isDragging ? 'opacity-40' : ''
       }`}
@@ -729,7 +756,7 @@ function TrayRow({ item }: { item: TrayItem }) {
           side="top"
           align="start"
           sideOffset={6}
-          className="z-[100] max-w-[320px] rounded-lg border border-border-glass px-3 py-2.5 text-[12px] text-text-primary leading-relaxed animate-in fade-in-0 zoom-in-95"
+          className="z-[100] max-w-[320px] rounded-lg border border-line-1 px-3 py-2.5 text-ui text-ink-1 leading-relaxed animate-in fade-in-0 zoom-in-95"
           style={{
             // Opaque base + top-light gradient → bottom-shaded gives the
             // liquid-glass sheen without bleed-through. Inset highlight
@@ -757,8 +784,8 @@ function QueuedEntityRow({ entity }: { entity: FactoryEntity }) {
   const title = entity.title || entity.source_id
   return (
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
-      <span className="font-mono text-[11px] text-text-primary">{label}</span>
-      <span className="truncate text-[10.5px] text-text-secondary">{title}</span>
+      <span className="font-mono text-reported text-ink-1">{label}</span>
+      <span className="truncate text-label text-ink-2">{title}</span>
     </div>
   )
 }
@@ -786,21 +813,21 @@ function EntityTooltip({ entity }: { entity: FactoryEntity }) {
   }
   return (
     <div className="space-y-2">
-      <div className="font-medium text-[12.5px] leading-snug text-text-primary">
+      <div className="font-medium text-card-title leading-snug text-ink-1">
         {entity.title || entity.source_id || entity.id}
       </div>
       {meta.length > 0 && (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-reported">
           {meta.map((m) => (
             <div key={m.k} className="contents">
-              <dt className="uppercase tracking-wider text-text-tertiary">{m.k}</dt>
-              <dd className="font-mono text-text-secondary">{m.v}</dd>
+              <dt className="uppercase tracking-wider text-ink-3">{m.k}</dt>
+              <dd className="font-mono text-ink-2">{m.v}</dd>
             </div>
           ))}
         </dl>
       )}
       {entity.url && (
-        <div className="border-t border-border-glass pt-1.5 text-[10.5px] text-text-tertiary">
+        <div className="border-t border-line-1 pt-1.5 text-label text-ink-3">
           Click to open in new tab →
         </div>
       )}
@@ -815,21 +842,21 @@ function ConversationRow({ conversation, task }: { conversation: Conversation; t
     <div className="flex min-w-0 flex-1 items-baseline gap-2">
       {isOpen && (
         <span
-          className="inline-flex items-center text-[12px] leading-none"
+          className="inline-flex items-center text-ui leading-none"
           style={{ color: conversationStatusColor(conversation.Status) }}
           title="Run is open — not concluded, not currently executing"
         >
           ◌
         </span>
       )}
-      <span className="font-mono text-[11px] text-text-primary">{ref}</span>
+      <span className="font-mono text-reported text-ink-1">{ref}</span>
       <span
-        className="text-[10px] uppercase tracking-wider"
+        className="text-label uppercase tracking-wider"
         style={{ color: conversationStatusColor(conversation.Status) }}
       >
         {conversationStatusLabel(conversation.Status)}
       </span>
-      <span className="ml-auto font-mono text-[10px] text-text-tertiary">
+      <span className="ml-auto font-mono text-label text-ink-3">
         {formatConversationMeta(conversation)}
       </span>
     </div>
@@ -858,9 +885,9 @@ function conversationStatusColor(status: ConversationStatusValue): string {
     case 'open':
       return '#8a6e1f' // --color-snooze (warm amber)
     case 'failed':
-      return '#a84545' // --color-dismiss (warm rose)
+      return '#a84545' // --color-alarm (warm rose)
     default:
-      return '#4a4541' // --color-text-secondary
+      return '#4a4541' // --color-ink-2
   }
 }
 

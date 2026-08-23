@@ -143,10 +143,10 @@ function Band({
   return (
     <section>
       <div className="mb-4 flex items-center gap-3">
-        <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.2em] text-text-tertiary/80">
+        <span className="font-mono text-label font-semibold uppercase tracking-[0.2em] text-ink-3/80">
           {label}
         </span>
-        <span className="h-px flex-1 bg-border-subtle/70" />
+        <span className="h-px flex-1 bg-line-1/70" />
         {aside}
       </div>
       {children}
@@ -166,10 +166,10 @@ function Instrument({
   return (
     <div>
       <div className="mb-2.5 flex items-center gap-2">
-        <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+        <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
           {label}
         </span>
-        <span className="h-px flex-1 bg-border-subtle/60" />
+        <span className="h-px flex-1 bg-line-1/60" />
         {aside}
       </div>
       {children}
@@ -182,7 +182,7 @@ function Instrument({
 function Meter({
   value,
   max,
-  color = 'var(--color-accent)',
+  color = 'var(--color-warm)',
 }: {
   value: number
   max: number
@@ -203,7 +203,7 @@ function Meter({
 function Stat({
   value,
   unit,
-  tone = 'text-text-primary',
+  tone = 'text-ink-1',
 }: {
   value: React.ReactNode
   unit?: string
@@ -212,24 +212,24 @@ function Stat({
   return (
     <div className={`font-mono tabular-nums ${tone}`}>
       <span className="text-[22px] font-light leading-none">{value}</span>
-      {unit && <span className="ml-1 text-[11px] text-text-tertiary">{unit}</span>}
+      {unit && <span className="ml-1 text-reported text-ink-3">{unit}</span>}
     </div>
   )
 }
 
 type ChipTone = 'rust' | 'good' | 'attention' | 'problem' | 'neutral'
 const CHIP_CLASS: Record<ChipTone, string> = {
-  rust: 'border-accent/30 text-accent',
-  good: 'border-claim/40 text-claim',
-  attention: 'border-snooze/40 text-snooze',
-  problem: 'border-dismiss/40 text-dismiss',
-  neutral: 'border-border-subtle text-text-tertiary',
+  rust: 'border-cool/40 text-cool',
+  good: 'border-line-1 text-ink-2',
+  attention: 'border-warm-3 text-warm',
+  problem: 'border-alarm/40 text-alarm',
+  neutral: 'border-line-1 text-ink-3',
 }
 
 function Chip({ tone = 'neutral', children }: { tone?: ChipTone; children: React.ReactNode }) {
   return (
     <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.12em] ${CHIP_CLASS[tone]}`}
+      className={`inline-flex items-center rounded-full border px-2 py-0.5 font-mono text-label-sm font-semibold uppercase tracking-[0.12em] ${CHIP_CLASS[tone]}`}
     >
       {children}
     </span>
@@ -237,7 +237,7 @@ function Chip({ tone = 'neutral', children }: { tone?: ChipTone; children: React
 }
 
 function ConsoleFrame({ children }: { children: React.ReactNode }) {
-  const tick = 'pointer-events-none absolute h-3 w-3 border-accent/40'
+  const tick = 'pointer-events-none absolute h-3 w-3 border-warm/40'
   return (
     <div className="relative">
       <span aria-hidden className={`${tick} -left-3 -top-3 border-l-[1.5px] border-t-[1.5px]`} />
@@ -262,12 +262,12 @@ function WindowToggle({ value, onChange }: { value: WindowKey; onChange: (w: Win
             key={wr.key}
             type="button"
             onClick={() => onChange(wr.key)}
-            className={`relative font-mono text-[11px] tracking-[0.12em] transition-colors ${
-              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            className={`relative font-mono text-reported tracking-[0.12em] transition-colors ${
+              active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
             }`}
           >
             {wr.label}
-            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-accent" />}
+            {active && <span className="absolute -bottom-1.5 left-0 right-0 h-px bg-warm" />}
           </button>
         )
       })}
@@ -341,7 +341,7 @@ function Trace({
   const gid = useId().replace(/:/g, '')
   if (data.length === 0) {
     return (
-      <p className="py-8 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+      <p className="py-8 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
         no samples yet
       </p>
     )
@@ -360,8 +360,8 @@ function Trace({
           <YAxis hide domain={[0, 'dataMax']} />
           <Tooltip
             contentStyle={{
-              background: 'var(--color-surface-raised)',
-              border: '1px solid var(--color-border-glass)',
+              background: 'var(--color-raised)',
+              border: '1px solid var(--color-line-1)',
               borderRadius: 8,
               fontSize: 11,
               fontFamily: 'ui-monospace, monospace',
@@ -394,19 +394,19 @@ function OverviewRow({ ov }: { ov: FleetOverview | null }) {
       <Instrument
         label="Machines"
         aside={
-          <span className="font-mono text-[9px] text-text-tertiary/60">
+          <span className="font-mono text-label-sm text-ink-3/60">
             {t.executors}ex · {t.control}ctl
           </span>
         }
       >
         <Stat value={fmtInt(t.instances)} unit="online" />
-        {t.stale > 0 && <p className="mt-1 font-mono text-[10px] text-dismiss">{t.stale} stale</p>}
+        {t.stale > 0 && <p className="mt-1 font-mono text-label text-alarm">{t.stale} stale</p>}
       </Instrument>
 
       <Instrument
         label="Capacity"
         aside={
-          <span className="font-mono text-[9px] tabular-nums text-text-tertiary/60">
+          <span className="font-mono text-label-sm tabular-nums text-ink-3/60">
             {t.active_runs}/{t.capacity_max}
           </span>
         }
@@ -427,29 +427,27 @@ function OverviewRow({ ov }: { ov: FleetOverview | null }) {
         <Stat
           value={fmtInt(q.depth)}
           unit="waiting"
-          tone={q.depth > 0 ? 'text-snooze' : 'text-text-primary'}
+          tone={q.depth > 0 ? 'text-ink-2' : 'text-ink-1'}
         />
-        <p className="mt-1 font-mono text-[10px] text-text-tertiary">
+        <p className="mt-1 font-mono text-label text-ink-3">
           oldest {q.depth > 0 ? fmtDuration(q.oldest_wait_seconds) : '—'}
         </p>
       </Instrument>
 
       <Instrument
         label="Queue wait"
-        aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+        aside={<span className="font-mono text-label-sm text-ink-3/60">p50 · p95</span>}
       >
         <Stat value={fmtMs(q.wait_p50_ms)} />
-        <p className="mt-1 font-mono text-[10px] text-text-tertiary">p95 {fmtMs(q.wait_p95_ms)}</p>
+        <p className="mt-1 font-mono text-label text-ink-3">p95 {fmtMs(q.wait_p95_ms)}</p>
       </Instrument>
 
       <Instrument
         label="Run duration"
-        aside={<span className="font-mono text-[9px] text-text-tertiary/60">p50 · p95</span>}
+        aside={<span className="font-mono text-label-sm text-ink-3/60">p50 · p95</span>}
       >
         <Stat value={fmtMs(r.duration_p50_ms)} />
-        <p className="mt-1 font-mono text-[10px] text-text-tertiary">
-          p95 {fmtMs(r.duration_p95_ms)}
-        </p>
+        <p className="mt-1 font-mono text-label text-ink-3">p95 {fmtMs(r.duration_p95_ms)}</p>
       </Instrument>
     </div>
   )
@@ -466,10 +464,10 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
           <div>
             <Stat value={fmtInt(r.total)} unit="total" />
           </div>
-          <div className="font-mono text-[11px] tabular-nums">
-            <span className="text-claim">{fmtInt(r.completed)} done</span>
-            <span className="mx-2 text-text-tertiary/40">·</span>
-            <span className={r.active > 0 ? 'text-delegate' : 'text-text-tertiary'}>
+          <div className="font-mono text-reported tabular-nums">
+            <span className="text-ink-2">{fmtInt(r.completed)} done</span>
+            <span className="mx-2 text-ink-3/40">·</span>
+            <span className={r.active > 0 ? 'text-ink-2' : 'text-ink-3'}>
               {fmtInt(r.active)} active
             </span>
           </div>
@@ -480,7 +478,7 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
         label="Failures"
         aside={
           <span
-            className={`font-mono text-[9px] tabular-nums ${failRate > 5 ? 'text-dismiss' : 'text-text-tertiary/60'}`}
+            className={`font-mono text-label-sm tabular-nums ${failRate > 5 ? 'text-alarm' : 'text-ink-3/60'}`}
           >
             {failRate.toFixed(1)}%
           </span>
@@ -489,7 +487,7 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
         <Stat
           value={fmtInt(r.failed)}
           unit="failed"
-          tone={r.failed > 0 ? 'text-dismiss' : 'text-text-primary'}
+          tone={r.failed > 0 ? 'text-alarm' : 'text-ink-1'}
         />
         {r.failure_kinds.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -514,19 +512,15 @@ function RunsBand({ ov }: { ov: FleetOverview | null }) {
       >
         <div className="flex flex-wrap items-center gap-2">
           {versions.map((v) => (
-            <span
-              key={v.version}
-              className="font-mono text-[11px] tabular-nums text-text-secondary"
-            >
+            <span key={v.version} className="font-mono text-reported tabular-nums text-ink-2">
               {v.version || '—'}
-              <span className="ml-1 text-text-tertiary/60">×{v.count}</span>
+              <span className="ml-1 text-ink-3/60">×{v.count}</span>
             </span>
           ))}
         </div>
         {spend && (
-          <p className="mt-3 font-mono text-[10px] uppercase tracking-wider text-text-tertiary/70">
-            spend {r.window_hours}h ·{' '}
-            <span className="text-text-secondary">{fmtUSD(spend.total_usd)}</span>
+          <p className="mt-3 font-mono text-label uppercase tracking-wider text-ink-3/70">
+            spend {r.window_hours}h · <span className="text-ink-2">{fmtUSD(spend.total_usd)}</span>
           </p>
         )}
       </Instrument>
@@ -551,18 +545,18 @@ function MachineCard({
   const active = inst.active_runs ?? 0
   const max = inst.max_runs ?? 0
   const meterColor = inst.stale
-    ? 'var(--color-dismiss)'
+    ? 'var(--color-alarm)'
     : inst.dispatch_gated
-      ? 'var(--color-snooze)'
-      : 'var(--color-accent)'
+      ? 'var(--color-warm)'
+      : 'var(--color-cool)'
   return (
-    <div className="rounded-lg border border-border-subtle/70 bg-surface-raised/40 p-4 transition-colors hover:border-border-subtle">
+    <div className="rounded-lg border border-line-1/70 bg-raised/40 p-4 transition-colors hover:border-line-1">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="truncate font-mono text-[12px] text-text-primary" title={inst.id}>
+          <p className="truncate font-mono text-ui text-ink-1" title={inst.id}>
             {shortId(inst.id)}
           </p>
-          <p className="mt-0.5 font-mono text-[9px] uppercase tracking-wider text-text-tertiary/70">
+          <p className="mt-0.5 font-mono text-label-sm uppercase tracking-wider text-ink-3/70">
             {inst.role} · {inst.version || 'unknown'} · e{inst.boot_epoch}
           </p>
         </div>
@@ -576,9 +570,9 @@ function MachineCard({
 
       {isExecutor && max > 0 && (
         <div className="mt-4">
-          <div className="mb-1.5 flex items-center justify-between font-mono text-[10px] tabular-nums text-text-tertiary">
+          <div className="mb-1.5 flex items-center justify-between font-mono text-label tabular-nums text-ink-3">
             <span>runs</span>
-            <span className="text-text-secondary">
+            <span className="text-ink-2">
               {active}/{max}
             </span>
           </div>
@@ -586,7 +580,7 @@ function MachineCard({
         </div>
       )}
 
-      <div className="mt-4 grid grid-cols-3 gap-3 font-mono text-[10px] tabular-nums">
+      <div className="mt-4 grid grid-cols-3 gap-3 font-mono text-label tabular-nums">
         <Readout label="cpu" value={inst.cpu_pct != null ? `${Math.round(inst.cpu_pct)}%` : '—'} />
         <Readout label="load" value={inst.load1 != null ? inst.load1.toFixed(2) : '—'} />
         <Readout label="mem free" value={fmtMem(inst.mem_available_mb)} />
@@ -600,7 +594,7 @@ function MachineCard({
         <Readout
           label="heartbeat"
           value={`${Math.round(inst.heartbeat_age_seconds)}s`}
-          tone={inst.stale ? 'text-dismiss' : undefined}
+          tone={inst.stale ? 'text-alarm' : undefined}
         />
       </div>
 
@@ -613,10 +607,10 @@ function MachineCard({
           aria-expanded={sandboxesOpen}
           aria-label={`sandboxes on ${inst.id}`}
           onClick={onToggleSandboxes}
-          className={`flex-1 rounded-md border py-1.5 font-mono text-[10px] uppercase tracking-[0.15em] transition-colors ${
+          className={`flex-1 rounded-md border py-1.5 font-mono text-label uppercase tracking-[0.15em] transition-colors ${
             sandboxesOpen
-              ? 'border-accent/40 text-accent'
-              : 'border-border-subtle text-text-tertiary hover:border-accent/40 hover:text-accent'
+              ? 'border-warm/40 text-warm'
+              : 'border-line-1 text-ink-3 hover:border-warm/40 hover:text-warm'
           }`}
         >
           {sandboxesOpen ? 'hide sandboxes' : 'sandboxes'}
@@ -626,10 +620,10 @@ function MachineCard({
             type="button"
             disabled={busy}
             onClick={() => onDrain(inst.id, !inst.draining)}
-            className={`flex-1 rounded-md border py-1.5 font-mono text-[10px] uppercase tracking-[0.15em] transition-colors disabled:opacity-40 ${
+            className={`flex-1 rounded-md border py-1.5 font-mono text-label uppercase tracking-[0.15em] transition-colors disabled:opacity-40 ${
               inst.draining
-                ? 'border-claim/40 text-claim hover:bg-claim/10'
-                : 'border-border-subtle text-text-tertiary hover:border-snooze/50 hover:text-snooze'
+                ? 'border-line-1 text-ink-2 hover:bg-tint-2'
+                : 'border-line-1 text-ink-3 hover:border-line-2 hover:text-ink-2'
             }`}
           >
             {inst.draining ? 'resume claims' : 'drain'}
@@ -671,7 +665,7 @@ function CopyId({ id, kind }: { id: string; kind: string }) {
         void navigator.clipboard?.writeText(id)
         setCopied(true)
       }}
-      className="text-text-tertiary transition-colors hover:text-text-secondary"
+      className="text-ink-3 transition-colors hover:text-ink-2"
     >
       {copied ? 'copied' : shortId(id)}
     </button>
@@ -720,7 +714,7 @@ function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
 
   if (!data) {
     return (
-      <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+      <p className="py-4 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
         {error ?? 'loading series…'}
       </p>
     )
@@ -729,7 +723,7 @@ function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
   // never met a tick, and history predating the sampler never will.
   if (data.samples.length === 0) {
     return (
-      <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+      <p className="py-4 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
         no samples for this sandbox
       </p>
     )
@@ -738,12 +732,12 @@ function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
     <div className="space-y-4 py-2">
       <div className="grid grid-cols-1 gap-x-8 gap-y-4 md:grid-cols-2">
         <Instrument label="Memory · sampled">
-          <Trace data={mem} color="var(--color-claim)" fmt={(v) => fmtMem(v)} height="h-20" />
+          <Trace data={mem} color="var(--color-ink-2)" fmt={(v) => fmtMem(v)} height="h-20" />
         </Instrument>
         <Instrument label="CPU · derived from cumulative">
           <Trace
             data={cpu}
-            color="var(--color-accent)"
+            color="var(--color-warm)"
             fmt={(v) => `${v.toFixed(2)} cores`}
             height="h-20"
           />
@@ -752,7 +746,7 @@ function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
       {/* The two numbers disagree by design and must not be reconciled: the
           sampler misses sub-minute spikes the kernel high-watermark catches,
           so the peak column legitimately sits above the chart. */}
-      <p className="font-mono text-[9px] leading-relaxed text-text-tertiary/60">
+      <p className="font-mono text-label-sm leading-relaxed text-ink-3/60">
         chart is the sampled shape ({data.samples.length} samples). the peak and cpu columns are the
         teardown snapshot — kernel truth, and higher than the chart whenever a spike fell between
         ticks.
@@ -765,15 +759,15 @@ function SandboxRow({ claim }: { claim: FleetSandboxClaim }) {
   const [open, setOpen] = useState(false)
   const cores = claim.cpu_usec != null ? averageCores(claim.cpu_usec, claim.duration_seconds) : null
   return (
-    <tbody className="border-t border-border-subtle/40">
-      <tr className="hover:bg-surface-raised/30">
+    <tbody className="border-t border-line-1/40">
+      <tr className="hover:bg-raised/30">
         <td className="py-1.5 pr-2 align-top">
           <button
             type="button"
             aria-expanded={open}
             aria-label={`usage series for sandbox ${shortId(claim.id)}`}
             onClick={() => setOpen((o) => !o)}
-            className="text-text-tertiary transition-colors hover:text-accent"
+            className="text-ink-3 transition-colors hover:text-warm"
           >
             {open ? '▾' : '▸'}
           </button>
@@ -787,16 +781,14 @@ function SandboxRow({ claim }: { claim: FleetSandboxClaim }) {
         <td className="py-1.5 pr-3 align-top">
           <SandboxState claim={claim} />
         </td>
-        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
+        <td className="py-1.5 pr-3 text-right align-top text-ink-2">
           {fmtDuration(claim.duration_seconds)}
         </td>
-        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
-          {fmtMem(claim.peak_mem_mb)}
-        </td>
-        <td className="py-1.5 pr-3 text-right align-top text-text-secondary">
+        <td className="py-1.5 pr-3 text-right align-top text-ink-2">{fmtMem(claim.peak_mem_mb)}</td>
+        <td className="py-1.5 pr-3 text-right align-top text-ink-2">
           {claim.cpu_usec != null ? `${coreMinutes(claim.cpu_usec).toFixed(2)}` : '—'}
         </td>
-        <td className="py-1.5 text-right align-top text-text-secondary">
+        <td className="py-1.5 text-right align-top text-ink-2">
           {cores != null ? cores.toFixed(2) : '—'}
         </td>
       </tr>
@@ -816,32 +808,32 @@ function SandboxBreakdown({ instanceId }: { instanceId: string }) {
     `/api/fleet/instances/${encodeURIComponent(instanceId)}/sandboxes`,
   )
   return (
-    <div className="rounded-lg border border-border-subtle/50 bg-surface-raised/20 p-4">
+    <div className="rounded-lg border border-line-1/50 bg-raised/20 p-4">
       <Instrument
         label={`Sandboxes · ${shortId(instanceId)}`}
         aside={
           data ? (
-            <span className="font-mono text-[9px] tabular-nums text-text-tertiary/60">
+            <span className="font-mono text-label-sm tabular-nums text-ink-3/60">
               {data.sandboxes.length} most recent
             </span>
           ) : undefined
         }
       >
         {!data ? (
-          <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+          <p className="py-4 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
             {error ?? 'loading sandboxes…'}
           </p>
         ) : data.sandboxes.length === 0 ? (
           // A control pod never claims, and an executor that hasn't yet is a
           // normal state — an empty table, never an error.
-          <p className="py-4 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+          <p className="py-4 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
             no sandboxes on this instance
           </p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full border-collapse text-left font-mono text-[10px] tabular-nums">
+            <table className="w-full border-collapse text-left font-mono text-label tabular-nums">
               <thead>
-                <tr className="text-[8px] uppercase tracking-wider text-text-tertiary/60">
+                <tr className="text-[8px] uppercase tracking-wider text-ink-3/60">
                   <th className="w-4 py-1 pr-2 font-normal" />
                   <th className="py-1 pr-3 font-normal">run</th>
                   <th className="py-1 pr-3 font-normal">org</th>
@@ -866,7 +858,7 @@ function SandboxBreakdown({ instanceId }: { instanceId: string }) {
 function Readout({
   label,
   value,
-  tone = 'text-text-secondary',
+  tone = 'text-ink-2',
 }: {
   label: string
   value: string
@@ -874,7 +866,7 @@ function Readout({
 }) {
   return (
     <div>
-      <p className="text-[8px] uppercase tracking-wider text-text-tertiary/60">{label}</p>
+      <p className="text-[8px] uppercase tracking-wider text-ink-3/60">{label}</p>
       <p className={`mt-0.5 ${tone}`}>{value}</p>
     </div>
   )
@@ -884,7 +876,7 @@ function QueueBand({ q }: { q: FleetBacklog | null }) {
   if (!q) return null
   if (q.depth === 0) {
     return (
-      <p className="py-6 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+      <p className="py-6 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
         queue empty
       </p>
     )
@@ -894,16 +886,13 @@ function QueueBand({ q }: { q: FleetBacklog | null }) {
     <div className="space-y-3">
       {q.by_org.slice(0, 8).map((o) => (
         <div key={o.org_id} className="flex items-center gap-3">
-          <span
-            className="w-40 shrink-0 truncate font-mono text-[10px] text-text-tertiary"
-            title={o.org_id}
-          >
+          <span className="w-40 shrink-0 truncate font-mono text-label text-ink-3" title={o.org_id}>
             {shortId(o.org_id)}
           </span>
           <div className="flex-1">
-            <Meter value={o.count} max={maxCount} color="var(--color-snooze)" />
+            <Meter value={o.count} max={maxCount} color="var(--color-warm)" />
           </div>
-          <span className="w-24 shrink-0 text-right font-mono text-[10px] tabular-nums text-text-secondary">
+          <span className="w-24 shrink-0 text-right font-mono text-label tabular-nums text-ink-2">
             {o.count} · {fmtDuration(o.oldest_wait_seconds)}
           </span>
         </div>
@@ -917,8 +906,8 @@ function SkeletonRow({ n }: { n: number }) {
     <div className="grid grid-cols-2 gap-x-8 gap-y-7 md:grid-cols-3 lg:grid-cols-5">
       {Array.from({ length: n }).map((_, i) => (
         <div key={i} className="animate-pulse">
-          <div className="mb-3 h-2 w-16 rounded bg-border-subtle/60" />
-          <div className="h-6 w-20 rounded bg-border-subtle/40" />
+          <div className="mb-3 h-2 w-16 rounded bg-line-1/60" />
+          <div className="h-6 w-20 rounded bg-line-1/40" />
         </div>
       ))}
     </div>
@@ -987,8 +976,8 @@ export default function Fleet() {
     <div className="mx-auto max-w-6xl">
       <div className="mb-8 flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-light tracking-tight text-text-primary">Fleet</h1>
-          <p className="mt-1 font-mono text-[11px] tracking-[0.08em] text-text-tertiary">
+          <h1 className="text-2xl font-light tracking-tight text-ink-1">Fleet</h1>
+          <p className="mt-1 font-mono text-reported tracking-[0.08em] text-ink-3">
             sandbox fleet · live capacity &amp; queue
           </p>
         </div>
@@ -996,7 +985,7 @@ export default function Fleet() {
       </div>
 
       {err && !overview.data && (
-        <p className="mb-6 rounded-md border border-dismiss/30 bg-dismiss/5 px-4 py-3 font-mono text-[11px] text-dismiss">
+        <p className="mb-6 rounded-md border border-alarm/30 bg-alarm/5 px-4 py-3 font-mono text-reported text-alarm">
           {err}
         </p>
       )}
@@ -1013,7 +1002,7 @@ export default function Fleet() {
             label="Machines"
             aside={
               instances.data ? (
-                <span className="font-mono text-[9px] text-text-tertiary/60">
+                <span className="font-mono text-label-sm text-ink-3/60">
                   {instances.data.instances.length} registered
                 </span>
               ) : undefined
@@ -1021,7 +1010,7 @@ export default function Fleet() {
           >
             {instances.data ? (
               instances.data.instances.length === 0 ? (
-                <p className="py-6 text-center font-mono text-[10px] uppercase tracking-wider text-text-tertiary/50">
+                <p className="py-6 text-center font-mono text-label uppercase tracking-wider text-ink-3/50">
                   no registered instances
                 </p>
               ) : (
@@ -1058,28 +1047,28 @@ export default function Fleet() {
               <Instrument label="Active runs">
                 <Trace
                   data={trace(series, 'active')}
-                  color="var(--color-delegate)"
+                  color="var(--color-cool)"
                   fmt={(v) => `${Math.round(v)} runs`}
                 />
               </Instrument>
               <Instrument label="Queue depth">
                 <Trace
                   data={trace(series, 'queued')}
-                  color="var(--color-snooze)"
+                  color="var(--color-warm)"
                   fmt={(v) => `${Math.round(v)} waiting`}
                 />
               </Instrument>
               <Instrument label="CPU (avg)">
                 <Trace
                   data={trace(series, 'cpu')}
-                  color="var(--color-accent)"
+                  color="var(--color-warm)"
                   fmt={(v) => `${Math.round(v)}%`}
                 />
               </Instrument>
               <Instrument label="Memory free (total)">
                 <Trace
                   data={trace(series, 'memGB')}
-                  color="var(--color-claim)"
+                  color="var(--color-ink-2)"
                   fmt={(v) => `${v.toFixed(1)}GB`}
                 />
               </Instrument>
@@ -1090,7 +1079,7 @@ export default function Fleet() {
             label="Queue by org"
             aside={
               queue.data ? (
-                <span className="font-mono text-[9px] tabular-nums text-text-tertiary/60">
+                <span className="font-mono text-label-sm tabular-nums text-ink-3/60">
                   {queue.data.depth} waiting
                 </span>
               ) : undefined

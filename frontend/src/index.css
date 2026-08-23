@@ -1,158 +1,82 @@
 @import 'tailwindcss';
 @import 'react-diff-view/style/index.css';
 
+/* The design language. Order matters only in that fonts must be declared
+   before anything asks for them; the token files are independent otherwise.
+   Every value in the product resolves through these — there is no second
+   vocabulary and no alias layer. See src/ui/CONVENTIONS.md. */
+@import './fonts.css';
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/elevation.css';
+@import './tokens/motion.css';
+
 @custom-variant dark (&:where(.dark, .dark *));
 
-@theme {
-  /* Warm neutral palette — Shanghai hotel lobby meets Her */
-  --color-surface: #f7f5f2;
-  --color-surface-raised: #ffffff;
-  --color-surface-overlay: rgba(255, 255, 255, 0.45);
-  --color-border-glass: rgba(255, 255, 255, 0.7);
-  --color-border-subtle: rgba(0, 0, 0, 0.06);
-  --color-text-primary: #1a1a1a;
-  --color-text-secondary: #4a4541;
-  --color-text-tertiary: #6b6560;
-  /* Inverted surface — a chip that always contrasts maximally with the
-     page (dark fill on light, light fill on dark) for primary buttons.
-     Pairs surface-inverse (fill) with text-inverse (label). Light-mode
-     values match the legacy text-primary/white pair so light is unchanged. */
-  --color-surface-inverse: #1a1a1a;
-  --color-text-inverse: #ffffff;
-  --color-accent: #a85a3a;
-  --color-accent-soft: rgba(168, 90, 58, 0.14);
-  --color-dismiss: #a84545;
-  --color-claim: #3f6b4d;
-  --color-delegate: #5e4f8f;
-  --color-snooze: #8a6e1f;
+/* ── Base ───────────────────────────────────────────────────────────
+   The minimum the language needs to read correctly. Tailwind's preflight
+   already handles box-sizing and margin reset, so this is only what it
+   does not cover. */
 
-  /* Tint overlays — referenced as var(--tint-warm-*) in raw CSS
-     so component styling flips cleanly between light/dark. */
-  --tint-warm-soft: rgba(0, 0, 0, 0.015);
-  --tint-warm: rgba(0, 0, 0, 0.03);
-  --tint-warm-strong: rgba(0, 0, 0, 0.06);
-}
+/* The shell is a fixed frame with a scrolling body, and it asks for its height
+   with `height: 100%`. A percentage height resolves against the parent, so
+   without an unbroken chain from the viewport down it falls back to content
+   height and the rail grows with whatever page is inside it — which is the
+   opposite of a frame.
 
-/* Dark palette — same warm earthy register, inverted luminance. */
-:root.dark {
-  --color-surface: #161311;
-  --color-surface-raised: #221f1c;
-  --color-surface-overlay: rgba(20, 16, 14, 0.7);
-  --color-border-glass: rgba(255, 255, 255, 0.08);
-  --color-border-subtle: rgba(255, 255, 255, 0.08);
-  --color-text-primary: #ece7e0;
-  --color-text-secondary: #b8b0a8;
-  --color-text-tertiary: #8a827a;
-  --color-surface-inverse: #ece7e0;
-  --color-text-inverse: #161311;
-  --color-accent: #d18a64;
-  --color-accent-soft: rgba(209, 138, 100, 0.18);
-  --color-dismiss: #d97777;
-  --color-claim: #7fb194;
-  --color-delegate: #a294cf;
-  --color-snooze: #d4b566;
-
-  --tint-warm-soft: rgba(255, 255, 255, 0.03);
-  --tint-warm: rgba(255, 255, 255, 0.05);
-  --tint-warm-strong: rgba(255, 255, 255, 0.08);
-}
-
-/* Re-target Tailwind's hardcoded black/white tint utilities so
-   the existing component styling reads correctly in dark mode
-   without touching ~170 call sites. */
-.dark .bg-black\/\[0\.01\],
-.dark .bg-black\/\[0\.015\],
-.dark .bg-black\/\[0\.02\] {
-  background-color: rgba(255, 255, 255, 0.025);
-}
-.dark .bg-black\/\[0\.03\],
-.dark .bg-black\/\[0\.04\] {
-  background-color: rgba(255, 255, 255, 0.04);
-}
-.dark .bg-black\/\[0\.05\],
-.dark .bg-black\/\[0\.06\],
-.dark .bg-black\/5 {
-  background-color: rgba(255, 255, 255, 0.06);
-}
-.dark .bg-black\/\[0\.08\] {
-  background-color: rgba(255, 255, 255, 0.08);
-}
-.dark .bg-black\/10 {
-  background-color: rgba(255, 255, 255, 0.1);
-}
-.dark .bg-black\/15 {
-  background-color: rgba(255, 255, 255, 0.12);
-}
-.dark .bg-black\/20 {
-  background-color: rgba(255, 255, 255, 0.16);
-}
-.dark .bg-black\/30 {
-  background-color: rgba(255, 255, 255, 0.22);
-}
-
-.dark .bg-white\/30 {
-  background-color: rgba(255, 255, 255, 0.03);
-}
-.dark .bg-white\/40 {
-  background-color: rgba(255, 255, 255, 0.04);
-}
-.dark .bg-white\/45,
-.dark .bg-white\/50 {
-  background-color: rgba(255, 255, 255, 0.05);
-}
-.dark .bg-white\/60,
-.dark .bg-white\/65 {
-  background-color: rgba(255, 255, 255, 0.07);
-}
-.dark .bg-white\/70 {
-  background-color: rgba(255, 255, 255, 0.08);
-}
-.dark .bg-white\/80,
-.dark .bg-white\/90,
-.dark .bg-white\/92 {
-  background-color: rgba(255, 255, 255, 0.1);
-}
-
-/* The active "selected" toggle pill (Settings, Slider) uses bg-white.
-   In dark mode plain white is jarring; soften it. */
-.dark .bg-white {
-  background-color: rgba(255, 255, 255, 0.1);
-}
-
-.dark .border-white\/40 {
-  border-color: rgba(255, 255, 255, 0.08);
-}
-.dark .border-white\/80,
-.dark .border-white\/90 {
-  border-color: rgba(255, 255, 255, 0.12);
-}
-.dark .text-black\/\[0\.08\] {
-  color: rgba(255, 255, 255, 0.16);
-}
-.dark .text-white\/70 {
-  color: rgba(255, 255, 255, 0.85);
-}
-.dark .ring-black\/\[0\.04\] {
-  --tw-ring-color: rgba(255, 255, 255, 0.05);
-}
-
-/* Gradients are part of the light-mode glass treatment; in dark
-   mode they read as near-white rectangles. Drop every gradient and
-   fall back to the raised surface. */
-.dark [class*='bg-gradient'] {
-  background-image: none !important;
-  background-color: var(--color-surface-raised);
+   The chain is load-bearing and easy to lose: the design bundle set it in its
+   own harness, and /dev/ui hid its absence here because the gallery mounts the
+   shell in a fixed-height box. Anything taller than the viewport still scrolls
+   normally outside the shell (overflow propagates from body to the viewport);
+   inside it, .sh-body is the scroll container by design. */
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
-  background: var(--color-surface);
-  color: var(--color-text-primary);
-  font-family:
-    'Inter',
-    system-ui,
-    -apple-system,
-    sans-serif;
+  background: var(--color-ground);
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  font-size: var(--text-body);
+  line-height: var(--leading-body);
   -webkit-font-smoothing: antialiased;
+}
+
+/* TEMPORARY — remove page by page as each surface is rebuilt.
+   The retired top bar wrapped every page in `main.px-8.py-8`, so all fifteen
+   of them assume a 2rem gutter they do not draw: some rely on it for their
+   margins, and Factory cancels it with -mx-8 -my-8 to go full bleed. The new
+   shell's .sh-body is unpadded on purpose — in the design the frame owns the
+   frame and each page brings its own padding — so this restores exactly what
+   was there rather than leaving every legacy page flush against the rail.
+
+   It lives here and not in ui/shell/shell.css: that file is the design system
+   and stays faithful. This is scaffolding for pages that have not caught up. */
+.sh-body {
+  padding: 2rem;
+}
+
+/* Links take the measurement hue, at zero specificity so any utility class
+   wins without a fight. The underline is deliberately NOT global: this app is
+   mostly nav pills and card links, where an underline reads as noise. Prose
+   surfaces opt in — see .review-markdown a below. */
+:where(a) {
+  color: var(--color-warm);
+}
+:where(a):hover {
+  color: var(--color-ink-1);
+}
+
+/* Numbers that came from the system align. Not optional in a readout. */
+.tf-tabular,
+code,
+kbd,
+samp {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 /* Tailwind v4 dropped the default cursor: pointer on buttons; restore it for
@@ -163,24 +87,36 @@ body {
   cursor: pointer;
 }
 
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 3px;
+  border-radius: var(--radius-nested);
+}
+
 /* ── react-diff-view theme overrides ── */
 /* Base stylesheet imported above provides layout. We retheme via CSS variables + overrides. */
 .diff {
   --diff-background-color: transparent;
-  --diff-text-color: var(--color-text-primary);
-  --diff-font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --diff-text-color: var(--color-ink-1);
+  --diff-font-family: var(--font-mono);
   --diff-font-size: 12.5px;
+
+  /* Added and removed lines are green and red because that is git's
+     convention, not this system's — the design language has three hues and
+     none of them means "a line arrived". Treated as a vendor mark: local to
+     .diff, never reachable as an app token. Revisit with the run view. */
+  --diff-add-ink: #3f6b4d;
 
   /* Insert (addition) — warm sage green */
   --diff-gutter-insert-background-color: rgba(63, 107, 77, 0.1);
-  --diff-gutter-insert-text-color: var(--color-claim);
+  --diff-gutter-insert-text-color: var(--diff-add-ink);
   --diff-code-insert-background-color: rgba(63, 107, 77, 0.12);
   --diff-code-insert-text-color: inherit;
   --diff-code-insert-edit-background-color: rgba(63, 107, 77, 0.28);
 
   /* Delete (removal) — warm rose */
   --diff-gutter-delete-background-color: rgba(168, 69, 69, 0.1);
-  --diff-gutter-delete-text-color: var(--color-dismiss);
+  --diff-gutter-delete-text-color: var(--color-alarm);
   --diff-code-delete-background-color: rgba(168, 69, 69, 0.12);
   --diff-code-delete-text-color: inherit;
   --diff-code-delete-edit-background-color: rgba(168, 69, 69, 0.28);
@@ -190,16 +126,20 @@ body {
   --diff-code-selected-background-color: rgba(168, 90, 58, 0.08);
 
   /* Omit (collapsed) line */
-  --diff-omit-gutter-line-color: var(--color-border-subtle);
+  --diff-omit-gutter-line-color: var(--color-line-1);
 
   font-size: 12.5px;
   line-height: 1.6;
 }
 
+:root.dark .diff {
+  --diff-add-ink: #7fb194;
+}
+
 .diff .diff-gutter {
-  color: var(--color-text-tertiary);
+  color: var(--color-ink-3);
   font-size: 11px;
-  border-right: 1px solid var(--color-border-subtle);
+  border-right: 1px solid var(--color-line-1);
 }
 
 .diff .diff-code {
@@ -217,12 +157,12 @@ body {
 
 /* Decoration / hunk headers */
 .diff .diff-decoration {
-  background: var(--tint-warm-soft);
+  background: var(--color-tint-1);
 }
 .diff .diff-decoration-content {
   padding: 4px 12px;
   font-size: 11px;
-  color: var(--color-text-tertiary);
+  color: var(--color-ink-3);
   font-style: italic;
 }
 
@@ -340,19 +280,19 @@ body {
   font-size: 1.25em;
   font-weight: 600;
   margin: 0.8em 0 0.4em;
-  color: var(--color-text-primary);
+  color: var(--color-ink-1);
 }
 .review-markdown h2 {
   font-size: 1.1em;
   font-weight: 600;
   margin: 0.7em 0 0.3em;
-  color: var(--color-text-primary);
+  color: var(--color-ink-1);
 }
 .review-markdown h3 {
   font-size: 1em;
   font-weight: 600;
   margin: 0.6em 0 0.2em;
-  color: var(--color-text-primary);
+  color: var(--color-ink-1);
 }
 .review-markdown p {
   margin: 0.4em 0;
@@ -368,13 +308,13 @@ body {
 .review-markdown code {
   font-family: 'SF Mono', 'Fira Code', monospace;
   font-size: 0.9em;
-  background: var(--tint-warm);
+  background: var(--color-tint-2);
   border-radius: 4px;
   padding: 0.15em 0.35em;
 }
 .review-markdown pre {
-  background: var(--tint-warm-soft);
-  border: 1px solid var(--color-border-subtle);
+  background: var(--color-tint-1);
+  border: 1px solid var(--color-line-1);
   border-radius: 8px;
   padding: 0.75em 1em;
   overflow-x: auto;
@@ -386,24 +326,24 @@ body {
   border-radius: 0;
 }
 .review-markdown blockquote {
-  border-left: 3px solid var(--color-accent);
+  border-left: 3px solid var(--color-warm);
   padding-left: 0.75em;
   margin: 0.5em 0;
-  color: var(--color-text-tertiary);
+  color: var(--color-ink-3);
 }
 .review-markdown a {
-  color: var(--color-accent);
+  color: var(--color-warm);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 .review-markdown hr {
   border: none;
-  border-top: 1px solid var(--color-border-subtle);
+  border-top: 1px solid var(--color-line-1);
   margin: 0.75em 0;
 }
 .review-markdown strong {
   font-weight: 600;
-  color: var(--color-text-primary);
+  color: var(--color-ink-1);
 }
 .review-markdown em {
   font-style: italic;
@@ -538,8 +478,6 @@ body {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .hmi-anim {
-    animation: none !important;
-  }
-}
+/* No .hmi-anim reduced-motion rule here: tokens/motion.css blankets animation
+   and transition on every element under the same query, so the rule that used
+   to live here was a narrower duplicate of one that already covers it. */

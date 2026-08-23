@@ -90,28 +90,26 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
   const isEmpty = loaded && entities.length === 0
 
   return (
-    <section className="rounded-2xl border border-border-glass bg-surface-raised/60 backdrop-blur-sm shadow-sm shadow-black/[0.02] flex flex-col max-h-[40vh] overflow-hidden">
-      <header className="px-5 pt-4 pb-3 border-b border-border-subtle">
-        <h2 className="text-[14px] font-semibold text-text-primary tracking-tight">
+    <section className="rounded-2xl border border-line-1 bg-raised/60 backdrop-blur-sm shadow-float shadow-black/[0.02] flex flex-col max-h-[40vh] overflow-hidden">
+      <header className="px-5 pt-4 pb-3 border-b border-line-1">
+        <h2 className="text-body font-semibold text-ink-1 tracking-tight">
           Entities{' '}
           {entities.length > 0 ? (
-            <span className="text-text-tertiary font-normal">({total ?? entities.length})</span>
+            <span className="text-ink-3 font-normal">({total ?? entities.length})</span>
           ) : null}
         </h2>
-        <p className="text-[12px] text-text-tertiary mt-0.5 leading-relaxed">
+        <p className="text-ui text-ink-3 mt-0.5 leading-relaxed">
           Active work assigned to this project. Click a row to see why it was assigned.
         </p>
       </header>
 
       <div className="flex-1 overflow-y-auto px-2 py-2 min-h-0">
-        {isLoading && (
-          <p className="text-[12px] text-text-tertiary text-center py-8">Loading entities…</p>
-        )}
+        {isLoading && <p className="text-ui text-ink-3 text-center py-8">Loading entities…</p>}
         {loadError && !isLoading && (
-          <p className="text-[12px] text-dismiss text-center py-8">{loadError}</p>
+          <p className="text-ui text-alarm text-center py-8">{loadError}</p>
         )}
         {isEmpty && (
-          <p className="text-[12px] text-text-tertiary text-center py-8 px-4 leading-relaxed">
+          <p className="text-ui text-ink-3 text-center py-8 px-4 leading-relaxed">
             No entities yet. Auto-classified entities and entities you reclaim from the
             create-project popup will appear here.
           </p>
@@ -133,7 +131,7 @@ export default function ProjectEntitiesPanel({ projectId }: Props) {
                 type="button"
                 onClick={loadMore}
                 disabled={loading}
-                className="mt-1.5 w-full py-1.5 text-[11px] text-accent transition-colors hover:text-accent/70 disabled:opacity-50"
+                className="mt-1.5 w-full py-1.5 text-[11px] text-warm transition-colors hover:text-warm/70 disabled:opacity-50"
               >
                 {loading
                   ? 'Loading…'
@@ -163,7 +161,7 @@ function EntityRow({ entity, expanded, onToggle }: RowProps) {
   // onClick stopPropagation prevents row toggle on link clicks.
   return (
     <li
-      className="px-3 py-2 rounded-xl hover:bg-black/[0.02] focus:bg-black/[0.02] focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 transition-colors cursor-pointer"
+      className="px-3 py-2 rounded-xl hover:bg-tint-2 focus:bg-tint-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-warm/40 transition-colors cursor-pointer"
       onClick={onToggle}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -175,8 +173,8 @@ function EntityRow({ entity, expanded, onToggle }: RowProps) {
       tabIndex={0}
       aria-expanded={expanded}
     >
-      <div className="flex items-center gap-2.5 text-[13px] min-w-0">
-        <span className="text-text-tertiary text-[10px] uppercase tracking-wide w-9 shrink-0">
+      <div className="flex items-center gap-2.5 text-body min-w-0">
+        <span className="text-ink-3 text-label uppercase tracking-wide w-9 shrink-0">
           {sourceShort(entity.source)}
         </span>
         <a
@@ -184,23 +182,23 @@ function EntityRow({ entity, expanded, onToggle }: RowProps) {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="text-text-primary font-medium hover:text-accent transition-colors flex items-center gap-1 shrink-0 max-w-[40%] truncate"
+          className="text-ink-1 font-medium hover:text-warm transition-colors flex items-center gap-1 shrink-0 max-w-[40%] truncate"
           title={entity.source_id}
         >
           <span className="truncate">{entity.source_id}</span>
           <ExternalLink size={11} className="opacity-50 shrink-0" />
         </a>
-        <span className="text-text-secondary truncate flex-1 min-w-0">{entity.title}</span>
-        <span className="text-[10px] text-text-tertiary border border-border-subtle rounded-full px-2 py-0.5 whitespace-nowrap shrink-0">
+        <span className="text-ink-2 truncate flex-1 min-w-0">{entity.title}</span>
+        <span className="text-label text-ink-3 border border-line-1 rounded-full px-2 py-0.5 whitespace-nowrap shrink-0">
           {entity.state}
         </span>
         <ChevronDown
           size={14}
-          className={`text-text-tertiary shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}
+          className={`text-ink-3 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}
         />
       </div>
       {expanded && (
-        <div className="mt-1.5 ml-11 text-[12px] text-text-tertiary leading-relaxed">
+        <div className="mt-1.5 ml-11 text-ui text-ink-3 leading-relaxed">
           {hasRationale ? (
             entity.classification_rationale
           ) : (

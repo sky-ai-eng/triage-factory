@@ -122,7 +122,7 @@ export default function InviteAccept() {
   if (!token) {
     return (
       <Card title="Invalid invite link">
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           This link is missing its invitation token. Ask your admin for a fresh invite link.
         </p>
       </Card>
@@ -135,7 +135,7 @@ export default function InviteAccept() {
   if (previewLoading || auth.status === 'loading') {
     return (
       <Card title="Checking your invitation…">
-        <p className="text-[13px] text-text-tertiary">One moment.</p>
+        <p className="text-body text-ink-3">One moment.</p>
       </Card>
     )
   }
@@ -143,7 +143,7 @@ export default function InviteAccept() {
   if (previewError) {
     return (
       <Card title="Couldn’t load the invitation">
-        <p className="mb-4 text-[13px] leading-relaxed text-text-tertiary">{previewError}</p>
+        <p className="mb-4 text-body leading-relaxed text-ink-3">{previewError}</p>
         <PrimaryButton onClick={() => void loadPreview()}>Try again</PrimaryButton>
       </Card>
     )
@@ -152,9 +152,7 @@ export default function InviteAccept() {
   if (!preview || preview.status !== 'valid') {
     return (
       <Card title="This invitation isn’t available">
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
-          {terminalMessage(preview?.status)}
-        </p>
+        <p className="text-body leading-relaxed text-ink-3">{terminalMessage(preview?.status)}</p>
       </Card>
     )
   }
@@ -165,7 +163,7 @@ export default function InviteAccept() {
   if (mismatch) {
     return (
       <Card title="Signed in as the wrong account">
-        <p className="mb-4 text-[13px] leading-relaxed text-text-tertiary">{mismatch.message}</p>
+        <p className="mb-4 text-body leading-relaxed text-ink-3">{mismatch.message}</p>
         <PrimaryButton onClick={() => void handleSwitchAccount()}>
           Log out and sign in with the invited account
         </PrimaryButton>
@@ -175,12 +173,12 @@ export default function InviteAccept() {
 
   return (
     <Card title="You’ve been invited">
-      <p className="text-[13px] leading-relaxed text-text-secondary">
-        You’ve been invited to <span className="font-semibold text-text-primary">{orgName}</span> as{' '}
-        <span className="font-semibold text-text-primary">{preview.role}</span>.
+      <p className="text-body leading-relaxed text-ink-2">
+        You’ve been invited to <span className="font-semibold text-ink-1">{orgName}</span> as{' '}
+        <span className="font-semibold text-ink-1">{preview.role}</span>.
       </p>
       {preview.invited_by_name && (
-        <p className="mt-1 text-[12px] text-text-tertiary">Invited by {preview.invited_by_name}.</p>
+        <p className="mt-1 text-ui text-ink-3">Invited by {preview.invited_by_name}.</p>
       )}
 
       <div className="mt-5">
@@ -190,7 +188,7 @@ export default function InviteAccept() {
               {accepting ? 'Accepting…' : 'Accept invitation'}
             </PrimaryButton>
             {acceptError && (
-              <p role="alert" className="mt-3 text-[12px] text-dismiss">
+              <p role="alert" className="mt-3 text-ui text-alarm">
                 {acceptError}
               </p>
             )}
@@ -198,7 +196,7 @@ export default function InviteAccept() {
         ) : (
           <>
             <PrimaryButton onClick={goSignIn}>Sign in to accept</PrimaryButton>
-            <p className="mt-3 text-[11px] leading-relaxed text-text-tertiary">
+            <p className="mt-3 text-reported leading-relaxed text-ink-3">
               You’ll sign in with GitHub, then land back here to accept.
             </p>
           </>
@@ -225,9 +223,9 @@ function terminalMessage(status: InvitePreview['status'] | undefined): string {
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-surface p-4">
-      <div className="w-full max-w-md space-y-4 rounded-2xl border border-border-glass bg-surface-raised p-8 shadow-lg shadow-black/[0.04] backdrop-blur-xl">
-        <h1 className="text-[22px] font-semibold tracking-tight text-text-primary">{title}</h1>
+    <div className="flex min-h-screen items-center justify-center bg-ground p-4">
+      <div className="w-full max-w-md space-y-4 rounded-2xl border border-line-1 bg-raised p-8 shadow-float shadow-black/[0.04] backdrop-blur-xl">
+        <h1 className="text-[22px] font-semibold tracking-tight text-ink-1">{title}</h1>
         {children}
       </div>
     </div>
@@ -248,7 +246,7 @@ function PrimaryButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="w-full rounded-xl bg-accent px-4 py-2.5 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-40"
+      className="w-full rounded-xl bg-warm px-4 py-2.5 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:cursor-not-allowed disabled:opacity-40"
     >
       {children}
     </button>

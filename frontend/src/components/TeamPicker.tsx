@@ -42,7 +42,7 @@ export default function TeamPicker({ value, onChange, label = 'Team', className 
 
   return (
     <div className={className}>
-      <label className="mb-1 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+      <label className="mb-1 block text-reported font-medium uppercase tracking-wide text-ink-3">
         {label}
       </label>
       <div ref={ref} className="relative">
@@ -50,24 +50,24 @@ export default function TeamPicker({ value, onChange, label = 'Team', className 
           type="button"
           onClick={() => setOpen((v) => !v)}
           className="
-            flex w-full items-center justify-between gap-2 rounded-lg border border-border-subtle
-            bg-white/60 px-3 py-1.5 text-left text-[13px] text-text-primary
-            hover:bg-white focus:border-accent focus:outline-none transition-colors
+            flex w-full items-center justify-between gap-2 rounded-lg border border-line-1
+            bg-raised px-3 py-1.5 text-left text-body text-ink-1
+            hover:bg-raised focus:border-warm focus:outline-none transition-colors
           "
         >
           <span className="inline-flex items-center gap-1.5 truncate">
-            <Users size={13} className="text-text-tertiary" />
-            <span className={selected ? '' : 'text-text-tertiary'}>
+            <Users size={13} className="text-ink-3" />
+            <span className={selected ? '' : 'text-ink-3'}>
               {selected ? selected.name : 'Select a team…'}
             </span>
           </span>
-          <ChevronDown size={14} className="shrink-0 text-text-tertiary" />
+          <ChevronDown size={14} className="shrink-0 text-ink-3" />
         </button>
         {open && (
           <div
             className="
               absolute top-full left-0 z-40 mt-1 max-h-56 w-full overflow-y-auto rounded-lg
-              border border-border-subtle bg-white py-1 shadow-lg
+              border border-line-1 bg-raised py-1 shadow-float
             "
           >
             {teams.map((t) => (
@@ -78,10 +78,10 @@ export default function TeamPicker({ value, onChange, label = 'Team', className 
                   onChange(t.id)
                   setOpen(false)
                 }}
-                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-black/[0.03]"
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-body hover:bg-tint-2"
               >
-                <span className="truncate text-text-primary">{t.name}</span>
-                {value === t.id && <Check size={13} className="shrink-0 text-accent" />}
+                <span className="truncate text-ink-1">{t.name}</span>
+                {value === t.id && <Check size={13} className="shrink-0 text-warm" />}
               </button>
             ))}
           </div>

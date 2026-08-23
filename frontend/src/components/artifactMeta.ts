@@ -24,18 +24,18 @@ export interface KindMeta {
 // KIND_META is exhaustive over ArtifactKind. A server value outside the modeled
 // union falls through to FALLBACK_META at the render layer (forward-compat).
 export const KIND_META: Record<ArtifactKind, KindMeta> = {
-  branch: { icon: GitBranch, label: 'branch', text: 'text-text-tertiary' },
+  branch: { icon: GitBranch, label: 'branch', text: 'text-ink-3' },
   pull_request: { icon: GitPullRequest, label: 'pull request', text: 'text-delegate' },
   review: { icon: Eye, label: 'review', text: 'text-snooze' },
-  issue: { icon: CircleDot, label: 'issue', text: 'text-accent' },
-  comment: { icon: MessageSquare, label: 'comment', text: 'text-text-tertiary' },
-  message: { icon: MessageCircle, label: 'message', text: 'text-text-tertiary' },
+  issue: { icon: CircleDot, label: 'issue', text: 'text-warm' },
+  comment: { icon: MessageSquare, label: 'comment', text: 'text-ink-3' },
+  message: { icon: MessageCircle, label: 'message', text: 'text-ink-3' },
 }
 
 export const FALLBACK_META: KindMeta = {
   icon: CircleDot,
   label: 'artifact',
-  text: 'text-text-tertiary',
+  text: 'text-ink-3',
 }
 
 // ARTIFACT_KINDS is the canonical kind order for the feed's kind filter — the

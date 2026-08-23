@@ -19,21 +19,21 @@ import { isActiveConversation } from '../../lib/conversationStatus'
 export type Tone = 'rust' | 'active' | 'good' | 'attention' | 'problem' | 'neutral'
 
 export const TONE_VAR: Record<Tone, string> = {
-  rust: 'var(--color-accent)',
-  active: 'var(--color-delegate)',
-  good: 'var(--color-claim)',
-  attention: 'var(--color-snooze)',
-  problem: 'var(--color-dismiss)',
-  neutral: 'var(--color-text-tertiary)',
+  rust: 'var(--color-warm)',
+  active: 'var(--color-cool)',
+  good: 'var(--color-ink-1)',
+  attention: 'var(--color-warm)',
+  problem: 'var(--color-alarm)',
+  neutral: 'var(--color-ink-3)',
 }
 
 export const TONE_TEXT: Record<Tone, string> = {
-  rust: 'text-accent',
-  active: 'text-delegate',
-  good: 'text-claim',
-  attention: 'text-snooze',
-  problem: 'text-dismiss',
-  neutral: 'text-text-tertiary',
+  rust: 'text-warm',
+  active: 'text-cool',
+  good: 'text-ink-1',
+  attention: 'text-warm',
+  problem: 'text-alarm',
+  neutral: 'text-ink-3',
 }
 
 export interface Glow {
@@ -57,11 +57,11 @@ export function conversationGlow(conversation: Conversation): Glow | null {
 export type StepState = 'done' | 'active' | 'failed' | 'current' | 'pending'
 
 export const STEP_VAR: Record<StepState, string> = {
-  done: 'var(--color-claim)',
-  active: 'var(--color-delegate)',
-  failed: 'var(--color-dismiss)',
-  current: 'var(--color-accent)',
-  pending: 'var(--color-text-tertiary)',
+  done: 'var(--color-ink-2)',
+  active: 'var(--color-cool)',
+  failed: 'var(--color-alarm)',
+  current: 'var(--color-warm)',
+  pending: 'var(--color-ink-3)',
 }
 
 // formatAge — coarse "just now / 4h / 3d" for the card's age caption.

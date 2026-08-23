@@ -123,14 +123,14 @@ export default function JiraAccessGroup({
           title and tucks Disconnect above the status line. */}
       {!bare && (
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-[13px] font-medium text-text-secondary">Jira connection</h2>
+          <h2 className="text-body font-medium text-ink-2">Jira connection</h2>
           {connected && (
             <div className="flex items-center gap-3">
               {canReplace && (
                 <button
                   type="button"
                   onClick={onReplace}
-                  className="text-[11px] text-accent transition-colors hover:underline"
+                  className="text-reported text-warm transition-colors hover:underline"
                 >
                   Replace credential
                 </button>
@@ -138,7 +138,7 @@ export default function JiraAccessGroup({
               <button
                 type="button"
                 onClick={disconnect}
-                className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+                className="text-reported text-alarm transition-colors hover:text-alarm/80"
               >
                 Disconnect
               </button>
@@ -182,13 +182,13 @@ export default function JiraAccessGroup({
                   onChange={(e) => onChange({ jira_api_token: e.target.value })}
                   className={field}
                 />
-                <p className="mt-1.5 text-[11px] leading-snug text-text-tertiary">
+                <p className="mt-1.5 text-reported leading-snug text-ink-3">
                   Create one at{' '}
                   <a
                     href="https://id.atlassian.com/manage-profile/security/api-tokens"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-accent hover:underline"
+                    className="text-warm hover:underline"
                   >
                     Atlassian API token settings
                   </a>
@@ -212,9 +212,9 @@ export default function JiraAccessGroup({
         /* Connected — status + (bare) the Disconnect the carded layout puts on
            its heading row. */
         <div className="space-y-2">
-          <div className="flex items-center gap-2 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
-            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-claim" />
-            <span className="text-[12px] text-claim">
+          <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
+            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm" />
+            <span className="text-ui text-ink-2">
               Connected to {value.jira_url.replace(/^https?:\/\//, '')}
             </span>
             {bare && (
@@ -223,7 +223,7 @@ export default function JiraAccessGroup({
                   <button
                     type="button"
                     onClick={onReplace}
-                    className="text-[11px] text-accent transition-colors hover:underline"
+                    className="text-reported text-warm transition-colors hover:underline"
                   >
                     Replace credential
                   </button>
@@ -231,7 +231,7 @@ export default function JiraAccessGroup({
                 <button
                   type="button"
                   onClick={disconnect}
-                  className="text-[11px] text-dismiss transition-colors hover:text-dismiss/80"
+                  className="text-reported text-alarm transition-colors hover:text-alarm/80"
                 >
                   Disconnect
                 </button>
@@ -241,7 +241,7 @@ export default function JiraAccessGroup({
           {/* Says why there's no Replace here, rather than leaving its absence
               to be discovered. */}
           {envProvided && (
-            <p className="text-[11px] leading-relaxed text-text-tertiary">
+            <p className="text-reported leading-relaxed text-ink-3">
               This connection comes from <code>TRIAGE_FACTORY_JIRA_*</code> environment variables,
               which take precedence over anything stored here — change it where the server is
               started, or unset those variables to manage it from Settings.

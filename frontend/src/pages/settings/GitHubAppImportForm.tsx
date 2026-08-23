@@ -134,14 +134,14 @@ export default function GitHubAppImportForm({
 
   return (
     <div className="space-y-5">
-      <p className="text-[13px] leading-relaxed text-text-tertiary">
+      <p className="text-body leading-relaxed text-ink-3">
         Connect a GitHub App you already have. Supply its App ID and a private key (.pem) — Triage
         Factory validates the pair against GitHub and reads the App&rsquo;s permissions itself, so
         you don&rsquo;t need to be the App&rsquo;s owner or a GitHub org owner.
       </p>
 
       <label className="block space-y-2">
-        <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+        <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
           App ID
         </span>
         <input
@@ -152,17 +152,17 @@ export default function GitHubAppImportForm({
           onChange={(e) => setAppId(e.target.value)}
           className={glassInputClass}
         />
-        <span className="block text-[11px] leading-relaxed text-text-tertiary">
+        <span className="block text-reported leading-relaxed text-ink-3">
           The numeric App ID from the App&rsquo;s GitHub settings (not the client ID).
         </span>
       </label>
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="text-reported font-medium uppercase tracking-wide text-ink-3">
             Private key (PEM)
           </span>
-          <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-accent transition-colors hover:text-accent/80">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-reported font-medium text-warm transition-colors hover:text-warm/80">
             <Upload size={12} />
             Upload .pem
             <input type="file" accept=".pem" className="hidden" onChange={onPemFile} />
@@ -174,16 +174,16 @@ export default function GitHubAppImportForm({
           onChange={(e) => setPem(e.target.value)}
           rows={5}
           spellCheck={false}
-          className={`${glassInputClass} resize-y font-mono text-[12px] leading-snug`}
+          className={`${glassInputClass} resize-y font-mono text-ui leading-snug`}
         />
-        <span className="block text-[11px] leading-relaxed text-text-tertiary">
+        <span className="block text-reported leading-relaxed text-ink-3">
           Paste the full contents of the App&rsquo;s downloaded .pem, or upload the file. It&rsquo;s
           stored encrypted and never leaves your deployment.
         </span>
       </div>
 
       {/* Optional OAuth client secret — collapsible, recommended. */}
-      <div className="rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40">
+      <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40">
         <button
           type="button"
           onClick={() => setOauthOpen((v) => !v)}
@@ -191,25 +191,25 @@ export default function GitHubAppImportForm({
           className="flex w-full items-center gap-2 px-4 py-3 text-left"
         >
           {oauthOpen ? (
-            <ChevronDown size={14} className="shrink-0 text-text-tertiary" />
+            <ChevronDown size={14} className="shrink-0 text-ink-3" />
           ) : (
-            <ChevronRight size={14} className="shrink-0 text-text-tertiary" />
+            <ChevronRight size={14} className="shrink-0 text-ink-3" />
           )}
-          <span className="flex-1 text-[13px] font-medium text-text-secondary">
+          <span className="flex-1 text-body font-medium text-ink-2">
             Enable browser sign-in for your team{' '}
-            <span className="font-normal text-text-tertiary">(recommended)</span>
+            <span className="font-normal text-ink-3">(recommended)</span>
           </span>
         </button>
         {oauthOpen && (
           <div className="space-y-3 px-4 pb-4">
-            <p className="text-[12px] leading-relaxed text-text-tertiary">
+            <p className="text-ui leading-relaxed text-ink-3">
               A client secret lets teammates connect their GitHub identity with one click instead of
               pasting a token. You can skip it — identity capture falls back to a personal access
               token. Apps can hold two client secrets at once, so generating one here won&rsquo;t
               disturb an existing consumer.
             </p>
             <label className="block space-y-2">
-              <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
                 Client secret
               </span>
               <input
@@ -223,7 +223,7 @@ export default function GitHubAppImportForm({
             </label>
             {callbackUrl && (
               <div className="space-y-1.5">
-                <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
                   Callback URL to register on the App
                 </span>
                 <div className="flex items-center gap-2">
@@ -232,19 +232,19 @@ export default function GitHubAppImportForm({
                     readOnly
                     value={callbackUrl}
                     onFocus={(e) => e.target.select()}
-                    className={`${glassInputClass} font-mono text-[12px]`}
+                    className={`${glassInputClass} font-mono text-ui`}
                   />
                   <button
                     type="button"
                     onClick={copyCallback}
                     aria-label="Copy callback URL"
-                    className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-border-glass)] px-3 py-2 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary"
+                    className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[var(--color-line-1)] px-3 py-2 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1"
                   >
                     {copied ? <Check size={13} /> : <Copy size={13} />}
                     {copied ? 'Copied' : 'Copy'}
                   </button>
                 </div>
-                <p className="text-[11px] leading-relaxed text-text-tertiary">
+                <p className="text-reported leading-relaxed text-ink-3">
                   Add this as a Callback URL under the App&rsquo;s settings on GitHub — OAuth
                   sign-in only works once it&rsquo;s registered there.
                 </p>
@@ -264,9 +264,9 @@ export default function GitHubAppImportForm({
           afterwards; this is where it can still be avoided. */}
       {!isLocal && (
         <label className="block space-y-2">
-          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
             Webhook secret{' '}
-            <span className="font-normal normal-case text-text-tertiary">
+            <span className="font-normal normal-case text-ink-3">
               (needed for live installation tracking)
             </span>
           </span>
@@ -278,7 +278,7 @@ export default function GitHubAppImportForm({
             onChange={(e) => setWebhookSecret(e.target.value)}
             className={glassInputClass}
           />
-          <span className="block text-[11px] leading-relaxed text-text-tertiary">
+          <span className="block text-reported leading-relaxed text-ink-3">
             Paste the secret set on the App&rsquo;s webhook so Triage Factory can verify deliveries
             are genuine. Without it every delivery is rejected: installs, uninstalls and suspensions
             reach this workspace only on the next periodic sync. Leave blank only if the App has no
@@ -290,7 +290,7 @@ export default function GitHubAppImportForm({
       {permissions && <PermissionTable rows={permissions} />}
 
       {softGap && (
-        <label className="flex items-start gap-2 text-[12px] text-text-secondary">
+        <label className="flex items-start gap-2 text-ui text-ink-2">
           <input
             type="checkbox"
             checked={ack}
@@ -305,7 +305,7 @@ export default function GitHubAppImportForm({
       )}
 
       {error && (
-        <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
+        <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
           {error}
         </p>
       )}
@@ -314,7 +314,7 @@ export default function GitHubAppImportForm({
         type="button"
         onClick={() => void submit()}
         disabled={!canSubmit}
-        className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+        className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
       >
         {busy ? 'Validating…' : 'Connect App'}
       </button>
@@ -327,8 +327,8 @@ export default function GitHubAppImportForm({
 // ones in amber with the feature they degrade; satisfied rows are muted.
 function PermissionTable({ rows }: { rows: GitHubAppPermissionRow[] }) {
   return (
-    <div className="overflow-hidden rounded-xl border border-border-subtle">
-      <div className="flex items-center gap-2 border-b border-border-subtle bg-white/30 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-text-tertiary">
+    <div className="overflow-hidden rounded-xl border border-line-1">
+      <div className="flex items-center gap-2 border-b border-line-1 bg-raised px-3 py-1.5 text-label font-medium uppercase tracking-wide text-ink-3">
         <span className="flex-1">Permission</span>
         <span className="w-16 text-right">Needs</span>
         <span className="w-16 text-right">Granted</span>
@@ -340,31 +340,29 @@ function PermissionTable({ rows }: { rows: GitHubAppPermissionRow[] }) {
         return (
           <div
             key={p.permission}
-            className={`px-3 py-1.5 text-[12px] ${
-              unmetRequired ? 'bg-dismiss/[0.06]' : unmetOptional ? 'bg-amber-500/[0.07]' : ''
+            className={`px-3 py-1.5 text-ui ${
+              unmetRequired ? 'bg-alarm/[0.06]' : unmetOptional ? 'bg-warm/[0.07]' : ''
             }`}
           >
             <div className="flex items-center gap-2">
-              <span className="flex-1 text-text-primary">{p.permission}</span>
-              <span className="w-16 text-right text-text-tertiary">{p.required}</span>
-              <span
-                className={`w-16 text-right ${p.granted ? 'text-text-secondary' : 'text-text-tertiary'}`}
-              >
+              <span className="flex-1 text-ink-1">{p.permission}</span>
+              <span className="w-16 text-right text-ink-3">{p.required}</span>
+              <span className={`w-16 text-right ${p.granted ? 'text-ink-2' : 'text-ink-3'}`}>
                 {p.granted || '—'}
               </span>
               <span className="flex w-4 justify-end">
                 {p.satisfied ? (
-                  <Check size={13} className="text-[var(--color-claim)]" />
+                  <Check size={13} className="text-warm" />
                 ) : (
                   <X
                     size={13}
-                    className={unmetRequired ? 'text-[var(--color-dismiss)]' : 'text-amber-500'}
+                    className={unmetRequired ? 'text-[var(--color-alarm)]' : 'text-warm'}
                   />
                 )}
               </span>
             </div>
             {unmetOptional && p.feature && (
-              <p className="mt-0.5 text-[11px] leading-snug text-amber-600 dark:text-amber-400">
+              <p className="mt-0.5 text-reported leading-snug text-warm dark:text-warm">
                 Without this: {p.feature} won&rsquo;t work.
               </p>
             )}

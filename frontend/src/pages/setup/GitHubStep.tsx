@@ -38,7 +38,7 @@ export const DEFAULT_GITHUB_URL = 'https://github.com'
 // teardown/cutover only happens on the relevant step's Continue.
 function SwitchNotice({ children }: { children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.08] px-4 py-2.5 text-[12px] leading-relaxed text-amber-600 dark:text-amber-400">
+    <div className="rounded-xl border border-warm/20 bg-warm/[0.08] px-4 py-2.5 text-ui leading-relaxed text-warm dark:text-warm">
       {children}
     </div>
   )
@@ -52,10 +52,10 @@ export function GitHubUrlStep({ state, patch, error }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           Where does your GitHub live?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           GitHub is the backbone — Triage Factory polls your organization&rsquo;s repositories for
           the PRs and reviews it surfaces.
         </p>
@@ -122,10 +122,10 @@ export function GitHubModeStep({ state, patch, advance }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           How should the bots connect?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           How Triage Factory connects to your organization&rsquo;s GitHub — the identity its bots
           poll and open pull requests under. This is the org-wide connection, not your personal
           GitHub access.
@@ -168,10 +168,10 @@ export function GitHubAppSourcePicker({
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           New App or one you already have?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Register a fresh GitHub App, or connect one that already exists — useful when only a
           platform team may create org Apps, or you&rsquo;re reusing an App across deployments.
         </p>
@@ -229,10 +229,10 @@ export function GitHubAccountTypeStep({ state, patch, advance }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           Who owns the GitHub App?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Where the App is registered — your personal account, or an organization you administer.
         </p>
       </div>
@@ -274,7 +274,7 @@ export function GitHubAppStep({
       returnTo={returnTo}
     />
   ) : (
-    <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+    <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
   )
 }
 
@@ -293,7 +293,7 @@ export function GitHubAppImportStep({ orgId, isLocal, patch, advance }: StepCont
       }}
     />
   ) : (
-    <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+    <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
   )
 }
 
@@ -308,15 +308,13 @@ export function GitHubAppInstallStep({ orgId, state }: StepContext) {
   // Hook called unconditionally (stable hook order), then branch on orgId.
   const { status, installUrl } = useGitHubAppInstall(orgId)
   if (!orgId) {
-    return <p className="text-[12px] italic text-text-tertiary">Resolving your workspace…</p>
+    return <p className="text-ui italic text-ink-3">Resolving your workspace…</p>
   }
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-          Install the App
-        </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Install the App</h2>
+        <p className="text-body leading-relaxed text-ink-3">
           The App is registered, but GitHub only grants repository access once it&rsquo;s installed.
           Install it on your account or organization, choose all or selected repositories, then come
           back and continue — we&rsquo;ll verify the installation before moving on.
@@ -419,10 +417,10 @@ export function GitHubCloneStep({ state, patch, advance }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           How should repos be cloned?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Only affects how Triage Factory clones repos to this machine — not the API connection.
         </p>
       </div>

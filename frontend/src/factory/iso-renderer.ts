@@ -67,14 +67,15 @@ import {
 
 const DEFAULT_FLOOR_SIZE = 4800
 // Closest the camera can get before its near plane starts clipping
-// objects in the scene. Expressed as a max zoom multiplier so the
-// physical limit derives from the initial view (radius_min =
-// initial_radius / max_zoom). 9× lets the front-facing status panel
-// and run-chip cluster on the console top read clearly at peak zoom.
+// objects in the scene. Expressed as a zoom multiplier over the
+// floor's full-extent ortho bounds (radius_min = full_extent_radius
+// / max_zoom), independent of where the camera starts. 9× lets the
+// front-facing status panel and run-chip cluster on the console top
+// read clearly at peak zoom.
 const MAX_ZOOM = 9
 // Initial zoom level relative to the floor's full-extent ortho
 // bounds. >1 is zoomed in (smaller visible area).
-const INITIAL_ZOOM = 1.75
+const INITIAL_ZOOM = 1.5
 // Camera target's y offset below the floor center, so the action
 // fills more of the lower half of the screen by default. ~10 cells
 // at the debug scene's 80-wu cell size.
@@ -108,6 +109,7 @@ export class IsoScene {
   private itemSim: ItemSimulator | null = null
   private snapshotChips: SnapshotChipController | null = null
   private detachShiftPan: (() => void) | null = null
+  private detachWheelGuard: (() => void) | null = null
 
   constructor(canvas: HTMLCanvasElement) {
     this.engine = new Engine(canvas, true, {
@@ -187,6 +189,20 @@ export class IsoScene {
     // on canvas events" so the surrounding page still receives them
     // when appropriate (we suppress only what we explicitly need to).
     this.camera.attachControl(true)
+
+    // Wheel is one of the things we explicitly need to suppress. Babylon
+    // reads it for zoom but, told not to preventDefault, leaves the browser
+    // free to hand the same event to the nearest scroller as well. Now that
+    // the scene covers the window that scroller is the shell, and on macOS
+    // the result is the whole frame rubber-banding under the cursor while
+    // the camera zooms — one gesture, two responses.
+    //
+    // Suppressed here rather than by flipping attachControl to preventDefault
+    // everything: that would also swallow pointerdown, and dragging an entity
+    // out of the scene and onto a station is a dnd-kit sensor that needs it.
+    const swallowWheel = (e: WheelEvent) => e.preventDefault()
+    canvas.addEventListener('wheel', swallowWheel, { passive: false })
+    this.detachWheelGuard = () => canvas.removeEventListener('wheel', swallowWheel)
 
     // Sensitivity tuning for our world's scale (~1200 units across):
     // smaller `*Sensibility` = more pan/rotation per pixel. Babylon's
@@ -286,7 +302,7 @@ export class IsoScene {
 
     // Grid lines, drawn just above the ground plane so they're
     // visible against it. Tinted with the project accent terracotta
-    // (--color-accent #a85a3a) at very low alpha so the grid carries
+    // (--color-warm #a85a3a) at very low alpha so the grid carries
     // the same warm hue as the rest of the app and station footprint
     // pads — and stays barely-there at normal zoom, only resolving
     // into faint blueprint structure when the camera leans in.
@@ -309,7 +325,7 @@ export class IsoScene {
     // floor when the camera pans. CreatePlane is xy with normal +z,
     // matching our z-up world without needing rotation.
     //
-    // Albedo lifted toward the app's --color-surface (#f7f5f2) for
+    // Albedo lifted toward the app's --color-ground (#f7f5f2) for
     // cohesion with the rest of the UI. Roughness dropped to 0.72 so
     // the floor picks up a faint sheen from the warm key + cool rim
     // lights — reads as polished concrete / warm stone, not matte
@@ -712,6 +728,8 @@ export class IsoScene {
   destroy(): void {
     this.detachShiftPan?.()
     this.detachShiftPan = null
+    this.detachWheelGuard?.()
+    this.detachWheelGuard = null
     this.itemSim?.destroy()
     this.snapshotChips?.destroy()
     this.gridMesh?.dispose()

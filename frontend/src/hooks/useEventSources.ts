@@ -148,12 +148,6 @@ export interface UseEventSources {
  * from the org settings read plus the entitlements probe plus the workspace
  * list would be three async probes wide, and a surface that renders on the
  * first to land flashes through states that were never true.
- *
- * TODO(TFAC-880): the team page's GitHub / Jira / Slack source cards still
- * hardcode state="configured" and its band rows are interactive for every
- * source. They are wired to this hook — and rendered inert for a non-available
- * one — once the design-language branch that owns pages/team/TeamSettings.tsx
- * lands; that file does not exist on this branch to edit.
  */
 export function useEventSources(): UseEventSources {
   const orgId = useApiOrgId()

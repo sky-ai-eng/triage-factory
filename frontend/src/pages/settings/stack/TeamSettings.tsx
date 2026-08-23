@@ -1,3 +1,6 @@
+// TODO(TFAC-892): the new /team surface supersedes this stack; delete it once
+// every group here is covered there, including the local-mode mount below.
+//
 // The team-scoped config sections — repos, GitHub teams, Jira projects, team
 // defaults/model/auto-delegate, and unattended prompts. Relocated from the
 // global Settings page into the /team page's Settings tab (TFAC-445): this
@@ -25,6 +28,7 @@ import { Archive } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
 import Slider from '../../../components/Slider'
 import ArchiveTeamModal from '../../../components/ArchiveTeamModal'
+import { fetchArchivePreview, type ArchivePreview } from '../../../lib/teamLifecycle'
 import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
@@ -164,7 +168,11 @@ export default function TeamSettings({
   teamName?: string
 }) {
   const { refresh: refreshTeams } = useTeams()
-  const [archiveOpen, setArchiveOpen] = useState(false)
+  // The archive confirm opens already holding its consequences preview — the
+  // fetch happens on the button, and a preview that cannot be read withdraws
+  // the question instead of opening an empty dialog.
+  const [archivePreview, setArchivePreview] = useState<ArchivePreview | null>(null)
+  const [archiveReading, setArchiveReading] = useState(false)
   // The endpoint alias: local addresses the sole team as "default"; multi uses
   // the selected team's real id.
   const endpointTeamId = isLocal ? 'default' : teamId
@@ -444,9 +452,9 @@ export default function TeamSettings({
 
   if (loadError) {
     return (
-      <div className="px-1 py-3 text-[13px] text-text-secondary">
+      <div className="px-1 py-3 text-body text-ink-2">
         {loadError}{' '}
-        <button type="button" onClick={() => load()} className="text-accent underline">
+        <button type="button" onClick={() => load()} className="text-warm underline">
           Retry
         </button>
       </div>
@@ -456,11 +464,11 @@ export default function TeamSettings({
   const trackedProjects = projects.filter((p) => p.key.trim() !== '').length
 
   if (loading) {
-    return <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading team settings…</div>
+    return <div className="px-1 py-3 text-body text-ink-3">Loading team settings…</div>
   }
 
   return (
-    <div className="divide-y divide-border-subtle">
+    <div className="divide-y divide-line-1">
       <SettingsSection
         title="Repositories"
         summary={`${(baseline.repos ?? []).length} tracked`}
@@ -469,7 +477,7 @@ export default function TeamSettings({
         onSave={saveRepos}
         onCancel={() => setRepos(baseline.repos ?? [])}
       >
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Watched repos surface in this team&rsquo;s triage queue and anchor Jira-to-code matching
           for delegation.
         </p>
@@ -483,7 +491,7 @@ export default function TeamSettings({
             onClose={() => {}}
           />
         ) : (
-          <p className="text-[12px] italic text-amber-600">
+          <p className="text-ui italic text-warm">
             Couldn&rsquo;t load this team&rsquo;s repositories — they&rsquo;ll be left unchanged.
             Reload to edit them.
           </p>
@@ -572,8 +580,8 @@ export default function TeamSettings({
         />
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-[13px] text-text-primary">Auto-delegation</p>
-            <p className="mt-0.5 text-[11px] text-text-tertiary">
+            <p className="text-body text-ink-1">Auto-delegation</p>
+            <p className="mt-0.5 text-reported text-ink-3">
               Automatically delegate tasks when matching triggers fire
             </p>
           </div>
@@ -583,11 +591,11 @@ export default function TeamSettings({
             aria-checked={autoDelegate}
             onClick={() => setAutoDelegate((v) => !v)}
             className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-              autoDelegate ? 'bg-accent' : 'bg-black/[0.08]'
+              autoDelegate ? 'bg-warm' : 'bg-tint-3'
             }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-float transition-transform ${
                 autoDelegate ? 'translate-x-4' : 'translate-x-0'
               }`}
             />
@@ -596,8 +604,8 @@ export default function TeamSettings({
         {isLocal && (
           <div className="flex items-center justify-between gap-4">
             <div>
-              <p className="text-[13px] text-text-primary">Auto mode</p>
-              <p className="mt-0.5 text-[11px] text-text-tertiary">
+              <p className="text-[13px] text-ink-1">Auto mode</p>
+              <p className="mt-0.5 text-[11px] text-ink-3">
                 Let Claude automatically approve tool calls it determines are safe
               </p>
             </div>
@@ -608,11 +616,11 @@ export default function TeamSettings({
               aria-checked={autoMode}
               onClick={() => setAutoMode((v) => !v)}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                autoMode ? 'bg-accent' : 'bg-black/[0.08]'
+                autoMode ? 'bg-warm' : 'bg-line-2'
               }`}
             >
               <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-sm transition-transform ${
                   autoMode ? 'translate-x-4' : 'translate-x-0'
                 }`}
               />
@@ -620,8 +628,8 @@ export default function TeamSettings({
           </div>
         )}
         <div>
-          <p className="text-[13px] text-text-primary">Branch name template</p>
-          <p className="mt-0.5 text-[11px] text-text-tertiary">
+          <p className="text-body text-ink-1">Branch name template</p>
+          <p className="mt-0.5 text-reported text-ink-3">
             Suggested to delegated agents when they create a branch. &lt;ticket-id&gt; is replaced
             with the ticket id. Guidance only — not enforced.
           </p>
@@ -630,19 +638,19 @@ export default function TeamSettings({
             value={branchTemplate}
             onChange={(e) => setBranchTemplate(e.target.value)}
             placeholder="tfac/<ticket-id>"
-            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
           />
         </div>
         <div>
-          <p className="text-[13px] text-text-primary">Review posting</p>
-          <p className="mt-0.5 text-[11px] text-text-tertiary">
+          <p className="text-body text-ink-1">Review posting</p>
+          <p className="mt-0.5 text-reported text-ink-3">
             What happens when an agent finishes a code review. A drafted review waits in the
             approval queue; a posted one appears on the pull request immediately.
           </p>
           <select
             value={reviewPosture}
             onChange={(e) => setReviewPosture(e.target.value)}
-            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
           >
             {REVIEW_POSTURES.map((p) => (
               <option key={p.value} value={p.value}>
@@ -650,13 +658,13 @@ export default function TeamSettings({
               </option>
             ))}
           </select>
-          <p className="mt-1 text-[11px] text-text-tertiary">
+          <p className="mt-1 text-reported text-ink-3">
             {REVIEW_POSTURES.find((p) => p.value === reviewPosture)?.help}
           </p>
         </div>
         <div>
-          <p className="text-[13px] text-text-primary">Pushes to the base branch</p>
-          <p className="mt-0.5 text-[11px] text-text-tertiary">
+          <p className="text-body text-ink-1">Pushes to the base branch</p>
+          <p className="mt-0.5 text-reported text-ink-3">
             Whether a delegated agent may push straight to a repo&rsquo;s base or default branch
             (main, master, or whatever the repository records). A safety guard against an agent
             pushing there by mistake &mdash; not a substitute for branch protection on the host.
@@ -664,7 +672,7 @@ export default function TeamSettings({
           <select
             value={basePushPolicy}
             onChange={(e) => setBasePushPolicy(e.target.value)}
-            className="mt-1.5 w-full rounded-md border border-border-subtle bg-transparent px-2 py-1 text-[13px] text-text-primary focus:border-accent focus:outline-none"
+            className="mt-1.5 w-full rounded-md border border-line-1 bg-transparent px-2 py-1 text-body text-ink-1 focus:border-warm focus:outline-none"
           >
             {BASE_BRANCH_PUSH_POLICIES.map((p) => (
               <option key={p.value} value={p.value}>
@@ -672,7 +680,7 @@ export default function TeamSettings({
               </option>
             ))}
           </select>
-          <p className="mt-1 text-[11px] text-text-tertiary">
+          <p className="mt-1 text-reported text-ink-3">
             {BASE_BRANCH_PUSH_POLICIES.find((p) => p.value === basePushPolicy)?.help}
           </p>
         </div>
@@ -694,7 +702,7 @@ export default function TeamSettings({
           setAbsentGraceSeconds(baseline.permission_absent_grace_seconds)
         }}
       >
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           When a delegated run needs permission for an off-allowlist tool and no one has the board
           or that run open and focused, deny after a short grace instead of parking the run for the
           full timeout. If someone opens or focuses the board (or the run) during the grace, the
@@ -702,8 +710,8 @@ export default function TeamSettings({
         </p>
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-[13px] text-text-primary">Fast-deny when unattended</p>
-            <p className="mt-0.5 text-[11px] text-text-tertiary">
+            <p className="text-body text-ink-1">Fast-deny when unattended</p>
+            <p className="mt-0.5 text-reported text-ink-3">
               Off keeps the full-timeout behavior for every prompt
             </p>
           </div>
@@ -713,11 +721,11 @@ export default function TeamSettings({
             aria-checked={absentAutodeny}
             onClick={() => setAbsentAutodeny((v) => !v)}
             className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-              absentAutodeny ? 'bg-accent' : 'bg-black/[0.08]'
+              absentAutodeny ? 'bg-warm' : 'bg-tint-3'
             }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-raised shadow-float transition-transform ${
                 absentAutodeny ? 'translate-x-4' : 'translate-x-0'
               }`}
             />
@@ -726,12 +734,10 @@ export default function TeamSettings({
         {absentAutodeny && (
           <div>
             <div className="flex items-baseline justify-between gap-2">
-              <p className="text-[13px] text-text-primary">Grace window</p>
-              <span className="text-[12px] text-text-tertiary tabular-nums">
-                {absentGraceSeconds}s
-              </span>
+              <p className="text-body text-ink-1">Grace window</p>
+              <span className="text-ui text-ink-3 tabular-nums">{absentGraceSeconds}s</span>
             </div>
-            <p className="mt-0.5 text-[11px] text-text-tertiary">
+            <p className="mt-0.5 text-reported text-ink-3">
               How long to wait for someone to appear before denying ({graceMin}s–{graceMax}s)
             </p>
             <div className="mt-3 flex items-center gap-3">
@@ -754,32 +760,41 @@ export default function TeamSettings({
       {!isLocal && orgIsAdmin && (
         <div className="flex items-center justify-between gap-4 py-4">
           <div>
-            <p className="flex items-center gap-1.5 text-[13px] font-medium text-text-primary">
-              <Archive size={13} className="text-dismiss" />
+            <p className="flex items-center gap-1.5 text-body font-medium text-ink-1">
+              <Archive size={13} className="text-alarm" />
               Archive team
             </p>
-            <p className="mt-0.5 text-[11px] leading-relaxed text-text-tertiary">
+            <p className="mt-0.5 text-reported leading-relaxed text-ink-3">
               Stops all in-flight work for this team and hides it. Restorable by an org admin;
               stopped runs do not resume.
             </p>
           </div>
           <button
             type="button"
-            onClick={() => setArchiveOpen(true)}
-            className="shrink-0 rounded-lg border border-dismiss/30 px-3 py-1.5 text-[13px] font-medium text-dismiss transition-colors hover:bg-dismiss/[0.06]"
+            onClick={() => {
+              if (archiveReading) return
+              setArchiveReading(true)
+              fetchArchivePreview(teamId)
+                .then(setArchivePreview)
+                .catch(() => toast.error('Could not check the team for in-flight work. Try again.'))
+                .finally(() => setArchiveReading(false))
+            }}
+            disabled={archiveReading}
+            className="shrink-0 rounded-lg border border-alarm/30 px-3 py-1.5 text-body font-medium text-alarm transition-colors hover:bg-alarm/[0.06] disabled:opacity-50"
           >
-            Archive…
+            {archiveReading ? 'Checking…' : 'Archive…'}
           </button>
         </div>
       )}
 
-      {archiveOpen && (
+      {archivePreview && (
         <ArchiveTeamModal
           teamId={teamId}
           teamName={teamName || 'this team'}
-          onClose={() => setArchiveOpen(false)}
+          preview={archivePreview}
+          onClose={() => setArchivePreview(null)}
           onDone={(runs, sessions) => {
-            setArchiveOpen(false)
+            setArchivePreview(null)
             toast.success(
               `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
                 sessions === 1 ? 'session' : 'sessions'

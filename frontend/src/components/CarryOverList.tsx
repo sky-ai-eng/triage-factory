@@ -261,16 +261,16 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
   }
 
   return (
-    <div className="w-full max-w-2xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]">
+    <div className="w-full max-w-2xl backdrop-blur-xl bg-raised border border-line-1 rounded-2xl shadow-float shadow-black/[0.04] overflow-hidden flex flex-col max-h-[85vh]">
       {/* Header */}
       <div className="px-6 pt-6 pb-4">
         <div className="flex items-start justify-between gap-3">
-          <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">Carry over</h2>
+          <h2 className="text-section font-semibold text-ink-1 tracking-tight">Carry over</h2>
           {/* The deck is single-team; the picker selects which team's Jira
               backlog to triage, and claims land on it. */}
           <TeamPicker value={team} onChange={onTeamChange} label="Team" className="w-44 shrink-0" />
         </div>
-        <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
+        <p className="text-body text-ink-3 mt-1 leading-relaxed">
           Queue your assigned work, or grab available tickets to get started. We&rsquo;ve
           pre-selected what usually makes sense — review, adjust, and skip anything you don&rsquo;t
           want.
@@ -281,22 +281,20 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       <div className="flex-1 overflow-y-auto px-6 min-h-0">
         {polling && assigned === null && available === null && (
           <div className="space-y-1 py-2">
-            <p className="text-[12px] text-text-tertiary text-center pb-2">
-              Fetching your tickets…
-            </p>
+            <p className="text-ui text-ink-3 text-center pb-2">Fetching your tickets…</p>
             {[1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
                 <div className="flex-1 space-y-1.5">
                   <div
-                    className="h-3 rounded bg-black/[0.04] animate-pulse"
+                    className="h-3 rounded bg-tint-3 animate-pulse"
                     style={{ width: `${55 + ((i * 17) % 35)}%` }}
                   />
                   <div
-                    className="h-2.5 rounded bg-black/[0.03] animate-pulse"
+                    className="h-2.5 rounded bg-tint-2 animate-pulse"
                     style={{ width: `${30 + ((i * 23) % 40)}%` }}
                   />
                 </div>
-                <div className="w-[180px] h-6 rounded-full bg-black/[0.04] animate-pulse" />
+                <div className="w-[180px] h-6 rounded-full bg-tint-3 animate-pulse" />
               </div>
             ))}
           </div>
@@ -304,7 +302,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
 
         {error && !polling && (
           <div className="flex flex-col items-center justify-center py-12 gap-3">
-            <div className="text-[13px] text-text-secondary text-center">{error}</div>
+            <div className="text-body text-ink-2 text-center">{error}</div>
             <button
               type="button"
               onClick={() => {
@@ -314,7 +312,7 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
                 setAvailable(null)
                 fetchStock()
               }}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+              className="flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
             >
               <RotateCw size={13} />
               Retry
@@ -323,15 +321,13 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
         )}
 
         {isEmpty && (
-          <p className="text-[13px] text-text-tertiary text-center py-12">
-            No existing work to carry over.
-          </p>
+          <p className="text-body text-ink-3 text-center py-12">No existing work to carry over.</p>
         )}
 
         {!polling && !error && totalCount > 0 && (
           <>
             {Object.keys(failures).length > 0 && (
-              <div className="mb-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/20 px-3 py-2 text-[12px] text-dismiss">
+              <div className="mb-2 rounded-xl bg-alarm/[0.06] border border-alarm/20 px-3 py-2 text-ui text-alarm">
                 Some actions couldn&rsquo;t be applied. Successful rows were saved; fix the
                 highlighted rows below or skip to continue.
               </div>
@@ -363,30 +359,30 @@ export default function CarryOverList({ onSave, onSkip, onBack }: Props) {
       </div>
 
       {/* Footer */}
-      <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between">
+      <div className="px-6 py-4 border-t border-line-1 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={onBack}
-            className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+            className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk border border-line-1 rounded-xl px-4 py-2 transition-colors"
           >
             Back
           </button>
           <button
             type="button"
             onClick={onSkip}
-            className="text-[12px] text-text-tertiary hover:text-text-secondary transition-colors"
+            className="text-ui text-ink-3 hover:text-ink-2 transition-colors"
           >
             Skip for now
           </button>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-[11px] text-text-tertiary">{selectionCount} selected</span>
+          <span className="text-reported text-ink-3">{selectionCount} selected</span>
           <button
             type="button"
             onClick={handleSave}
             disabled={selectionCount === 0 || saving || !teamsLoaded}
-            className="bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
+            className="bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
           >
             {saving ? 'Saving…' : 'Save'}
           </button>
@@ -414,10 +410,8 @@ function Section({
   return (
     <div>
       <div className="px-1 pb-1.5">
-        <h3 className="text-[12px] font-semibold text-text-secondary uppercase tracking-wide">
-          {title}
-        </h3>
-        <p className="text-[11px] text-text-tertiary mt-0.5">{caption}</p>
+        <h3 className="text-ui font-semibold text-ink-2 uppercase tracking-wide">{title}</h3>
+        <p className="text-reported text-ink-3 mt-0.5">{caption}</p>
       </div>
       <div className="space-y-0.5">
         {tickets.map((t) => (
@@ -448,7 +442,7 @@ function TicketRow({
   return (
     <div
       className={`flex items-start gap-3 px-3 py-2.5 rounded-xl transition-colors ${
-        failure ? 'bg-dismiss/[0.04] border border-dismiss/20' : 'hover:bg-black/[0.02]'
+        failure ? 'bg-alarm/[0.04] border border-alarm/20' : 'hover:bg-tint-2'
       }`}
     >
       <div className="min-w-0 flex-1">
@@ -458,18 +452,16 @@ function TicketRow({
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="text-[11px] font-medium text-accent hover:text-accent/80 bg-accent/[0.08] hover:bg-accent/[0.12] rounded px-1.5 py-0.5 transition-colors inline-flex items-center gap-1 shrink-0"
+            className="text-reported font-medium text-warm hover:text-warm/80 bg-warm/[0.08] hover:bg-warm/[0.12] rounded px-1.5 py-0.5 transition-colors inline-flex items-center gap-1 shrink-0"
           >
             {ticket.issue_key}
             <ExternalLink size={10} />
           </a>
-          <span className="text-[13px] font-medium text-text-primary truncate">
-            {ticket.summary}
-          </span>
+          <span className="text-body font-medium text-ink-1 truncate">{ticket.summary}</span>
         </div>
         <MetadataLine ticket={ticket} />
         {failure && (
-          <div className="mt-1 text-[11px] text-dismiss" title={failure}>
+          <div className="mt-1 text-reported text-alarm" title={failure}>
             {failure}
           </div>
         )}
@@ -491,7 +483,7 @@ function MetadataLine({ ticket }: { ticket: StockTicket }) {
   if (ticket.status) {
     parts.push({
       key: 'status',
-      node: <span className="text-text-secondary font-medium">{ticket.status}</span>,
+      node: <span className="text-ink-2 font-medium">{ticket.status}</span>,
     })
   }
   if (ticket.priority) {
@@ -508,7 +500,7 @@ function MetadataLine({ ticket }: { ticket: StockTicket }) {
           href={ticket.parent_url}
           target="_blank"
           rel="noopener noreferrer"
-          className="hover:text-accent transition-colors"
+          className="hover:text-warm transition-colors"
         >
           {ticket.parent_key}
         </a>
@@ -517,7 +509,7 @@ function MetadataLine({ ticket }: { ticket: StockTicket }) {
   }
 
   return (
-    <div className="flex items-center gap-1.5 mt-0.5 text-[11px] text-text-tertiary">
+    <div className="flex items-center gap-1.5 mt-0.5 text-reported text-ink-3">
       {parts.length === 0 ? (
         <span className="italic">no metadata</span>
       ) : (
@@ -545,7 +537,7 @@ function TriSelector({
     { value: 'done', label: 'Done' },
   ]
   return (
-    <div className="flex rounded-full border border-border-subtle p-0.5 gap-0.5 shrink-0">
+    <div className="flex rounded-full border border-line-1 p-0.5 gap-0.5 shrink-0">
       {options.map((o) => {
         const active = selection === o.value
         return (
@@ -555,8 +547,8 @@ function TriSelector({
             onClick={() => onToggle(o.value)}
             className={
               active
-                ? 'px-3 py-1 rounded-full bg-accent text-white text-[11px] font-medium transition-colors'
-                : 'px-3 py-1 rounded-full text-text-tertiary hover:text-text-secondary text-[11px] transition-colors'
+                ? 'px-3 py-1 rounded-full bg-warm text-warm-ink text-reported font-medium transition-colors'
+                : 'px-3 py-1 rounded-full text-ink-3 hover:text-ink-2 text-reported transition-colors'
             }
           >
             {o.label}

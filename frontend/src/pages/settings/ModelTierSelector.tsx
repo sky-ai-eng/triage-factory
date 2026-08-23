@@ -82,16 +82,12 @@ export default function ModelTierSelector({
           filled = selected
         }
 
-        const textClass = selected
-          ? 'text-accent'
-          : aboveCap
-            ? 'text-text-tertiary'
-            : 'text-text-secondary'
+        const textClass = selected ? 'text-warm' : aboveCap ? 'text-ink-3' : 'text-ink-2'
         const railClass = selected
-          ? 'bg-accent shadow-[0_0_10px_-1px_var(--color-accent)]'
+          ? 'bg-warm shadow-[0_0_10px_-1px_var(--color-warm)]'
           : filled
-            ? 'bg-accent'
-            : 'bg-[var(--color-border-subtle)]'
+            ? 'bg-warm'
+            : 'bg-[var(--color-line-1)]'
 
         return (
           <button
@@ -109,15 +105,13 @@ export default function ModelTierSelector({
             }`}
           >
             <span
-              className={`flex items-center gap-1 text-[14px] font-medium transition-colors ${textClass}`}
+              className={`flex items-center gap-1 text-body font-medium transition-colors ${textClass}`}
             >
-              {isNoCap && <span className="text-[15px] leading-none">∞</span>}
+              {isNoCap && <span className="text-column leading-none">∞</span>}
               {opt.label}
             </span>
             {opt.hint && (
-              <span className="mt-0.5 block text-[11px] leading-snug text-text-tertiary">
-                {opt.hint}
-              </span>
+              <span className="mt-0.5 block text-reported leading-snug text-ink-3">{opt.hint}</span>
             )}
             <span
               aria-hidden

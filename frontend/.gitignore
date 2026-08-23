@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# ESLint's incremental cache. Machine-local and rewritten on every run, so a
+# tracked copy shows the tree as dirty after any lint and invites committing
+# one developer's cache over another's.
+.eslintcache
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

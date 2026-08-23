@@ -38,7 +38,7 @@ export default function RequestedReviewerBadge({ task }: { task: Task }) {
       aria-label={title}
       onClick={(e) => e.stopPropagation()}
       onPointerDown={(e) => e.stopPropagation()}
-      className="inline-flex shrink-0 items-center gap-1 text-[10px] text-text-tertiary hover:text-text-secondary truncate max-w-[120px] transition-colors"
+      className="inline-flex shrink-0 items-center gap-1 text-label text-ink-3 hover:text-ink-2 truncate max-w-[120px] transition-colors"
     >
       {reviewer.kind === 'user' ? (
         <span aria-hidden>@</span>

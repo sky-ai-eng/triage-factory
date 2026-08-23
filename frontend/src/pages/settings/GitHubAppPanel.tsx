@@ -129,10 +129,8 @@ export default function GitHubAppPanel({
 
   const inner = (
     <>
-      {showHeading && (
-        <h2 className="text-[13px] font-medium text-text-secondary mb-1">GitHub access</h2>
-      )}
-      <p className="text-[11px] text-text-tertiary mb-4 leading-relaxed">
+      {showHeading && <h2 className="text-body font-medium text-ink-2 mb-1">GitHub access</h2>}
+      <p className="text-reported text-ink-3 mb-4 leading-relaxed">
         A GitHub App connects Triage Factory to your organization under a bot identity of its own —
         one that doesn&rsquo;t leave with the person who set it up — and lets GitHub itself hold
         each team to its own repositories: a team&rsquo;s token is issued for the repositories that
@@ -141,16 +139,16 @@ export default function GitHubAppPanel({
       </p>
 
       {ghAppState.kind === 'loading' && (
-        <p className="text-[12px] text-text-tertiary italic">Loading GitHub App status…</p>
+        <p className="text-ui text-ink-3 italic">Loading GitHub App status…</p>
       )}
 
       {ghAppState.kind === 'error' && (
-        <div className="flex items-center justify-between gap-2 rounded-xl bg-dismiss/[0.06] border border-dismiss/15 px-4 py-2.5">
-          <span className="text-[12px] text-dismiss">Couldn&rsquo;t load GitHub App status.</span>
+        <div className="flex items-center justify-between gap-2 rounded-xl bg-alarm/[0.06] border border-alarm/15 px-4 py-2.5">
+          <span className="text-ui text-alarm">Couldn&rsquo;t load GitHub App status.</span>
           <button
             type="button"
             onClick={() => setGhReloadKey((k) => k + 1)}
-            className="shrink-0 text-[11px] text-accent hover:text-accent/80"
+            className="shrink-0 text-reported text-warm hover:text-warm/80"
           >
             Retry
           </button>
@@ -164,46 +162,45 @@ export default function GitHubAppPanel({
               type="button"
               onClick={() => setGhAppDetailsExpanded((v) => !v)}
               aria-expanded={ghAppDetailsExpanded}
-              className="w-full flex items-center gap-2 rounded-xl bg-claim/[0.06] border border-claim/15 px-4 py-2.5 text-left transition-colors hover:bg-claim/[0.1]"
+              className="w-full flex items-center gap-2 rounded-xl bg-tint-2 border border-line-1 px-4 py-2.5 text-left transition-colors hover:bg-tint-3"
             >
-              <div className="w-1.5 h-1.5 rounded-full bg-claim shrink-0" />
-              <span className="text-[12px] text-claim flex-1">
+              <div className="w-1.5 h-1.5 rounded-full bg-warm shrink-0" />
+              <span className="text-ui text-ink-2 flex-1">
                 Connected to GitHub via your own App ({app.slug})
               </span>
               {ghAppDetailsExpanded ? (
-                <ChevronDown size={14} className="text-claim/70 shrink-0" />
+                <ChevronDown size={14} className="text-ink-2 shrink-0" />
               ) : (
-                <ChevronRight size={14} className="text-claim/70 shrink-0" />
+                <ChevronRight size={14} className="text-ink-2 shrink-0" />
               )}
             </button>
 
             {ghAppDetailsExpanded && (
-              <div className="text-[11px] text-text-tertiary space-y-0.5 px-1">
+              <div className="text-reported text-ink-3 space-y-0.5 px-1">
                 <p>
-                  App slug: <span className="text-text-secondary">{app.slug}</span>
+                  App slug: <span className="text-ink-2">{app.slug}</span>
                 </p>
                 {app.registered_at && (
                   <p>
                     Registered:{' '}
-                    <span className="text-text-secondary">
+                    <span className="text-ink-2">
                       {new Date(app.registered_at).toLocaleDateString()}
                     </span>
                     {app.registered_by_display_name ? ` by ${app.registered_by_display_name}` : ''}
                   </p>
                 )}
                 <p>
-                  Installations:{' '}
-                  <span className="text-text-secondary">{status.installations.length}</span>
+                  Installations: <span className="text-ink-2">{status.installations.length}</span>
                 </p>
                 {status.installations.length > 0 && (
                   <div className="space-y-1 pt-2">
                     {status.installations.map((inst) => (
                       <div
                         key={inst.installation_id}
-                        className="flex items-center justify-between rounded-xl border border-border-subtle bg-white/40 px-3 py-2"
+                        className="flex items-center justify-between rounded-xl border border-line-1 bg-raised px-3 py-2"
                       >
-                        <span className="text-[12px] text-text-primary">{inst.account_login}</span>
-                        <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
+                        <span className="text-ui text-ink-1">{inst.account_login}</span>
+                        <span className="text-label uppercase tracking-wide text-ink-3">
                           {inst.account_type}
                         </span>
                       </div>
@@ -244,11 +241,11 @@ export default function GitHubAppPanel({
               type="button"
               onClick={registerGitHubApp}
               disabled={ghAppRegistering || !ghAppOwnerLogin.trim()}
-              className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+              className="w-full bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
             >
               {ghAppRegistering ? 'Redirecting to GitHub…' : 'Register your own GitHub App'}
             </button>
-            <p className="text-[11px] text-text-tertiary leading-relaxed">
+            <p className="text-reported text-ink-3 leading-relaxed">
               You&rsquo;ll be taken to GitHub to confirm the App, then returned here. GitHub will
               ask which repositories to grant on install.
             </p>

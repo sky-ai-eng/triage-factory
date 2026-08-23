@@ -1,0 +1,189 @@
+/* SourceChart — a fortnight of events with the part that became work inside it.
+   96px tall, baseline at 84, tallest point at 8, drawn in a 320-wide viewBox
+   that stretches to whatever column it is given. */
+
+.sc {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sc-legend {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+}
+
+.sc-legend-t {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  color: var(--color-ink-4);
+}
+
+.sc-grow {
+  flex: 1;
+}
+
+.sc-key {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.1em;
+  color: var(--color-ink-3);
+}
+
+.sc-key i {
+  width: 8px;
+  height: 2px;
+}
+
+/* One vocabulary for the two series, so the key, the line and the hover node
+   cannot drift apart: OUTER is the quantity, INNER is the part of it that
+   became work. */
+.sc-key i[data-line='outer'],
+.sc-node[data-line='outer'],
+.sc-cross {
+  background: color-mix(in srgb, var(--color-ink-4) 40%, var(--color-line-2));
+}
+
+.sc-key i[data-line='inner'],
+.sc-node[data-line='inner'] {
+  background: var(--color-warm);
+}
+
+.sc-plot {
+  position: relative;
+  height: 96px;
+}
+
+.sc-plot[data-live] {
+  cursor: crosshair;
+}
+
+.sc-plot svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  /* The hover belongs to the container, so the drawing never intercepts it. */
+  pointer-events: none;
+}
+
+.sc-base {
+  stroke: var(--color-line-2);
+  stroke-width: 1;
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: tf-sc-drawx 0.5s var(--ease-default) 0.35s both;
+}
+
+@keyframes tf-sc-drawx {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* The reveal. Registered, or the percentage cannot be interpolated and the
+   wipe snaps from nothing to everything on the first frame. */
+@property --scfw {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+
+/* ONE wipe over the area and both lines together. Two would read as two
+   charts, and the whole point is the distance between the lines. */
+.sc-mask {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0,
+    #000 var(--scfw),
+    transparent calc(var(--scfw) + 7%)
+  );
+  mask-image: linear-gradient(90deg, #000 0, #000 var(--scfw), transparent calc(var(--scfw) + 7%));
+  animation: tf-sc-wipe 1.05s cubic-bezier(0.33, 0.7, 0.3, 1) 0.6s both;
+}
+
+@keyframes tf-sc-wipe {
+  to {
+    --scfw: 112%;
+  }
+}
+
+.sc-line {
+  fill: none;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.sc-line[data-line='outer'] {
+  stroke: color-mix(in srgb, var(--color-ink-4) 40%, var(--color-line-2));
+  stroke-width: 1.2;
+}
+
+.sc-line[data-line='inner'] {
+  stroke: var(--color-warm);
+  stroke-width: 1.4;
+}
+
+/* The crosshair stops at the baseline: below it there is nothing to read. */
+.sc-cross {
+  position: absolute;
+  top: 0;
+  height: 84px;
+  width: 1px;
+  pointer-events: none;
+}
+
+.sc-node {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  margin: -2.5px 0 0 -2.5px;
+  pointer-events: none;
+}
+
+.sc-none {
+  position: absolute;
+  inset: 0 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-ink-4);
+}
+
+.sc-axis {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1;
+  color: var(--color-ink-4);
+}
+
+.sc-read {
+  color: var(--color-ink-2);
+}
+
+/* Reduced motion. The blanket in tokens/motion.css removes the animation,
+   which for anything filling `both` from a zeroed start leaves it zeroed — a
+   baseline at scaleX(0) is invisible, and a mask at 0% hides the entire chart.
+   The end state is the information, so the component states it. */
+.sc[data-still] .sc-base {
+  transform: scaleX(1);
+  animation: none;
+}
+
+.sc[data-still] .sc-mask {
+  --scfw: 112%;
+  animation: none;
+}

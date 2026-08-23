@@ -1314,7 +1314,7 @@ export default function Board() {
       <>
         <GlassBackdrop />
         <div className="flex items-center justify-center min-h-[70vh]">
-          <p className="text-[13px] text-text-tertiary">Loading board…</p>
+          <p className="text-body text-ink-3">Loading board…</p>
         </div>
       </>
     )
@@ -1324,7 +1324,7 @@ export default function Board() {
   // filter panel — see the `snooze` prop below — not as a header button.)
   const doneHeader = (
     <span
-      className="text-[10px] text-text-tertiary"
+      className="text-label text-ink-3"
       title="Done column shows the last 7 days; older entries are hidden"
     >
       last 7 days
@@ -1349,7 +1349,7 @@ export default function Board() {
           columns close to the chrome, not floating in a big top gap like the
           form pages do. The team filter takes what it needs; the scroll area
           fills the rest to the page bottom (hard floor on short screens). */}
-      <div className="-mt-4 flex h-[calc(100dvh-7rem)] min-h-[26rem] flex-col">
+      <div className="-mt-4 flex h-[calc(100%+1rem)] min-h-[26rem] flex-col">
         {/* Per-page team filter. Renders nothing at ≤1 team. */}
         {teams.length >= 2 && (
           <div className="flex items-center justify-end px-1 pb-3">
@@ -1786,7 +1786,7 @@ const SortableAgentCard = memo(function SortableAgentCard({
 })
 
 function EmptyColumn({ children }: { children: React.ReactNode }) {
-  return <p className="text-[12px] text-text-tertiary text-center py-12">{children}</p>
+  return <p className="text-ui text-ink-3 text-center py-12">{children}</p>
 }
 
 // ColumnMore is the tail of a column that holds more than one page. A lane
@@ -1812,7 +1812,7 @@ function ColumnMore({
       type="button"
       onClick={onLoadMore}
       disabled={loading}
-      className="w-full py-2 text-[12px] text-text-tertiary hover:text-text-secondary disabled:opacity-50"
+      className="w-full py-2 text-[12px] text-ink-3 hover:text-ink-2 disabled:opacity-50"
     >
       {loading ? 'Loading…' : `Load more — ${label}`}
     </button>

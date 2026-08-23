@@ -56,7 +56,7 @@ export default function UserMenu() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-8 h-8 rounded-full bg-accent-soft text-accent flex items-center justify-center text-[12px] font-semibold hover:ring-2 hover:ring-accent/20 transition-all overflow-hidden"
+        className="w-8 h-8 rounded-full bg-warm-2 text-warm flex items-center justify-center text-ui font-semibold hover:ring-2 hover:ring-warm/20 transition-all overflow-hidden"
         aria-haspopup="menu"
         aria-expanded={open}
         title={auth.me.display_name || auth.me.email}
@@ -79,14 +79,14 @@ export default function UserMenu() {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 top-full mt-1.5 min-w-[220px] backdrop-blur-xl bg-surface-raised border border-border-glass rounded-xl shadow-lg shadow-black/[0.08] py-1 z-50"
+          className="absolute right-0 top-full mt-1.5 min-w-[220px] backdrop-blur-xl bg-raised border border-line-1 rounded-xl shadow-float shadow-black/[0.08] py-1 z-50"
         >
-          <div className="px-3 py-2 border-b border-border-subtle">
-            <div className="text-[13px] font-medium text-text-primary truncate">
+          <div className="px-3 py-2 border-b border-line-1">
+            <div className="text-body font-medium text-ink-1 truncate">
               {auth.me.display_name || auth.me.github_username || 'Account'}
             </div>
             {auth.me.email && (
-              <div className="text-[11px] text-text-tertiary truncate">{auth.me.email}</div>
+              <div className="text-reported text-ink-3 truncate">{auth.me.email}</div>
             )}
           </div>
           {/* Linked login identities (the principal's GitHub + N SSO logins).
@@ -99,12 +99,12 @@ export default function UserMenu() {
               setOpen(false)
               void auth.logout()
             }}
-            className="w-full flex items-center gap-2 px-3 py-2 text-left text-[13px] text-text-primary hover:bg-black/[0.03] transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-body text-ink-1 hover:bg-tint-2 transition-colors"
           >
-            <LogOut size={14} className="text-text-tertiary" />
+            <LogOut size={14} className="text-ink-3" />
             Log out
           </button>
-          <div className="px-3 py-1 text-[10px] text-text-tertiary uppercase tracking-wide flex items-center gap-1">
+          <div className="px-3 py-1 text-label text-ink-3 uppercase tracking-wide flex items-center gap-1">
             <UserIcon size={10} />
             <span>signed in</span>
           </div>

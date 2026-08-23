@@ -165,14 +165,14 @@ export default function AgentCard({
               {assigneeSlot}
               <HeaderDivider />
               <span
-                className="inline-flex items-center gap-1.5 font-mono text-[11px] leading-none tabular-nums text-text-tertiary/80"
+                className="inline-flex items-center gap-1.5 font-mono text-reported leading-none tabular-nums text-ink-3/80"
                 title={isQueued ? 'Time spent waiting in the run queue' : undefined}
               >
                 {isActive && (
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-delegate" />
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-cool" />
                 )}
                 {isQueued && (
-                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-snooze" />
+                  <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-warm" />
                 )}
                 {elapsed}
               </span>
@@ -183,7 +183,7 @@ export default function AgentCard({
                 rel="noopener noreferrer"
                 aria-label="Expand run details"
                 title="Open full session view (new tab)"
-                className="inline-flex items-center text-text-tertiary transition-colors hover:text-text-primary"
+                className="inline-flex items-center text-ink-3 transition-colors hover:text-ink-1"
               >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
                   <path
@@ -209,7 +209,7 @@ export default function AgentCard({
                         toast.error(httpErrorMessage(err, 'Could not stop the run.'))
                       }
                     }}
-                    className="inline-flex items-center text-dismiss/40 transition-colors hover:text-dismiss"
+                    className="inline-flex items-center text-alarm/40 transition-colors hover:text-alarm"
                     title="Cancel run"
                   >
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -230,10 +230,10 @@ export default function AgentCard({
 
         {/* Title + entity readout */}
         <div className="px-4 pb-2 pt-3">
-          <h3 className="mb-1 line-clamp-2 text-[14px] font-semibold leading-snug text-text-primary">
+          <h3 className="mb-1 line-clamp-2 text-body font-semibold leading-snug text-ink-1">
             {task.title}
           </h3>
-          <div className="flex min-w-0 items-center gap-2 text-[11px] text-text-tertiary/80">
+          <div className="flex min-w-0 items-center gap-2 text-reported text-ink-3/80">
             <span className="truncate font-mono">{task.source_id}</span>
           </div>
         </div>
@@ -299,7 +299,7 @@ export default function AgentCard({
 
         {/* Footer */}
         <div className="flex items-center justify-between pb-3.5 pl-4 pr-4">
-          <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums tracking-wide text-text-tertiary/80">
+          <div className="flex items-center gap-3 font-mono text-reported tabular-nums tracking-wide text-ink-3/80">
             {/* Who executed this conversation, shown only once that diverges from who
                 holds the task. The header's assignee chip already names the bot
                 while it still holds the claim; once the claim moves off it — a
@@ -334,7 +334,7 @@ export default function AgentCard({
             {(isFailed || isParked || needsApproval) && onRequeue && (
               <button
                 onClick={onRequeue}
-                className="text-[12px] font-medium text-text-tertiary transition-colors hover:text-text-secondary"
+                className="text-ui font-medium text-ink-3 transition-colors hover:text-ink-2"
               >
                 Return to queue
               </button>
@@ -344,7 +344,7 @@ export default function AgentCard({
                 href={task.source_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[12px] font-semibold text-accent transition-colors hover:text-accent/70"
+                className="text-ui font-semibold text-warm transition-colors hover:text-warm/70"
               >
                 Open
               </a>
@@ -359,7 +359,7 @@ export default function AgentCard({
 // HeaderDivider is the hairline tick between the header's right-cluster
 // readouts (assignee | elapsed | expand | cancel).
 function HeaderDivider() {
-  return <span aria-hidden className="h-3 w-px shrink-0 bg-text-tertiary/20" />
+  return <span aria-hidden className="h-3 w-px shrink-0 bg-ink-3/20" />
 }
 
 // ArtifactsAffordance is the footer's "N artifacts →" button — the full set a
@@ -392,7 +392,7 @@ function ArtifactsAffordance({
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="font-mono text-[11px] tabular-nums tracking-wide text-accent transition-colors hover:text-accent/70"
+          className="font-mono text-reported tabular-nums tracking-wide text-warm transition-colors hover:text-warm/70"
           aria-label={`Show ${count} artifact${count === 1 ? '' : 's'}`}
         >
           {count} artifact{count === 1 ? '' : 's'} →
@@ -403,9 +403,9 @@ function ArtifactsAffordance({
           side="top"
           align="start"
           sideOffset={6}
-          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-border-glass bg-surface-raised/95 p-2.5 shadow-lg shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
+          className="z-[100] max-h-[360px] w-[320px] overflow-y-auto rounded-xl border border-line-1 bg-raised/95 p-2.5 shadow-float shadow-black/[0.08] backdrop-blur-2xl animate-in fade-in-0 zoom-in-95"
         >
-          <div className="mb-1.5 px-1 font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-text-tertiary/70">
+          <div className="mb-1.5 px-1 font-mono text-label-sm font-semibold uppercase tracking-[0.18em] text-ink-3/70">
             Artifacts
           </div>
           <ArtifactList
@@ -418,7 +418,7 @@ function ArtifactsAffordance({
             }}
             onResolved={onArtifactResolved}
           />
-          <Popover.Arrow className="fill-surface-raised" />
+          <Popover.Arrow className="fill-raised" />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -430,12 +430,12 @@ function ArtifactsAffordance({
 // a few at a time — this says so, instead of leaving a dead-looking card.
 function QueuedBlock() {
   return (
-    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
+    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-label text-ink-3/70">
       <span
         className="inline-flex items-center gap-2"
         title="Concurrent runs are capped (TF_MAX_CONCURRENT_CLAIMS, default 8). This run starts automatically when a slot frees up."
       >
-        <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-snooze" />
+        <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-warm" />
         queued — starts when a run slot frees up
       </span>
     </div>
@@ -452,12 +452,12 @@ function QueuedBlock() {
 // other exit.
 function ParkedBlock() {
   return (
-    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
+    <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-label text-ink-3/70">
       <span
         className="inline-flex items-center gap-2"
         title="The run stopped without concluding and its workspace is still warm. Open the run view to send it a follow-up, or return the task to the queue."
       >
-        <span className="inline-block h-1 w-1 rounded-full bg-snooze" />
+        <span className="inline-block h-1 w-1 rounded-full bg-warm" />
         idle — stopped without concluding, resumable
       </span>
     </div>
@@ -475,10 +475,10 @@ const FEED_MASK = 'linear-gradient(to bottom, transparent 0, #000 22px, #000 100
 function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean }) {
   if (lines.length === 0) {
     return (
-      <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-[10.5px] text-text-tertiary/70">
+      <div className="flex h-[3.5rem] items-end px-4 pb-1 font-mono text-label text-ink-3/70">
         {isActive ? (
           <span className="inline-flex items-center gap-2">
-            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-delegate" />
+            <span className="inline-block h-1 w-1 animate-pulse rounded-full bg-cool" />
             awaiting agent…
           </span>
         ) : null}
@@ -501,13 +501,11 @@ function LiveFeed({ lines, isActive }: { lines: FeedLine[]; isActive: boolean })
         return (
           <div
             key={l.id}
-            className="flex items-baseline gap-2 py-[1.5px] font-mono text-[10.5px] leading-relaxed"
+            className="flex items-baseline gap-2 py-[1.5px] font-mono text-label leading-relaxed"
           >
-            <span className="shrink-0 tabular-nums text-text-tertiary/45">{l.time}</span>
-            <span
-              className={`truncate ${latest ? 'text-text-secondary' : 'text-text-tertiary/70'}`}
-            >
-              {latest && isActive && <span className="text-delegate">› </span>}
+            <span className="shrink-0 tabular-nums text-ink-3/45">{l.time}</span>
+            <span className={`truncate ${latest ? 'text-ink-2' : 'text-ink-3/70'}`}>
+              {latest && isActive && <span className="text-ink-2">› </span>}
               {l.text}
             </span>
           </div>
@@ -562,7 +560,7 @@ function ResultBlock({ conversation }: { conversation: Conversation }) {
   return (
     <div className="px-4 pb-1 pt-0.5">
       <div
-        className={`mb-1 text-[10px] font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}
+        className={`mb-1 text-label font-semibold uppercase tracking-wider ${TONE_TEXT[tone]}`}
         title={
           memoryKilled
             ? 'The sandbox enforces a per-run memory ceiling (TF_CLAIM_MEMORY_LIMIT_MB, default 4096 MB). This run exceeded it and was killed to protect the host.'
@@ -571,7 +569,7 @@ function ResultBlock({ conversation }: { conversation: Conversation }) {
       >
         {heading}
       </div>
-      <p className="line-clamp-3 text-[12px] leading-relaxed text-text-secondary">{body}</p>
+      <p className="line-clamp-3 text-ui leading-relaxed text-ink-2">{body}</p>
     </div>
   )
 }

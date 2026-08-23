@@ -73,21 +73,21 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
   return (
     <SettingsSection title="GitHub identity" summary={summary}>
       <div className="space-y-3">
-        <p className="text-[12px] leading-relaxed text-text-tertiary">
+        <p className="text-ui leading-relaxed text-ink-3">
           Triage Factory matches your pull requests and reviews to you by your GitHub username on{' '}
-          <span className="text-text-secondary">{host}</span>. It reads your username and verified
-          primary email — it never stores your token or gains access to your repositories.
+          <span className="text-ink-2">{host}</span>. It reads your username and verified primary
+          email — it never stores your token or gains access to your repositories.
         </p>
 
         {connected && !reentering ? (
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
-            <span className="text-[12px] text-claim">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
+            <span className="text-ui text-ink-2">
               Connected as @{state.status === 'ready' ? state.data.login : ''}
             </span>
             <button
               type="button"
               onClick={() => setReentering(true)}
-              className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+              className="text-reported text-ink-3 underline transition-colors hover:text-ink-2"
             >
               {connectAvailable ? 'Reconnect' : 'Re-identify with a PAT'}
             </button>
@@ -100,7 +100,7 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                 the capture-and-discard PAT path — say so, so the missing Connect
                 button doesn't read as a regression. */}
             {!connectAvailable && (
-              <p className="text-[12px] leading-relaxed text-text-tertiary">
+              <p className="text-ui leading-relaxed text-ink-3">
                 This workspace switched to PAT access; identity capture now uses a personal token
                 that is verified and discarded.
               </p>
@@ -109,13 +109,13 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
               <button
                 type="button"
                 onClick={startConnect}
-                className="w-full rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
+                className="w-full rounded-xl bg-inverse px-4 py-2.5 text-body font-medium text-inverse-ink transition-colors hover:bg-inverse/90"
               >
                 Connect GitHub
               </button>
             )}
             <label className="block">
-              <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
                 {connectAvailable
                   ? 'Or paste a personal access token'
                   : 'Paste a personal access token'}
@@ -133,18 +133,18 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                   if (e.key === 'Enter') void submitPat()
                 }}
                 aria-invalid={!!patError || undefined}
-                className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                  patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                  patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                 }`}
               />
             </label>
-            {patError && <p className="text-[12px] leading-relaxed text-dismiss">{patError}</p>}
+            {patError && <p className="text-ui leading-relaxed text-alarm">{patError}</p>}
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => void submitPat()}
                 disabled={pat.trim() === '' || capturing}
-                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-40"
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
               >
                 {capturing ? 'Verifying…' : 'Verify token'}
               </button>
@@ -156,7 +156,7 @@ function GitHubIdentitySection({ orgId }: { orgId: string | null }) {
                     setPat('')
                     setPatError(null)
                   }}
-                  className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"
+                  className="text-ui text-ink-3 transition-colors hover:text-ink-2"
                 >
                   Cancel
                 </button>
@@ -251,22 +251,22 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
   return (
     <SettingsSection title="Jira identity" summary={summary}>
       <div className="space-y-3">
-        <p className="text-[12px] leading-relaxed text-text-tertiary">
-          Triage Factory acts as you on <span className="text-text-secondary">{host}</span> — so the
-          tickets it claims and updates are attributed to you, not a shared bot. Unlike GitHub, your
-          token is stored (it&rsquo;s needed to act as you); it stays in your workspace&rsquo;s
-          secret store and is never shared with other users.
+        <p className="text-ui leading-relaxed text-ink-3">
+          Triage Factory acts as you on <span className="text-ink-2">{host}</span> — so the tickets
+          it claims and updates are attributed to you, not a shared bot. Unlike GitHub, your token
+          is stored (it&rsquo;s needed to act as you); it stays in your workspace&rsquo;s secret
+          store and is never shared with other users.
         </p>
 
         {connected && !reentering ? (
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-claim/15 bg-claim/[0.06] px-4 py-2.5">
-            <span className="text-[12px] text-claim">
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
+            <span className="text-ui text-ink-2">
               Connected as {state.status === 'ready' ? state.data.account : ''}
             </span>
             <button
               type="button"
               onClick={() => setReentering(true)}
-              className="text-[11px] text-text-tertiary underline transition-colors hover:text-text-secondary"
+              className="text-reported text-ink-3 underline transition-colors hover:text-ink-2"
             >
               Reconnect
             </button>
@@ -277,7 +277,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
               <button
                 type="button"
                 onClick={startConnect}
-                className="w-full rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
+                className="w-full rounded-xl bg-inverse px-4 py-2.5 text-body font-medium text-inverse-ink transition-colors hover:bg-inverse/90"
               >
                 Connect Jira
               </button>
@@ -285,7 +285,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
             {cloud ? (
               <>
                 <label className="block">
-                  <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                  <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
                     {connectAvailable
                       ? 'Or paste an Atlassian account email'
                       : 'Atlassian account email'}
@@ -300,13 +300,13 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                       if (patError) setPatError(null)
                     }}
                     aria-invalid={!!patError || undefined}
-                    className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                      patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                      patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                     }`}
                   />
                 </label>
                 <label className="block">
-                  <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                  <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
                     API token
                   </span>
                   <input
@@ -322,18 +322,18 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                       if (e.key === 'Enter') void submit()
                     }}
                     aria-invalid={!!patError || undefined}
-                    className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                      patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                    className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                      patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                     }`}
                   />
                 </label>
-                <p className="text-[11px] leading-relaxed text-text-tertiary">
+                <p className="text-reported leading-relaxed text-ink-3">
                   Create a token at{' '}
                   <a
                     href="https://id.atlassian.com/manage-profile/security/api-tokens"
                     target="_blank"
                     rel="noreferrer"
-                    className="text-accent hover:underline"
+                    className="text-warm hover:underline"
                   >
                     Atlassian API token settings
                   </a>
@@ -342,7 +342,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
               </>
             ) : (
               <label className="block">
-                <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+                <span className="mb-1.5 block text-reported font-medium uppercase tracking-wide text-ink-3">
                   Paste a personal access token
                 </span>
                 <input
@@ -358,19 +358,19 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                     if (e.key === 'Enter') void submit()
                   }}
                   aria-invalid={!!patError || undefined}
-                  className={`w-full rounded-xl border bg-surface px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
-                    patError ? 'border-dismiss/50' : 'border-border-glass focus:border-accent/40'
+                  className={`w-full rounded-xl border bg-ground px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 transition-colors focus:outline-none focus:ring-2 focus:ring-warm/30 ${
+                    patError ? 'border-alarm/50' : 'border-line-1 focus:border-warm/40'
                   }`}
                 />
               </label>
             )}
-            {patError && <p className="text-[12px] leading-relaxed text-dismiss">{patError}</p>}
+            {patError && <p className="text-ui leading-relaxed text-alarm">{patError}</p>}
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => void submit()}
                 disabled={submitDisabled}
-                className="rounded-xl border border-border-glass px-4 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:border-accent/40 hover:text-text-primary disabled:opacity-40"
+                className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
               >
                 {capturing ? 'Verifying…' : cloud ? 'Verify credential' : 'Verify token'}
               </button>
@@ -384,7 +384,7 @@ function JiraIdentitySection({ orgId }: { orgId: string | null }) {
                     setApiToken('')
                     setPatError(null)
                   }}
-                  className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"
+                  className="text-ui text-ink-3 transition-colors hover:text-ink-2"
                 >
                   Cancel
                 </button>
@@ -403,8 +403,8 @@ function AppearanceSection() {
   return (
     <SettingsSection title="Appearance" summary={theme[0].toUpperCase() + theme.slice(1)}>
       <div>
-        <span className="mb-2 block text-[11px] text-text-tertiary">Theme</span>
-        <div className="inline-flex rounded-lg border border-border-glass bg-black/[0.02] p-0.5">
+        <span className="mb-2 block text-reported text-ink-3">Theme</span>
+        <div className="inline-flex rounded-lg border border-line-1 bg-tint-2 p-0.5">
           {(['light', 'dark', 'auto'] as const).map((m) => (
             <button
               key={m}
@@ -413,19 +413,15 @@ function AppearanceSection() {
                 setThemeState(m)
                 setTheme(m)
               }}
-              className={`rounded-md px-3 py-1 text-[12px] font-medium capitalize transition-colors ${
-                theme === m
-                  ? 'bg-white text-text-primary shadow-sm'
-                  : 'text-text-tertiary hover:text-text-secondary'
+              className={`rounded-md px-3 py-1 text-ui font-medium capitalize transition-colors ${
+                theme === m ? 'bg-raised text-ink-1 shadow-float' : 'text-ink-3 hover:text-ink-2'
               }`}
             >
               {m}
             </button>
           ))}
         </div>
-        <p className="mt-1.5 text-[11px] text-text-tertiary">
-          Auto follows your system preference.
-        </p>
+        <p className="mt-1.5 text-reported text-ink-3">Auto follows your system preference.</p>
       </div>
     </SettingsSection>
   )

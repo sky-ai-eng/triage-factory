@@ -97,13 +97,13 @@ export default function MarketplacePublishControl({
   const delisted = listing?.status === 'delisted'
 
   const badgeLabel = published ? 'Published' : delisted ? 'Delisted' : null
-  const badgeClass = published ? 'bg-accent/10 text-accent' : 'bg-black/[0.04] text-text-tertiary'
+  const badgeClass = published ? 'bg-warm/10 text-warm' : 'bg-tint-3 text-ink-3'
 
   return (
     <div className={compact ? 'flex items-center gap-1.5' : 'flex flex-wrap items-center gap-1.5'}>
       {badgeLabel && (
         <span
-          className={`inline-flex items-center gap-1 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${badgeClass}`}
+          className={`inline-flex items-center gap-1 text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded ${badgeClass}`}
         >
           <Store size={9} className="shrink-0" />
           {badgeLabel}
@@ -113,14 +113,14 @@ export default function MarketplacePublishControl({
         <>
           <button
             onClick={() => setDialogOpen(true)}
-            className="text-[11px] font-medium text-text-secondary hover:text-text-primary hover:bg-black/[0.04] px-2 py-1 rounded-md border border-border-subtle transition-colors"
+            className="text-reported font-medium text-ink-2 hover:text-ink-1 hover:bg-tint-3 px-2 py-1 rounded-md border border-line-1 transition-colors"
           >
             {listing ? 'Publish update' : 'Publish to marketplace'}
           </button>
           {published && (
             <button
               onClick={() => void setStatus('delist')}
-              className="text-[11px] font-medium text-text-tertiary hover:text-red-500 px-2 py-1 rounded-md transition-colors"
+              className="text-reported font-medium text-ink-3 hover:text-alarm px-2 py-1 rounded-md transition-colors"
             >
               Delist
             </button>
@@ -128,7 +128,7 @@ export default function MarketplacePublishControl({
           {delisted && (
             <button
               onClick={() => void setStatus('relist')}
-              className="text-[11px] font-medium text-text-secondary hover:text-text-primary px-2 py-1 rounded-md transition-colors"
+              className="text-reported font-medium text-ink-2 hover:text-ink-1 px-2 py-1 rounded-md transition-colors"
             >
               Relist
             </button>
@@ -276,7 +276,7 @@ function PublishDialog({
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-[70]"
+            className="fixed inset-0 bg-scrim backdrop-blur-sm z-[70]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -295,19 +295,19 @@ function PublishDialog({
               role="dialog"
               aria-modal="true"
               aria-label={isRepublish ? 'Publish update' : 'Publish to marketplace'}
-              className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[480px] max-h-[85vh] flex flex-col overflow-hidden"
+              className="pointer-events-auto bg-raised/95 backdrop-blur-2xl border border-line-1 rounded-2xl shadow-float shadow-black/10 w-[480px] max-h-[85vh] flex flex-col overflow-hidden"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
-                <h2 className="text-[15px] font-semibold text-text-primary flex items-center gap-2">
-                  <Store size={15} className="text-accent" />
+                <h2 className="text-column font-semibold text-ink-1 flex items-center gap-2">
+                  <Store size={15} className="text-warm" />
                   {isRepublish ? 'Publish update' : 'Publish to marketplace'}
                 </h2>
                 <button
                   type="button"
                   onClick={onClose}
                   aria-label="Close"
-                  className="text-text-tertiary hover:text-text-secondary transition-colors"
+                  className="text-ink-3 hover:text-ink-2 transition-colors"
                 >
                   <X size={18} />
                 </button>
@@ -315,7 +315,7 @@ function PublishDialog({
 
               <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4 min-h-0">
                 {isRepublish && (
-                  <div className="text-[11px] text-text-tertiary bg-black/[0.02] border border-border-subtle rounded-lg px-3 py-2 leading-snug">
+                  <div className="text-reported text-ink-3 bg-tint-2 border border-line-1 rounded-lg px-3 py-2 leading-snug">
                     The listing is a snapshot — your local edits since v
                     {existingListing?.current_version} aren&rsquo;t shared until you publish this
                     update.
@@ -323,78 +323,72 @@ function PublishDialog({
                 )}
 
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Name
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
                   <input
                     ref={nameRef}
                     type="text"
                     value={name}
                     onChange={(e) => setName(e.target.value)}
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Description
-                  </label>
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Description</label>
                   <textarea
                     value={description}
                     onChange={(e) => setDescription(e.target.value)}
                     rows={3}
                     placeholder="What does this help with?"
-                    className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors resize-y"
+                    className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors resize-y"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                    Event types
-                  </label>
-                  <div className="max-h-[160px] overflow-y-auto space-y-1 border border-border-subtle rounded-lg p-2 bg-black/[0.02]">
+                  <label className="block text-ui font-medium text-ink-2 mb-1.5">Event types</label>
+                  <div className="max-h-[160px] overflow-y-auto space-y-1 border border-line-1 rounded-lg p-2 bg-tint-2">
                     {catalog.length === 0 && (
-                      <div className="text-[11px] text-text-tertiary px-1 py-1">Loading…</div>
+                      <div className="text-reported text-ink-3 px-1 py-1">Loading…</div>
                     )}
                     {catalog.map((et) => (
                       <label
                         key={et.id}
-                        className="flex items-center gap-2 text-[12px] text-text-secondary px-1 py-1 rounded hover:bg-black/[0.03] cursor-pointer"
+                        className="flex items-center gap-2 text-ui text-ink-2 px-1 py-1 rounded hover:bg-tint-2 cursor-pointer"
                       >
                         <input
                           type="checkbox"
                           checked={eventTypes.includes(et.id)}
                           onChange={() => toggleEventType(et.id)}
-                          className="accent-accent"
+                          className="accent-warm"
                         />
                         <span className="truncate">{et.label}</span>
                       </label>
                     ))}
                   </div>
-                  <p className="text-[10px] text-text-tertiary mt-1.5">
+                  <p className="text-label text-ink-3 mt-1.5">
                     How other teams find this when browsing — which event it&rsquo;s meant to
                     handle.
                   </p>
                 </div>
 
-                <div className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-snug">
+                <div className="text-reported text-warm bg-warm-1 border border-warm-3 rounded-lg px-3 py-2 leading-snug">
                   Publishing makes the full prompt bod{kind === 'blueprint' ? 'ies' : 'y'} visible
                   to every team in the org.
                 </div>
               </div>
 
-              <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-end gap-3 shrink-0">
-                {error && <span className="text-[12px] text-red-500">{error}</span>}
+              <div className="px-6 py-4 border-t border-line-1 flex items-center justify-end gap-3 shrink-0">
+                {error && <span className="text-ui text-alarm">{error}</span>}
                 <button
                   onClick={onClose}
-                  className="text-[12px] text-text-tertiary hover:text-text-secondary font-medium transition-colors"
+                  className="text-ui text-ink-3 hover:text-ink-2 font-medium transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={submit}
                   disabled={saving}
-                  className="text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
+                  className="text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-50"
                 >
                   {saving ? 'Publishing…' : isRepublish ? 'Publish update' : 'Publish'}
                 </button>

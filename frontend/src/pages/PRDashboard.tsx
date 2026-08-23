@@ -265,13 +265,13 @@ export default function PRDashboard() {
   const activePR = activeId ? prMap.get(activeId) : null
 
   return (
-    <div className="max-w-5xl mx-auto flex flex-col" style={{ minHeight: 'calc(100vh - 120px)' }}>
+    <div className="max-w-5xl mx-auto flex flex-col" style={{ minHeight: '100%' }}>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-semibold text-text-primary">Pull Requests</h1>
+        <h1 className="text-xl font-semibold text-ink-1">Pull Requests</h1>
         <button
           onClick={fetchAll}
           disabled={loading}
-          className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors disabled:opacity-50"
+          className="text-ui text-warm hover:text-warm/70 font-medium transition-colors disabled:opacity-50"
         >
           {loading ? 'Refreshing...' : 'Refresh'}
         </button>
@@ -314,7 +314,7 @@ export default function PRDashboard() {
           >
             <SortableContext items={readyPRs.map(prKey)} strategy={verticalListSortingStrategy}>
               {readyPRs.length === 0 ? (
-                <p className="text-[12px] text-text-tertiary text-center py-8">No open PRs</p>
+                <p className="text-ui text-ink-3 text-center py-8">No open PRs</p>
               ) : (
                 readyPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
@@ -329,7 +329,7 @@ export default function PRDashboard() {
           >
             <SortableContext items={draftPRs.map(prKey)} strategy={verticalListSortingStrategy}>
               {draftPRs.length === 0 ? (
-                <p className="text-[12px] text-text-tertiary text-center py-8">No drafts</p>
+                <p className="text-ui text-ink-3 text-center py-8">No drafts</p>
               ) : (
                 draftPRs.map((pr) => <SortablePRCard key={prKey(pr)} id={prKey(pr)} pr={pr} />)
               )}
@@ -354,7 +354,7 @@ export default function PRDashboard() {
               void loadMore()
             }}
             disabled={loading}
-            className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors disabled:opacity-50"
+            className="text-[12px] text-warm hover:text-warm/70 font-medium transition-colors disabled:opacity-50"
           >
             Load more{total !== null ? ` (${prs.length} of ${total})` : ''}
           </button>
@@ -366,14 +366,14 @@ export default function PRDashboard() {
         <div className="grid grid-cols-2 gap-6 mt-6">
           <StaticColumn title="Recently merged" count={mergedPRs.length}>
             {mergedPRs.length === 0 ? (
-              <p className="text-[12px] text-text-tertiary text-center py-8">No merged PRs</p>
+              <p className="text-ui text-ink-3 text-center py-8">No merged PRs</p>
             ) : (
               mergedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
             )}
           </StaticColumn>
           <StaticColumn title="Closed" count={closedPRs.length}>
             {closedPRs.length === 0 ? (
-              <p className="text-[12px] text-text-tertiary text-center py-8">No closed PRs</p>
+              <p className="text-ui text-ink-3 text-center py-8">No closed PRs</p>
             ) : (
               closedPRs.map((pr) => <PRCard key={prKey(pr)} pr={pr} />)
             )}
@@ -424,16 +424,16 @@ function DroppableColumn({
 
   return (
     <div className="flex flex-col min-h-0">
-      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1 shrink-0">
+      <h2 className="text-body font-medium text-ink-2 mb-3 px-1 shrink-0">
         {title}
-        <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
+        <span className="ml-2 text-ink-3 bg-tint-3 rounded-full px-2 py-0.5 text-reported">
           {count}
         </span>
       </h2>
       <div
         ref={setNodeRef}
-        className={`rounded-2xl border border-border-subtle p-3 space-y-3 flex-1 overflow-y-auto transition-colors ${
-          isOver ? 'bg-accent/5 border-accent/20' : 'bg-black/[0.01]'
+        className={`rounded-2xl border border-line-1 p-3 space-y-3 flex-1 overflow-y-auto transition-colors ${
+          isOver ? 'bg-warm/5 border-warm/20' : 'bg-tint-1'
         }`}
       >
         {children}
@@ -453,13 +453,13 @@ function StaticColumn({
 }) {
   return (
     <div className="flex flex-col min-h-0">
-      <h2 className="text-[13px] font-medium text-text-secondary mb-3 px-1 shrink-0">
+      <h2 className="text-body font-medium text-ink-2 mb-3 px-1 shrink-0">
         {title}
-        <span className="ml-2 text-text-tertiary bg-black/[0.04] rounded-full px-2 py-0.5 text-[11px]">
+        <span className="ml-2 text-ink-3 bg-tint-3 rounded-full px-2 py-0.5 text-reported">
           {count}
         </span>
       </h2>
-      <div className="rounded-2xl border border-border-subtle p-3 space-y-3 flex-1 overflow-y-auto bg-black/[0.01] max-h-[400px]">
+      <div className="rounded-2xl border border-line-1 p-3 space-y-3 flex-1 overflow-y-auto bg-tint-1 max-h-[400px]">
         {children}
       </div>
     </div>
@@ -470,18 +470,18 @@ function StaticColumn({
 
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="bg-surface-raised backdrop-blur-xl border border-border-glass rounded-2xl p-4 shadow-sm shadow-black/[0.03]">
-      <h3 className="text-[11px] font-medium text-text-tertiary mb-3">{title}</h3>
+    <div className="bg-raised backdrop-blur-xl border border-line-1 rounded-2xl p-4 shadow-float shadow-black/[0.03]">
+      <h3 className="text-reported font-medium text-ink-3 mb-3">{title}</h3>
       {children}
     </div>
   )
 }
 
 const COLORS = {
-  merged: 'var(--color-claim)',
-  closed: 'var(--color-dismiss)',
-  awaiting: 'var(--color-accent)',
-  draft: 'var(--color-text-tertiary)',
+  merged: 'var(--color-ink-1)',
+  closed: 'var(--color-alarm)',
+  awaiting: 'var(--color-warm)',
+  draft: 'var(--color-ink-3)',
 }
 
 function StatusDonut({ stats }: { stats: Stats }) {
@@ -493,7 +493,7 @@ function StatusDonut({ stats }: { stats: Stats }) {
   ].filter((d) => d.value > 0)
 
   const total = data.reduce((sum, d) => sum + d.value, 0)
-  if (total === 0) return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
+  if (total === 0) return <p className="text-ui text-ink-3 text-center py-4">No data</p>
 
   return (
     <div className="flex items-center gap-3">
@@ -518,9 +518,9 @@ function StatusDonut({ stats }: { stats: Stats }) {
       </div>
       <div className="space-y-0.5">
         {data.map((d) => (
-          <div key={d.name} className="flex items-center gap-1.5 text-[11px]">
+          <div key={d.name} className="flex items-center gap-1.5 text-reported">
             <span className="w-1.5 h-1.5 rounded-full" style={{ background: d.color }} />
-            <span className="text-text-tertiary">
+            <span className="text-ink-3">
               {d.value} {d.name.toLowerCase()}
             </span>
           </div>
@@ -531,8 +531,7 @@ function StatusDonut({ stats }: { stats: Stats }) {
 }
 
 function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
-  if (data.length === 0)
-    return <p className="text-[12px] text-text-tertiary text-center py-4">No data</p>
+  if (data.length === 0) return <p className="text-ui text-ink-3 text-center py-4">No data</p>
 
   const formatted = data.map((d) => ({
     ...d,
@@ -548,8 +547,8 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
         <AreaChart data={formatted}>
           <defs>
             <linearGradient id="mergedGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--color-claim)" stopOpacity={0.3} />
-              <stop offset="100%" stopColor="var(--color-claim)" stopOpacity={0} />
+              <stop offset="0%" stopColor="var(--color-ink-1)" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="var(--color-ink-1)" stopOpacity={0} />
             </linearGradient>
           </defs>
           <XAxis dataKey="label" hide />
@@ -572,7 +571,7 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
           <Area
             type="monotone"
             dataKey="count"
-            stroke="var(--color-claim)"
+            stroke="var(--color-ink-1)"
             strokeWidth={2}
             fill="url(#mergedGrad)"
           />
@@ -584,8 +583,7 @@ function MergedTimeline({ data }: { data: { date: string; count: number }[] }) {
 
 function ReviewBalance({ given, received }: { given: number; received: number }) {
   const total = given + received
-  if (total === 0)
-    return <p className="text-[12px] text-text-tertiary text-center py-4">No reviews yet</p>
+  if (total === 0) return <p className="text-ui text-ink-3 text-center py-4">No reviews yet</p>
 
   const givenPct = (given / total) * 100
   const net = given - received
@@ -593,21 +591,21 @@ function ReviewBalance({ given, received }: { given: number; received: number })
 
   return (
     <div className="space-y-2">
-      <div className="flex h-2.5 rounded-full overflow-hidden bg-black/[0.04]">
+      <div className="flex h-2.5 rounded-full overflow-hidden bg-tint-3">
         <div
           className="h-full rounded-l-full"
-          style={{ width: `${givenPct}%`, background: 'var(--color-delegate)' }}
+          style={{ width: `${givenPct}%`, background: 'var(--color-ink-2)' }}
         />
         <div
           className="h-full rounded-r-full"
-          style={{ width: `${100 - givenPct}%`, background: 'var(--color-accent)' }}
+          style={{ width: `${100 - givenPct}%`, background: 'var(--color-warm)' }}
         />
       </div>
-      <div className="flex justify-between text-[11px]">
-        <span className="text-delegate">{given} given</span>
-        <span className="text-accent">{received} received</span>
+      <div className="flex justify-between text-reported">
+        <span className="text-ink-2">{given} given</span>
+        <span className="text-warm">{received} received</span>
       </div>
-      <p className="text-[11px] text-text-tertiary text-center">{label}</p>
+      <p className="text-reported text-ink-3 text-center">{label}</p>
     </div>
   )
 }
@@ -617,28 +615,25 @@ function TotalsSummary({ stats }: { stats: Stats }) {
   return (
     <div className="space-y-2">
       <div className="text-center">
-        <span className="text-2xl font-semibold text-text-primary">{total}</span>
-        <p className="text-[11px] text-text-tertiary">total PRs</p>
+        <span className="text-2xl font-semibold text-ink-1">{total}</span>
+        <p className="text-reported text-ink-3">total PRs</p>
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-reported">
         <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-claim" />
-          <span className="text-text-tertiary">{stats.merged} merged</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-ink-1" />
+          <span className="text-ink-3">{stats.merged} merged</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-dismiss" />
-          <span className="text-text-tertiary">{stats.closed} closed</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-alarm" />
+          <span className="text-ink-3">{stats.closed} closed</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-          <span className="text-text-tertiary">{stats.awaiting} open</span>
+          <span className="w-1.5 h-1.5 rounded-full bg-warm" />
+          <span className="text-ink-3">{stats.awaiting} open</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <span
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ background: 'var(--color-text-tertiary)' }}
-          />
-          <span className="text-text-tertiary">{stats.draft} draft</span>
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: 'var(--color-ink-3)' }} />
+          <span className="text-ink-3">{stats.draft} draft</span>
         </div>
       </div>
     </div>
@@ -646,7 +641,7 @@ function TotalsSummary({ stats }: { stats: Stats }) {
 }
 
 // --- Skeletons ---
-const shimmer = 'animate-pulse bg-black/[0.04] rounded'
+const shimmer = 'animate-pulse bg-tint-3 rounded'
 
 function SkeletonDonut() {
   return (
@@ -691,7 +686,7 @@ function SkeletonTotals() {
         <div className={`h-7 w-10 mx-auto mb-1 ${shimmer}`} />
         <div className={`h-3 w-14 mx-auto ${shimmer}`} />
       </div>
-      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-reported">
         {[1, 2, 3, 4].map((i) => (
           <div key={i} className="flex items-center gap-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${shimmer}`} />

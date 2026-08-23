@@ -180,12 +180,12 @@ export default function TeamSlackChannelsPanel({
 
   if (loadError) {
     return (
-      <div className="px-1 py-3 text-[13px] text-text-secondary">
+      <div className="px-1 py-3 text-body text-ink-2">
         {loadError}{' '}
         <button
           type="button"
           onClick={() => setReloadKey((k) => k + 1)}
-          className="text-accent underline"
+          className="text-warm underline"
         >
           Retry
         </button>
@@ -194,18 +194,18 @@ export default function TeamSlackChannelsPanel({
   }
 
   if (channels === null) {
-    return <div className="px-1 py-3 text-[13px] text-text-tertiary">Loading Slack channels…</div>
+    return <div className="px-1 py-3 text-body text-ink-3">Loading Slack channels…</div>
   }
 
   return (
     <div className="space-y-4">
-      <p className="text-[13px] leading-relaxed text-text-tertiary">
+      <p className="text-body leading-relaxed text-ink-3">
         Channels this team tracks route Slack @mentions to its board. Claim a channel someone
         already mentioned the bot in, or pick one before anyone has.
       </p>
 
       {channels.length === 0 ? (
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Connect a Slack workspace in organization settings first.
         </p>
       ) : (
@@ -223,19 +223,19 @@ export default function TeamSlackChannelsPanel({
           {warnings.length > 0 && (
             <ul className="space-y-1">
               {warnings.map((w, i) => (
-                <li key={i} className="text-[12px] text-amber-600">
+                <li key={i} className="text-ui text-warm">
                   {warningMessage(w, channels)}
                 </li>
               ))}
             </ul>
           )}
 
-          <div className="flex items-center justify-end gap-2 border-t border-border-subtle pt-4">
+          <div className="flex items-center justify-end gap-2 border-t border-line-1 pt-4">
             <button
               type="button"
               onClick={cancel}
               disabled={!dirty || saving}
-              className="rounded-xl px-3 py-2 text-[13px] font-medium text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
+              className="rounded-xl px-3 py-2 text-body font-medium text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
             >
               Cancel
             </button>
@@ -243,7 +243,7 @@ export default function TeamSlackChannelsPanel({
               type="button"
               onClick={() => void save()}
               disabled={!dirty || saving || role !== 'admin'}
-              className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+              className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
             >
               {saving ? 'Saving…' : 'Save'}
             </button>

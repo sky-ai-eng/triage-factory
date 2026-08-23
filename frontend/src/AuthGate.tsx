@@ -32,8 +32,8 @@ import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 function Loading() {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center">
-      <p className="text-text-tertiary text-sm">Loading...</p>
+    <div className="min-h-screen bg-ground flex items-center justify-center">
+      <p className="text-ink-3 text-sm">Loading...</p>
     </div>
   )
 }
@@ -58,13 +58,13 @@ function MultiAuthGate({ children }: { children: React.ReactNode }) {
   }
   if (auth.status === 'error') {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">{auth.error ?? 'Failed to load session'}</p>
+          <p className="text-ink-2 text-sm">{auth.error ?? 'Failed to load session'}</p>
           <button
             type="button"
             onClick={() => void auth.refresh()}
-            className="text-accent text-sm underline"
+            className="text-warm text-sm underline"
           >
             Retry
           </button>
@@ -140,10 +140,10 @@ export function RequireGitHubIdentity({
   }
   if (state.status === 'error') {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">Couldn&apos;t check your GitHub connection.</p>
-          <button type="button" onClick={refresh} className="text-accent text-sm underline">
+          <p className="text-ink-2 text-sm">Couldn&apos;t check your GitHub connection.</p>
+          <button type="button" onClick={refresh} className="text-warm text-sm underline">
             Retry
           </button>
         </div>
@@ -205,10 +205,10 @@ export function RequireJiraIdentity({
   // render-through would both skip the Jira check and leak the unbound app).
   if (state.status === 'error') {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">Couldn&apos;t check your Jira connection.</p>
-          <button type="button" onClick={refresh} className="text-accent text-sm underline">
+          <p className="text-ink-2 text-sm">Couldn&apos;t check your Jira connection.</p>
+          <button type="button" onClick={refresh} className="text-warm text-sm underline">
             Retry
           </button>
         </div>
@@ -236,12 +236,12 @@ export function RequireJiraIdentity({
  */
 function SetupPendingNotice() {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center px-4">
+    <div className="min-h-screen bg-ground flex items-center justify-center px-4">
       <div className="max-w-md text-center space-y-3">
-        <h1 className="text-[18px] font-semibold text-text-primary tracking-tight">
+        <h1 className="text-section font-semibold text-ink-1 tracking-tight">
           Setup isn&rsquo;t finished
         </h1>
-        <p className="text-[13px] text-text-tertiary leading-relaxed">
+        <p className="text-body text-ink-3 leading-relaxed">
           Contact your org administrator to finish setup before continuing. Once GitHub access and
           tracked repositories are configured, this organization will open for everyone.
         </p>

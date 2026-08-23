@@ -1,0 +1,86 @@
+/* Checkbox.
+   Unchecked is structure — a hairline, no fill. Checked is a value — a solid
+   warm block carrying a light mark.
+
+   Size is the one thing the component passes in, as custom properties, because
+   it is a genuine per-instance runtime value: --check-size, --check-radius and
+   --check-stroke are set inline and everything here scales off them. Hover,
+   focus, checked and disabled are all state, so they live here as selectors —
+   the component holds no hover state, which is the point. */
+
+.tf-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  cursor: pointer;
+  font: var(--font-weight-regular) var(--text-secondary) / var(--leading-snug) var(--font-sans);
+  color: var(--color-ink-2);
+}
+
+.tf-check[data-labelled] {
+  gap: 9px;
+}
+
+.tf-check[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.tf-check__box {
+  position: relative;
+  display: block;
+  flex: none;
+  width: var(--check-size);
+  height: var(--check-size);
+  border-radius: var(--check-radius);
+  background: transparent;
+  box-shadow: inset 0 0 0 1.2px var(--color-line-2);
+  transition:
+    background 0.12s linear,
+    box-shadow 0.12s linear;
+}
+
+/* Hover strengthens the empty frame. It says nothing about a filled one, so
+   the checked rules below deliberately come after and win. */
+.tf-check:hover:not([aria-disabled='true']) .tf-check__box {
+  box-shadow: inset 0 0 0 1.2px var(--color-ink-4);
+}
+
+.tf-check[data-on] .tf-check__box {
+  background: var(--color-warm);
+  box-shadow: none;
+}
+
+.tf-check[data-on][aria-disabled='true'] .tf-check__box {
+  background: var(--color-ink-4);
+}
+
+.tf-check__mark {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  width: var(--check-size);
+  height: var(--check-size);
+}
+
+/* The mark is a hole punched in the warm block — painted in ground, never in
+   white, so it stays correct on either theme. */
+.tf-check__mark path {
+  stroke: var(--color-ground);
+  stroke-width: var(--check-stroke);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The focus ring hugs the square rather than the label — base.css draws a ring
+   on the whole [tabindex] box, which on a labelled checkbox is a long ellipse
+   around text that is not itself the control. */
+.tf-check:focus-visible {
+  outline: none;
+}
+
+.tf-check:focus-visible .tf-check__box {
+  outline: 1.5px solid var(--color-focus);
+  outline-offset: 2.5px;
+}

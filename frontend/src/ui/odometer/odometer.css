@@ -1,0 +1,198 @@
+/* Odometer — the rolling figure, and the increment that flashes.
+   Two speeds of one instrument. Both are stacks of digits behind a window one
+   digit high, and the only thing that differs is what moves them: an arrival
+   rolls a whole ramp past the window once, an increment travels exactly one
+   line.
+
+   Every measurement here is the design's: a 22px line for a figure in a row,
+   24px for the one in a header band, a 30-step ramp, and a flash that is a
+   hollow frame rather than a fill. */
+
+.odo {
+  display: flex;
+  align-items: center;
+  /* Ink is the caller's: a figure takes the color of the row it reports in. */
+  color: inherit;
+}
+
+.odo-digits {
+  display: flex;
+  gap: 0;
+}
+
+/* The window. One digit tall, and the ramp behind it is 30. */
+.odo-col {
+  display: block;
+  height: 22px;
+  overflow: hidden;
+}
+
+.odo-ramp {
+  display: block;
+  animation: tf-odo-roll 0.95s cubic-bezier(0.16, 1, 0.3, 1) var(--at, 0s) both;
+}
+
+.odo-d,
+.odo-suffix {
+  display: block;
+  height: 22px;
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  font-size: 20px;
+  line-height: 22px;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+}
+
+/* A unit rides beside the digits at their own size — "40s" is one reading, not
+   a number and a word. */
+.odo-suffix {
+  flex: none;
+}
+
+@keyframes tf-odo-roll {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(var(--roll));
+  }
+}
+
+/* Skip to the end state. The blanket rule in tokens/motion.css kills the
+   animation outright, and an animation with `both` that never runs leaves the
+   ramp at translateY(0) — which is the digit ZERO, not the answer. So the
+   component reads the preference itself and writes the end state directly.
+   Stated in Odometer.md. */
+.odo[data-still] .odo-ramp {
+  animation: none;
+  transform: translateY(var(--roll));
+}
+
+/* A measurement nobody has taken yet. No ramp, no roll — an em dash is not a
+   value arriving. */
+.odo-none {
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  font-size: 20px;
+  line-height: 22px;
+  color: inherit;
+}
+
+/* ── The increment ─────────────────────────────────────────────────────
+   A figure that is not allowed to change quietly. It travels one line height
+   inside a hollow warm frame that appears and fades. No filled strike: on a
+   24px figure that reads as an alarm, and this is an increment.
+
+   Re-running is a REMOUNT — the window and the frame are keyed on the beat
+   count, which is the same answer Acquire gives for replaying a sequence. The
+   design swaps between two identical keyframe names to the same end; a key is
+   the mechanism this codebase already has for it. */
+
+.tick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  height: 24px;
+  min-width: 30px;
+}
+
+/* The row reading fills the slot it is given rather than hugging its digits,
+   so the frame flashes around the FIGURE'S PLACE — the same width whether the
+   count is 9 or 10, and the same width as the odometers above and below it. */
+.tick[data-variant='row'] {
+  height: 22px;
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.tick-frame {
+  position: absolute;
+  inset: -3px -6px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warm) 34%, var(--color-ground));
+  opacity: 0;
+  pointer-events: none;
+  animation: tf-tick-frame 0.9s linear both;
+}
+
+.tick[data-variant='row'] .tick-frame {
+  inset: -3px -5px;
+}
+
+@keyframes tf-tick-frame {
+  0% {
+    opacity: 0;
+  }
+  5% {
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  82% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.tick-win {
+  position: relative;
+  display: block;
+  height: 24px;
+  overflow: hidden;
+}
+
+.tick-strip {
+  display: block;
+  animation: tf-tick-roll 0.62s cubic-bezier(0.22, 1, 0.36, 1) 0.12s both;
+}
+
+@keyframes tf-tick-roll {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-24px);
+  }
+}
+
+.tick-v {
+  display: block;
+  height: 24px;
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  font-size: 24px;
+  line-height: 24px;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-warm);
+}
+
+/* The row reading of the same figure: no window and no travel, because the
+   band already showed the movement. The frame still fires, so the two agree
+   about when something happened. */
+.tick-plain {
+  position: relative;
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  font-size: 20px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-warm);
+}
+
+.tick[data-variant='head'] .tick-plain {
+  font-size: 24px;
+  line-height: 24px;
+}
+
+/* Same reason as the ramp: with the animation gone the strip would sit on the
+   PREVIOUS value forever. The end state is the new one. */
+.tick[data-still] .tick-strip {
+  animation: none;
+  transform: translateY(-24px);
+}

@@ -61,29 +61,25 @@ export default function PredicateEditor({ eventType, value, onChange }: Predicat
   }
 
   if (!eventType) {
-    return <p className="text-[12px] text-text-tertiary italic">Select an event type first.</p>
+    return <p className="text-ui text-ink-3 italic">Select an event type first.</p>
   }
 
   if (loading) {
     return (
       <div className="space-y-3">
         {[1, 2, 3].map((i) => (
-          <div key={i} className="h-10 rounded-lg bg-black/[0.03] animate-pulse" />
+          <div key={i} className="h-10 rounded-lg bg-tint-2 animate-pulse" />
         ))}
       </div>
     )
   }
 
   if (error) {
-    return <p className="text-[12px] text-dismiss">{error}</p>
+    return <p className="text-ui text-alarm">{error}</p>
   }
 
   if (fields.length === 0) {
-    return (
-      <p className="text-[12px] text-text-tertiary italic">
-        No filterable fields for this event type.
-      </p>
-    )
+    return <p className="text-ui text-ink-3 italic">No filterable fields for this event type.</p>
   }
 
   return (
@@ -114,21 +110,19 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1.5">
-        <label className="text-[12px] font-medium text-text-secondary">
-          {humanize(field.name)}
-        </label>
+        <label className="text-ui font-medium text-ink-2">{humanize(field.name)}</label>
         {field.description && (
           <Tooltip.Root>
             <Tooltip.Trigger asChild>
-              <Info size={12} className="text-text-tertiary cursor-help" />
+              <Info size={12} className="text-ink-3 cursor-help" />
             </Tooltip.Trigger>
             <Tooltip.Portal>
               <Tooltip.Content
                 sideOffset={5}
-                className="max-w-[260px] px-3 py-2 rounded-lg bg-text-primary text-white text-[11px] leading-relaxed shadow-lg z-[100]"
+                className="max-w-[260px] px-3 py-2 rounded-lg bg-ink-1 text-inverse-ink text-reported leading-relaxed shadow-float z-[100]"
               >
                 {field.description}
-                <Tooltip.Arrow className="fill-text-primary" />
+                <Tooltip.Arrow className="fill-ink-1" />
               </Tooltip.Content>
             </Tooltip.Portal>
           </Tooltip.Root>
@@ -206,10 +200,10 @@ function Pill({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1 text-[12px] font-medium rounded-full border transition-colors ${
+      className={`px-3 py-1 text-ui font-medium rounded-full border transition-colors ${
         active
-          ? 'bg-accent/10 text-accent border-accent/25'
-          : 'text-text-tertiary border-border-subtle hover:text-text-secondary hover:border-border-subtle/80'
+          ? 'bg-warm/10 text-warm border-warm/25'
+          : 'text-ink-3 border-line-1 hover:text-ink-2 hover:border-line-1/80'
       }`}
     >
       {children}
@@ -232,7 +226,7 @@ function EnumField({
     <select
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || undefined)}
-      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     >
       <option value="">Any</option>
       {options.map((opt) => (
@@ -261,7 +255,7 @@ function StringField({
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value || undefined)}
       placeholder={placeholder ?? 'any'}
-      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     />
   )
 }
@@ -281,7 +275,7 @@ function IntField({
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value ? Number(e.target.value) : undefined)}
       placeholder="any"
-      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
     />
   )
 }

@@ -263,7 +263,7 @@ export default function TaskRuleEditor({
         <>
           {/* Backdrop */}
           <motion.div
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-[60]"
+            className="fixed inset-0 bg-scrim backdrop-blur-sm z-[60]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -279,15 +279,15 @@ export default function TaskRuleEditor({
             transition={{ duration: 0.15 }}
           >
             <Tooltip.Provider delayDuration={300}>
-              <div className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
+              <div className="pointer-events-auto bg-raised/95 backdrop-blur-2xl border border-line-1 rounded-2xl shadow-float shadow-black/10 w-[520px] max-h-[85vh] flex flex-col overflow-hidden">
                 {/* Header */}
                 <div className="px-6 pt-5 pb-3 flex items-center justify-between shrink-0">
-                  <h2 className="text-[15px] font-semibold text-text-primary">
+                  <h2 className="text-column font-semibold text-ink-1">
                     {isEdit ? 'Edit Task Rule' : 'New Task Rule'}
                   </h2>
                   <button
                     onClick={onClose}
-                    className="text-text-tertiary hover:text-text-secondary transition-colors"
+                    className="text-ink-3 hover:text-ink-2 transition-colors"
                   >
                     <X size={18} />
                   </button>
@@ -300,9 +300,9 @@ export default function TaskRuleEditor({
                       prompts page; otherwise the modal's own write picker. */}
                   {!isEdit &&
                     (lockedTeamId ? (
-                      <div className="text-[12px] text-text-tertiary">
+                      <div className="text-ui text-ink-3">
                         Team:{' '}
-                        <span className="font-medium text-text-secondary">
+                        <span className="font-medium text-ink-2">
                           {teams.find((t) => t.id === lockedTeamId)?.name ?? 'current team'}
                         </span>
                       </div>
@@ -311,7 +311,7 @@ export default function TaskRuleEditor({
                     ))}
                   {/* Event type */}
                   <div>
-                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                    <label className="block text-ui font-medium text-ink-2 mb-1.5">
                       Event type
                     </label>
                     <select
@@ -322,7 +322,7 @@ export default function TaskRuleEditor({
                         setAppliesToUnowned(false) // Reset watch flag — the new event may not support it.
                       }}
                       disabled={isEdit}
-                      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <option value="">Select event type…</option>
                       {eventTypes
@@ -345,7 +345,7 @@ export default function TaskRuleEditor({
                         ))}
                     </select>
                     {eventType && !canProduce(sourceKindOf(eventType)) && (
-                      <p className="text-[11px] text-text-tertiary mt-1.5 italic">
+                      <p className="text-[11px] text-ink-3 mt-1.5 italic">
                         {sourceUnavailableReason(
                           sourceKindOf(eventType),
                           stateOf(sourceKindOf(eventType)),
@@ -357,32 +357,30 @@ export default function TaskRuleEditor({
 
                   {/* Name */}
                   <div>
-                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
-                      Name
-                    </label>
+                    <label className="block text-ui font-medium text-ink-2 mb-1.5">Name</label>
                     <input
                       type="text"
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       placeholder="e.g. CI failures on my PRs"
-                      className="w-full px-3 py-2 rounded-lg border border-border-subtle bg-white/50 text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                      className="w-full px-3 py-2 rounded-lg border border-line-1 bg-raised text-body text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                     />
                   </div>
 
                   {/* Predicate */}
                   {eventType && (
                     <div>
-                      <label className="block text-[12px] font-medium text-text-secondary mb-2">
+                      <label className="block text-ui font-medium text-ink-2 mb-2">
                         When (predicate filter)
                       </label>
-                      <div className="bg-black/[0.02] rounded-lg border border-border-subtle p-3">
+                      <div className="bg-tint-2 rounded-lg border border-line-1 p-3">
                         <PredicateEditor
                           eventType={eventType}
                           value={predicate}
                           onChange={setPredicate}
                         />
                       </div>
-                      <p className="text-[11px] text-text-tertiary mt-1.5">
+                      <p className="text-reported text-ink-3 mt-1.5">
                         Leave all fields on &ldquo;Any&rdquo; to match every event of this type.
                       </p>
                     </div>
@@ -390,11 +388,9 @@ export default function TaskRuleEditor({
 
                   {/* Priority */}
                   <div>
-                    <label className="block text-[12px] font-medium text-text-secondary mb-1.5">
+                    <label className="block text-ui font-medium text-ink-2 mb-1.5">
                       Default priority{' '}
-                      <span className="text-text-tertiary font-normal">
-                        ({priority.toFixed(2)})
-                      </span>
+                      <span className="text-ink-3 font-normal">({priority.toFixed(2)})</span>
                     </label>
                     <Slider
                       value={priority}
@@ -404,7 +400,7 @@ export default function TaskRuleEditor({
                       step={0.05}
                       label="Default priority"
                     />
-                    <div className="flex justify-between text-[10px] text-text-tertiary mt-0.5">
+                    <div className="flex justify-between text-label text-ink-3 mt-0.5">
                       <span>Low</span>
                       <span>High</span>
                     </div>
@@ -423,13 +419,13 @@ export default function TaskRuleEditor({
                           type="checkbox"
                           checked={appliesToUnowned}
                           onChange={(e) => setAppliesToUnowned(e.target.checked)}
-                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-border-subtle text-accent focus:ring-accent/30"
+                          className="mt-0.5 h-4 w-4 shrink-0 rounded border-line-1 text-warm focus:ring-warm/30"
                         />
                         <span>
-                          <span className="block text-[12px] font-medium text-text-secondary">
+                          <span className="block text-ui font-medium text-ink-2">
                             Apply to entities outside this team
                           </span>
-                          <span className="block text-[11px] text-text-tertiary mt-0.5">
+                          <span className="block text-reported text-ink-3 mt-0.5">
                             Surface matching tasks even when no one on this team owns the entity.
                           </span>
                         </span>
@@ -440,7 +436,7 @@ export default function TaskRuleEditor({
                             initial={{ opacity: 0, height: 0 }}
                             animate={{ opacity: 1, height: 'auto' }}
                             exit={{ opacity: 0, height: 0 }}
-                            className="overflow-hidden text-[11px] leading-relaxed text-amber-700 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 mt-2"
+                            className="overflow-hidden text-reported leading-relaxed text-warm bg-warm/10 border border-warm/20 rounded-lg px-3 py-2 mt-2"
                           >
                             This rule surfaces matching PRs and issues authored by anyone —
                             including people on other teams and outside contributors — so expect
@@ -457,13 +453,13 @@ export default function TaskRuleEditor({
                 </div>
 
                 {/* Footer */}
-                <div className="px-6 py-4 border-t border-border-subtle flex items-center shrink-0">
+                <div className="px-6 py-4 border-t border-line-1 flex items-center shrink-0">
                   {/* Left: delete — only for user rules. System rules use the enabled toggle instead. */}
                   {isEdit && rule?.source !== 'system' && (
                     <button
                       onClick={handleDelete}
                       disabled={deleting}
-                      className="text-[13px] font-medium text-dismiss hover:text-dismiss/80 transition-colors disabled:opacity-50"
+                      className="text-body font-medium text-alarm hover:text-alarm/80 transition-colors disabled:opacity-50"
                     >
                       {deleting ? 'Deleting…' : 'Delete'}
                     </button>
@@ -471,10 +467,10 @@ export default function TaskRuleEditor({
 
                   {/* Right: cancel + save */}
                   <div className="ml-auto flex items-center gap-3">
-                    {error && <span className="text-[12px] text-dismiss mr-2">{error}</span>}
+                    {error && <span className="text-ui text-alarm mr-2">{error}</span>}
                     <button
                       onClick={onClose}
-                      className="text-[13px] font-medium text-text-tertiary hover:text-text-secondary transition-colors"
+                      className="text-body font-medium text-ink-3 hover:text-ink-2 transition-colors"
                     >
                       Cancel
                     </button>
@@ -486,7 +482,7 @@ export default function TaskRuleEditor({
                         !name.trim() ||
                         (!isEdit && !lockedTeamId && !teamsLoaded)
                       }
-                      className="text-[13px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
+                      className="text-body font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2 rounded-full transition-colors"
                     >
                       {saving ? 'Saving…' : isEdit ? 'Save' : 'Create'}
                     </button>

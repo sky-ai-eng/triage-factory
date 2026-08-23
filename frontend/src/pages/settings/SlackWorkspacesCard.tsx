@@ -37,7 +37,7 @@ function FieldHelp({ children }: { children: React.ReactNode }) {
           // the tooltip is hover/focus-driven, so suppress the click entirely.
           onClick={(e) => e.preventDefault()}
           aria-label="Where to find this in Slack"
-          className="cursor-help text-text-tertiary/60 transition-colors hover:text-text-secondary"
+          className="cursor-help text-ink-3/60 transition-colors hover:text-ink-2"
         >
           <HelpCircle size={12} />
         </button>
@@ -45,10 +45,10 @@ function FieldHelp({ children }: { children: React.ReactNode }) {
       <Tooltip.Portal>
         <Tooltip.Content
           sideOffset={5}
-          className="z-[100] max-w-[260px] rounded-lg bg-text-primary px-3 py-2 text-[11px] leading-relaxed text-white shadow-lg"
+          className="z-[100] max-w-[260px] rounded-lg bg-ink-1 px-3 py-2 text-reported leading-relaxed text-inverse-ink shadow-float"
         >
           {children}
-          <Tooltip.Arrow className="fill-text-primary" />
+          <Tooltip.Arrow className="fill-ink-1" />
         </Tooltip.Content>
       </Tooltip.Portal>
     </Tooltip.Root>
@@ -130,14 +130,14 @@ export default function SlackWorkspacesCard({ orgId }: { orgId: string }) {
 
   return (
     <div className="space-y-5">
-      <p className="text-[13px] leading-relaxed text-text-tertiary">
+      <p className="text-body leading-relaxed text-ink-3">
         Connect one or more Slack workspaces so Triage Factory can respond to @mentions. Slack has
         no one-click install for a custom app — create the app from the manifest below, install it
         to your workspace, then paste the resulting credentials here.
       </p>
 
       {loadError && (
-        <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
+        <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
           {loadError}
         </p>
       )}
@@ -232,7 +232,7 @@ function AddWorkspaceSection({
           type="button"
           onClick={() => setExpanded(true)}
           aria-expanded={expanded}
-          className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-border-glass)] px-4 py-3 text-[12px] font-medium text-text-secondary transition-colors hover:border-accent/30 hover:text-text-primary"
+          className="flex w-full items-center justify-center gap-1.5 rounded-2xl border border-dashed border-[var(--color-line-1)] px-4 py-3 text-ui font-medium text-ink-2 transition-colors hover:border-warm/30 hover:text-ink-1"
         >
           <Plus size={14} />
           Add another workspace
@@ -283,19 +283,19 @@ function WorkspaceRow({
   }
 
   return (
-    <li className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/40 px-4 py-3">
+    <li className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[13px] font-medium text-text-primary">
+          <span className="truncate text-body font-medium text-ink-1">
             {workspace.workspace_name || workspace.workspace_id}
           </span>
           <TransportChip transport={workspace.transport} />
           <ConnectionStatusChip workspace={workspace} />
         </div>
-        <p className="mt-0.5 truncate text-[11px] text-text-tertiary">
+        <p className="mt-0.5 truncate text-reported text-ink-3">
           {workspace.workspace_id}
           {workspace.enterprise_id ? ' · Enterprise Grid' : ''}
-          <span className="ml-1.5 rounded bg-black/[0.05] px-1 py-px font-mono text-[10px] text-text-tertiary">
+          <span className="ml-1.5 rounded bg-tint-3 px-1 py-px font-mono text-label text-ink-3">
             {workspace.api_app_id}
           </span>
         </p>
@@ -305,7 +305,7 @@ function WorkspaceRow({
         onClick={() => void disconnect()}
         disabled={busy}
         aria-label={`Disconnect ${workspace.workspace_name || workspace.workspace_id}`}
-        className="inline-flex shrink-0 items-center rounded-full p-1.5 text-text-tertiary transition-colors hover:text-dismiss disabled:opacity-40"
+        className="inline-flex shrink-0 items-center rounded-full p-1.5 text-ink-3 transition-colors hover:text-alarm disabled:opacity-40"
       >
         <Trash2 size={14} />
       </button>
@@ -321,11 +321,11 @@ const CONNECTION_STATUS_DISPLAY: Record<
   SlackConnectionStatus['state'],
   { label: string; dot: string; text: string }
 > = {
-  open: { label: 'Connected', dot: 'bg-emerald-500', text: 'text-emerald-700' },
-  dialing: { label: 'Connecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
-  draining: { label: 'Reconnecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
-  backing_off: { label: 'Reconnecting…', dot: 'bg-amber-500', text: 'text-amber-700' },
-  auth_failed: { label: 'Auth failed', dot: 'bg-rose-500', text: 'text-rose-700' },
+  open: { label: 'Connected', dot: 'bg-ink-1', text: 'text-ink-1' },
+  dialing: { label: 'Connecting…', dot: 'bg-warm', text: 'text-warm' },
+  draining: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },
+  backing_off: { label: 'Reconnecting…', dot: 'bg-warm', text: 'text-warm' },
+  auth_failed: { label: 'Auth failed', dot: 'bg-alarm', text: 'text-alarm' },
 }
 
 // ConnectionStatusChip is the Socket Mode connection status indicator
@@ -340,9 +340,9 @@ function ConnectionStatusChip({ workspace }: { workspace: SlackWorkspace }) {
   const status = workspace.connection
   if (!status) {
     if (workspace.transport === 'socket') {
-      return <StatusDot label="Connecting…" dot="bg-amber-500" text="text-amber-700" />
+      return <StatusDot label="Connecting…" dot="bg-warm" text="text-warm" />
     }
-    return <StatusDot label="n/a" dot="bg-text-tertiary/40" text="text-text-tertiary" />
+    return <StatusDot label="n/a" dot="bg-ink-3/40" text="text-ink-3" />
   }
   const display = CONNECTION_STATUS_DISPLAY[status.state] ?? CONNECTION_STATUS_DISPLAY.dialing
   return (
@@ -373,7 +373,7 @@ function StatusDot({
   return (
     <span
       title={title}
-      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium ${text}`}
+      className={`inline-flex shrink-0 items-center gap-1 rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium ${text}`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
       {label}
@@ -383,7 +383,7 @@ function StatusDot({
 
 function TransportChip({ transport }: { transport: 'socket' | 'events_api' }) {
   return (
-    <span className="inline-flex shrink-0 items-center rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] font-medium text-text-tertiary">
+    <span className="inline-flex shrink-0 items-center rounded-full bg-tint-3 px-2 py-0.5 text-reported font-medium text-ink-3">
       {transport === 'socket' ? 'Socket Mode' : 'Events API'}
     </span>
   )
@@ -484,17 +484,15 @@ function ConnectFlow({
 
   return (
     <Tooltip.Provider delayDuration={150}>
-      <div className="space-y-4 rounded-2xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/20 px-4 py-4">
+      <div className="space-y-4 rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/20 px-4 py-4">
         {onCollapse && (
           <div className="flex items-center justify-between">
-            <span className="text-[12px] font-medium text-text-secondary">
-              Add another workspace
-            </span>
+            <span className="text-ui font-medium text-ink-2">Add another workspace</span>
             <button
               type="button"
               onClick={onCollapse}
               aria-label="Collapse"
-              className="inline-flex shrink-0 items-center rounded-full p-1 text-text-tertiary transition-colors hover:text-text-secondary"
+              className="inline-flex shrink-0 items-center rounded-full p-1 text-ink-3 transition-colors hover:text-ink-2"
             >
               <X size={14} />
             </button>
@@ -505,26 +503,26 @@ function ConnectFlow({
             href={SLACK_APP_CREATE_URL}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-full border border-accent/20 px-3.5 py-1.5 text-[12px] font-medium text-accent transition-colors hover:border-accent/30 hover:text-accent/80"
+            className="inline-flex items-center gap-1.5 rounded-full border border-warm/20 px-3.5 py-1.5 text-ui font-medium text-warm transition-colors hover:border-warm/30 hover:text-warm/80"
           >
             Create a Slack app <ExternalLink size={12} />
           </a>
           <CopyManifestButton transport="socket" label="Copy manifest (Socket Mode)" />
           <CopyManifestButton transport="events_api" label="Copy manifest (Events API)" />
         </div>
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
+        <p className="text-reported leading-relaxed text-ink-3">
           Two ways to receive events:{' '}
-          <strong className="font-medium text-text-secondary">Socket Mode</strong> works anywhere —
+          <strong className="font-medium text-ink-2">Socket Mode</strong> works anywhere —
           localhost, behind a firewall, no public URL — and is the usual choice;{' '}
-          <strong className="font-medium text-text-secondary">Events API</strong> needs a public
-          HTTPS URL Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
+          <strong className="font-medium text-ink-2">Events API</strong> needs a public HTTPS URL
+          Slack can reach. Copy the matching manifest into &ldquo;Create an app from a
           manifest,&rdquo; install it to your workspace, then paste the credentials below — hover a{' '}
-          <HelpCircle size={11} className="inline align-[-1px] text-text-tertiary" /> for where each
-          lives in Slack.
+          <HelpCircle size={11} className="inline align-[-1px] text-ink-3" /> for where each lives
+          in Slack.
         </p>
 
         <label className="block space-y-2">
-          <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="flex items-center gap-1.5 text-reported font-medium uppercase tracking-wide text-ink-3">
             Bot token
             <FieldHelp>
               Slack app → <strong>OAuth &amp; Permissions</strong> →{' '}
@@ -544,8 +542,8 @@ function ConnectFlow({
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label className="block space-y-2">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-              Signing secret <span className="normal-case text-text-tertiary/70">(Events API)</span>
+            <span className="flex items-center gap-1.5 text-reported font-medium uppercase tracking-wide text-ink-3">
+              Signing secret <span className="normal-case text-ink-3/70">(Events API)</span>
               <FieldHelp>
                 Slack app → <strong>Basic Information</strong> → <strong>App Credentials</strong> →{' '}
                 <strong>Signing Secret</strong>. Only for Events API — leave blank for Socket Mode.
@@ -561,9 +559,8 @@ function ConnectFlow({
             />
           </label>
           <label className="block space-y-2">
-            <span className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
-              App-level token{' '}
-              <span className="normal-case text-text-tertiary/70">(Socket Mode)</span>
+            <span className="flex items-center gap-1.5 text-reported font-medium uppercase tracking-wide text-ink-3">
+              App-level token <span className="normal-case text-ink-3/70">(Socket Mode)</span>
               <FieldHelp>
                 Slack app → <strong>Basic Information</strong> → <strong>App-Level Tokens</strong> →
                 Generate Token &amp; Scopes with the <code>connections:write</code> scope (starts{' '}
@@ -583,7 +580,7 @@ function ConnectFlow({
 
         {needsTransportChoice && (
           <label className="block space-y-2">
-            <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+            <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
               Both credentials supplied — which transport?
             </span>
             <div className="flex gap-2">
@@ -592,10 +589,10 @@ function ConnectFlow({
                   key={t}
                   type="button"
                   onClick={() => setTransport(t)}
-                  className={`rounded-full border px-3.5 py-1.5 text-[12px] font-medium transition-colors ${
+                  className={`rounded-full border px-3.5 py-1.5 text-ui font-medium transition-colors ${
                     transport === t
-                      ? 'border-accent/40 bg-accent/10 text-accent'
-                      : 'border-[var(--color-border-glass)] text-text-secondary hover:text-text-primary'
+                      ? 'border-warm/40 bg-warm/10 text-warm'
+                      : 'border-[var(--color-line-1)] text-ink-2 hover:text-ink-1'
                   }`}
                 >
                   {t === 'socket' ? 'Socket Mode' : 'Events API'}
@@ -606,7 +603,7 @@ function ConnectFlow({
         )}
 
         {error && (
-          <p role="alert" className="text-[12px] leading-relaxed text-[var(--color-dismiss)]">
+          <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
             {error}
           </p>
         )}
@@ -615,7 +612,7 @@ function ConnectFlow({
           type="button"
           onClick={() => void connect()}
           disabled={!canSubmit}
-          className="rounded-full bg-accent px-6 py-2.5 text-[13px] font-medium text-white shadow-[0_10px_28px_-10px_var(--color-accent)] transition-all hover:bg-accent/90 disabled:opacity-40 disabled:shadow-none"
+          className="rounded-full bg-warm px-6 py-2.5 text-body font-medium text-warm-ink shadow-[0_10px_28px_-10px_var(--color-warm)] transition-all hover:bg-warm/90 disabled:opacity-40 disabled:shadow-none"
         >
           {connecting ? 'Connecting…' : 'Connect workspace'}
         </button>
@@ -655,7 +652,7 @@ function CopyManifestButton({
       type="button"
       onClick={() => void copy()}
       disabled={busy}
-      className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-border-glass)] px-3.5 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:text-text-primary disabled:opacity-40"
+      className="inline-flex items-center gap-1.5 rounded-full border border-[var(--color-line-1)] px-3.5 py-1.5 text-ui font-medium text-ink-2 transition-colors hover:text-ink-1 disabled:opacity-40"
     >
       {copied ? <Check size={12} /> : <Copy size={12} />}
       {copied ? 'Copied' : label}

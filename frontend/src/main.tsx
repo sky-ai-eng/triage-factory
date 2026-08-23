@@ -3,9 +3,9 @@
    RootRedirect, *Routes) aren't exported anywhere — the file calls
    createRoot().render() at the bottom and exits. The rule's HMR
    heuristic doesn't apply to an entrypoint. */
-import { StrictMode } from 'react'
+import { StrictMode, Suspense, lazy } from 'react'
 import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router'
 import { useEffect } from 'react'
 import './index.css'
 import { watchSystemTheme } from './lib/theme'
@@ -20,7 +20,7 @@ import PRDashboard from './pages/PRDashboard'
 import Settings from './pages/Settings'
 import Prompts from './pages/Prompts'
 import OrgPage from './pages/OrgPage'
-import TeamPage from './pages/TeamPage'
+import TeamSettings from './pages/team/TeamSettings'
 import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
@@ -28,6 +28,7 @@ import Projects from './pages/Projects'
 import ProjectDetail from './pages/ProjectDetail'
 import Fleet from './pages/Fleet'
 import Usage from './pages/Usage'
+import Overview from './pages/Overview'
 import Login from './pages/Login'
 import Onboarding from './pages/Onboarding'
 import InviteAccept from './pages/InviteAccept'
@@ -58,8 +59,8 @@ import { OrgProvider, useActiveOrgId } from './contexts/OrgContext'
 
 function Loading() {
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center">
-      <p className="text-text-tertiary text-sm">Loading...</p>
+    <div className="min-h-screen bg-ground flex items-center justify-center">
+      <p className="text-ink-3 text-sm">Loading...</p>
     </div>
   )
 }
@@ -151,6 +152,10 @@ function LocalRoutes() {
         }
       >
         <Route path="/" element={<Factory />} />
+        {/* Overview is a stub page behind a real route: the rail's first row
+            and the scope switcher both point here, and a nav row that 404s is
+            worse than one that says "not yet". */}
+        <Route path="/overview" element={<Overview />} />
         <Route path="/triage" element={<Cards />} />
         <Route path="/board" element={<Board />} />
         <Route path="/runs/:conversationID" element={<RunDetail />} />
@@ -237,15 +242,17 @@ function MultiRoutes() {
             }
           >
             <Route index element={<Factory />} />
+            <Route path="overview" element={<Overview />} />
             <Route path="triage" element={<Cards />} />
             <Route path="board" element={<Board />} />
             <Route path="runs/:conversationID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
-            {/* Prompts is the /team Prompts tab in multi mode (TFAC-445). The
-                top-level Prompts nav deep-links straight there; this redirect
-                keeps the standalone /prompts path (and old bookmarks) pointing
-                at the canonical surface. `..` pops to /orgs/:org_id. */}
-            <Route path="prompts" element={<Navigate to="../team?tab=prompts" replace />} />
+            {/* Prompts is its own destination. It used to redirect into a tab
+                on /team, which is where the editor lived before the rail gave
+                Prompts a row of its own with Library, Marketplace and Bindings
+                under it. The page is mode-agnostic — it resolves its team from
+                useActiveTeam like every other surface. */}
+            <Route path="prompts" element={<Prompts />} />
             <Route path="repos" element={<Repos />} />
             <Route path="projects" element={<Projects />} />
             <Route path="projects/:id" element={<ProjectDetail />} />
@@ -258,7 +265,7 @@ function MultiRoutes() {
             {/* Team page shell (TFAC-445) — [Members · Settings · Prompts]
                 tabs + a shared team-switcher, plus the zero-team safe landing.
                 Multi-mode only. */}
-            <Route path="team" element={<TeamPage />} />
+            <Route path="team" element={<TeamSettings />} />
             {/* Within-org prompt marketplace browse page (TFAC-537). Multi-mode
                 only — nothing in LocalRoutes; absence from that table is the
                 mode gate, mirroring org/team above. */}
@@ -287,18 +294,38 @@ function MultiRoutes() {
   )
 }
 
+/* The design-system gallery. `import.meta.env.DEV` is statically replaced at
+   build time, so in production this is `false ? lazy(...) : null` and neither
+   the component nor its stylesheet reaches the bundle. */
+const UiGallery = import.meta.env.DEV ? lazy(() => import('./dev/UiGallery')) : null
+
 function AppRoutes() {
+  const { pathname } = useLocation()
   const { config, loading, error } = useDeploymentConfig()
+
+  /* Intercepted ahead of the deployment-mode branch, and ahead of every gate:
+     the gallery mounts ui components with hand-written props and talks to
+     nothing, so it must stay reachable when the backend is down or the user is
+     signed out. That independence is the point — it is where the design system
+     is reviewed, including when the API is what you are busy breaking. */
+  if (UiGallery && pathname.startsWith('/dev/ui')) {
+    return (
+      <Suspense fallback={<Loading />}>
+        <UiGallery />
+      </Suspense>
+    )
+  }
+
   if (loading) return <Loading />
   if (error || !config) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">{error ?? 'Failed to load configuration'}</p>
+          <p className="text-ink-2 text-sm">{error ?? 'Failed to load configuration'}</p>
           <button
             type="button"
             onClick={() => window.location.reload()}
-            className="text-accent text-sm underline"
+            className="text-warm text-sm underline"
           >
             Retry
           </button>

@@ -301,7 +301,7 @@ export default function PromptPicker({
         <>
           {/* Backdrop */}
           <motion.div
-            className="fixed inset-0 bg-black/20 backdrop-blur-sm z-50"
+            className="fixed inset-0 bg-scrim backdrop-blur-sm z-50"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -323,13 +323,13 @@ export default function PromptPicker({
               aria-modal="true"
               aria-label={title}
               onKeyDown={onKeyDown}
-              className="pointer-events-auto bg-surface-raised/95 backdrop-blur-2xl border border-border-glass rounded-2xl shadow-2xl shadow-black/10 w-[760px] max-w-[calc(100vw-2rem)] h-[460px] max-h-[calc(100vh-4rem)] flex flex-col overflow-hidden"
+              className="pointer-events-auto bg-raised/95 backdrop-blur-2xl border border-line-1 rounded-2xl shadow-float shadow-black/10 w-[760px] max-w-[calc(100vw-2rem)] h-[460px] max-h-[calc(100vh-4rem)] flex flex-col overflow-hidden"
             >
               {/* Header */}
-              <div className="px-5 pt-5 pb-3 flex items-start justify-between gap-3 shrink-0 border-b border-border-subtle">
+              <div className="px-5 pt-5 pb-3 flex items-start justify-between gap-3 shrink-0 border-b border-line-1">
                 <div className="min-w-0">
-                  <h2 className="text-[15px] font-semibold text-text-primary truncate">{title}</h2>
-                  <p className="text-[12px] text-text-tertiary mt-0.5">{subtitle}</p>
+                  <h2 className="text-column font-semibold text-ink-1 truncate">{title}</h2>
+                  <p className="text-ui text-ink-3 mt-0.5">{subtitle}</p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {onTeamChange && (
@@ -343,7 +343,7 @@ export default function PromptPicker({
                   <button
                     onClick={onClose}
                     aria-label="Close"
-                    className="text-text-tertiary hover:text-text-secondary transition-colors text-lg leading-none px-1"
+                    className="text-ink-3 hover:text-ink-2 transition-colors text-lg leading-none px-1"
                   >
                     &times;
                   </button>
@@ -353,8 +353,8 @@ export default function PromptPicker({
               {/* Body — master list + detail pane */}
               <div className="flex flex-1 min-h-0">
                 {/* List rail */}
-                <div className="flex w-[244px] shrink-0 flex-col border-r border-border-subtle">
-                  <div className="shrink-0 px-3 py-2.5 border-b border-border-subtle">
+                <div className="flex w-[244px] shrink-0 flex-col border-r border-line-1">
+                  <div className="shrink-0 px-3 py-2.5 border-b border-line-1">
                     <input
                       ref={filterRef}
                       type="text"
@@ -370,7 +370,7 @@ export default function PromptPicker({
                       aria-controls={listboxId}
                       aria-activedescendant={selId ? optionId(selId) : undefined}
                       aria-autocomplete="list"
-                      className="w-full px-2.5 py-1.5 rounded-lg border border-border-subtle bg-white/50 text-[12px] text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-colors"
+                      className="w-full px-2.5 py-1.5 rounded-lg border border-line-1 bg-raised text-ui text-ink-1 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 transition-colors"
                     />
                   </div>
                   <div
@@ -384,10 +384,10 @@ export default function PromptPicker({
                   >
                     {loading ? (
                       [...Array(6)].map((_, i) => (
-                        <div key={i} className="h-9 rounded-lg bg-black/[0.03] animate-pulse" />
+                        <div key={i} className="h-9 rounded-lg bg-tint-2 animate-pulse" />
                       ))
                     ) : visible.length === 0 ? (
-                      <p className="px-2 py-6 text-center text-[12px] text-text-tertiary">
+                      <p className="px-2 py-6 text-center text-ui text-ink-3">
                         {fetchFailed
                           ? 'Failed to load.'
                           : query
@@ -409,16 +409,16 @@ export default function PromptPicker({
                           onDoubleClick={() => commit(it.id)}
                           className={`group flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-all duration-150 ${
                             selId === it.id
-                              ? 'border-accent/60 bg-accent/[0.06] ring-1 ring-accent/20'
-                              : 'border-transparent hover:bg-black/[0.03]'
+                              ? 'border-warm/60 bg-warm/[0.06] ring-1 ring-warm/20'
+                              : 'border-transparent hover:bg-tint-2'
                           }`}
                         >
-                          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-text-primary">
+                          <span className="min-w-0 flex-1 truncate text-body font-medium text-ink-1">
                             {it.name}
                           </span>
                           {it.steps && it.steps.length > 1 && (
                             <span
-                              className="inline-flex shrink-0 items-center gap-0.5 text-[10px] font-semibold tabular-nums text-text-tertiary"
+                              className="inline-flex shrink-0 items-center gap-0.5 text-label font-semibold tabular-nums text-ink-3"
                               title={`${it.steps.length} steps`}
                             >
                               <Layers size={10} />
@@ -428,7 +428,7 @@ export default function PromptPicker({
                           {it.id === selectedId && (
                             <span
                               aria-hidden
-                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+                              className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm"
                               title="In use"
                             />
                           )}
@@ -442,23 +442,21 @@ export default function PromptPicker({
                 <div className="flex flex-1 min-w-0 flex-col">
                   {loading ? (
                     <div className="flex-1 px-5 py-4 space-y-3">
-                      <div className="h-5 w-40 rounded bg-black/[0.04] animate-pulse" />
-                      <div className="h-3 w-24 rounded bg-black/[0.03] animate-pulse" />
-                      <div className="h-24 rounded-lg bg-black/[0.02] animate-pulse" />
+                      <div className="h-5 w-40 rounded bg-tint-3 animate-pulse" />
+                      <div className="h-3 w-24 rounded bg-tint-2 animate-pulse" />
+                      <div className="h-24 rounded-lg bg-tint-2 animate-pulse" />
                     </div>
                   ) : selected ? (
                     <div className="flex-1 overflow-y-auto px-5 py-4">
                       <div className="flex items-center gap-2">
-                        <h3 className="text-[15px] font-semibold text-text-primary">
-                          {selected.name}
-                        </h3>
+                        <h3 className="text-column font-semibold text-ink-1">{selected.name}</h3>
                         {selected.id === selectedId && (
-                          <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">
+                          <span className="text-label-sm font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-warm/10 text-warm shrink-0">
                             In use
                           </span>
                         )}
                       </div>
-                      <div className="mt-1 font-mono text-[10px] uppercase tracking-[0.1em] text-text-tertiary">
+                      <div className="mt-1 font-mono text-label uppercase tracking-[0.1em] text-ink-3">
                         {metaLine(selected)}
                       </div>
 
@@ -472,29 +470,29 @@ export default function PromptPicker({
                               <span
                                 key={s.index}
                                 className="h-[3px] flex-1 rounded-full"
-                                style={{ background: 'var(--color-accent)', opacity: 0.5 }}
+                                style={{ background: 'var(--color-warm)', opacity: 0.5 }}
                               />
                             ))}
                           </div>
                           <ol className="mt-4 space-y-3">
                             {selected.steps!.map((s) => (
                               <li key={s.index} className="flex gap-3">
-                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/[0.04] font-mono text-[10px] font-semibold tabular-nums text-text-tertiary">
+                                <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-tint-3 font-mono text-label font-semibold tabular-nums text-ink-3">
                                   {s.index}
                                 </span>
                                 <div className="min-w-0 flex-1">
                                   <div className="flex items-center gap-2">
-                                    <span className="truncate text-[12.5px] font-medium text-text-primary">
+                                    <span className="truncate text-card-title font-medium text-ink-1">
                                       {s.name}
                                     </span>
                                     {s.model && (
-                                      <span className="shrink-0 rounded bg-black/[0.04] px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-text-tertiary">
+                                      <span className="shrink-0 rounded bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm uppercase tracking-wider text-ink-3">
                                         {s.model}
                                       </span>
                                     )}
                                   </div>
                                   {s.brief && (
-                                    <p className="mt-0.5 text-[11px] leading-snug text-text-tertiary">
+                                    <p className="mt-0.5 text-reported leading-snug text-ink-3">
                                       {s.brief}
                                     </p>
                                   )}
@@ -504,18 +502,16 @@ export default function PromptPicker({
                           </ol>
                         </>
                       ) : selected.body.trim() ? (
-                        <p className="mt-3 whitespace-pre-wrap font-mono text-[11.5px] leading-relaxed text-text-secondary">
+                        <p className="mt-3 whitespace-pre-wrap font-mono text-secondary leading-relaxed text-ink-2">
                           {selected.body}
                         </p>
                       ) : (
-                        <p className="mt-3 text-[12px] italic text-text-tertiary">
-                          No description.
-                        </p>
+                        <p className="mt-3 text-ui italic text-ink-3">No description.</p>
                       )}
                     </div>
                   ) : (
                     <div className="flex flex-1 items-center justify-center px-5">
-                      <p className="text-[12px] text-text-tertiary">
+                      <p className="text-ui text-ink-3">
                         {source === 'blueprints' ? 'No blueprints yet.' : 'No prompts yet.'}
                       </p>
                     </div>
@@ -524,11 +520,11 @@ export default function PromptPicker({
               </div>
 
               {/* Footer — secondary edit link + primary commit */}
-              <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between shrink-0">
+              <div className="px-5 py-3 border-t border-line-1 flex items-center justify-between shrink-0">
                 {onEditPrompts ? (
                   <button
                     onClick={onEditPrompts}
-                    className="text-[12px] text-text-tertiary hover:text-accent font-medium transition-colors"
+                    className="text-ui text-ink-3 hover:text-warm font-medium transition-colors"
                   >
                     Edit Prompts
                   </button>
@@ -538,7 +534,7 @@ export default function PromptPicker({
                 <button
                   onClick={() => commit()}
                   disabled={selectionDisabled || !selected}
-                  className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-white bg-accent hover:bg-accent/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 text-ui font-semibold text-warm-ink bg-warm hover:bg-warm/90 px-4 py-1.5 rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {selectLabel}
                   <span aria-hidden>→</span>

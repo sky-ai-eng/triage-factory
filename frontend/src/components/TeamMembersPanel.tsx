@@ -110,20 +110,20 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
 // shell's concern; this surfaces the bot's current state.
 function TeamBotRow({ bot }: { bot: TeamBot }) {
   return (
-    <li className="flex items-center gap-4 bg-accent-soft/20 px-4 py-3">
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-soft text-accent">
+    <li className="flex items-center gap-4 bg-warm-2/20 px-4 py-3">
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-warm-2 text-warm">
         <Bot size={16} />
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-[13px] font-medium text-text-primary">
+          <span className="truncate text-body font-medium text-ink-1">
             {bot.display_name || 'Team bot'}
           </span>
-          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent">
+          <span className="rounded-full bg-warm-2 px-2 py-0.5 text-label font-medium text-warm">
             Bot
           </span>
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-text-tertiary">
+        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-label text-ink-3">
           <span>{bot.enabled ? 'Enabled' : 'Disabled'}</span>
           {bot.model && <span>· {bot.model}</span>}
           {bot.autonomy != null && <span>· autonomy {bot.autonomy}</span>}

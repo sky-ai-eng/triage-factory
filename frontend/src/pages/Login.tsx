@@ -110,19 +110,15 @@ export default function Login() {
   }
 
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-      <div className="w-full max-w-sm backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]">
+    <div className="min-h-screen bg-ground flex items-center justify-center p-4">
+      <div className="w-full max-w-sm backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         <div className="space-y-1.5">
-          <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
-            Triage Factory
-          </h1>
-          <p className="text-[13px] text-text-tertiary leading-relaxed">
-            Enter your work email to continue.
-          </p>
+          <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">Triage Factory</h1>
+          <p className="text-body text-ink-3 leading-relaxed">Enter your work email to continue.</p>
         </div>
 
         {auth.status === 'error' && auth.error && (
-          <div className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss">
+          <div className="rounded-xl bg-alarm/[0.08] border border-alarm/20 px-4 py-2.5 text-body text-alarm">
             Couldn&apos;t reach the server. Try again in a moment.
           </div>
         )}
@@ -130,7 +126,7 @@ export default function Login() {
         {ssoRequired && (
           <div
             role="alert"
-            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+            className="rounded-xl bg-warm/[0.08] border border-warm/20 px-4 py-2.5 text-body text-ink-2"
           >
             Your organization requires single sign-on. Enter your work email to continue via SSO.
           </div>
@@ -139,7 +135,7 @@ export default function Login() {
         {seatLimit && (
           <div
             role="alert"
-            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+            className="rounded-xl bg-warm/[0.08] border border-warm/20 px-4 py-2.5 text-body text-ink-2"
           >
             This deployment has reached its licensed seat limit. Ask your administrator to add seats
             before signing in.
@@ -149,7 +145,7 @@ export default function Login() {
         {loginFailed && (
           <div
             role="alert"
-            className="rounded-xl bg-dismiss/[0.08] border border-dismiss/20 px-4 py-2.5 text-[13px] text-dismiss"
+            className="rounded-xl bg-alarm/[0.08] border border-alarm/20 px-4 py-2.5 text-body text-alarm"
           >
             Sign-in couldn&apos;t be completed. This is usually a temporary problem with the
             identity provider — please try again in a moment.
@@ -159,7 +155,7 @@ export default function Login() {
         {loginCancelled && (
           <div
             role="alert"
-            className="rounded-xl bg-accent/[0.08] border border-accent/20 px-4 py-2.5 text-[13px] text-text-secondary"
+            className="rounded-xl bg-warm/[0.08] border border-warm/20 px-4 py-2.5 text-body text-ink-2"
           >
             Sign-in was cancelled. Try again below to continue.
           </div>
@@ -167,10 +163,7 @@ export default function Login() {
 
         <form onSubmit={onSubmit} className="space-y-3">
           <div className="space-y-1.5">
-            <label
-              htmlFor="login-email"
-              className="block text-[12px] font-medium text-text-secondary"
-            >
+            <label htmlFor="login-email" className="block text-ui font-medium text-ink-2">
               Work email
             </label>
             <input
@@ -184,18 +177,18 @@ export default function Login() {
                 if (notice) setNotice(null)
               }}
               placeholder="you@company.com"
-              className="w-full rounded-xl border border-border-subtle bg-white/60 px-3.5 py-2.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-accent focus:bg-white focus:outline-none"
+              className="w-full rounded-xl border border-line-1 bg-raised px-3.5 py-2.5 text-body text-ink-1 placeholder:text-ink-3 focus:border-warm focus:bg-raised focus:outline-none"
             />
           </div>
 
           {notice === 'no-sso' && (
-            <p role="status" className="text-[12px] text-text-tertiary leading-relaxed">
+            <p role="status" className="text-ui text-ink-3 leading-relaxed">
               No single sign-on for that email. Continue with GitHub below.
             </p>
           )}
 
           {notice === 'error' && (
-            <p role="alert" className="text-[12px] text-dismiss leading-relaxed">
+            <p role="alert" className="text-ui text-alarm leading-relaxed">
               Couldn&apos;t check single sign-on right now. Try again, or continue with GitHub
               below.
             </p>
@@ -204,22 +197,22 @@ export default function Login() {
           <button
             type="submit"
             disabled={checking || !email.trim()}
-            className="w-full flex items-center justify-center gap-2 bg-accent hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            className="w-full flex items-center justify-center gap-2 bg-warm hover:bg-warm/90 disabled:opacity-50 disabled:cursor-not-allowed text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
           >
             {checking ? 'Checking…' : 'Continue'}
           </button>
         </form>
 
         <div className="flex items-center gap-3">
-          <div className="h-px flex-1 bg-border-subtle" />
-          <span className="text-[11px] uppercase tracking-wide text-text-tertiary">or</span>
-          <div className="h-px flex-1 bg-border-subtle" />
+          <div className="h-px flex-1 bg-line-1" />
+          <span className="text-reported uppercase tracking-wide text-ink-3">or</span>
+          <div className="h-px flex-1 bg-line-1" />
         </div>
 
         <button
           type="button"
           onClick={startGitHub}
-          className="w-full flex items-center justify-center gap-2 bg-surface-inverse hover:bg-surface-inverse/90 text-text-inverse font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+          className="w-full flex items-center justify-center gap-2 bg-inverse hover:bg-inverse/90 text-inverse-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
         >
           <svg
             viewBox="0 0 16 16"
@@ -233,7 +226,7 @@ export default function Login() {
           Sign in with GitHub
         </button>
 
-        <p className="text-[11px] text-text-tertiary leading-relaxed">
+        <p className="text-reported text-ink-3 leading-relaxed">
           By signing in, you authorize Triage Factory to read your GitHub identity. Repository
           access is configured separately by your organization admin.
         </p>

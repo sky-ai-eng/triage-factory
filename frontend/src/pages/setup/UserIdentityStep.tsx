@@ -32,21 +32,20 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
     return (
       <div className="space-y-5">
         <div className="space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
             Your GitHub identity
           </h2>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <p className="text-body leading-relaxed text-ink-3">
             So Triage Factory can match the pull requests and reviews you author to you.
           </p>
         </div>
-        <div className="flex items-center gap-2.5 rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 px-4 py-3">
-          <span className="text-[var(--color-claim)]">
+        <div className="flex items-center gap-2.5 rounded-xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/50 px-4 py-3">
+          <span className="text-warm">
             <GitHubMark />
           </span>
-          <p className="text-[13px] text-text-secondary">
-            Connected as{' '}
-            <span className="font-medium text-text-primary">@{state.userIdentityLogin}</span>
-            <span className="text-text-tertiary"> on {host}</span>
+          <p className="text-body text-ink-2">
+            Connected as <span className="font-medium text-ink-1">@{state.userIdentityLogin}</span>
+            <span className="text-ink-3"> on {host}</span>
           </p>
         </div>
       </div>
@@ -62,14 +61,12 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-          Connect your GitHub
-        </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect your GitHub</h2>
+        <p className="text-body leading-relaxed text-ink-3">
           Triage Factory needs to know who you are on{' '}
-          <span className="font-medium text-text-secondary">{host}</span> so it can match your pull
-          requests and reviews to you. This reads your username and verified primary email — it
-          doesn&rsquo;t grant access to your repositories.
+          <span className="font-medium text-ink-2">{host}</span> so it can match your pull requests
+          and reviews to you. This reads your username and verified primary email — it doesn&rsquo;t
+          grant access to your repositories.
         </p>
       </div>
 
@@ -77,7 +74,7 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
         <button
           type="button"
           onClick={startConnect}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-inverse px-4 py-2.5 text-body font-medium text-inverse-ink transition-colors hover:bg-inverse/90"
         >
           <GitHubMark />
           Connect GitHub
@@ -86,7 +83,7 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
 
       <div className="space-y-2">
         <label className="block">
-          <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
             {state.userConnectAvailable
               ? 'Or paste a personal access token'
               : 'Personal access token'}
@@ -100,12 +97,12 @@ export function UserIdentityStep({ state, patch, orgId, error }: StepContext) {
             aria-invalid={!!error || undefined}
             className={`${glassInputClass}${
               error
-                ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
                 : ''
             }`}
           />
         </label>
-        <p className="text-[11px] leading-relaxed text-text-tertiary">
+        <p className="text-reported leading-relaxed text-ink-3">
           {state.userConnectAvailable
             ? 'A token works too — your username and verified primary email are read, and the token isn’t stored.'
             : 'Paste a token with read access to your identity and email addresses. The token isn’t stored.'}

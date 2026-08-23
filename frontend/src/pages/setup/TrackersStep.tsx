@@ -52,7 +52,7 @@ export default function TrackersStep({ state, patch }: StepContext) {
 
   return (
     <div className="space-y-4">
-      <p className="text-[13px] leading-relaxed text-text-secondary">
+      <p className="text-body leading-relaxed text-ink-2">
         Optionally connect an issue tracker. You can skip this and add one later in Settings.
       </p>
 
@@ -79,28 +79,24 @@ export default function TrackersStep({ state, patch }: StepContext) {
               onClick={() => select(card.kind)}
               className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left transition-colors ${
                 card.disabled
-                  ? 'cursor-default border-border-subtle bg-black/[0.02] opacity-55'
+                  ? 'cursor-default border-line-1 bg-tint-2 opacity-55'
                   : selected
-                    ? 'border-accent/50 bg-accent/[0.06] shadow-sm shadow-black/[0.03]'
-                    : 'border-border-subtle bg-white/40 hover:border-accent/30 hover:bg-white/70'
+                    ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
+                    : 'border-line-1 bg-raised hover:border-warm/30 hover:bg-sunk'
               }`}
             >
               <span className="flex items-center gap-1.5">
-                <span
-                  className={`text-[13px] font-medium ${
-                    selected ? 'text-accent' : 'text-text-primary'
-                  }`}
-                >
+                <span className={`text-body font-medium ${selected ? 'text-warm' : 'text-ink-1'}`}>
                   {card.title}
                 </span>
                 {card.disabled && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide text-text-tertiary">
+                  <span className="inline-flex items-center gap-0.5 rounded-full bg-tint-3 px-1.5 py-0.5 text-label-sm font-medium uppercase tracking-wide text-ink-3">
                     <Clock size={9} aria-hidden />
                     Soon
                   </span>
                 )}
               </span>
-              <span className="text-[11px] leading-snug text-text-tertiary">{card.blurb}</span>
+              <span className="text-reported leading-snug text-ink-3">{card.blurb}</span>
             </button>
           )
         })}

@@ -139,11 +139,11 @@ export default function DiffFile({
       : null
 
   return (
-    <div className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl overflow-hidden shadow-sm shadow-black/[0.02]">
+    <div className="backdrop-blur-xl bg-raised/70 border border-line-1 rounded-2xl overflow-hidden shadow-float shadow-black/[0.02]">
       {/* File header */}
       <button
         onClick={() => setCollapsed(!collapsed)}
-        className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-black/[0.015] transition-colors text-left"
+        className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-tint-1 transition-colors text-left"
       >
         {/* Chevron */}
         <svg
@@ -155,7 +155,7 @@ export default function DiffFile({
           strokeWidth="1.5"
           strokeLinecap="round"
           strokeLinejoin="round"
-          className={`text-text-tertiary shrink-0 transition-transform duration-200 ${
+          className={`text-ink-3 shrink-0 transition-transform duration-200 ${
             collapsed ? '' : 'rotate-90'
           }`}
         >
@@ -163,13 +163,11 @@ export default function DiffFile({
         </svg>
 
         {/* File path */}
-        <span className="text-[12.5px] font-mono text-text-primary truncate flex-1">
-          {displayPath}
-        </span>
+        <span className="text-card-title font-mono text-ink-1 truncate flex-1">{displayPath}</span>
 
         {/* Comment count */}
         {commentCount > 0 && (
-          <span className="text-[10px] font-medium text-delegate bg-delegate/10 px-2 py-0.5 rounded-full shrink-0">
+          <span className="text-label font-medium text-ink-2 bg-tint-2 px-2 py-0.5 rounded-full shrink-0">
             {commentCount} comment{commentCount !== 1 ? 's' : ''}
           </span>
         )}
@@ -177,10 +175,10 @@ export default function DiffFile({
         {/* Stats */}
         <div className="flex items-center gap-2 shrink-0">
           {stats.additions > 0 && (
-            <span className="text-[11px] font-medium text-claim">+{stats.additions}</span>
+            <span className="text-reported font-medium text-warm">+{stats.additions}</span>
           )}
           {stats.deletions > 0 && (
-            <span className="text-[11px] font-medium text-dismiss">-{stats.deletions}</span>
+            <span className="text-reported font-medium text-alarm">-{stats.deletions}</span>
           )}
         </div>
       </button>
@@ -188,11 +186,11 @@ export default function DiffFile({
       {/* Diff content */}
       {!collapsed &&
         (emptyBodyNote ? (
-          <div className="border-t border-border-subtle px-4 py-3">
-            <p className="text-[12px] text-text-tertiary italic">{emptyBodyNote}</p>
+          <div className="border-t border-line-1 px-4 py-3">
+            <p className="text-ui text-ink-3 italic">{emptyBodyNote}</p>
           </div>
         ) : (
-          <div className="border-t border-border-subtle overflow-x-auto">
+          <div className="border-t border-line-1 overflow-x-auto">
             <Diff
               viewType="unified"
               diffType={file.type}
@@ -209,8 +207,8 @@ export default function DiffFile({
           code became identical to base, or the patch was omitted from a truncated
           diff). Kept visible — with their badge — rather than silently dropped. */}
       {!collapsed && unanchored.length > 0 && (
-        <div className="border-t border-border-subtle px-3 py-2">
-          <p className="px-1 pb-1 text-[10px] text-text-tertiary">
+        <div className="border-t border-line-1 px-3 py-2">
+          <p className="px-1 pb-1 text-label text-ink-3">
             {unanchored.length} comment{unanchored.length !== 1 ? 's' : ''} not shown in this diff
           </p>
           {unanchored.map((c) => (

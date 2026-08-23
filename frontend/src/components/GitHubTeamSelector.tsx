@@ -125,14 +125,14 @@ export default function GitHubTeamSelector({
   const noTeams = !loading && !error && candidates.length === 0
 
   return (
-    <div className="w-full max-w-lg backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.04] overflow-hidden">
+    <div className="w-full max-w-lg backdrop-blur-xl bg-raised border border-line-1 rounded-2xl shadow-float shadow-black/[0.04] overflow-hidden">
       <div className="flex flex-col h-full max-h-[80vh]">
         {/* Header */}
         <div className="px-6 pt-6 pb-4 shrink-0">
-          <h2 className="text-[18px] font-semibold text-text-primary tracking-tight">
+          <h2 className="text-section font-semibold text-ink-1 tracking-tight">
             GitHub teams for this Triage Factory team
           </h2>
-          <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
+          <p className="text-body text-ink-3 mt-1 leading-relaxed">
             Triage Factory routes PRs that request these GitHub teams to your Triage Factory team.
             PRs that request you individually are routed separately via your GitHub identity.
           </p>
@@ -156,7 +156,7 @@ export default function GitHubTeamSelector({
         {/* Hint */}
         {!loading && !error && candidates.length > 0 && (
           <div className="px-6 pt-3 shrink-0">
-            <p className="text-[11px] text-text-tertiary leading-relaxed">
+            <p className="text-reported text-ink-3 leading-relaxed">
               Broad teams produce noisy queues. Skip those here; you can add them later in Settings
               if you want them after all.
             </p>
@@ -164,12 +164,12 @@ export default function GitHubTeamSelector({
         )}
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-border-subtle flex items-center justify-between gap-3 shrink-0">
+        <div className="px-6 py-4 border-t border-line-1 flex items-center justify-between gap-3 shrink-0">
           <button
             type="button"
             onClick={onBack}
             disabled={saving}
-            className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 disabled:opacity-40 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+            className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
           >
             Back
           </button>
@@ -178,7 +178,7 @@ export default function GitHubTeamSelector({
               type="button"
               onClick={onSkip}
               disabled={saving}
-              className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 disabled:opacity-40 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+              className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk disabled:opacity-40 border border-line-1 rounded-xl px-4 py-2 transition-colors"
             >
               Skip
             </button>
@@ -186,7 +186,7 @@ export default function GitHubTeamSelector({
               type="button"
               onClick={handleContinue}
               disabled={noTeams || loading || !!error || saving}
-              className="flex items-center gap-1.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
+              className="flex items-center gap-1.5 bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
             >
               {saving && <RotateCw size={13} className="animate-spin" />}
               {saving ? 'Saving…' : 'Continue'}

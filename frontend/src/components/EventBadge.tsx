@@ -18,13 +18,13 @@ export default function EventBadge({
 
   const badge = compact ? (
     <span
-      className={`text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded cursor-default ${info.color}`}
+      className={`text-label font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded cursor-default ${info.color}`}
     >
       {info.label}
     </span>
   ) : (
     <span
-      className={`text-[11px] font-semibold px-2.5 py-1 rounded-full cursor-default ${info.color}`}
+      className={`text-reported font-semibold px-2.5 py-1 rounded-full cursor-default ${info.color}`}
     >
       {info.label}
     </span>
@@ -38,10 +38,10 @@ export default function EventBadge({
           <Tooltip.Content
             side="top"
             sideOffset={6}
-            className="z-[100] max-w-[240px] rounded-lg bg-surface-raised border border-border-glass px-3 py-2 shadow-lg shadow-black/[0.06] text-[12px] text-text-secondary leading-relaxed animate-in fade-in-0 zoom-in-95"
+            className="z-[100] max-w-[240px] rounded-lg bg-raised border border-line-1 px-3 py-2 shadow-float shadow-black/[0.06] text-ui text-ink-2 leading-relaxed animate-in fade-in-0 zoom-in-95"
           >
             {info.description}
-            <Tooltip.Arrow className="fill-surface-raised" />
+            <Tooltip.Arrow className="fill-raised" />
           </Tooltip.Content>
         </Tooltip.Portal>
       </Tooltip.Root>

@@ -85,12 +85,12 @@ export default function JiraStatusRule({
     <div className="space-y-2">
       <div className="flex items-baseline justify-between gap-3">
         <div className="min-w-0 leading-tight">
-          <span className="text-[12px] font-medium text-text-primary">{label}</span>
-          <span className="text-[11px] text-text-tertiary ml-2">{description}</span>
+          <span className="text-ui font-medium text-ink-1">{label}</span>
+          <span className="text-reported text-ink-3 ml-2">{description}</span>
         </div>
         {requireCanonical && (
           <div className="shrink-0 flex items-center gap-1.5">
-            <span className="text-[10px] uppercase tracking-wide text-text-tertiary">
+            <span className="text-label uppercase tracking-wide text-ink-3">
               {canonicalPrompt || 'Write to'}
             </span>
             <select
@@ -102,8 +102,8 @@ export default function JiraStatusRule({
                 )
               }
               disabled={value.members.length === 0}
-              className={`bg-white/50 border rounded-lg px-2 py-1 text-[12px] text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-                showCanonicalWarning ? 'border-dismiss/40' : 'border-border-subtle'
+              className={`bg-raised border rounded-lg px-2 py-1 text-ui text-ink-1 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+                showCanonicalWarning ? 'border-alarm/40' : 'border-line-1'
               }`}
             >
               <option value="">{value.members.length === 0 ? 'pick below' : 'choose…'}</option>
@@ -127,12 +127,12 @@ export default function JiraStatusRule({
               key={s.id || s.name}
               type="button"
               onClick={() => toggle(s)}
-              className={`text-[11px] px-2.5 py-1 rounded-full border transition-colors ${
+              className={`text-reported px-2.5 py-1 rounded-full border transition-colors ${
                 selected
                   ? isCanonical
-                    ? 'bg-accent/[0.14] border-accent/50 text-accent font-medium'
-                    : 'bg-accent/[0.08] border-accent/25 text-accent font-medium'
-                  : 'bg-white/50 border-border-subtle text-text-tertiary hover:text-text-secondary hover:border-border-subtle/80'
+                    ? 'bg-warm/[0.14] border-warm/50 text-warm font-medium'
+                    : 'bg-warm/[0.08] border-warm/25 text-warm font-medium'
+                  : 'bg-raised border-line-1 text-ink-3 hover:text-ink-2 hover:border-line-1/80'
               }`}
             >
               {s.name}
@@ -142,7 +142,7 @@ export default function JiraStatusRule({
       </div>
 
       {showCanonicalWarning && (
-        <div className="text-[11px] text-dismiss">
+        <div className="text-reported text-alarm">
           Pick a write target — TF needs a specific status to transition into.
         </div>
       )}

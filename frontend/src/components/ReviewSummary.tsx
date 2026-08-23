@@ -51,8 +51,8 @@ const EVENT_OPTIONS = [
   {
     value: 'APPROVE',
     label: 'Approve',
-    color: 'text-claim',
-    bg: 'bg-claim/10',
+    color: 'text-ink-2',
+    bg: 'bg-tint-2',
     icon: (
       <svg
         width="14"
@@ -71,8 +71,8 @@ const EVENT_OPTIONS = [
   {
     value: 'COMMENT',
     label: 'Comment',
-    color: 'text-text-secondary',
-    bg: 'bg-black/[0.04]',
+    color: 'text-ink-2',
+    bg: 'bg-tint-3',
     icon: (
       <svg
         width="14"
@@ -91,8 +91,8 @@ const EVENT_OPTIONS = [
   {
     value: 'REQUEST_CHANGES',
     label: 'Request Changes',
-    color: 'text-dismiss',
-    bg: 'bg-dismiss/10',
+    color: 'text-alarm',
+    bg: 'bg-alarm/10',
     icon: (
       <svg
         width="14"
@@ -182,22 +182,20 @@ export default function ReviewSummary({
   const currentEvent = EVENT_OPTIONS.find((e) => e.value === reviewEvent) ?? EVENT_OPTIONS[1]
 
   return (
-    <div className="backdrop-blur-xl bg-surface-raised/70 border border-border-glass rounded-2xl shadow-sm shadow-black/[0.02] overflow-hidden">
+    <div className="backdrop-blur-xl bg-raised/70 border border-line-1 rounded-2xl shadow-float shadow-black/[0.02] overflow-hidden">
       {/* Header */}
       <div className="px-5 pt-5 pb-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-[15px] font-semibold text-text-primary tracking-tight">
-              Review Preview
-            </h2>
-            <p className="text-[12px] text-text-tertiary mt-0.5">
+            <h2 className="text-column font-semibold text-ink-1 tracking-tight">Review Preview</h2>
+            <p className="text-ui text-ink-3 mt-0.5">
               {owner}/{repo} #{prNumber}
             </p>
             {!readOnly && commitsSinceFinalize != null && commitsSinceFinalize > 0 && (
               <div className="mt-1.5 flex flex-col gap-1.5">
                 <div className="flex items-center gap-2">
                   <span
-                    className="inline-flex items-center gap-1.5 text-[11px] font-medium text-amber-600 bg-amber-500/[0.10] border border-amber-500/25 rounded-md px-2 py-0.5"
+                    className="inline-flex items-center gap-1.5 text-reported font-medium text-warm bg-warm/[0.10] border border-warm/25 rounded-md px-2 py-0.5"
                     title="The PR has advanced since the agent wrote this review. The diff below shows the review as written; the per-comment badges show how each comment relates to the latest commit. Refresh to re-anchor against the latest."
                   >
                     <svg
@@ -221,7 +219,7 @@ export default function ReviewSummary({
                     <button
                       onClick={() => setConfirmingRefresh(true)}
                       disabled={refreshing}
-                      className="text-[11px] font-medium text-accent hover:text-accent/80 px-2 py-0.5 rounded-md hover:bg-accent/[0.06] transition-colors disabled:opacity-60"
+                      className="text-reported font-medium text-warm hover:text-warm/80 px-2 py-0.5 rounded-md hover:bg-warm/[0.06] transition-colors disabled:opacity-60"
                     >
                       Refresh
                     </button>
@@ -229,8 +227,8 @@ export default function ReviewSummary({
                 </div>
 
                 {confirmingRefresh && (
-                  <div className="flex flex-col gap-1.5 rounded-lg border border-amber-500/25 bg-amber-500/[0.05] px-3 py-2 max-w-md">
-                    <p className="text-[11px] text-text-secondary">
+                  <div className="flex flex-col gap-1.5 rounded-lg border border-warm/25 bg-warm/[0.05] px-3 py-2 max-w-md">
+                    <p className="text-reported text-ink-2">
                       Re-anchor this review to the latest commit?{' '}
                       {movedCount > 0 && (
                         <>
@@ -240,7 +238,7 @@ export default function ReviewSummary({
                         </>
                       )}
                       {outdatedCount > 0 && (
-                        <span className="text-amber-700 font-medium">
+                        <span className="text-warm font-medium">
                           {outdatedCount} outdated comment{outdatedCount !== 1 ? 's' : ''} will be
                           dropped.
                         </span>
@@ -261,20 +259,20 @@ export default function ReviewSummary({
                           }
                         }}
                         disabled={refreshing}
-                        className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"
+                        className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"
                       >
                         {refreshing ? 'Refreshing…' : 'Refresh'}
                       </button>
                       <button
                         onClick={() => setConfirmingRefresh(false)}
                         disabled={refreshing}
-                        className="text-[11px] text-text-tertiary hover:text-text-secondary px-2.5 py-1 rounded-lg transition-colors"
+                        className="text-reported text-ink-3 hover:text-ink-2 px-2.5 py-1 rounded-lg transition-colors"
                       >
                         Cancel
                       </button>
                     </div>
                     {refreshError && (
-                      <p className="text-[10.5px] text-dismiss">
+                      <p className="text-label text-alarm">
                         Couldn't refresh: {refreshError}. Retry.
                       </p>
                     )}
@@ -288,7 +286,7 @@ export default function ReviewSummary({
               submitted event is history, not a choice). */}
           {readOnly ? (
             <span
-              className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border shrink-0 ${currentEvent.color} ${currentEvent.bg} border-current/20`}
+              className={`flex items-center gap-1.5 text-reported font-medium px-2.5 py-1.5 rounded-lg border shrink-0 ${currentEvent.color} ${currentEvent.bg} border-current/20`}
             >
               {currentEvent.icon}
               {currentEvent.label}
@@ -300,10 +298,10 @@ export default function ReviewSummary({
                   key={opt.value}
                   onClick={() => selectEvent(opt.value)}
                   disabled={pendingEvent !== null}
-                  className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 disabled:opacity-60 ${
+                  className={`flex items-center gap-1.5 text-reported font-medium px-2.5 py-1.5 rounded-lg border transition-all duration-150 disabled:opacity-60 ${
                     reviewEvent === opt.value
                       ? `${opt.color} ${opt.bg} border-current/20`
-                      : 'text-text-tertiary border-transparent hover:bg-black/[0.03]'
+                      : 'text-ink-3 border-transparent hover:bg-tint-2'
                   }`}
                 >
                   {opt.icon}
@@ -314,7 +312,7 @@ export default function ReviewSummary({
           )}
         </div>
         {eventError && (
-          <p className="mt-2 text-[11px] text-dismiss">
+          <p className="mt-2 text-reported text-alarm">
             Couldn't change the verdict: {eventError}. Retry.
           </p>
         )}
@@ -327,19 +325,19 @@ export default function ReviewSummary({
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              className="w-full min-h-[120px] text-[13px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10 font-mono"
+              className="w-full min-h-[120px] text-body leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-xl px-4 py-3 resize-y focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10 font-mono"
               placeholder="Review summary..."
               autoFocus
             />
             {bodyError && (
-              <p className="text-[11px] text-dismiss">
+              <p className="text-reported text-alarm">
                 Couldn't save: {bodyError}. Your edits are still here — retry Save.
               </p>
             )}
             <div className="flex items-center gap-2 justify-end">
               <button
                 onClick={cancelEdit}
-                className="text-[11px] text-text-tertiary hover:text-text-secondary px-3 py-1.5 rounded-lg transition-colors"
+                className="text-reported text-ink-3 hover:text-ink-2 px-3 py-1.5 rounded-lg transition-colors"
               >
                 Cancel
               </button>
@@ -349,7 +347,7 @@ export default function ReviewSummary({
                 // empty review at approval), so the button says so up front
                 // instead of round-tripping to an error.
                 disabled={savingBody || draft.trim() === ''}
-                className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60"
+                className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-60"
               >
                 {savingBody ? 'Saving…' : 'Save'}
               </button>
@@ -361,7 +359,7 @@ export default function ReviewSummary({
             <div className="absolute top-2 right-2 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               <button
                 onClick={() => setRawView(!rawView)}
-                className="text-[10px] text-text-tertiary hover:text-text-secondary px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+                className="text-label text-ink-3 hover:text-ink-2 px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
               >
                 {rawView ? 'Preview' : 'Raw'}
               </button>
@@ -371,14 +369,14 @@ export default function ReviewSummary({
                     setDraft(reviewBody)
                     setEditingBody(true)
                   }}
-                  className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded bg-white/60 border border-border-subtle transition-colors"
+                  className="text-label text-ink-3 hover:text-warm px-1.5 py-0.5 rounded bg-raised border border-line-1 transition-colors"
                 >
                   Edit
                 </button>
               )}
             </div>
 
-            <div className="bg-white/30 rounded-xl px-4 py-3 border border-transparent hover:border-border-subtle transition-colors min-h-[48px]">
+            <div className="bg-raised rounded-xl px-4 py-3 border border-transparent hover:border-line-1 transition-colors min-h-[48px]">
               {!reviewBody ? (
                 <span
                   onClick={() => {
@@ -386,16 +384,16 @@ export default function ReviewSummary({
                     setDraft(reviewBody)
                     setEditingBody(true)
                   }}
-                  className={`text-[13px] text-text-tertiary italic ${readOnly ? '' : 'cursor-text'}`}
+                  className={`text-body text-ink-3 italic ${readOnly ? '' : 'cursor-text'}`}
                 >
                   No summary provided
                 </span>
               ) : rawView ? (
-                <pre className="text-[12.5px] leading-relaxed text-text-secondary font-mono whitespace-pre-wrap">
+                <pre className="text-card-title leading-relaxed text-ink-2 font-mono whitespace-pre-wrap">
                   {reviewBody}
                 </pre>
               ) : (
-                <div className="review-markdown text-[13px] leading-relaxed text-text-secondary">
+                <div className="review-markdown text-body leading-relaxed text-ink-2">
                   <Markdown>{reviewBody}</Markdown>
                 </div>
               )}
@@ -405,15 +403,15 @@ export default function ReviewSummary({
       </div>
 
       {/* Footer actions */}
-      <div className="px-5 py-3 border-t border-border-subtle flex items-center justify-between">
-        <span className="text-[11px] text-text-tertiary">
+      <div className="px-5 py-3 border-t border-line-1 flex items-center justify-between">
+        <span className="text-reported text-ink-3">
           {commentCount} inline comment{commentCount !== 1 ? 's' : ''}
         </span>
 
         <div className="flex items-center gap-2">
           <button
             onClick={onClose}
-            className="text-[11px] font-medium text-text-tertiary hover:text-text-primary px-3 py-1.5 rounded-lg transition-colors"
+            className="text-reported font-medium text-ink-3 hover:text-ink-1 px-3 py-1.5 rounded-lg transition-colors"
           >
             Close
           </button>
@@ -423,7 +421,7 @@ export default function ReviewSummary({
                 href={url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl text-white bg-accent hover:bg-accent/90 transition-all duration-150"
+                className="flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl text-warm-ink bg-warm hover:bg-warm/90 transition-all duration-150"
               >
                 View on GitHub
               </a>
@@ -432,21 +430,21 @@ export default function ReviewSummary({
             <button
               onClick={onSubmit}
               disabled={submitting}
-              className={`flex items-center gap-1.5 text-[12px] font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
+              className={`flex items-center gap-1.5 text-ui font-semibold px-4 py-2 rounded-xl transition-all duration-150 ${
                 submitting
-                  ? 'bg-accent/50 text-white/70 cursor-not-allowed'
-                  : `text-white ${
+                  ? 'bg-warm/50 text-warm-ink cursor-not-allowed'
+                  : `text-warm-ink ${
                       reviewEvent === 'APPROVE'
-                        ? 'bg-claim hover:bg-claim/90'
+                        ? 'bg-tint-2 hover:bg-tint-3'
                         : reviewEvent === 'REQUEST_CHANGES'
-                          ? 'bg-dismiss hover:bg-dismiss/90'
-                          : 'bg-accent hover:bg-accent/90'
+                          ? 'bg-alarm hover:bg-alarm/90'
+                          : 'bg-warm hover:bg-warm/90'
                     }`
               }`}
             >
               {submitting ? (
                 <>
-                  <span className="inline-block w-3 h-3 border border-white/40 border-t-white rounded-full animate-spin" />
+                  <span className="inline-block w-3 h-3 border border-line-1 border-t-white rounded-full animate-spin" />
                   Submitting...
                 </>
               ) : (

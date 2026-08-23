@@ -49,7 +49,7 @@ export function ArtifactRow({
   const body = (
     <>
       <Icon size={13} className={`shrink-0 ${meta.text}`} aria-hidden />
-      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-text-secondary">
+      <span className="min-w-0 flex-1 truncate font-mono text-reported text-ink-2">
         {artifact.target || artifact.external_id || meta.label}
       </span>
       {note}
@@ -58,7 +58,7 @@ export function ArtifactRow({
   )
 
   const rowClass =
-    'flex w-full items-center gap-2 rounded-[4px] border border-border-subtle bg-black/[0.015] px-2 py-1.5 text-left transition-colors hover:bg-black/[0.04]'
+    'flex w-full items-center gap-2 rounded-[4px] border border-line-1 bg-tint-1 px-2 py-1.5 text-left transition-colors hover:bg-tint-3'
 
   // The [x] rides the row's ACTIONABLE state, not the overlay handler — a
   // still-pending row stays dismissable even where no editor is wired, and a
@@ -75,7 +75,7 @@ export function ArtifactRow({
             ? 'Dismiss — closes the draft PR (branch kept)'
             : 'Dismiss — discards the pending review'
         }
-        className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1.5 text-text-tertiary/70 transition-colors hover:bg-dismiss/[0.1] hover:text-dismiss disabled:cursor-wait disabled:opacity-50"
+        className="inline-flex shrink-0 items-center justify-center rounded-[4px] p-1.5 text-ink-3/70 transition-colors hover:bg-alarm/[0.1] hover:text-alarm disabled:cursor-wait disabled:opacity-50"
       >
         <X size={12} aria-hidden />
       </button>
@@ -116,7 +116,7 @@ export function ArtifactRow({
           title={`Open ${meta.label} (new tab)`}
         >
           {body}
-          <ExternalLink size={11} className="shrink-0 text-text-tertiary/70" aria-hidden />
+          <ExternalLink size={11} className="shrink-0 text-ink-3/70" aria-hidden />
         </a>
         {dismissButton}
       </li>
@@ -140,7 +140,7 @@ function ExternalLinkIcon({ url, label }: { url: string; label: string }) {
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="inline-flex shrink-0 items-center rounded-[4px] p-1.5 text-text-tertiary/70 transition-colors hover:bg-black/[0.04] hover:text-text-secondary"
+      className="inline-flex shrink-0 items-center rounded-[4px] p-1.5 text-ink-3/70 transition-colors hover:bg-tint-3 hover:text-ink-2"
       aria-label={`Open ${label} on its source (new tab)`}
       title="Open source (new tab)"
     >
@@ -155,7 +155,7 @@ export function StateBadge({ state }: { state: string }) {
   const tone = stateTone(state)
   return (
     <span
-      className={`shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-[0.08em] ${TONE_TEXT[tone]}`}
+      className={`shrink-0 rounded-[3px] px-1.5 py-0.5 font-mono text-label-sm font-semibold uppercase tracking-[0.08em] ${TONE_TEXT[tone]}`}
       style={{ background: `color-mix(in srgb, ${TONE_VAR[tone]} 12%, transparent)` }}
     >
       {state}

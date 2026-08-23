@@ -55,22 +55,22 @@ export default function TeamSwitch({ value, onChange, className = '', teams: tea
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="
-          inline-flex items-center gap-1.5 rounded-lg border border-border-subtle
-          bg-white/60 px-2.5 py-1 text-[12px] text-text-primary
-          hover:bg-white transition-colors
+          inline-flex items-center gap-1.5 rounded-lg border border-line-1
+          bg-raised px-2.5 py-1 text-ui text-ink-1
+          hover:bg-raised transition-colors
         "
         title="Active team — the team these prompts and triggers belong to"
       >
-        <Users size={13} className="text-text-tertiary" />
+        <Users size={13} className="text-ink-3" />
         <span className="max-w-[12rem] truncate">{label}</span>
-        <ChevronDown size={13} className="text-text-tertiary" />
+        <ChevronDown size={13} className="text-ink-3" />
       </button>
 
       {open && (
         <div
           className="
-            absolute top-full left-0 z-30 mt-1 min-w-[14rem] rounded-lg border border-border-subtle
-            bg-white shadow-lg py-1
+            absolute top-full left-0 z-30 mt-1 min-w-[14rem] rounded-lg border border-line-1
+            bg-raised shadow-float py-1
           "
         >
           {teams.map((t) => {
@@ -83,10 +83,10 @@ export default function TeamSwitch({ value, onChange, className = '', teams: tea
                   onChange(t.id)
                   setOpen(false)
                 }}
-                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-ui hover:bg-tint-2"
               >
-                <span className="text-text-primary truncate">{t.name}</span>
-                {isOn && <Check size={13} className="shrink-0 text-accent" />}
+                <span className="text-ink-1 truncate">{t.name}</span>
+                {isOn && <Check size={13} className="shrink-0 text-warm" />}
               </button>
             )
           })}

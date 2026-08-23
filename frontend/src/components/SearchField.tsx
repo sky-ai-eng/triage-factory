@@ -21,7 +21,7 @@ export default function SearchField({
       <Search
         size={15}
         aria-hidden
-        className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-text-tertiary"
+        className="pointer-events-none absolute left-0 top-1/2 -translate-y-1/2 text-ink-3"
       />
       <input
         type="text"
@@ -29,7 +29,7 @@ export default function SearchField({
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full border-0 border-b border-border-subtle bg-transparent py-2.5 pl-6 pr-2 text-[14px] text-text-primary placeholder:text-text-tertiary outline-none transition-colors focus:border-accent"
+        className="w-full border-0 border-b border-line-1 bg-transparent py-2.5 pl-6 pr-2 text-body text-ink-1 placeholder:text-ink-3 outline-none transition-colors focus:border-warm"
       />
     </div>
   )

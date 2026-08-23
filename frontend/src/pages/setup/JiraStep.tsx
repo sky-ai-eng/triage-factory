@@ -38,7 +38,7 @@ import type { StepContext } from './types'
 export function JiraUrlStep({ state, patch, error }: StepContext) {
   return (
     <div className="space-y-4">
-      <p className="text-[13px] leading-relaxed text-text-secondary">
+      <p className="text-body leading-relaxed text-ink-2">
         Where your Jira lives. We&rsquo;ll confirm it&rsquo;s reachable, then pick how to connect.
       </p>
       <UrlField
@@ -71,10 +71,10 @@ export function JiraModeStep({ state, patch, advance }: StepContext) {
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
           Which Jira are you connecting?
         </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
+        <p className="text-body leading-relaxed text-ink-3">
           Atlassian Cloud and self-hosted Data Center use different credentials, so we tailor the
           next step to your deployment.
         </p>

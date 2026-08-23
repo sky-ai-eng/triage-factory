@@ -274,7 +274,7 @@ export default function JiraProjectRulesGroup({
   const board = (
     <div className="space-y-2">
       {watchedProjects.length === 0 && (
-        <p className="text-[12px] text-text-tertiary italic">
+        <p className="text-ui text-ink-3 italic">
           No Jira projects watched yet. Pick one below to start.
         </p>
       )}
@@ -290,31 +290,31 @@ export default function JiraProjectRulesGroup({
             key={key}
             className={`rounded-xl border ${
               bare
-                ? 'border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50'
-                : 'border-border-subtle bg-white/40'
+                ? 'border-[var(--color-line-1)] bg-[var(--color-raised)]/50'
+                : 'border-line-1 bg-raised'
             }`}
           >
             <div className="flex items-center gap-2 px-3 py-2">
               <button
                 type="button"
                 onClick={() => toggleExpanded(key)}
-                className="text-text-tertiary hover:text-text-secondary"
+                className="text-ink-3 hover:text-ink-2"
                 aria-label={isOpen ? 'Collapse project' : 'Expand project'}
               >
                 {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
               </button>
-              <span className="flex-1 min-w-0 truncate text-[13px] font-medium text-text-primary">
+              <span className="flex-1 min-w-0 truncate text-body font-medium text-ink-1">
                 {key}
               </span>
               <button
                 type="button"
                 onClick={() => toggleExpanded(key)}
-                className={`text-[10px] uppercase tracking-wide ${
+                className={`text-label uppercase tracking-wide ${
                   missing.length > 0
-                    ? 'text-dismiss hover:text-dismiss/80'
+                    ? 'text-alarm hover:text-alarm/80'
                     : armed
-                      ? 'text-claim'
-                      : 'text-snooze hover:text-snooze/80'
+                      ? 'text-ink-2'
+                      : 'text-ink-2 hover:text-ink-2/80'
                 }`}
               >
                 {missing.length > 0
@@ -326,7 +326,7 @@ export default function JiraProjectRulesGroup({
               <button
                 type="button"
                 onClick={() => unwatch(key)}
-                className="text-text-tertiary hover:text-dismiss"
+                className="text-ink-3 hover:text-alarm"
                 aria-label={`Stop watching ${key}`}
               >
                 <Trash2 size={14} />
@@ -336,13 +336,13 @@ export default function JiraProjectRulesGroup({
             {isOpen && (
               <div className="px-4 pb-4 pt-1 space-y-3">
                 {!armed && (
-                  <p className="text-[11px] text-text-tertiary">
+                  <p className="text-reported text-ink-3">
                     {key} is watched but not mapped, so nothing from it reaches the board yet. Map
                     its statuses below to arm it.
                   </p>
                 )}
                 <div className="flex items-center justify-between">
-                  <p className="text-[11px] text-text-tertiary">
+                  <p className="text-reported text-ink-3">
                     {loadingKeys.has(key)
                       ? 'Loading statuses…'
                       : statuses.length > 0
@@ -353,7 +353,7 @@ export default function JiraProjectRulesGroup({
                     type="button"
                     onClick={() => void fetchJiraStatuses(key)}
                     disabled={loadingKeys.has(key)}
-                    className="shrink-0 text-[11px] text-accent hover:text-accent/80 disabled:opacity-40 border border-accent/20 rounded-xl px-3 py-1 transition-colors"
+                    className="shrink-0 text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
                   >
                     {loadingKeys.has(key) ? 'Loading...' : 'Reload statuses'}
                   </button>
@@ -361,7 +361,7 @@ export default function JiraProjectRulesGroup({
 
                 {sources.length > 0 && (
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[11px] text-text-tertiary">
+                    <span className="text-reported text-ink-3">
                       Same status names as{sources.length > 1 ? ' these' : ''}:
                     </span>
                     {sources.map((source) => (
@@ -369,7 +369,7 @@ export default function JiraProjectRulesGroup({
                         key={source.key}
                         type="button"
                         onClick={() => copyMapping(key, source)}
-                        className="text-[11px] text-accent hover:text-accent/80 border border-accent/20 rounded-xl px-2.5 py-1 transition-colors"
+                        className="text-reported text-warm hover:text-warm/80 border border-warm/20 rounded-xl px-2.5 py-1 transition-colors"
                       >
                         Copy {normKey(source.key)}&rsquo;s mapping
                       </button>
@@ -378,10 +378,10 @@ export default function JiraProjectRulesGroup({
                 )}
 
                 {missing.length > 0 && (
-                  <div className="rounded-xl border border-dismiss/30 bg-dismiss/5 px-3 py-2.5 space-y-2">
+                  <div className="rounded-xl border border-alarm/30 bg-alarm/5 px-3 py-2.5 space-y-2">
                     <div className="flex items-start gap-2">
-                      <AlertTriangle size={13} className="mt-0.5 shrink-0 text-dismiss" />
-                      <p className="text-[11px] text-text-secondary">
+                      <AlertTriangle size={13} className="mt-0.5 shrink-0 text-alarm" />
+                      <p className="text-reported text-ink-2">
                         These statuses are in {key}&rsquo;s rules but not in its Jira workflow any
                         more. Polling skips them, and a rule whose write target is gone cannot
                         transition a ticket. Remove them, then pick replacements below.
@@ -393,7 +393,7 @@ export default function JiraProjectRulesGroup({
                           key={status.id || status.name}
                           type="button"
                           onClick={() => dropUnresolvable(key, status)}
-                          className="group inline-flex items-center gap-1.5 rounded-xl border border-dismiss/30 px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-dismiss hover:text-dismiss"
+                          className="group inline-flex items-center gap-1.5 rounded-xl border border-alarm/30 px-2 py-0.5 text-reported text-ink-2 transition-colors hover:border-alarm hover:text-alarm"
                           aria-label={`Remove ${status.name || status.id} from ${key}`}
                         >
                           {status.name || status.id}
@@ -453,49 +453,51 @@ export default function JiraProjectRulesGroup({
 
   const picker = (
     <div className="mt-4 space-y-2">
-      <div className="flex items-center gap-2 rounded-xl border border-border-subtle bg-white/40 px-3 py-1.5">
-        <Search size={13} className="shrink-0 text-text-tertiary" />
+      <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-raised px-3 py-1.5">
+        <Search size={13} className="shrink-0 text-ink-3" />
         <input
           type="search"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search Jira projects"
           aria-label="Search Jira projects"
-          className="w-full bg-transparent border-0 focus:outline-none text-[13px] text-text-primary placeholder-text-tertiary"
+          className="w-full bg-transparent border-0 focus:outline-none text-body text-ink-1 placeholder-ink-3"
         />
       </div>
 
-      {catalogError !== '' && <p className="text-[11px] text-dismiss">{catalogError}</p>}
+      {catalogError !== '' && <p className="text-reported text-alarm">{catalogError}</p>}
       {catalogError === '' && catalogLoading && rows.length === 0 && (
-        <p className="text-[12px] text-text-tertiary italic">Loading projects…</p>
+        <p className="text-ui text-ink-3 italic">Loading projects…</p>
       )}
       {catalogError === '' && !catalogLoading && rows.length === 0 && (
-        <p className="text-[12px] text-text-tertiary italic">
+        <p className="text-ui text-ink-3 italic">
           {search.trim() === ''
             ? 'This workspace’s Jira credential can’t see any projects.'
             : `No Jira project matches “${search.trim()}”.`}
         </p>
       )}
 
-      <div className="divide-y divide-border-subtle rounded-xl border border-border-subtle overflow-hidden">
+      <div className="divide-y divide-border-subtle rounded-xl border border-line-1 overflow-hidden">
         {rows.map((row) => (
-          <div key={row.key} className="flex items-center gap-3 bg-white/40 px-3 py-2">
+          <div key={row.key} className="flex items-center gap-3 bg-raised px-3 py-2">
             <div className="min-w-0 flex-1">
-              <span className="text-[13px] font-medium text-text-primary">{row.key}</span>
+              <span className="text-body font-medium text-ink-1">{row.key}</span>
               {row.name !== '' && (
-                <span className="ml-2 text-[12px] text-text-tertiary truncate">{row.name}</span>
+                <span className="ml-2 text-ui text-ink-3 truncate">{row.name}</span>
               )}
               {!row.inCatalog && (
-                <span className="ml-2 text-[11px] text-snooze">not visible to this credential</span>
+                <span className="ml-2 text-reported text-ink-2">
+                  not visible to this credential
+                </span>
               )}
             </div>
             <button
               type="button"
               onClick={() => (row.watched ? unwatch(row.key) : watch(row.key))}
-              className={`shrink-0 text-[11px] rounded-xl border px-3 py-1 transition-colors ${
+              className={`shrink-0 text-reported rounded-xl border px-3 py-1 transition-colors ${
                 row.watched
-                  ? 'border-accent/25 bg-accent/[0.08] text-accent'
-                  : 'border-accent/20 text-accent hover:text-accent/80'
+                  ? 'border-warm/25 bg-warm/[0.08] text-warm'
+                  : 'border-warm/20 text-warm hover:text-warm/80'
               }`}
             >
               {row.watched ? 'Watching' : 'Watch'}
@@ -505,7 +507,7 @@ export default function JiraProjectRulesGroup({
       </div>
 
       {catalogTruncated && (
-        <p className="text-[11px] text-text-tertiary">
+        <p className="text-reported text-ink-3">
           More projects match than fit here — narrow the search to reach them.
         </p>
       )}
@@ -516,19 +518,17 @@ export default function JiraProjectRulesGroup({
     <>
       {bare ? (
         <div className="mb-4 space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-            Jira projects
-          </h2>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Jira projects</h2>
+          <p className="text-body leading-relaxed text-ink-3">
             Watch the Jira projects this team works from, then map each one&rsquo;s statuses to
             pickup / in-progress / done.
           </p>
         </div>
       ) : (
-        <h2 className="mb-4 text-[13px] font-medium text-text-secondary">Jira projects</h2>
+        <h2 className="mb-4 text-body font-medium text-ink-2">Jira projects</h2>
       )}
       {!connected ? (
-        <p className="text-[12px] text-text-tertiary italic">
+        <p className="text-ui text-ink-3 italic">
           Connect Jira under Workspace settings before configuring tracked projects.
         </p>
       ) : (

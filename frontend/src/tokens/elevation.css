@@ -1,0 +1,55 @@
+/* Elevation.
+   The single most load-bearing rule: IN-FLOW CONTENT IS BORDERLESS.
+   Only things that genuinely float above the plane get a frame.
+
+   In flow  → --shadow-edge (an INSET hairline), no shadow, radius 5px.
+   Floating → a real border + --shadow-float, radius 10px.
+
+   The inset hairlines live in the --shadow-* namespace because that is what
+   they are: box-shadow values. On Tailwind that makes them shadow-edge,
+   shadow-edge-strong, shadow-edge-measure, shadow-edge-alarm.
+
+   `@theme inline` throughout, because every value here references a color
+   token. Inline means the generated utility carries `var(--color-line-1)`
+   itself and resolves it on the element, rather than resolving once at :root
+   and inheriting a frozen result. */
+
+/* The cast a floating surface throws is heavier on a dark ground. That
+   difference has to live in a COLOR token rather than in the shadow itself:
+   Tailwind expands a --shadow-* value at build time into the utility, so a
+   `.shadow-float` generated from a literal rgba carries that literal forever
+   and a :root.dark override of --shadow-float never reaches it. Put the
+   varying part in a color, keep the geometry constant, and the utility
+   resolves it on the element like every other token.
+
+   The general rule, and it applies to any future composite: if a token's
+   value differs between light and dark, the difference belongs to a color
+   token and the composite must be `@theme inline`. */
+@theme {
+  --color-cast: rgba(0, 0, 0, 0.35);
+}
+
+:root.dark {
+  --color-cast: rgba(0, 0, 0, 0.8);
+}
+
+@theme inline {
+  --shadow-edge: inset 0 0 0 1px var(--color-line-1);
+  --shadow-edge-strong: inset 0 0 0 1px var(--color-line-2);
+  --shadow-edge-measure: inset 0 0 0 1px var(--color-warm-3);
+  --shadow-edge-alarm: inset 0 0 0 1px var(--color-alarm-1);
+
+  --shadow-float: 0 10px 34px -18px var(--color-cast);
+
+  --shadow-glow: 0 0 16px 1px var(--color-cool-glow);
+  --shadow-glow-dot: 0 0 9px var(--color-cool-glow);
+
+  --blur-float: blur(10px) saturate(0.5);
+}
+
+:root {
+  /* A border shorthand, not a namespaced token — it generates no utility
+     because Tailwind's border utilities take a color. In a className the
+     equivalent is: border border-line-1. */
+  --edge-float: 1px solid var(--color-line-1);
+}

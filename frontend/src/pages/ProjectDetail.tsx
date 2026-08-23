@@ -219,7 +219,7 @@ export default function ProjectDetail() {
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto">
-        <div className="text-text-tertiary text-[13px]">Loading project…</div>
+        <div className="text-ink-3 text-body">Loading project…</div>
       </div>
     )
   }
@@ -235,13 +235,11 @@ export default function ProjectDetail() {
       <div className="max-w-7xl mx-auto">
         <Link
           to={orgHref('/projects')}
-          className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary mb-6"
+          className="inline-flex items-center gap-1 text-body text-ink-2 hover:text-ink-1 mb-6"
         >
           <ArrowLeft size={14} /> Projects
         </Link>
-        <div className="text-text-secondary text-[13px]">
-          Project not found. It may have been deleted.
-        </div>
+        <div className="text-ink-2 text-body">Project not found. It may have been deleted.</div>
       </div>
     )
   }
@@ -251,13 +249,11 @@ export default function ProjectDetail() {
       <div className="max-w-7xl mx-auto">
         <Link
           to={orgHref('/projects')}
-          className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary mb-6"
+          className="inline-flex items-center gap-1 text-body text-ink-2 hover:text-ink-1 mb-6"
         >
           <ArrowLeft size={14} /> Projects
         </Link>
-        <div className="text-text-secondary text-[13px] mb-3">
-          {loadError ?? 'Failed to load project.'}
-        </div>
+        <div className="text-ink-2 text-body mb-3">{loadError ?? 'Failed to load project.'}</div>
         <button
           type="button"
           onClick={() => {
@@ -276,7 +272,7 @@ export default function ProjectDetail() {
           }}
           className="
             inline-flex items-center gap-1.5 rounded-full
-            bg-accent text-white text-[13px] font-medium
+            bg-warm text-warm-ink text-body font-medium
             px-4 py-1.5 hover:opacity-90
           "
         >
@@ -291,7 +287,7 @@ export default function ProjectDetail() {
       <div className="flex items-center justify-between mb-6">
         <Link
           to={orgHref('/projects')}
-          className="inline-flex items-center gap-1 text-[13px] text-text-secondary hover:text-text-primary"
+          className="inline-flex items-center gap-1 text-body text-ink-2 hover:text-ink-1"
         >
           <ArrowLeft size={14} /> Projects
         </Link>
@@ -301,9 +297,9 @@ export default function ProjectDetail() {
             onClick={() => setExportOpen(true)}
             className="
               inline-flex items-center gap-1.5 rounded-full
-              px-3 py-1.5 text-[12px]
-              text-text-secondary border border-border-subtle bg-white/60
-              hover:text-text-primary hover:bg-white transition-all
+              px-3 py-1.5 text-ui
+              text-ink-2 border border-line-1 bg-raised
+              hover:text-ink-1 hover:bg-raised transition-all
             "
           >
             <Download size={12} />
@@ -314,8 +310,8 @@ export default function ProjectDetail() {
             onClick={handleDelete}
             className="
               inline-flex items-center gap-1.5 rounded-full
-              px-3 py-1.5 text-[12px]
-              text-dismiss/80 hover:text-dismiss hover:bg-dismiss/[0.08]
+              px-3 py-1.5 text-ui
+              text-alarm/80 hover:text-alarm hover:bg-alarm/[0.08]
               transition-all
             "
           >
@@ -427,17 +423,17 @@ function ProjectHeader({
               }}
               autoFocus
               className="
-                flex-1 rounded-lg border border-border-subtle
-                bg-white/80 px-3 py-1.5 text-lg font-semibold tracking-tight
-                text-text-primary
-                focus:outline-none focus:border-accent
+                flex-1 rounded-lg border border-line-1
+                bg-raised px-3 py-1.5 text-lg font-semibold tracking-tight
+                text-ink-1
+                focus:outline-none focus:border-warm
               "
             />
             <button
               type="button"
               onClick={saveName}
               aria-label="Save project name"
-              className="text-claim hover:bg-claim/10 p-1.5 rounded-full"
+              className="text-ink-2 hover:bg-tint-2 p-1.5 rounded-full"
             >
               <Check size={14} />
             </button>
@@ -448,20 +444,20 @@ function ProjectHeader({
                 setEditingName(false)
               }}
               aria-label="Cancel editing project name"
-              className="text-text-tertiary hover:bg-black/[0.03] p-1.5 rounded-full"
+              className="text-ink-3 hover:bg-tint-2 p-1.5 rounded-full"
             >
               <X size={14} />
             </button>
           </div>
         ) : (
-          <h1 className="text-2xl font-semibold tracking-tight text-text-primary">
+          <h1 className="text-2xl font-semibold tracking-tight text-ink-1">
             <button
               type="button"
               onClick={beginEditName}
               className="group inline-flex items-center gap-2 text-inherit cursor-pointer"
             >
               {project.name}
-              <Pencil size={12} className="text-text-tertiary opacity-0 group-hover:opacity-100" />
+              <Pencil size={12} className="text-ink-3 opacity-0 group-hover:opacity-100" />
             </button>
           </h1>
         )}
@@ -476,9 +472,9 @@ function ProjectHeader({
               autoFocus
               rows={3}
               className="
-                w-full rounded-lg border border-border-subtle
-                bg-white/80 px-3 py-2 text-[13px] text-text-primary
-                resize-none focus:outline-none focus:border-accent
+                w-full rounded-lg border border-line-1
+                bg-raised px-3 py-2 text-body text-ink-1
+                resize-none focus:outline-none focus:border-warm
               "
             />
             <div className="flex justify-end gap-2">
@@ -488,14 +484,14 @@ function ProjectHeader({
                   setDraftDesc(project.description)
                   setEditingDesc(false)
                 }}
-                className="text-[12px] text-text-secondary hover:text-text-primary px-2 py-1 rounded-full"
+                className="text-ui text-ink-2 hover:text-ink-1 px-2 py-1 rounded-full"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={saveDesc}
-                className="text-[12px] bg-accent text-white px-3 py-1 rounded-full hover:opacity-90"
+                className="text-ui bg-warm text-warm-ink px-3 py-1 rounded-full hover:opacity-90"
               >
                 Save
               </button>
@@ -510,20 +506,20 @@ function ProjectHeader({
             type="button"
             onClick={beginEditDesc}
             className="
-              text-left text-[13px] text-text-secondary leading-relaxed
+              text-left text-body text-ink-2 leading-relaxed
               cursor-pointer group inline-flex items-start gap-2
-              hover:text-text-primary focus:outline-none
-              focus-visible:ring-2 focus-visible:ring-accent rounded
+              hover:text-ink-1 focus:outline-none
+              focus-visible:ring-2 focus-visible:ring-warm rounded
             "
           >
             {project.description ? (
               project.description
             ) : (
-              <span className="italic text-text-tertiary">Add a description…</span>
+              <span className="italic text-ink-3">Add a description…</span>
             )}
             <Pencil
               size={12}
-              className="text-text-tertiary opacity-0 group-hover:opacity-100 mt-1 shrink-0"
+              className="text-ink-3 opacity-0 group-hover:opacity-100 mt-1 shrink-0"
             />
           </button>
         )}
@@ -543,7 +539,7 @@ function ProjectHeader({
           // to validate pinned repos or tracker keys against in v1 (see
           // handleProjectUpdate's matching 400s) — mirrors the same copy
           // ProjectCreateModal shows when those fields are hidden there.
-          <p className="text-[12px] text-text-tertiary italic">
+          <p className="text-ui text-ink-3 italic">
             Pinned repos and tracker projects are available for team-visibility projects.
           </p>
         )}
@@ -750,9 +746,9 @@ function PinnedReposInline({
             type="button"
             className="
               inline-flex items-center gap-1 rounded-full
-              border border-dashed border-border-subtle
-              px-2 py-0.5 text-[11px] text-text-tertiary
-              hover:border-accent hover:text-accent hover:bg-accent-soft/40
+              border border-dashed border-line-1
+              px-2 py-0.5 text-reported text-ink-3
+              hover:border-warm hover:text-warm hover:bg-warm-2/40
               transition-colors
             "
           >
@@ -765,8 +761,8 @@ function PinnedReposInline({
             sideOffset={6}
             align="start"
             className="
-              z-50 w-72 rounded-xl border border-border-subtle
-              bg-white shadow-lg shadow-black/[0.08] p-2
+              z-50 w-72 rounded-xl border border-line-1
+              bg-raised shadow-float shadow-black/[0.08] p-2
             "
           >
             <input
@@ -776,17 +772,17 @@ function PinnedReposInline({
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search configured repos…"
               className="
-                w-full rounded-lg border border-border-subtle
-                bg-white px-2.5 py-1.5 text-[12px] text-text-primary
-                placeholder:text-text-tertiary mb-1.5
-                focus:outline-none focus:border-accent
+                w-full rounded-lg border border-line-1
+                bg-raised px-2.5 py-1.5 text-ui text-ink-1
+                placeholder:text-ink-3 mb-1.5
+                focus:outline-none focus:border-warm
               "
             />
             <div className="max-h-60 overflow-y-auto">
               {loading ? (
-                <div className="text-[12px] text-text-tertiary px-2 py-1">Loading…</div>
+                <div className="text-ui text-ink-3 px-2 py-1">Loading…</div>
               ) : loadError ? (
-                <div className="text-[12px] text-text-tertiary px-2 py-1">
+                <div className="text-ui text-ink-3 px-2 py-1">
                   Couldn&rsquo;t load configured repos.{' '}
                   <button
                     type="button"
@@ -795,22 +791,22 @@ function PinnedReposInline({
                       const controller = new AbortController()
                       loadRepos(controller.signal)
                     }}
-                    className="text-accent hover:underline"
+                    className="text-warm hover:underline"
                   >
                     Try again
                   </button>
                   .
                 </div>
               ) : available.length === 0 ? (
-                <div className="text-[12px] text-text-tertiary px-2 py-1">
+                <div className="text-ui text-ink-3 px-2 py-1">
                   No repos configured.{' '}
-                  <Link to={orgHref('/repos')} className="text-accent hover:underline">
+                  <Link to={orgHref('/repos')} className="text-warm hover:underline">
                     Add some
                   </Link>
                   .
                 </div>
               ) : addable.length === 0 ? (
-                <div className="text-[12px] text-text-tertiary px-2 py-1 italic">
+                <div className="text-ui text-ink-3 px-2 py-1 italic">
                   {pinned.length === available.length
                     ? 'All configured repos are pinned.'
                     : 'No matches.'}
@@ -823,8 +819,8 @@ function PinnedReposInline({
                     onClick={() => add(r.id)}
                     className="
                       w-full text-left px-2 py-1.5 rounded-md
-                      text-[12px] text-text-primary
-                      hover:bg-black/[0.04] transition-colors
+                      text-ui text-ink-1
+                      hover:bg-tint-3 transition-colors
                     "
                   >
                     {r.slug}
@@ -844,9 +840,9 @@ function RepoChip({ slug, onRemove }: { slug: string; onRemove: () => void }) {
     <span
       className="
         group inline-flex items-center rounded-full
-        bg-black/[0.03] text-text-secondary border border-border-subtle
-        pl-2 pr-1 py-0.5 text-[11px]
-        hover:border-dismiss/40 hover:bg-dismiss/[0.04] transition-colors
+        bg-tint-2 text-ink-2 border border-line-1
+        pl-2 pr-1 py-0.5 text-reported
+        hover:border-alarm/40 hover:bg-alarm/[0.04] transition-colors
       "
     >
       {slug}
@@ -861,8 +857,8 @@ function RepoChip({ slug, onRemove }: { slug: string; onRemove: () => void }) {
           ml-1 inline-flex items-center justify-center
           h-3.5 w-3.5 rounded-full
           opacity-0 group-hover:opacity-100 focus-visible:opacity-100
-          text-text-tertiary hover:text-dismiss hover:bg-dismiss/10
-          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-dismiss/40
+          text-ink-3 hover:text-alarm hover:bg-alarm/10
+          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-alarm/40
           transition-[opacity,color]
         "
       >
@@ -932,7 +928,7 @@ function VisibilityPanel({
 
   return (
     <Card>
-      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-4">
+      <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase mb-4">
         Visibility
       </h2>
       <ProjectVisibilitySelect
@@ -1020,7 +1016,7 @@ function IntegrationsPanel({
 
   return (
     <Card>
-      <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase mb-4">
+      <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase mb-4">
         Integrations
       </h2>
       <TrackerProjectPickers
@@ -1227,14 +1223,14 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
 
   return (
     <Card
-      className={`transition-shadow duration-200 ${dragOver ? 'ring-2 ring-accent' : ''}`}
+      className={`transition-shadow duration-200 ${dragOver ? 'ring-2 ring-warm' : ''}`}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
       <header className="flex items-center justify-between mb-4">
-        <h2 className="text-[13px] font-semibold tracking-tight text-text-primary uppercase">
+        <h2 className="text-body font-semibold tracking-tight text-ink-1 uppercase">
           Knowledge base
         </h2>
         <button
@@ -1243,8 +1239,8 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
           disabled={uploading}
           className="
             inline-flex items-center gap-1.5 rounded-full
-            px-3 py-1 text-[12px]
-            text-accent hover:bg-accent-soft
+            px-3 py-1 text-ui
+            text-warm hover:bg-warm-2
             disabled:opacity-50 transition-colors
           "
         >
@@ -1265,9 +1261,9 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
       </header>
 
       {loading ? (
-        <div className="text-[12px] text-text-tertiary">Loading…</div>
+        <div className="text-ui text-ink-3">Loading…</div>
       ) : files.length === 0 && ghostNames.length === 0 ? (
-        <div className="text-[12px] text-text-tertiary italic py-4 text-center">
+        <div className="text-ui text-ink-3 italic py-4 text-center">
           No knowledge files yet. Drop files here or click <span className="not-italic">+ Add</span>
           .
         </div>
@@ -1362,7 +1358,7 @@ function ProjectExportModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={() => {
         if (!exporting) onClose()
       }}
@@ -1370,9 +1366,9 @@ function ProjectExportModal({
       <div
         className="
           relative w-full max-w-2xl
-          rounded-2xl border border-border-glass
-          bg-gradient-to-br from-white/95 via-white/90 to-white/85
-          shadow-xl shadow-black/[0.08] backdrop-blur-xl
+          rounded-2xl border border-line-1
+          bg-raised
+          shadow-float shadow-black/[0.08] backdrop-blur-xl
           p-6
         "
         ref={dialogRef}
@@ -1384,50 +1380,48 @@ function ProjectExportModal({
       >
         <h2
           id="project-export-title"
-          className="text-lg font-semibold tracking-tight text-text-primary mb-1"
+          className="text-lg font-semibold tracking-tight text-ink-1 mb-1"
         >
           Review export contents
         </h2>
-        <p className="text-[12px] text-text-tertiary mb-4">
+        <p className="text-ui text-ink-3 mb-4">
           This bundle includes everything listed below. Review before sharing.
         </p>
 
         {loading ? (
-          <div className="text-[12px] text-text-tertiary">Loading preview…</div>
+          <div className="text-ui text-ink-3">Loading preview…</div>
         ) : error ? (
-          <div className="rounded-lg border border-dismiss/20 bg-dismiss/5 px-3 py-2 text-[12px] text-dismiss">
+          <div className="rounded-lg border border-alarm/20 bg-alarm/5 px-3 py-2 text-ui text-alarm">
             {error}
           </div>
         ) : (
           <div className="space-y-3">
-            <div className="max-h-72 overflow-y-auto rounded-lg border border-border-subtle bg-white/60">
+            <div className="max-h-72 overflow-y-auto rounded-lg border border-line-1 bg-raised">
               {(preview?.files || []).map((file) => (
                 <div
                   key={file.path}
-                  className="flex items-center justify-between gap-3 border-b last:border-b-0 border-border-subtle px-3 py-2"
+                  className="flex items-center justify-between gap-3 border-b last:border-b-0 border-line-1 px-3 py-2"
                 >
-                  <span className="text-[12px] text-text-primary truncate">{file.path}</span>
-                  <span className="text-[11px] text-text-tertiary tabular-nums shrink-0">
+                  <span className="text-ui text-ink-1 truncate">{file.path}</span>
+                  <span className="text-reported text-ink-3 tabular-nums shrink-0">
                     {formatBytes(file.size_bytes)}
                   </span>
                 </div>
               ))}
               {preview && preview.files.length === 0 && (
-                <div className="px-3 py-2 text-[12px] text-text-tertiary italic">
-                  No files to export.
-                </div>
+                <div className="px-3 py-2 text-ui text-ink-3 italic">No files to export.</div>
               )}
             </div>
-            <div className="text-[12px] text-text-secondary">
+            <div className="text-ui text-ink-2">
               Total size:{' '}
-              <span className="font-medium text-text-primary">
+              <span className="font-medium text-ink-1">
                 {formatBytes(preview?.total_size || 0)}
               </span>
             </div>
             {(preview?.warnings || []).map((warning) => (
               <div
                 key={warning}
-                className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-700"
+                className="rounded-lg border border-warm/25 bg-warm/5 px-3 py-2 text-ui text-warm"
               >
                 {warning}
               </div>
@@ -1441,8 +1435,8 @@ function ProjectExportModal({
             onClick={onClose}
             disabled={exporting}
             className="
-              rounded-full px-4 py-2 text-[13px]
-              text-text-secondary hover:text-text-primary hover:bg-black/[0.03]
+              rounded-full px-4 py-2 text-body
+              text-ink-2 hover:text-ink-1 hover:bg-tint-2
               transition-all disabled:opacity-50
             "
           >
@@ -1453,8 +1447,8 @@ function ProjectExportModal({
             onClick={startExport}
             disabled={loading || exporting || !!error}
             className="
-              rounded-full px-4 py-2 text-[13px] font-medium
-              bg-accent text-white hover:opacity-90
+              rounded-full px-4 py-2 text-body font-medium
+              bg-warm text-warm-ink hover:opacity-90
               disabled:opacity-50 transition-all
             "
           >
@@ -1502,11 +1496,11 @@ function hasFiles(e: React.DragEvent): boolean {
 // as in-progress until its durable listing entry arrives and replaces it.
 function KnowledgeSyncingRow({ name }: { name: string }) {
   return (
-    <div className="rounded-lg border border-border-subtle border-dashed bg-white/20 overflow-hidden">
+    <div className="rounded-lg border border-line-1 border-dashed bg-raised overflow-hidden">
       <div className="flex items-center gap-3 px-3 py-2 min-w-0">
-        <Loader2 size={14} className="shrink-0 animate-spin text-text-tertiary" />
-        <span className="flex-1 truncate text-[13px] text-text-tertiary">{name}</span>
-        <span className="shrink-0 text-[11px] text-text-tertiary italic">Syncing…</span>
+        <Loader2 size={14} className="shrink-0 animate-spin text-ink-3" />
+        <span className="flex-1 truncate text-body text-ink-3">{name}</span>
+        <span className="shrink-0 text-reported text-ink-3 italic">Syncing…</span>
       </div>
     </div>
   )
@@ -1562,7 +1556,7 @@ function KnowledgeRow({
   const Icon = isImage ? ImageIcon : isText ? FileText : FileIcon
 
   return (
-    <div className="group rounded-lg border border-border-subtle bg-white/40 overflow-hidden">
+    <div className="group rounded-lg border border-line-1 bg-raised overflow-hidden">
       <div className="flex items-center gap-2 pr-2">
         <button
           type="button"
@@ -1570,14 +1564,14 @@ function KnowledgeRow({
           className="
             flex-1 flex items-center justify-between gap-3
             px-3 py-2 text-left min-w-0
-            hover:bg-black/[0.02] transition-colors
+            hover:bg-tint-2 transition-colors
           "
         >
           <span className="flex items-center gap-2 min-w-0">
-            <Icon size={12} className="text-text-tertiary shrink-0" />
-            <span className="text-[12px] font-medium text-text-primary truncate">{file.path}</span>
+            <Icon size={12} className="text-ink-3 shrink-0" />
+            <span className="text-ui font-medium text-ink-1 truncate">{file.path}</span>
           </span>
-          <span className="text-[10px] text-text-tertiary tabular-nums shrink-0">
+          <span className="text-label text-ink-3 tabular-nums shrink-0">
             {formatBytes(file.size_bytes)}
           </span>
         </button>
@@ -1588,8 +1582,8 @@ function KnowledgeRow({
           className="
             inline-flex items-center justify-center h-6 w-6 rounded-full
             opacity-0 group-hover:opacity-100 focus-visible:opacity-100
-            text-text-tertiary hover:text-dismiss hover:bg-dismiss/[0.08]
-            focus:outline-none focus-visible:ring-2 focus-visible:ring-dismiss
+            text-ink-3 hover:text-alarm hover:bg-alarm/[0.08]
+            focus:outline-none focus-visible:ring-2 focus-visible:ring-alarm
             transition-[opacity,color,background-color]
           "
         >
@@ -1597,9 +1591,9 @@ function KnowledgeRow({
         </button>
       </div>
       {expanded && (
-        <div className="border-t border-border-subtle px-4 py-3">
+        <div className="border-t border-line-1 px-4 py-3">
           {isMarkdown ? (
-            <div className="prose prose-sm max-w-none text-[12px] text-text-secondary leading-relaxed">
+            <div className="prose prose-sm max-w-none text-ui text-ink-2 leading-relaxed">
               <Markdown>{file.content || lazyContent || ''}</Markdown>
             </div>
           ) : isImage ? (
@@ -1610,15 +1604,15 @@ function KnowledgeRow({
             />
           ) : isText ? (
             lazyLoading ? (
-              <div className="text-[12px] text-text-tertiary">Loading…</div>
+              <div className="text-ui text-ink-3">Loading…</div>
             ) : (
-              <pre className="text-[11px] text-text-secondary leading-relaxed whitespace-pre-wrap break-words font-mono max-h-96 overflow-auto">
+              <pre className="text-reported text-ink-2 leading-relaxed whitespace-pre-wrap break-words font-mono max-h-96 overflow-auto">
                 {file.content || lazyContent || ''}
               </pre>
             )
           ) : (
             <div className="flex items-center justify-between gap-3">
-              <span className="text-[12px] text-text-tertiary italic">
+              <span className="text-ui text-ink-3 italic">
                 No inline preview for {file.mime_type || 'this file type'}.
               </span>
               <a
@@ -1627,7 +1621,7 @@ function KnowledgeRow({
                 rel="noreferrer"
                 className="
                   inline-flex items-center gap-1 rounded-full
-                  bg-accent-soft text-accent px-3 py-1 text-[11px]
+                  bg-warm-2 text-warm px-3 py-1 text-reported
                   hover:opacity-90
                 "
               >
@@ -1676,16 +1670,16 @@ function Card({
   return (
     <section
       className={`
-        relative overflow-hidden rounded-2xl border border-border-glass
-        bg-gradient-to-br from-white/70 via-white/50 to-white/35
-        p-5 shadow-sm shadow-black/[0.03] backdrop-blur-xl
+        relative overflow-hidden rounded-2xl border border-line-1
+        bg-raised
+        p-5 shadow-float shadow-black/[0.03] backdrop-blur-xl
         ${className}
       `}
       {...rest}
     >
       <span
         aria-hidden
-        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-white/30 blur-2xl"
+        className="pointer-events-none absolute -left-8 -top-8 h-24 w-24 rounded-full bg-raised blur-2xl"
       />
       <div className="relative">{children}</div>
     </section>
@@ -1694,11 +1688,9 @@ function Card({
 
 function Chip({ label, tone }: { label: string; tone: 'accent' | 'muted' }) {
   const cls =
-    tone === 'accent'
-      ? 'bg-accent-soft text-accent'
-      : 'bg-black/[0.03] text-text-secondary border border-border-subtle'
+    tone === 'accent' ? 'bg-warm-2 text-warm' : 'bg-tint-2 text-ink-2 border border-line-1'
   return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] ${cls}`}>
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-reported ${cls}`}>
       {label}
     </span>
   )

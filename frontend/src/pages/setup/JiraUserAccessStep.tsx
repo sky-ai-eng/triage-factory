@@ -42,22 +42,19 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
     return (
       <div className="space-y-5">
         <div className="space-y-1.5">
-          <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-            Your Jira access
-          </h2>
-          <p className="text-[13px] leading-relaxed text-text-tertiary">
+          <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Your Jira access</h2>
+          <p className="text-body leading-relaxed text-ink-3">
             So Triage Factory can act as you on Jira — claiming and updating tickets under your
             name, not a shared bot.
           </p>
         </div>
-        <div className="flex items-center gap-2.5 rounded-xl border border-[var(--color-border-glass)] bg-[var(--color-surface-overlay)]/50 px-4 py-3">
-          <span className="text-[var(--color-claim)]">
+        <div className="flex items-center gap-2.5 rounded-xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/50 px-4 py-3">
+          <span className="text-warm">
             <JiraMark />
           </span>
-          <p className="text-[13px] text-text-secondary">
-            Connected as{' '}
-            <span className="font-medium text-text-primary">{state.jiraUserAccount}</span>
-            <span className="text-text-tertiary"> on {host}</span>
+          <p className="text-body text-ink-2">
+            Connected as <span className="font-medium text-ink-1">{state.jiraUserAccount}</span>
+            <span className="text-ink-3"> on {host}</span>
           </p>
         </div>
       </div>
@@ -67,13 +64,10 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <h2 className="text-[19px] font-medium tracking-tight text-text-primary">
-          Connect your Jira
-        </h2>
-        <p className="text-[13px] leading-relaxed text-text-tertiary">
-          Triage Factory acts as you on{' '}
-          <span className="font-medium text-text-secondary">{host}</span> — so the tickets it claims
-          and updates are attributed to you, not a shared bot.
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">Connect your Jira</h2>
+        <p className="text-body leading-relaxed text-ink-3">
+          Triage Factory acts as you on <span className="font-medium text-ink-2">{host}</span> — so
+          the tickets it claims and updates are attributed to you, not a shared bot.
           {connectAvailable
             ? ' Authorize with Atlassian, or paste a token, to link your account.'
             : ' Paste your personal Jira token to link your account.'}
@@ -84,7 +78,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
         <button
           type="button"
           onClick={startConnect}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-surface-inverse px-4 py-2.5 text-[13px] font-medium text-text-inverse transition-colors hover:bg-surface-inverse/90"
+          className="flex w-full items-center justify-center gap-2 rounded-xl bg-inverse px-4 py-2.5 text-body font-medium text-inverse-ink transition-colors hover:bg-inverse/90"
         >
           <JiraMark />
           Connect Jira
@@ -93,14 +87,14 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
 
       <div className="space-y-2">
         {connectAvailable && (
-          <span className="block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+          <span className="block text-reported font-medium uppercase tracking-wide text-ink-3">
             {cloud ? 'Or paste an email + API token' : 'Or paste a personal access token'}
           </span>
         )}
         {cloud ? (
           <>
             <label className="block">
-              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
                 Atlassian account email
               </span>
               <input
@@ -112,13 +106,13 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
                 aria-invalid={!!error || undefined}
                 className={`${glassInputClass}${
                   error
-                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
                     : ''
                 }`}
               />
             </label>
             <label className="block">
-              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
                 API token
               </span>
               <input
@@ -130,18 +124,18 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
                 aria-invalid={!!error || undefined}
                 className={`${glassInputClass}${
                   error
-                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
                     : ''
                 }`}
               />
             </label>
-            <p className="text-[11px] leading-relaxed text-text-tertiary">
+            <p className="text-reported leading-relaxed text-ink-3">
               Create a token at{' '}
               <a
                 href="https://id.atlassian.com/manage-profile/security/api-tokens"
                 target="_blank"
                 rel="noreferrer"
-                className="text-accent hover:underline"
+                className="text-warm hover:underline"
               >
                 Atlassian API token settings
               </a>
@@ -152,7 +146,7 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
         ) : (
           <>
             <label className="block">
-              <span className="mb-2 block text-[11px] font-medium uppercase tracking-wide text-text-tertiary">
+              <span className="mb-2 block text-reported font-medium uppercase tracking-wide text-ink-3">
                 Personal access token
               </span>
               <input
@@ -164,12 +158,12 @@ export function JiraUserAccessStep({ state, patch, orgId, error }: StepContext) 
                 aria-invalid={!!error || undefined}
                 className={`${glassInputClass}${
                   error
-                    ? ' !border-[var(--color-dismiss)] focus:!border-[var(--color-dismiss)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
+                    ? ' !border-[var(--color-alarm)] focus:!border-[var(--color-alarm)] focus:!shadow-[0_0_0_4px_rgba(168,69,69,0.16)]'
                     : ''
                 }`}
               />
             </label>
-            <p className="text-[11px] leading-relaxed text-text-tertiary">
+            <p className="text-reported leading-relaxed text-ink-3">
               Unlike GitHub, this token is stored — Triage Factory needs it to act as you on Jira.
               It stays in your workspace&rsquo;s secret store and is never shared with other users.
             </p>

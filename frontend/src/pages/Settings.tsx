@@ -45,18 +45,16 @@ export default function Settings() {
   if (!isLocal && !orgId) {
     return (
       <div className="flex min-h-[50vh] items-center justify-center">
-        <p className="text-[13px] text-text-tertiary">Loading settings…</p>
+        <p className="text-body text-ink-3">Loading settings…</p>
       </div>
     )
   }
 
   return (
-    <div className="relative min-h-screen px-4 py-10">
+    <div className="relative min-h-full px-4 py-10">
       <GlassBackdrop />
       <div className="mx-auto max-w-2xl">
-        <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-text-primary">
-          Settings
-        </h1>
+        <h1 className="mb-8 text-[22px] font-semibold tracking-tight text-ink-1">Settings</h1>
 
         <div className="space-y-8">
           {/* Org + Team groups — local mode only. Multi mode relocates Org to

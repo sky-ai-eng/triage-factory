@@ -119,10 +119,10 @@ export default function GitHubTeamChecklist({
         <div className="space-y-1 py-2">
           {[1, 2, 3, 4, 5, 6].map((i) => (
             <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
-              <div className="w-4 h-4 rounded bg-black/[0.04] animate-pulse" />
+              <div className="w-4 h-4 rounded bg-tint-3 animate-pulse" />
               <div className="flex-1 space-y-1.5">
                 <div
-                  className="h-3 rounded bg-black/[0.04] animate-pulse"
+                  className="h-3 rounded bg-tint-3 animate-pulse"
                   style={{ width: `${50 + ((i * 17) % 35)}%` }}
                 />
               </div>
@@ -137,12 +137,12 @@ export default function GitHubTeamChecklist({
     return (
       <div className={`flex flex-col min-h-0 ${className}`}>
         <div className="flex flex-col items-center justify-center py-12 gap-3">
-          <div className="text-[13px] text-text-secondary text-center">{error}</div>
+          <div className="text-body text-ink-2 text-center">{error}</div>
           {onRetry && (
             <button
               type="button"
               onClick={onRetry}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+              className="flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
             >
               <RotateCw size={13} />
               Retry
@@ -156,7 +156,7 @@ export default function GitHubTeamChecklist({
   if (rows.length === 0) {
     return (
       <div className={`flex flex-col min-h-0 ${className}`}>
-        <div className="text-[13px] text-text-tertiary py-8 leading-relaxed">{emptyLabel}</div>
+        <div className="text-body text-ink-3 py-8 leading-relaxed">{emptyLabel}</div>
       </div>
     )
   }
@@ -185,16 +185,12 @@ export default function GitHubTeamChecklist({
             placeholder="Search teams..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+            className="w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
           />
         )}
         {bare ? (
           // Rail-underline filters — borderless, blended (no segmented box).
-          <div
-            role="tablist"
-            aria-label="Team filter"
-            className="flex items-center gap-5 text-[12px]"
-          >
+          <div role="tablist" aria-label="Team filter" className="flex items-center gap-5 text-ui">
             {segments.map((s) => {
               const active = mode === s.mode
               return (
@@ -205,7 +201,7 @@ export default function GitHubTeamChecklist({
                   aria-selected={active}
                   onClick={() => setMode(s.mode)}
                   className={`relative pb-1.5 font-medium transition-colors ${
-                    active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+                    active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
                   }`}
                 >
                   {s.label}
@@ -213,7 +209,7 @@ export default function GitHubTeamChecklist({
                   {active && (
                     <span
                       aria-hidden
-                      className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-accent"
+                      className="absolute inset-x-0 bottom-0 h-[2px] rounded-full bg-warm"
                     />
                   )}
                 </button>
@@ -224,7 +220,7 @@ export default function GitHubTeamChecklist({
           <div
             role="tablist"
             aria-label="Team filter"
-            className="flex items-center gap-1 rounded-xl bg-black/[0.03] p-0.5 text-[12px]"
+            className="flex items-center gap-1 rounded-xl bg-tint-2 p-0.5 text-ui"
           >
             {segments.map((s) => (
               <button
@@ -235,12 +231,12 @@ export default function GitHubTeamChecklist({
                 onClick={() => setMode(s.mode)}
                 className={`flex-1 rounded-lg px-2.5 py-1.5 font-medium transition-colors ${
                   mode === s.mode
-                    ? 'bg-surface-raised text-text-primary shadow-sm'
-                    : 'text-text-tertiary hover:text-text-secondary'
+                    ? 'bg-raised text-ink-1 shadow-float'
+                    : 'text-ink-3 hover:text-ink-2'
                 }`}
               >
                 {s.label}
-                <span className="ml-1 text-text-tertiary tabular-nums">{s.count}</span>
+                <span className="ml-1 text-ink-3 tabular-nums">{s.count}</span>
               </button>
             ))}
           </div>
@@ -250,7 +246,7 @@ export default function GitHubTeamChecklist({
       {/* List */}
       <div className={`${scrollClassName} overflow-y-auto`}>
         {visible.length === 0 ? (
-          <p className="text-[13px] text-text-tertiary text-center py-8">
+          <p className="text-body text-ink-3 text-center py-8">
             {mode === 'selected'
               ? 'No selected teams match.'
               : mode === 'unselected'
@@ -270,13 +266,13 @@ export default function GitHubTeamChecklist({
                 aria-checked={isChecked}
                 disabled={disabled}
                 onClick={() => onToggle(team.org_login, team.team_slug)}
-                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] disabled:cursor-not-allowed disabled:opacity-60 ${
-                  isChecked ? 'bg-accent/[0.04]' : ''
+                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-tint-2 disabled:cursor-not-allowed disabled:opacity-60 ${
+                  isChecked ? 'bg-warm/[0.04]' : ''
                 }`}
               >
                 <span
                   className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
-                    isChecked ? 'bg-accent border-accent text-white' : 'border-border-subtle'
+                    isChecked ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
                   }`}
                 >
                   {isChecked && (
@@ -296,32 +292,32 @@ export default function GitHubTeamChecklist({
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[12.5px] font-medium text-text-primary font-mono truncate">
+                    <span className="text-card-title font-medium text-ink-1 font-mono truncate">
                       {team.org_login}/{team.team_slug}
                     </span>
                     {team.mine && (
-                      <span className="text-[10px] text-accent border border-accent/30 rounded px-1 py-0.5">
+                      <span className="text-label text-warm border border-warm/30 rounded px-1 py-0.5">
                         your team
                       </span>
                     )}
                     {team.member_count ? (
-                      <span className="text-[10px] text-text-tertiary">
+                      <span className="text-label text-ink-3">
                         {team.member_count} member{team.member_count !== 1 ? 's' : ''}
                       </span>
                     ) : null}
                     {noisy && (
-                      <span className="text-[10px] text-snooze border border-snooze/30 rounded px-1 py-0.5">
+                      <span className="text-label text-ink-2 border border-line-1 rounded px-1 py-0.5">
                         broad team — noisy queue
                       </span>
                     )}
                     {team.orphan && (
-                      <span className="text-[10px] text-dismiss border border-dismiss/30 rounded px-1 py-0.5">
+                      <span className="text-label text-alarm border border-alarm/30 rounded px-1 py-0.5">
                         not on GitHub
                       </span>
                     )}
                   </div>
                   {team.name && team.name.toLowerCase() !== team.team_slug.toLowerCase() && (
-                    <p className="text-[11px] text-text-tertiary truncate mt-0.5">{team.name}</p>
+                    <p className="text-reported text-ink-3 truncate mt-0.5">{team.name}</p>
                   )}
                 </div>
               </button>

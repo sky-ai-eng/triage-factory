@@ -64,20 +64,20 @@ function EventTypeNode({
   }
   return (
     <div
-      className={`group bg-white/90 backdrop-blur border border-border-subtle ${sourceColor[data.source] || 'border-l-gray-400'} border-l-[3px] rounded-lg px-3 py-2 min-w-[180px] max-w-[220px] shadow-sm`}
+      className={`group bg-raised backdrop-blur border border-line-1 ${sourceColor[data.source] || 'border-l-gray-400'} border-l-[3px] rounded-lg px-3 py-2 min-w-[180px] max-w-[220px] shadow-float`}
     >
       <button
         onClick={data.onRemove}
-        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border border-border-subtle text-text-tertiary text-[10px] leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-all shadow-sm"
+        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-raised border border-line-1 text-ink-3 text-label leading-none flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-alarm hover:text-alarm hover:border-alarm transition-all shadow-float"
       >
         &times;
       </button>
-      <div className="text-[11px] font-semibold text-text-primary">{data.label}</div>
-      <div className="text-[9px] text-text-tertiary mt-0.5 leading-relaxed">{data.description}</div>
+      <div className="text-reported font-semibold text-ink-1">{data.label}</div>
+      <div className="text-label-sm text-ink-3 mt-0.5 leading-relaxed">{data.description}</div>
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-accent !border-2 !border-white"
+        className="!w-2.5 !h-2.5 !bg-warm !border-2 !border-line-1"
       />
     </div>
   )
@@ -103,7 +103,7 @@ function PromptNode({
         if (e.shiftKey || e.metaKey || e.ctrlKey) return
         data.onClick?.()
       }}
-      className="bg-white/90 backdrop-blur border border-border-subtle rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-sm hover:border-accent/30 hover:shadow-md transition-all cursor-pointer"
+      className="bg-raised backdrop-blur border border-line-1 rounded-lg px-3 py-2.5 min-w-[200px] max-w-[240px] shadow-float hover:border-warm/30 transition-all cursor-pointer"
     >
       {/* Target (left): a prompt's single input — an event (it becomes a
           blueprint's entry) OR an upstream step. Source (right): its single
@@ -112,28 +112,28 @@ function PromptNode({
       <Handle
         type="target"
         position={Position.Left}
-        className="!w-2.5 !h-2.5 !bg-accent !border-2 !border-white"
+        className="!w-2.5 !h-2.5 !bg-warm !border-2 !border-line-1"
       />
       <div className="flex items-center gap-2">
-        <div className="text-[11px] font-semibold text-text-primary">{data.label}</div>
+        <div className="text-reported font-semibold text-ink-1">{data.label}</div>
         {data.source === 'system' && (
-          <span className="text-[8px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded bg-black/5 text-text-tertiary">
+          <span className="text-[8px] font-semibold uppercase tracking-wider px-1 py-0.5 rounded bg-tint-3 text-ink-3">
             Sys
           </span>
         )}
       </div>
       {data.bodyPreview && (
-        <div className="text-[9px] text-text-tertiary mt-1 line-clamp-2 leading-relaxed font-mono">
+        <div className="text-label-sm text-ink-3 mt-1 line-clamp-2 leading-relaxed font-mono">
           {data.bodyPreview}
         </div>
       )}
       {data.usageCount > 0 && (
-        <div className="text-[9px] text-text-tertiary mt-1">Used {data.usageCount}x</div>
+        <div className="text-label-sm text-ink-3 mt-1">Used {data.usageCount}x</div>
       )}
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-accent !border-2 !border-white"
+        className="!w-2.5 !h-2.5 !bg-warm !border-2 !border-line-1"
       />
     </div>
   )
@@ -169,16 +169,16 @@ function BlueprintBoxNode({
 }) {
   return (
     <div
-      className={`relative w-full h-full rounded-2xl border bg-accent/[0.04] transition-colors ${
-        selected ? 'border-accent ring-2 ring-accent/30' : 'border-border-subtle'
+      className={`relative w-full h-full rounded-2xl border bg-warm/[0.04] transition-colors ${
+        selected ? 'border-warm ring-2 ring-warm/30' : 'border-line-1'
       }`}
     >
       {/* Header (top edge): the blueprint's name + the primary drag/select
           handle. `pr-8` clears the kebab so a long name truncates before it. */}
       <div className="pointer-events-auto absolute inset-x-0 top-0 flex h-[30px] items-center gap-1.5 pl-3 pr-8 cursor-grab active:cursor-grabbing">
-        <Layers size={12} className="text-text-tertiary shrink-0" />
-        <span className="text-[11px] font-semibold text-text-tertiary truncate">{data.name}</span>
-        <span className="text-[10px] text-text-tertiary/60 shrink-0">· {data.stepCount} steps</span>
+        <Layers size={12} className="text-ink-3 shrink-0" />
+        <span className="text-reported font-semibold text-ink-3 truncate">{data.name}</span>
+        <span className="text-label text-ink-3/60 shrink-0">· {data.stepCount} steps</span>
       </div>
       {/* Edit button (top-right) — opens the blueprint details popup. `nodrag`
           keeps a click from starting a box drag; stopPropagation keeps it from
@@ -189,7 +189,7 @@ function BlueprintBoxNode({
           data.onBoxEdit(data.blueprintId, e.clientX, e.clientY)
         }}
         title="Blueprint details"
-        className="nodrag pointer-events-auto absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-black/[0.04] transition-colors cursor-pointer"
+        className="nodrag pointer-events-auto absolute right-1.5 top-1.5 w-6 h-6 rounded-md flex items-center justify-center text-ink-3 hover:text-ink-2 hover:bg-tint-3 transition-colors cursor-pointer"
       >
         <MoreVertical size={14} />
       </button>
@@ -238,38 +238,29 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
     e.dataTransfer.effectAllowed = 'move'
   }
 
-  // Dot colours per source; a source with no entry gets the neutral dot rather
-  // than no dot. The NAMES come from the shared label map, so a source added
-  // to the vocabulary can never render here as a raw lowercase key.
-  const sourceColors: Record<string, string> = {
-    github: 'bg-emerald-500',
-    jira: 'bg-blue-500',
-    slack: 'bg-violet-500',
-    linear: 'bg-indigo-500',
-    schedule: 'bg-amber-500',
-  }
+  // Every source gets the same neutral dot — this design reserves colour for
+  // state, not identity. The NAMES come from the shared label map, so a source
+  // added to the vocabulary can never render here as a raw lowercase key.
 
   const allPlaced = Object.values(groups).every((g) => g.length === 0)
 
   return (
-    <div className="absolute left-3 top-3 bottom-3 w-[190px] z-10 bg-white/80 backdrop-blur-xl border border-border-subtle rounded-xl shadow-lg overflow-hidden flex flex-col">
-      <div className="px-3 py-2.5 border-b border-border-subtle shrink-0">
-        <div className="text-[11px] font-semibold text-text-primary">Events</div>
-        <div className="text-[9px] text-text-tertiary mt-0.5">Drag onto canvas to bind</div>
+    <div className="absolute left-3 top-3 bottom-3 w-[190px] z-10 bg-raised backdrop-blur-xl border border-line-1 rounded-xl shadow-float overflow-hidden flex flex-col">
+      <div className="px-3 py-2.5 border-b border-line-1 shrink-0">
+        <div className="text-reported font-semibold text-ink-1">Events</div>
+        <div className="text-label-sm text-ink-3 mt-0.5">Drag onto canvas to bind</div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-3">
         {allPlaced ? (
-          <p className="text-[10px] text-text-tertiary text-center py-4">All events placed</p>
+          <p className="text-label text-ink-3 text-center py-4">All events placed</p>
         ) : (
           Object.entries(groups).map(
             ([source, items]) =>
               items.length > 0 && (
                 <div key={source}>
                   <div className="flex items-center gap-1.5 px-1 mb-1.5">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${sourceColors[source] || 'bg-gray-400'}`}
-                    />
-                    <span className="text-[10px] font-semibold text-text-tertiary uppercase tracking-wider">
+                    <span className="w-1.5 h-1.5 rounded-full bg-ink-3" />
+                    <span className="text-label font-semibold text-ink-3 uppercase tracking-wider">
                       {sourceLabel(source)}
                     </span>
                   </div>
@@ -278,7 +269,7 @@ function Sidebar({ eventTypes, activeIds }: { eventTypes: EventType[]; activeIds
                       key={et.id}
                       draggable
                       onDragStart={(e) => onDragStart(e, et.id)}
-                      className="px-2 py-1.5 rounded-md text-[10px] text-text-secondary hover:bg-accent/5 hover:text-accent cursor-grab active:cursor-grabbing transition-colors mb-0.5"
+                      className="px-2 py-1.5 rounded-md text-label text-ink-2 hover:bg-warm/5 hover:text-warm cursor-grab active:cursor-grabbing transition-colors mb-0.5"
                     >
                       {et.label}
                     </div>
@@ -1093,19 +1084,19 @@ function BindingGraphInner({
         deletable: false,
         reconnectable,
         style: {
-          stroke: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+          stroke: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
           strokeWidth: t.enabled ? 2 : 1,
           strokeDasharray: t.enabled ? undefined : '5 5',
           opacity: t.enabled ? 1 : 0.5,
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+          color: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
         },
         label: t.enabled ? 'auto' : 'disabled',
         labelStyle: {
           fontSize: 9,
-          fill: t.enabled ? 'var(--color-accent)' : 'var(--color-text-tertiary)',
+          fill: t.enabled ? 'var(--color-warm)' : 'var(--color-ink-3)',
           fontWeight: 600,
         },
         // The "auto"/"disabled" label text is already theme-aware (accent /
@@ -1113,7 +1104,7 @@ function BindingGraphInner({
         // white pill glares as a bright rectangle on the dark canvas, swamping
         // the state it's meant to read out (TFAC-400). surface-raised is white
         // in light mode (unchanged) and the dark raised surface in dark mode.
-        labelBgStyle: { fill: 'var(--color-surface-raised)', fillOpacity: 0.8 },
+        labelBgStyle: { fill: 'var(--color-raised)', fillOpacity: 0.8 },
       }))
 
     const sequenceEdges: Edge[] = []
@@ -1131,8 +1122,8 @@ function BindingGraphInner({
           data: { kind: 'sequence', blueprintId: bpId, atStepIndex: i + 1 },
           deletable: false,
           reconnectable,
-          style: { stroke: 'var(--color-text-tertiary)', strokeWidth: 1.5 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-text-tertiary)' },
+          style: { stroke: 'var(--color-ink-3)', strokeWidth: 1.5 },
+          markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-ink-3)' },
         })
       }
     }
@@ -1759,7 +1750,7 @@ function BindingGraphInner({
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-full text-text-tertiary text-sm">
+      <div className="flex items-center justify-center h-full text-ink-3 text-sm">
         Loading graph...
       </div>
     )
@@ -1804,7 +1795,7 @@ function BindingGraphInner({
         // which is fine — prompts aren't expected to overlap.
         elevateNodesOnSelect={false}
       >
-        <Background color="var(--color-border-subtle)" gap={20} size={1} />
+        <Background color="var(--color-line-1)" gap={20} size={1} />
       </ReactFlow>
 
       {/* Edge context menu (shift-click) */}
@@ -1812,7 +1803,7 @@ function BindingGraphInner({
         <>
           <div className="fixed inset-0 z-50" onClick={() => setEdgeMenu(null)} />
           <div
-            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-1.5 w-[200px]"
+            className="fixed z-50 bg-raised/95 backdrop-blur-xl border border-line-1 rounded-xl shadow-float shadow-black/10 p-1.5 w-[200px]"
             style={{
               left: Math.max(8, Math.min(edgeMenu.x - 100, window.innerWidth - 208)),
               top: edgeMenu.y - 12,
@@ -1825,7 +1816,7 @@ function BindingGraphInner({
                     onTriggerClickRef.current?.(edgeMenu.trigger)
                     setEdgeMenu(null)
                   }}
-                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   Edit trigger config
                 </button>
@@ -1835,14 +1826,14 @@ function BindingGraphInner({
                     setEdgeMenu(null)
                   }}
                   disabled={removeTriggerGuard.pending}
-                  className="w-full text-left text-[12px] text-red-500 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  className="w-full text-left text-ui text-alarm hover:bg-alarm disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   {removeTriggerGuard.pending ? 'Removing…' : 'Remove trigger'}
                 </button>
               </>
             ) : (
               <>
-                <div className="px-2.5 pt-1.5 pb-1 text-[10px] text-text-tertiary leading-snug">
+                <div className="px-2.5 pt-1.5 pb-1 text-label text-ink-3 leading-snug">
                   Split into two blueprints at this boundary.
                 </div>
                 <button
@@ -1851,7 +1842,7 @@ function BindingGraphInner({
                     setEdgeMenu(null)
                   }}
                   disabled={splitGuard.pending}
-                  className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 disabled:opacity-40 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   {splitGuard.pending ? 'Splitting…' : 'Split here'}
                 </button>
@@ -1872,14 +1863,14 @@ function BindingGraphInner({
             }}
           />
           <div
-            className="fixed z-50 bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-3 w-[260px]"
+            className="fixed z-50 bg-raised/95 backdrop-blur-xl border border-line-1 rounded-xl shadow-float shadow-black/10 p-3 w-[260px]"
             style={{
               left: Math.max(8, Math.min(boxMenu.x - 240, window.innerWidth - 268)),
               top: boxMenu.y + 6,
             }}
           >
             {/* Rename — the blueprint's name is its own, not the entry prompt's. */}
-            <label className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-tertiary mb-1">
+            <label className="flex items-center gap-1.5 text-label font-semibold uppercase tracking-wider text-ink-3 mb-1">
               <Layers size={11} className="shrink-0" />
               Blueprint name
             </label>
@@ -1892,7 +1883,7 @@ function BindingGraphInner({
                   if (e.key === 'Enter') saveBoxName(boxMenu.blueprintId, boxNameDraft)
                 }}
                 disabled={renameGuard.pending}
-                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-border-subtle bg-white/60 text-[12px] text-text-primary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 disabled:opacity-60 transition-colors"
+                className="flex-1 min-w-0 px-2 py-1 rounded-md border border-line-1 bg-raised text-ui text-ink-1 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20 disabled:opacity-60 transition-colors"
               />
               <button
                 onClick={() => saveBoxName(boxMenu.blueprintId, boxNameDraft)}
@@ -1901,12 +1892,12 @@ function BindingGraphInner({
                   !boxNameDraft.trim() ||
                   boxNameDraft.trim() === (blueprintNames[boxMenu.blueprintId] ?? '')
                 }
-                className="text-[11px] font-semibold text-white bg-accent hover:bg-accent/90 disabled:opacity-40 px-2.5 py-1 rounded-md transition-colors"
+                className="text-reported font-semibold text-warm-ink bg-warm hover:bg-warm/90 disabled:opacity-40 px-2.5 py-1 rounded-md transition-colors"
               >
                 {renameGuard.pending ? 'Saving…' : 'Save'}
               </button>
             </div>
-            <div className="text-[11px] text-text-tertiary mb-2.5">
+            <div className="text-reported text-ink-3 mb-2.5">
               {(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) + ' steps · composed on canvas'}
             </div>
             {/* Duplicate the whole blueprint — passes all its step prompt ids to the
@@ -1920,7 +1911,7 @@ function BindingGraphInner({
                 void duplicatePromptIds(ids)
               }}
               disabled={(blueprintSteps[boxMenu.blueprintId]?.length ?? 0) === 0}
-              className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-secondary disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors mb-1.5"
+              className="w-full flex items-center gap-1.5 text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-2 disabled:cursor-not-allowed font-medium px-2.5 py-1.5 rounded-lg border border-line-1 transition-colors mb-1.5"
             >
               <Copy size={12} className="shrink-0" />
               Duplicate blueprint
@@ -1931,12 +1922,12 @@ function BindingGraphInner({
                   onTriggerClickRef.current?.(boxMenuTrigger)
                   setBoxMenu(null)
                 }}
-                className="w-full text-left text-[12px] text-text-secondary hover:text-text-primary hover:bg-black/[0.04] font-medium px-2.5 py-1.5 rounded-lg border border-border-subtle transition-colors"
+                className="w-full text-left text-ui text-ink-2 hover:text-ink-1 hover:bg-tint-3 font-medium px-2.5 py-1.5 rounded-lg border border-line-1 transition-colors"
               >
                 Edit trigger config
               </button>
             ) : (
-              <p className="text-[11px] text-text-tertiary leading-snug">
+              <p className="text-reported text-ink-3 leading-snug">
                 No trigger yet — wire an event to this blueprint’s first step to fire it.
               </p>
             )}
@@ -1945,7 +1936,7 @@ function BindingGraphInner({
                 publish whole. Multi-mode only (renders nothing in local
                 mode). Event-type suggestion comes from the blueprint's own
                 trigger, already loaded for the canvas. */}
-            <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
+            <div className="mt-2.5 pt-2.5 border-t border-line-1">
               <MarketplacePublishControl
                 kind="blueprint"
                 sourceId={boxMenu.blueprintId}
@@ -1959,12 +1950,12 @@ function BindingGraphInner({
                 drops the box and its nodes. Two-stage so an accidental click in
                 the rename/duplicate menu can't destroy a blueprint: the confirm
                 names it and how many steps go with it. */}
-            <div className="mt-2.5 pt-2.5 border-t border-border-subtle">
+            <div className="mt-2.5 pt-2.5 border-t border-line-1">
               {boxDeleteConfirm ? (
                 <div className="space-y-1.5">
-                  <p className="text-[11px] text-text-secondary leading-snug">
+                  <p className="text-reported text-ink-2 leading-snug">
                     Delete{' '}
-                    <span className="font-semibold text-text-primary">
+                    <span className="font-semibold text-ink-1">
                       {blueprintNames[boxMenu.blueprintId] ?? 'this blueprint'}
                     </span>{' '}
                     and its {blueprintSteps[boxMenu.blueprintId]?.length ?? 0} step
@@ -1975,14 +1966,14 @@ function BindingGraphInner({
                     <button
                       onClick={() => setBoxDeleteConfirm(false)}
                       disabled={deleteBlueprintGuard.pending}
-                      className="flex-1 text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-2.5 py-1 rounded-md border border-border-subtle transition-colors"
+                      className="flex-1 text-reported font-medium text-ink-2 hover:text-ink-1 disabled:opacity-50 px-2.5 py-1 rounded-md border border-line-1 transition-colors"
                     >
                       Cancel
                     </button>
                     <button
                       onClick={() => void deleteBlueprint(boxMenu.blueprintId)}
                       disabled={deleteBlueprintGuard.pending}
-                      className="flex-1 text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-60 px-2.5 py-1 rounded-md transition-colors"
+                      className="flex-1 text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm/90 disabled:opacity-60 px-2.5 py-1 rounded-md transition-colors"
                     >
                       {deleteBlueprintGuard.pending ? 'Deleting…' : 'Delete'}
                     </button>
@@ -1991,7 +1982,7 @@ function BindingGraphInner({
               ) : (
                 <button
                   onClick={() => setBoxDeleteConfirm(true)}
-                  className="w-full flex items-center gap-1.5 text-left text-[12px] text-text-tertiary hover:text-red-500 font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+                  className="w-full flex items-center gap-1.5 text-left text-ui text-ink-3 hover:text-alarm font-medium px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   <Trash2 size={12} className="shrink-0" />
                   Delete blueprint
@@ -2007,7 +1998,7 @@ function BindingGraphInner({
       {deleteConfirm && (
         <>
           <div
-            className="fixed inset-0 z-[60] bg-black/20"
+            className="fixed inset-0 z-[60] bg-scrim"
             onClick={() => {
               if (!bulkDeleteGuard.pending) setDeleteConfirm(null)
             }}
@@ -2018,36 +2009,34 @@ function BindingGraphInner({
             role="dialog"
             aria-modal="true"
             aria-label={`Delete ${deleteSummary}?`}
-            className="fixed z-[60] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[360px] bg-surface-raised/95 backdrop-blur-xl border border-border-glass rounded-xl shadow-xl shadow-black/10 p-4"
+            className="fixed z-[60] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[360px] bg-raised/95 backdrop-blur-xl border border-line-1 rounded-xl shadow-float shadow-black/10 p-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-2 mb-2.5">
-              <Trash2 size={14} className="text-red-500 shrink-0" />
-              <h3 className="text-[13px] font-semibold text-text-primary">
-                Delete {deleteSummary}?
-              </h3>
+              <Trash2 size={14} className="text-alarm shrink-0" />
+              <h3 className="text-body font-semibold text-ink-1">Delete {deleteSummary}?</h3>
             </div>
-            <ul className="text-[12px] text-text-secondary space-y-1 mb-3 max-h-[180px] overflow-y-auto">
+            <ul className="text-ui text-ink-2 space-y-1 mb-3 max-h-[180px] overflow-y-auto">
               {deleteConfirm.blueprints.map((b) => (
                 <li key={`bp:${b.id}`} className="flex items-center gap-1.5">
-                  <Layers size={11} className="text-text-tertiary shrink-0" />
+                  <Layers size={11} className="text-ink-3 shrink-0" />
                   <span className="truncate">
-                    <span className="font-medium text-text-primary">{b.name}</span>
-                    <span className="text-text-tertiary"> — blueprint &amp; its steps</span>
+                    <span className="font-medium text-ink-1">{b.name}</span>
+                    <span className="text-ink-3"> — blueprint &amp; its steps</span>
                   </span>
                 </li>
               ))}
               {deleteConfirm.prompts.map((p) => (
                 <li key={`p:${p.id}`} className="flex items-center gap-1.5">
-                  <FileText size={11} className="text-text-tertiary shrink-0" />
+                  <FileText size={11} className="text-ink-3 shrink-0" />
                   <span className="truncate">
-                    <span className="font-medium text-text-primary">{p.name}</span>
-                    <span className="text-text-tertiary"> — prompt</span>
+                    <span className="font-medium text-ink-1">{p.name}</span>
+                    <span className="text-ink-3"> — prompt</span>
                   </span>
                 </li>
               ))}
             </ul>
-            <p className="text-[11px] text-text-tertiary leading-snug mb-3">
+            <p className="text-reported text-ink-3 leading-snug mb-3">
               {deleteMightOrphan &&
                 'Deleting a prompt mid-blueprint splits the steps after it into a new untriggered blueprint. '}
               This can’t be undone.
@@ -2057,14 +2046,14 @@ function BindingGraphInner({
                 ref={deleteCancelRef}
                 onClick={() => setDeleteConfirm(null)}
                 disabled={bulkDeleteGuard.pending}
-                className="text-[11px] font-medium text-text-secondary hover:text-text-primary disabled:opacity-50 px-3 py-1.5 rounded-md border border-border-subtle transition-colors"
+                className="text-reported font-medium text-ink-2 hover:text-ink-1 disabled:opacity-50 px-3 py-1.5 rounded-md border border-line-1 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => void executeDeletePlan(deleteConfirm)}
                 disabled={bulkDeleteGuard.pending}
-                className="text-[11px] font-semibold text-white bg-red-500 hover:bg-red-600 disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
+                className="text-reported font-semibold text-warm-ink bg-alarm hover:bg-alarm/90 disabled:opacity-60 px-3 py-1.5 rounded-md transition-colors"
               >
                 {bulkDeleteGuard.pending ? 'Deleting…' : 'Delete'}
               </button>
@@ -2080,7 +2069,7 @@ function BindingGraphInner({
 
 export default function BindingGraph(props: GraphProps) {
   return (
-    <div className="h-full rounded-2xl border border-border-subtle bg-white/30 overflow-hidden">
+    <div className="h-full rounded-2xl border border-line-1 bg-raised overflow-hidden">
       <ReactFlowProvider>
         <BindingGraphInner {...props} />
       </ReactFlowProvider>

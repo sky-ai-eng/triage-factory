@@ -67,7 +67,7 @@ export default function ResolveAllConfirm({
       {open && (
         <>
           <motion.div
-            className="fixed inset-0 z-[60] bg-black/30 backdrop-blur-sm"
+            className="fixed inset-0 z-[60] bg-scrim backdrop-blur-sm"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -80,17 +80,17 @@ export default function ResolveAllConfirm({
             aria-modal="true"
             aria-labelledby={titleId}
             aria-describedby={descId}
-            className="fixed left-1/2 top-1/2 z-[60] w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border-glass bg-surface/95 p-5 shadow-2xl shadow-black/[0.12] backdrop-blur-2xl focus:outline-none"
+            className="fixed left-1/2 top-1/2 z-[60] w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-line-1 bg-ground/95 p-5 shadow-float shadow-black/[0.12] backdrop-blur-2xl focus:outline-none"
             initial={{ opacity: 0, scale: 0.96, y: 8 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
             transition={{ type: 'spring', damping: 28, stiffness: 360 }}
             onClick={(e) => e.stopPropagation()}
           >
-            <h2 id={titleId} className="text-[14px] font-semibold tracking-tight text-text-primary">
+            <h2 id={titleId} className="text-body font-semibold tracking-tight text-ink-1">
               Resolve open artifacts?
             </h2>
-            <p id={descId} className="mt-2 text-[12.5px] leading-relaxed text-text-secondary">
+            <p id={descId} className="mt-2 text-card-title leading-relaxed text-ink-2">
               {resolveAllSummary(prCount, reviewCount, isLive)}
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
@@ -99,7 +99,7 @@ export default function ResolveAllConfirm({
                 type="button"
                 onClick={onCancel}
                 disabled={busy}
-                className="rounded-[5px] px-3 py-1.5 text-[12px] font-medium text-text-tertiary transition-colors hover:bg-black/[0.04] hover:text-text-secondary disabled:opacity-50"
+                className="rounded-[5px] px-3 py-1.5 text-ui font-medium text-ink-3 transition-colors hover:bg-tint-3 hover:text-ink-2 disabled:opacity-50"
               >
                 Cancel
               </button>
@@ -107,7 +107,7 @@ export default function ResolveAllConfirm({
                 type="button"
                 onClick={onConfirm}
                 disabled={busy}
-                className="rounded-[5px] bg-dismiss px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
+                className="rounded-[5px] bg-alarm px-3 py-1.5 text-ui font-semibold text-ground transition-opacity hover:opacity-90 disabled:cursor-wait disabled:opacity-60"
               >
                 {busy ? 'Working…' : actionLabel}
               </button>

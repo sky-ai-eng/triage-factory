@@ -105,8 +105,8 @@ export default function Onboarding() {
   // are known.
   if (auth.status === 'loading') {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
-        <p className="text-text-tertiary text-sm">Loading...</p>
+      <div className="min-h-screen bg-ground flex items-center justify-center">
+        <p className="text-ink-3 text-sm">Loading...</p>
       </div>
     )
   }
@@ -115,13 +115,13 @@ export default function Onboarding() {
     // error has no redirect — surface it with a retry instead of an
     // indefinite spinner.
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
+      <div className="min-h-screen bg-ground flex items-center justify-center">
         <div className="text-center space-y-3">
-          <p className="text-text-secondary text-sm">{auth.error ?? 'Failed to load session'}</p>
+          <p className="text-ink-2 text-sm">{auth.error ?? 'Failed to load session'}</p>
           <button
             type="button"
             onClick={() => void auth.refresh()}
-            className="text-accent text-sm underline"
+            className="text-warm text-sm underline"
           >
             Retry
           </button>
@@ -138,17 +138,17 @@ export default function Onboarding() {
   const canCreate = auth.me.org_creation_enabled
 
   return (
-    <div className="min-h-screen bg-surface flex items-center justify-center p-4">
-      <div className="w-full max-w-md backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl p-8 space-y-6 shadow-lg shadow-black/[0.04]">
+    <div className="min-h-screen bg-ground flex items-center justify-center p-4">
+      <div className="w-full max-w-md backdrop-blur-xl bg-raised border border-line-1 rounded-2xl p-8 space-y-6 shadow-float shadow-black/[0.04]">
         {canCreate ? (
           <>
             <div className="space-y-1.5">
-              <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+              <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
                 Welcome to Triage Factory
               </h1>
-              <p className="text-[13px] text-text-tertiary leading-relaxed">
+              <p className="text-body text-ink-3 leading-relaxed">
                 You&apos;re signed in as{' '}
-                <span className="text-text-secondary font-medium">{accountLabel}</span>. Create an
+                <span className="text-ink-2 font-medium">{accountLabel}</span>. Create an
                 organization to get started, or wait for an invite to an existing one.
               </p>
             </div>
@@ -166,40 +166,40 @@ export default function Onboarding() {
                 maxLength={200}
                 placeholder="Organization name"
                 autoFocus
-                className="w-full bg-white/50 border border-border-subtle focus:border-accent focus:outline-none text-text-primary placeholder:text-text-tertiary rounded-xl px-4 py-2.5 text-[13px] transition-colors disabled:opacity-50"
+                className="w-full bg-raised border border-line-1 focus:border-warm focus:outline-none text-ink-1 placeholder:text-ink-3 rounded-xl px-4 py-2.5 text-body transition-colors disabled:opacity-50"
               />
               <button
                 type="submit"
                 disabled={creating || orgName.trim() === ''}
-                className="w-full bg-accent hover:bg-accent/90 disabled:opacity-40 disabled:cursor-not-allowed text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+                className="w-full bg-warm hover:bg-warm/90 disabled:opacity-40 disabled:cursor-not-allowed text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
               >
                 {creating ? 'Creating…' : 'Start your Factory'}
               </button>
-              {createError && <p className="text-[11px] text-red-500 text-center">{createError}</p>}
+              {createError && <p className="text-reported text-alarm text-center">{createError}</p>}
             </form>
 
             <div className="flex items-center gap-3">
-              <div className="h-px flex-1 bg-border-subtle" />
-              <span className="text-[11px] uppercase tracking-wide text-text-tertiary">or</span>
-              <div className="h-px flex-1 bg-border-subtle" />
+              <div className="h-px flex-1 bg-line-1" />
+              <span className="text-reported uppercase tracking-wide text-ink-3">or</span>
+              <div className="h-px flex-1 bg-line-1" />
             </div>
 
-            <p className="text-[13px] text-text-tertiary leading-relaxed">
+            <p className="text-body text-ink-3 leading-relaxed">
               Waiting for an invite? Ask an administrator to add you to an organization, then
               refresh.
             </p>
           </>
         ) : (
           <div className="space-y-1.5">
-            <h1 className="text-[22px] font-semibold text-text-primary tracking-tight">
+            <h1 className="text-[22px] font-semibold text-ink-1 tracking-tight">
               Invitation required
             </h1>
-            <p className="text-[13px] text-text-tertiary leading-relaxed">
+            <p className="text-body text-ink-3 leading-relaxed">
               You&apos;re signed in as{' '}
-              <span className="text-text-secondary font-medium">{accountLabel}</span>. This instance
-              is configured to require an invitation before granting access.
+              <span className="text-ink-2 font-medium">{accountLabel}</span>. This instance is
+              configured to require an invitation before granting access.
             </p>
-            <p className="text-[13px] text-text-tertiary leading-relaxed">
+            <p className="text-body text-ink-3 leading-relaxed">
               Contact your administrator to request an invite, then refresh or log back in with the
               invited account.
             </p>
@@ -210,14 +210,14 @@ export default function Onboarding() {
           <button
             type="button"
             onClick={() => void auth.refresh()}
-            className="flex-1 bg-white/50 hover:bg-white/80 border border-border-subtle text-text-secondary font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            className="flex-1 bg-raised hover:bg-sunk border border-line-1 text-ink-2 font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
           >
             Refresh
           </button>
           <button
             type="button"
             onClick={() => void auth.logout()}
-            className="flex-1 bg-accent hover:bg-accent/90 text-white font-medium rounded-xl px-4 py-2.5 text-[13px] transition-colors"
+            className="flex-1 bg-warm hover:bg-warm/90 text-warm-ink font-medium rounded-xl px-4 py-2.5 text-body transition-colors"
           >
             Log out
           </button>

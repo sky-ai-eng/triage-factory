@@ -58,22 +58,22 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
         type="button"
         onClick={() => setOpen((v) => !v)}
         className="
-          inline-flex items-center gap-1.5 rounded-lg border border-border-subtle
-          bg-white/60 px-2.5 py-1 text-[12px] text-text-primary
-          hover:bg-white transition-colors
+          inline-flex items-center gap-1.5 rounded-lg border border-line-1
+          bg-raised px-2.5 py-1 text-ui text-ink-1
+          hover:bg-raised transition-colors
         "
         title="Filter by team"
       >
-        <Users size={13} className="text-text-tertiary" />
+        <Users size={13} className="text-ink-3" />
         <span className="max-w-[12rem] truncate">{label}</span>
-        <ChevronDown size={13} className="text-text-tertiary" />
+        <ChevronDown size={13} className="text-ink-3" />
       </button>
 
       {open && (
         <div
           className="
-            absolute top-full left-0 z-30 mt-1 min-w-[14rem] rounded-lg border border-border-subtle
-            bg-white shadow-lg py-1
+            absolute top-full left-0 z-30 mt-1 min-w-[14rem] rounded-lg border border-line-1
+            bg-raised shadow-float py-1
           "
         >
           <button
@@ -82,17 +82,15 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
               onChange([])
               setOpen(false)
             }}
-            className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
+            className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-ui hover:bg-tint-2"
           >
             <span className="flex flex-col">
-              <span className="text-text-primary">All my teams</span>
-              <span className="text-[10px] text-text-tertiary">
-                union of every team you&rsquo;re on
-              </span>
+              <span className="text-ink-1">All my teams</span>
+              <span className="text-label text-ink-3">union of every team you&rsquo;re on</span>
             </span>
-            {value.length === 0 && <Check size={13} className="shrink-0 text-accent" />}
+            {value.length === 0 && <Check size={13} className="shrink-0 text-warm" />}
           </button>
-          <div className="my-1 h-px bg-border-subtle" />
+          <div className="my-1 h-px bg-line-1" />
           {teams.map((t) => {
             const isOn = selected.has(t.id)
             return (
@@ -100,17 +98,17 @@ export default function TeamScopeSelect({ value, onChange, className = '' }: Pro
                 key={t.id}
                 type="button"
                 onClick={() => toggle(t.id)}
-                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-black/[0.03]"
+                className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-ui hover:bg-tint-2"
               >
                 <span className="flex items-center gap-2">
                   <span
                     className={`flex h-3.5 w-3.5 items-center justify-center rounded border ${
-                      isOn ? 'border-accent bg-accent text-white' : 'border-border-subtle'
+                      isOn ? 'border-warm bg-warm text-warm-ink' : 'border-line-1'
                     }`}
                   >
                     {isOn && <Check size={10} />}
                   </span>
-                  <span className="text-text-primary truncate">{t.name}</span>
+                  <span className="text-ink-1 truncate">{t.name}</span>
                 </span>
               </button>
             )

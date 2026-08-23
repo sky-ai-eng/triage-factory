@@ -45,7 +45,7 @@ export default function IdentityListField({
   const labels = labelsForField(fieldName, identityKind)
 
   if (meLoading || membersLoading) {
-    return <div className="h-10 rounded-lg bg-black/[0.03] animate-pulse" />
+    return <div className="h-10 rounded-lg bg-tint-2 animate-pulse" />
   }
 
   // /api/me is the load-bearing call here — without it the editor has
@@ -56,7 +56,7 @@ export default function IdentityListField({
     return (
       <div
         role="alert"
-        className="rounded-lg border border-red-300/40 bg-red-50/40 px-3 py-2 text-[12px] text-red-700"
+        className="rounded-lg border border-alarm/40 bg-alarm/40 px-3 py-2 text-ui text-alarm"
       >
         Couldn’t load your identity{meError ? `: ${meError}` : '.'} Refresh the page to retry.
       </div>
@@ -250,26 +250,20 @@ function VariantA({
         type="button"
         onClick={handleToggle}
         disabled={!hasIdentity}
-        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-[12px] font-medium border transition-colors ${
-          isOn
-            ? 'bg-accent/10 text-accent border-accent/25'
-            : 'text-text-tertiary border-border-subtle hover:text-text-secondary'
+        className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-ui font-medium border transition-colors ${
+          isOn ? 'bg-warm/10 text-warm border-warm/25' : 'text-ink-3 border-line-1 hover:text-ink-2'
         } ${!hasIdentity ? 'opacity-50 cursor-not-allowed' : ''}`}
         aria-pressed={isOn}
       >
-        <span
-          className={`inline-block w-2 h-2 rounded-full ${
-            isOn ? 'bg-accent' : 'bg-text-tertiary/40'
-          }`}
-        />
+        <span className={`inline-block w-2 h-2 rounded-full ${isOn ? 'bg-warm' : 'bg-ink-3/40'}`} />
         {isOn ? labels.toggleOnLabel : labels.toggleOffLabel}
       </button>
       {hasIdentity ? (
-        <p className="mt-1.5 text-[11px] text-text-tertiary">
+        <p className="mt-1.5 text-reported text-ink-3">
           {isOn ? labels.scopedHint(displayForHint) : labels.unscopedHint}
         </p>
       ) : (
-        <p className="mt-1.5 text-[11px] text-amber-600">
+        <p className="mt-1.5 text-reported text-warm">
           {sourceLabel} identity not yet captured.{' '}
           <a href="/settings" className="underline">
             Configure {sourceLabel} on Settings
@@ -463,7 +457,7 @@ function VariantB({
   return (
     <div className="relative" ref={containerRef}>
       <div
-        className="min-h-[40px] w-full px-2 py-1.5 rounded-lg border border-border-subtle bg-white/50 flex flex-wrap items-center gap-1.5 cursor-text focus-within:border-accent/40 focus-within:ring-1 focus-within:ring-accent/20"
+        className="min-h-[40px] w-full px-2 py-1.5 rounded-lg border border-line-1 bg-raised flex flex-wrap items-center gap-1.5 cursor-text focus-within:border-warm/40 focus-within:ring-1 focus-within:ring-warm/20"
         onClick={() => {
           inputRef.current?.focus()
           setOpen(true)
@@ -474,10 +468,8 @@ function VariantB({
           return (
             <span
               key={h}
-              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] border ${
-                m
-                  ? 'bg-accent/10 text-accent border-accent/25'
-                  : 'bg-violet-100 text-violet-700 border-violet-200'
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-reported border ${
+                m ? 'bg-warm/10 text-warm border-warm/25' : 'bg-tint-2 text-ink-2 border-line-2'
               }`}
               title={m ? `${m.display}${m.isSelf ? ' (you)' : ''}` : `External handle: ${h}`}
             >
@@ -489,7 +481,7 @@ function VariantB({
                   removeHandle(h)
                 }}
                 aria-label={`Remove ${h}`}
-                className="hover:text-text-primary"
+                className="hover:text-ink-1"
               >
                 <X size={11} aria-hidden="true" />
               </button>
@@ -515,7 +507,7 @@ function VariantB({
           onKeyDown={onKeyDown}
           onFocus={() => setOpen(true)}
           placeholder={selected.length === 0 ? labels.searchPlaceholder : ''}
-          className="flex-1 min-w-[140px] bg-transparent text-[13px] text-text-primary placeholder:text-text-tertiary focus:outline-none"
+          className="flex-1 min-w-[140px] bg-transparent text-body text-ink-1 placeholder:text-ink-3 focus:outline-none"
         />
       </div>
 
@@ -523,12 +515,12 @@ function VariantB({
         <ul
           id={listboxId}
           role="listbox"
-          className="absolute z-20 mt-1 w-full max-h-[260px] overflow-y-auto rounded-lg border border-border-subtle bg-white shadow-lg list-none p-0 m-0"
+          className="absolute z-20 mt-1 w-full max-h-[260px] overflow-y-auto rounded-lg border border-line-1 bg-raised shadow-float list-none p-0 m-0"
         >
           {dropdownItems.map((item, i) => {
             const isActive = i === safeActiveIndex
             const baseCls = `w-full flex items-center justify-between px-3 py-2 text-left cursor-pointer ${
-              isActive ? 'bg-accent/10' : 'hover:bg-accent/5'
+              isActive ? 'bg-warm/10' : 'hover:bg-warm/5'
             }`
             if (item.kind === 'team') {
               const m = item.member
@@ -548,13 +540,11 @@ function VariantB({
                   onMouseEnter={() => setActiveIndex(i)}
                   className={baseCls}
                 >
-                  <span className="text-[13px] text-text-primary">
+                  <span className="text-body text-ink-1">
                     {m.display_name || id}
-                    {m.is_current_user && (
-                      <span className="ml-1 text-[10px] text-text-tertiary">(you)</span>
-                    )}
+                    {m.is_current_user && <span className="ml-1 text-label text-ink-3">(you)</span>}
                   </span>
-                  <span className="text-[11px] font-mono text-text-tertiary">{id}</span>
+                  <span className="text-reported font-mono text-ink-3">{id}</span>
                 </li>
               )
             }
@@ -569,9 +559,9 @@ function VariantB({
                   addHandle(item.handle)
                 }}
                 onMouseEnter={() => setActiveIndex(i)}
-                className={`${baseCls} text-violet-700 border-t border-border-subtle`}
+                className={`${baseCls} text-ink-3 border-t border-line-1`}
               >
-                <span className="text-[12px]">
+                <span className="text-ui">
                   + Add &ldquo;{item.handle}&rdquo; as external handle
                 </span>
               </li>
@@ -587,17 +577,17 @@ function VariantB({
                 key={m.user_id}
                 role="presentation"
                 aria-hidden="true"
-                className="px-3 py-2 text-[12px] text-text-tertiary opacity-60"
+                className="px-3 py-2 text-ui text-ink-3 opacity-60"
                 title={`No ${sourceLabel} identity captured — ask this user to configure ${sourceLabel} on Settings`}
               >
                 {m.display_name || (m.github_username ? `@${m.github_username}` : '(no name)')}{' '}
-                <span className="text-[10px]">— no {sourceLabel} identity</span>
+                <span className="text-label">— no {sourceLabel} identity</span>
               </li>
             ))}
         </ul>
       )}
 
-      <p className="mt-1.5 text-[11px] text-text-tertiary">{labels.emptyHint}</p>
+      <p className="mt-1.5 text-reported text-ink-3">{labels.emptyHint}</p>
     </div>
   )
 }

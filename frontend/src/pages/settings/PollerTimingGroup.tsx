@@ -53,8 +53,8 @@ function IntervalScale({
             className="group relative flex-1 px-3 py-2 text-center outline-none"
           >
             <span
-              className={`text-[13px] font-medium transition-colors ${
-                selected ? 'text-accent' : 'text-text-secondary group-hover:text-text-primary'
+              className={`text-body font-medium transition-colors ${
+                selected ? 'text-warm' : 'text-ink-2 group-hover:text-ink-1'
               }`}
             >
               {o.label}
@@ -63,8 +63,8 @@ function IntervalScale({
               aria-hidden
               className={`absolute inset-x-0 bottom-0 h-[2px] transition-colors ${
                 selected
-                  ? 'bg-accent shadow-[0_0_10px_-1px_var(--color-accent)]'
-                  : 'bg-[var(--color-border-subtle)]'
+                  ? 'bg-warm shadow-[0_0_10px_-1px_var(--color-warm)]'
+                  : 'bg-[var(--color-line-1)]'
               }`}
             />
           </button>
@@ -131,9 +131,7 @@ export default function PollerTimingGroup({
 
   return (
     <Section>
-      {showHeading && (
-        <h2 className="text-[13px] font-medium text-text-secondary mb-4">Poller timing</h2>
-      )}
+      {showHeading && <h2 className="text-body font-medium text-ink-2 mb-4">Poller timing</h2>}
       <div className="space-y-3">
         {showGitHub && (
           <Field label="GitHub poll interval">

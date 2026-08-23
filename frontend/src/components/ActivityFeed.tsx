@@ -242,14 +242,14 @@ export default function ActivityFeed({
           count, matching the spend bands' chrome but counting actions/objects. */}
       <div className="flex items-end gap-4">
         <div className="flex items-baseline gap-3 pb-1.5">
-          <span className="font-mono text-[12px] font-semibold uppercase tracking-[0.2em] text-text-secondary">
+          <span className="font-mono text-ui font-semibold uppercase tracking-[0.2em] text-ink-2">
             Activity
           </span>
           <ModeTabs value={mode} onChange={switchMode} />
         </div>
-        <span className="mb-[9px] h-px flex-1 bg-border-subtle" />
+        <span className="mb-[9px] h-px flex-1 bg-line-1" />
         <div className="pb-0.5 text-right leading-none">
-          <span className="font-mono text-sm tabular-nums text-text-tertiary">
+          <span className="font-mono text-sm tabular-nums text-ink-3">
             {visible === null
               ? '—'
               : `${count}${hasMore ? '+' : ''} ${noun}${count === 1 ? '' : 's'}`}
@@ -259,7 +259,7 @@ export default function ActivityFeed({
 
       {/* Sub-caption — what this lens is, so the coverage difference reads as
           intentional, not a gap. */}
-      <div className="mt-1 font-mono text-[10px] tracking-[0.06em] text-text-tertiary/70">
+      <div className="mt-1 font-mono text-label tracking-[0.06em] text-ink-3/70">
         {mode === 'actions'
           ? 'audit log of every org-credential action TF took'
           : 'objects the bot produced + their current state'}
@@ -379,7 +379,7 @@ export default function ActivityFeed({
                   type="button"
                   onClick={loadMore}
                   disabled={loadingMore || superseded}
-                  className="rounded-[4px] border border-border-subtle bg-white/60 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-text-tertiary transition-colors hover:bg-white hover:text-text-secondary disabled:opacity-50"
+                  className="rounded-[4px] border border-line-1 bg-raised px-3 py-1 font-mono text-label uppercase tracking-[0.12em] text-ink-3 transition-colors hover:bg-sunk hover:text-ink-2 disabled:opacity-50"
                 >
                   {loadingMore ? 'loading…' : 'load more'}
                 </button>
@@ -408,12 +408,12 @@ function ModeTabs({ value, onChange }: { value: Mode; onChange: (m: Mode) => voi
             role="tab"
             aria-selected={active}
             onClick={() => onChange(t.key)}
-            className={`relative font-mono text-[10px] font-semibold tracking-[0.14em] transition-colors ${
-              active ? 'text-accent' : 'text-text-tertiary/70 hover:text-text-secondary'
+            className={`relative font-mono text-label font-semibold tracking-[0.14em] transition-colors ${
+              active ? 'text-warm' : 'text-ink-3/70 hover:text-ink-2'
             }`}
           >
             {t.label}
-            {active && <span className="absolute -bottom-1 left-0 right-0 h-px bg-accent" />}
+            {active && <span className="absolute -bottom-1 left-0 right-0 h-px bg-warm" />}
           </button>
         )
       })}
@@ -436,14 +436,14 @@ function FeedSelect({
 }) {
   return (
     <label className="flex items-center gap-1.5">
-      <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-text-tertiary/70">
+      <span className="font-mono text-label-sm font-semibold uppercase tracking-[0.14em] text-ink-3/70">
         {label}
       </span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
         aria-label={label}
-        className="rounded-[4px] border border-border-subtle bg-white/60 px-2 py-1 font-mono text-[11px] text-text-secondary transition-colors hover:bg-white focus:outline-none focus:ring-1 focus:ring-accent/40"
+        className="rounded-[4px] border border-line-1 bg-raised px-2 py-1 font-mono text-reported text-ink-2 transition-colors hover:bg-sunk focus:outline-none focus:ring-1 focus:ring-warm/40"
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>
@@ -467,12 +467,12 @@ function RangeTabs({ value, onChange }: { value: RangeKey; onChange: (r: RangeKe
             key={t.key}
             type="button"
             onClick={() => onChange(t.key)}
-            className={`relative font-mono text-[10px] tracking-[0.12em] transition-colors ${
-              active ? 'text-accent' : 'text-text-tertiary hover:text-text-secondary'
+            className={`relative font-mono text-label tracking-[0.12em] transition-colors ${
+              active ? 'text-warm' : 'text-ink-3 hover:text-ink-2'
             }`}
           >
             {t.label}
-            {active && <span className="absolute -bottom-1 left-0 right-0 h-px bg-accent" />}
+            {active && <span className="absolute -bottom-1 left-0 right-0 h-px bg-warm" />}
           </button>
         )
       })}
@@ -484,7 +484,7 @@ function RangeTabs({ value, onChange }: { value: RangeKey; onChange: (r: RangeKe
 function TeamChip({ name }: { name: string }) {
   return (
     <span
-      className="max-w-[8rem] shrink-0 truncate rounded-[3px] bg-black/[0.04] px-1.5 py-0.5 font-mono text-[9px] text-text-tertiary"
+      className="max-w-[8rem] shrink-0 truncate rounded-[3px] bg-tint-3 px-1.5 py-0.5 font-mono text-label-sm text-ink-3"
       title={name}
     >
       {name}
@@ -496,10 +496,7 @@ function FeedSkeleton() {
   return (
     <ul className="space-y-1.5">
       {[0, 1, 2, 3].map((i) => (
-        <li
-          key={i}
-          className="h-8 animate-pulse rounded-[4px] border border-border-subtle bg-black/[0.03]"
-        />
+        <li key={i} className="h-8 animate-pulse rounded-[4px] border border-line-1 bg-tint-2" />
       ))}
     </ul>
   )
@@ -512,15 +509,13 @@ function FeedNote({ msg, tone = 'muted' }: { msg: string; tone?: 'muted' | 'erro
   const isErr = tone === 'error'
   return (
     <div
-      className={`flex items-center gap-3 py-4 font-mono text-[10px] ${
-        isErr
-          ? 'tracking-[0.04em] text-dismiss'
-          : 'uppercase tracking-[0.16em] text-text-tertiary/60'
+      className={`flex items-center gap-3 py-4 font-mono text-label ${
+        isErr ? 'tracking-[0.04em] text-alarm' : 'uppercase tracking-[0.16em] text-ink-3/60'
       }`}
     >
-      <span className={`h-px w-6 ${isErr ? 'bg-dismiss/40' : 'bg-border-subtle'}`} />
+      <span className={`h-px w-6 ${isErr ? 'bg-alarm/40' : 'bg-line-1'}`} />
       {msg}
-      <span className={`h-px flex-1 ${isErr ? 'bg-dismiss/20' : 'bg-border-subtle'}`} />
+      <span className={`h-px flex-1 ${isErr ? 'bg-alarm/20' : 'bg-line-1'}`} />
     </div>
   )
 }

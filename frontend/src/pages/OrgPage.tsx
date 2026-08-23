@@ -106,7 +106,7 @@ export default function OrgPage() {
   // stays mounted across a :org_id change), refetching the roster for the
   // newly-active org.
   if (!orgId) {
-    return <p className="mx-auto max-w-3xl text-[13px] text-text-tertiary">Loading organization…</p>
+    return <p className="mx-auto max-w-3xl text-body text-ink-3">Loading organization…</p>
   }
   return <OrgPageBody key={orgId} orgId={orgId} />
 }
@@ -132,27 +132,25 @@ function OrgPageBody({ orgId }: { orgId: string }) {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-5 flex shrink-0 items-center gap-2.5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
+        <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-warm-2 text-warm">
           <Users size={15} />
         </span>
         <div>
-          <h1 className="text-[17px] font-semibold leading-tight text-text-primary">
-            Organization
-          </h1>
-          <p className="text-[11px] leading-tight text-text-tertiary">People and settings.</p>
+          <h1 className="text-section font-semibold leading-tight text-ink-1">Organization</h1>
+          <p className="text-reported leading-tight text-ink-3">People and settings.</p>
         </div>
       </div>
 
-      <div className="mb-5 flex shrink-0 gap-1 border-b border-border-subtle">
+      <div className="mb-5 flex shrink-0 gap-1 border-b border-line-1">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             onClick={() => setTab(t.id)}
-            className={`-mb-px border-b-2 px-3 py-2 text-[13px] font-medium transition-colors ${
+            className={`-mb-px border-b-2 px-3 py-2 text-body font-medium transition-colors ${
               tab === t.id
-                ? 'border-accent text-accent'
-                : 'border-transparent text-text-tertiary hover:text-text-secondary'
+                ? 'border-warm text-warm'
+                : 'border-transparent text-ink-3 hover:text-ink-2'
             }`}
           >
             {t.label}
@@ -255,7 +253,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
       <button
         type="button"
         onClick={() => setModalOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-full border border-border-subtle bg-white/60 px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-white hover:text-text-primary"
+        className="inline-flex items-center gap-1.5 rounded-full border border-line-1 bg-raised px-3.5 py-2 text-body font-medium text-ink-2 transition-colors hover:bg-sunk hover:text-ink-1"
       >
         <Plus size={14} />
         Invite
@@ -273,7 +271,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
     <div className="space-y-3">
       {canManage && invites.length > 0 && (
         <div className="flex items-center justify-end">
-          <label className="flex cursor-pointer items-center gap-2 text-[12px] text-text-tertiary">
+          <label className="flex cursor-pointer items-center gap-2 text-ui text-ink-3">
             Show invited
             <Switch.Root
               // Radix renders a <button role="switch">, and a wrapping <label>
@@ -281,16 +279,16 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
               aria-label="Show invited"
               checked={showInvited}
               onCheckedChange={setShowInvited}
-              className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-accent data-[state=unchecked]:bg-black/10"
+              className="relative h-[18px] w-8 rounded-full transition-colors data-[state=checked]:bg-warm data-[state=unchecked]:bg-line-2"
             >
-              <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-white shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
+              <Switch.Thumb className="block h-[14px] w-[14px] rounded-full bg-raised shadow transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-[2px]" />
             </Switch.Root>
           </label>
         </div>
       )}
 
       {canManage && error && (
-        <p role="alert" className="text-[12px] text-dismiss">
+        <p role="alert" className="text-ui text-alarm">
           {error}
         </p>
       )}
@@ -302,7 +300,7 @@ function OrgPeople({ orgId, canManage }: { orgId: string; canManage: boolean }) 
           type="button"
           onClick={() => void loadMore()}
           disabled={loading}
-          className="w-full rounded-xl border border-border-subtle py-2 text-[12px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-50"
+          className="w-full rounded-xl border border-line-1 py-2 text-[12px] text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-50"
         >
           {loading
             ? 'Loading…'

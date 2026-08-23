@@ -139,13 +139,11 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
   // Waiting on the acting team — shown before the team resolves so the
   // user doesn't pick repos that won't match the team they submit under.
   if (disabled) {
-    return (
-      <div className="text-[12px] text-text-tertiary py-2">Select a team to choose its repos.</div>
-    )
+    return <div className="text-ui text-ink-3 py-2">Select a team to choose its repos.</div>
   }
 
   if (loading) {
-    return <div className="text-[12px] text-text-tertiary py-2">Loading repos…</div>
+    return <div className="text-ui text-ink-3 py-2">Loading repos…</div>
   }
 
   // Distinct from "no repos configured" — a transient failure to
@@ -153,7 +151,7 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
   // have already completed.
   if (error) {
     return (
-      <div className="text-[12px] text-text-tertiary py-2">
+      <div className="text-ui text-ink-3 py-2">
         Couldn&rsquo;t load configured repos.{' '}
         <button
           type="button"
@@ -162,7 +160,7 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
             const controller = new AbortController()
             loadRepos(controller.signal)
           }}
-          className="text-accent hover:underline"
+          className="text-warm hover:underline"
         >
           Try again
         </button>
@@ -173,9 +171,9 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
 
   if (available.length === 0) {
     return (
-      <div className="text-[12px] text-text-tertiary py-2">
+      <div className="text-ui text-ink-3 py-2">
         No repos configured.{' '}
-        <Link to={orgHref('/repos')} className="text-accent hover:underline">
+        <Link to={orgHref('/repos')} className="text-warm hover:underline">
           Add repos
         </Link>{' '}
         first.
@@ -194,8 +192,8 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
               onClick={() => toggle(r.id)}
               className="
                 inline-flex items-center gap-1 rounded-full
-                bg-accent-soft text-accent px-2.5 py-0.5 text-[11px]
-                hover:bg-accent hover:text-white transition-colors
+                bg-warm-2 text-warm px-2.5 py-0.5 text-reported
+                hover:bg-warm hover:text-warm-ink transition-colors
                 group
               "
             >
@@ -211,15 +209,15 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
         onChange={(e) => setSearch(e.target.value)}
         placeholder="Search configured repos…"
         className="
-          w-full rounded-lg border border-border-subtle
-          bg-white/60 px-3 py-1.5 text-[12px] text-text-primary
-          placeholder:text-text-tertiary mb-1.5
-          focus:outline-none focus:border-accent focus:bg-white
+          w-full rounded-lg border border-line-1
+          bg-raised px-3 py-1.5 text-ui text-ink-1
+          placeholder:text-ink-3 mb-1.5
+          focus:outline-none focus:border-warm focus:bg-raised
         "
       />
-      <div className="max-h-40 overflow-y-auto rounded-lg border border-border-subtle bg-white/40">
+      <div className="max-h-40 overflow-y-auto rounded-lg border border-line-1 bg-raised">
         {filtered.length === 0 ? (
-          <div className="text-[12px] text-text-tertiary py-2 px-3">No matches.</div>
+          <div className="text-ui text-ink-3 py-2 px-3">No matches.</div>
         ) : (
           filtered.map((r) => {
             const isSelected = selected.has(r.id)
@@ -230,12 +228,12 @@ export default function RepoMultiSelect({ value, onChange, teamId, disabled = fa
                 onClick={() => toggle(r.id)}
                 className="
                   w-full flex items-center justify-between gap-2
-                  px-3 py-1.5 text-[12px] text-left
-                  hover:bg-black/[0.03] transition-colors
+                  px-3 py-1.5 text-ui text-left
+                  hover:bg-tint-2 transition-colors
                 "
               >
-                <span className="text-text-primary truncate">{r.slug}</span>
-                {isSelected && <Check size={12} className="shrink-0 text-accent" />}
+                <span className="text-ink-1 truncate">{r.slug}</span>
+                {isSelected && <Check size={12} className="shrink-0 text-warm" />}
               </button>
             )
           })

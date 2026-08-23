@@ -1,8 +1,8 @@
 // Liquid Glass material tokens for the setup flow — shared class
 // strings + motion easing, kept in a non-component module so the component file
 // (glass.tsx) stays component-only (react-refresh). Built from the existing
-// theme tokens: --color-surface-overlay (the translucent glass fill, already
-// light/dark-aware) over --color-border-glass edges.
+// theme tokens: --color-raised (the translucent glass fill, already
+// light/dark-aware) over --color-line-1 edges.
 
 import type { Transition } from 'motion/react'
 

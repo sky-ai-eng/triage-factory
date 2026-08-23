@@ -25,13 +25,13 @@ interface Props {
 
 // Native chip styling per severity level — the diff UI renders this
 // instead of the shields.io badge (which is only applied when the review
-// is posted to GitHub). Palette tracks domain.severityBadgeColor:
-// BLOCKER→red, MAJOR→orange, MINOR→amber, CLEAN→blue.
+// is posted to GitHub). Ordered by weight: BLOCKER carries the alarm hue,
+// MAJOR and MINOR sit one warm step apart, CLEAN is neutral.
 const SEVERITY_CHIP: Record<string, string> = {
-  BLOCKER: 'bg-red-500/[0.10] text-red-600 border-red-500/20',
-  MAJOR: 'bg-orange-500/[0.10] text-orange-600 border-orange-500/20',
-  MINOR: 'bg-amber-500/[0.12] text-amber-600 border-amber-500/25',
-  CLEAN: 'bg-blue-500/[0.10] text-blue-600 border-blue-500/20',
+  BLOCKER: 'bg-alarm/[0.10] text-alarm border-alarm/20',
+  MAJOR: 'bg-warm-2 text-warm border-warm-4',
+  MINOR: 'bg-warm-1 text-warm border-warm-2',
+  CLEAN: 'bg-ink-3/[0.10] text-ink-3 border-ink-3/20',
 }
 
 function SeverityChip({ severity }: { severity?: string }) {
@@ -41,7 +41,7 @@ function SeverityChip({ severity }: { severity?: string }) {
   if (!cls) return null
   return (
     <span
-      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider border ${cls}`}
+      className={`inline-flex items-center rounded px-1.5 py-px text-label-sm font-semibold uppercase tracking-wider border ${cls}`}
     >
       {level}
     </span>
@@ -57,18 +57,18 @@ const FRESHNESS_BADGE: Record<string, { label: string; title: string; cls: strin
     label: 'Moved',
     title:
       'The code this comment anchors to has shifted since the review was written; it now points at its new location.',
-    cls: 'bg-amber-500/[0.12] text-amber-600 border-amber-500/25',
+    cls: 'bg-warm/[0.12] text-warm border-warm/25',
   },
   outdated: {
     label: 'Outdated',
     title:
       'The code this comment anchors to has changed or been deleted since the review was written — re-check it before approving.',
-    cls: 'bg-red-500/[0.10] text-red-600 border-red-500/20',
+    cls: 'bg-alarm/[0.10] text-alarm border-alarm/20',
   },
   unknown: {
     label: 'Unknown',
     title: "Couldn't check this comment's freshness against the live PR head.",
-    cls: 'bg-black/[0.04] text-text-tertiary border-border-subtle',
+    cls: 'bg-tint-3 text-ink-3 border-line-1',
   },
 }
 
@@ -84,7 +84,7 @@ function FreshnessBadge({ freshness, mappedLine }: { freshness?: string; mappedL
   return (
     <span
       title={title}
-      className={`inline-flex items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider border ${badge.cls}`}
+      className={`inline-flex items-center rounded px-1.5 py-px text-label-sm font-semibold uppercase tracking-wider border ${badge.cls}`}
     >
       {badge.label}
     </span>
@@ -162,12 +162,12 @@ export default function ReviewComment({
       parts.push(
         <div
           key={match.index}
-          className="mt-2 mb-1 rounded-lg border border-claim/20 overflow-hidden"
+          className="mt-2 mb-1 rounded-lg border border-line-1 overflow-hidden"
         >
-          <div className="px-2.5 py-1 bg-claim/[0.06] text-[10px] font-semibold text-claim uppercase tracking-wider">
+          <div className="px-2.5 py-1 bg-tint-2 text-label font-semibold text-ink-2 uppercase tracking-wider">
             Suggestion
           </div>
-          <pre className="px-3 py-2 text-[12px] leading-relaxed bg-claim/[0.03] font-mono overflow-x-auto">
+          <pre className="px-3 py-2 text-ui leading-relaxed bg-tint-2 font-mono overflow-x-auto">
             {match[1]}
           </pre>
         </div>,
@@ -188,13 +188,13 @@ export default function ReviewComment({
 
   return (
     <div className="mx-3 my-2 group">
-      <div className="backdrop-blur-xl bg-surface-raised/80 border border-border-glass rounded-xl shadow-sm shadow-black/[0.03] overflow-hidden">
+      <div className="backdrop-blur-xl bg-raised/80 border border-line-1 rounded-xl shadow-float shadow-black/[0.03] overflow-hidden">
         {/* Header */}
-        <div className="flex items-center justify-between px-3 py-1.5 border-b border-border-subtle">
+        <div className="flex items-center justify-between px-3 py-1.5 border-b border-line-1">
           <div className="flex items-center gap-2 min-w-0">
             <SeverityChip severity={severity} />
             <FreshnessBadge freshness={freshness} mappedLine={mappedLine} />
-            <span className="text-[10px] text-text-tertiary font-medium truncate">
+            <span className="text-label text-ink-3 font-medium truncate">
               {path}:{line}
             </span>
           </div>
@@ -204,14 +204,14 @@ export default function ReviewComment({
                 <button
                   onClick={() => setEditing(true)}
                   disabled={busy}
-                  className="text-[10px] text-text-tertiary hover:text-accent px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
+                  className="text-label text-ink-3 hover:text-warm px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
                 >
                   Edit
                 </button>
                 <button
                   onClick={remove}
                   disabled={busy}
-                  className="text-[10px] text-text-tertiary hover:text-dismiss px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
+                  className="text-label text-ink-3 hover:text-alarm px-1.5 py-0.5 rounded transition-colors disabled:opacity-50"
                 >
                   {busy ? 'Deleting…' : 'Delete'}
                 </button>
@@ -227,36 +227,34 @@ export default function ReviewComment({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                className="w-full min-h-[80px] text-[12.5px] leading-relaxed text-text-primary bg-white/40 border border-border-subtle rounded-lg px-3 py-2 font-mono resize-y focus:outline-none focus:border-accent/30 focus:ring-1 focus:ring-accent/10"
+                className="w-full min-h-[80px] text-card-title leading-relaxed text-ink-1 bg-raised border border-line-1 rounded-lg px-3 py-2 font-mono resize-y focus:outline-none focus:border-warm/30 focus:ring-1 focus:ring-warm/10"
                 autoFocus
               />
               {error && (
-                <p className="text-[10.5px] text-dismiss">
+                <p className="text-label text-alarm">
                   Couldn't save: {error}. Your edit is still here — retry.
                 </p>
               )}
               <div className="flex items-center gap-2 justify-end">
                 <button
                   onClick={cancel}
-                  className="text-[11px] text-text-tertiary hover:text-text-secondary px-2.5 py-1 rounded-lg transition-colors"
+                  className="text-reported text-ink-3 hover:text-ink-2 px-2.5 py-1 rounded-lg transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={save}
                   disabled={busy}
-                  className="text-[11px] font-medium text-white bg-accent hover:bg-accent/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"
+                  className="text-reported font-medium text-warm-ink bg-warm hover:bg-warm/90 px-3 py-1 rounded-lg transition-colors disabled:opacity-60"
                 >
                   {busy ? 'Saving…' : 'Save'}
                 </button>
               </div>
             </div>
           ) : (
-            <div className="space-y-1.5 text-[12.5px] leading-relaxed text-text-secondary">
+            <div className="space-y-1.5 text-card-title leading-relaxed text-ink-2">
               {renderBody(body)}
-              {error && (
-                <p className="text-[10.5px] text-dismiss">Couldn't delete: {error}. Retry.</p>
-              )}
+              {error && <p className="text-label text-alarm">Couldn't delete: {error}. Retry.</p>}
             </div>
           )}
         </div>

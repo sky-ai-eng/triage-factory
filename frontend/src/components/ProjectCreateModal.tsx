@@ -167,7 +167,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={handleBackdropClick}
     >
       <div
@@ -175,9 +175,9 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
         tabIndex={-1}
         className="
           relative w-full max-w-lg max-h-[90vh] overflow-y-auto
-          rounded-2xl border border-border-glass
-          bg-gradient-to-br from-white/95 via-white/90 to-white/85
-          shadow-xl shadow-black/[0.08] backdrop-blur-xl
+          rounded-2xl border border-line-1
+          bg-raised
+          shadow-float shadow-black/[0.08] backdrop-blur-xl
           p-6
         "
         role="dialog"
@@ -190,14 +190,11 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
           <div>
             <h2
               id="project-create-modal-title"
-              className="text-lg font-semibold tracking-tight text-text-primary"
+              className="text-lg font-semibold tracking-tight text-ink-1"
             >
               New project
             </h2>
-            <p
-              id="project-create-modal-description"
-              className="text-[12px] text-text-tertiary mt-0.5"
-            >
+            <p id="project-create-modal-description" className="text-ui text-ink-3 mt-0.5">
               You can add or change everything later.
             </p>
           </div>
@@ -207,7 +204,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               if (!submitting) onClose()
             }}
             disabled={submitting}
-            className="text-text-tertiary hover:text-text-secondary p-1 rounded-full hover:bg-black/[0.03] disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-text-tertiary disabled:hover:bg-transparent"
+            className="text-ink-3 hover:text-ink-2 p-1 rounded-full hover:bg-tint-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-ink-3 disabled:hover:bg-transparent"
             aria-label="Close"
           >
             <X size={16} />
@@ -236,10 +233,10 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               onChange={(e) => setName(e.target.value)}
               required
               className="
-                w-full rounded-lg border border-border-subtle
-                bg-white/60 px-3 py-2 text-[13px] text-text-primary
-                placeholder:text-text-tertiary
-                focus:outline-none focus:border-accent focus:bg-white
+                w-full rounded-lg border border-line-1
+                bg-raised px-3 py-2 text-body text-ink-1
+                placeholder:text-ink-3
+                focus:outline-none focus:border-warm focus:bg-raised
               "
               placeholder="e.g. Triage Factory"
             />
@@ -251,10 +248,10 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
               className="
-                w-full rounded-lg border border-border-subtle
-                bg-white/60 px-3 py-2 text-[13px] text-text-primary
-                placeholder:text-text-tertiary resize-none
-                focus:outline-none focus:border-accent focus:bg-white
+                w-full rounded-lg border border-line-1
+                bg-raised px-3 py-2 text-body text-ink-1
+                placeholder:text-ink-3 resize-none
+                focus:outline-none focus:border-warm focus:bg-raised
               "
               placeholder="What this project is about (optional)"
             />
@@ -282,7 +279,7 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               </Field>
             </>
           ) : (
-            <p className="text-[12px] text-text-tertiary italic">
+            <p className="text-ui text-ink-3 italic">
               Pinned repos and tracker projects are available for team-visibility projects.
             </p>
           )}
@@ -293,8 +290,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               onClick={onClose}
               disabled={submitting}
               className="
-                rounded-full px-4 py-2 text-[13px]
-                text-text-secondary hover:text-text-primary hover:bg-black/[0.03]
+                rounded-full px-4 py-2 text-body
+                text-ink-2 hover:text-ink-1 hover:bg-tint-2
                 transition-all disabled:opacity-50
               "
             >
@@ -304,8 +301,8 @@ export default function ProjectCreateModal({ onClose, onCreated }: Props) {
               type="submit"
               disabled={submitting || !name.trim() || !teamReady}
               className="
-                rounded-full px-4 py-2 text-[13px] font-medium
-                bg-accent text-white hover:opacity-90
+                rounded-full px-4 py-2 text-body font-medium
+                bg-warm text-warm-ink hover:opacity-90
                 disabled:opacity-50 transition-all
               "
             >
@@ -329,9 +326,9 @@ function Field({
 }) {
   return (
     <label className="block">
-      <span className="block text-[12px] font-medium text-text-secondary mb-1.5">
+      <span className="block text-ui font-medium text-ink-2 mb-1.5">
         {label}
-        {required && <span className="text-accent ml-0.5">*</span>}
+        {required && <span className="text-warm ml-0.5">*</span>}
       </span>
       {children}
     </label>

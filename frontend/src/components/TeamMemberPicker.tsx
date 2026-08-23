@@ -35,7 +35,7 @@ export default function TeamMemberPicker({ orgId, teamId, onAdded }: TeamMemberP
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="inline-flex items-center gap-1.5 rounded-full border border-border-subtle bg-white/60 px-3.5 py-2 text-[13px] font-medium text-text-secondary transition-colors hover:bg-white hover:text-text-primary"
+        className="inline-flex items-center gap-1.5 rounded-full border border-line-1 bg-raised px-3.5 py-2 text-body font-medium text-ink-2 transition-colors hover:bg-sunk hover:text-ink-1"
       >
         <Plus size={14} />
         Add member
@@ -132,7 +132,7 @@ function PickerModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={() => {
         if (!submitting) onClose()
       }}
@@ -140,7 +140,7 @@ function PickerModal({
       <div
         ref={dialogRef}
         tabIndex={-1}
-        className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border-glass bg-surface-raised shadow-lg shadow-black/[0.04] backdrop-blur-xl"
+        className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-line-1 bg-raised shadow-float shadow-black/[0.04] backdrop-blur-xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="add-team-member-title"
@@ -148,41 +148,39 @@ function PickerModal({
       >
         <div className="px-6 pb-4 pt-6">
           <div className="flex items-center gap-2.5">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent-soft text-accent">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-warm-2 text-warm">
               <UserPlus size={15} />
             </span>
             <h2
               id="add-team-member-title"
-              className="text-[18px] font-semibold tracking-tight text-text-primary"
+              className="text-section font-semibold tracking-tight text-ink-1"
             >
               Add a team member
             </h2>
           </div>
-          <p className="mt-2 text-[13px] leading-relaxed text-text-tertiary">
+          <p className="mt-2 text-body leading-relaxed text-ink-3">
             Pick someone already in the org and choose their team role.
           </p>
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-6">
           {candidates === null && !error && (
-            <p className="py-2 text-[13px] text-text-tertiary">Loading org members…</p>
+            <p className="py-2 text-body text-ink-3">Loading org members…</p>
           )}
           {empty && (
-            <p className="py-2 text-[13px] text-text-tertiary">
+            <p className="py-2 text-body text-ink-3">
               Everyone in the org is already on this team.
             </p>
           )}
           {candidates !== null && candidates.length > 0 && (
             <>
               <label className="block">
-                <span className="mb-1 block text-[12px] font-medium text-text-secondary">
-                  Member
-                </span>
+                <span className="mb-1 block text-ui font-medium text-ink-2">Member</span>
                 <select
                   value={selected}
                   disabled={submitting}
                   onChange={(e) => setSelected(e.target.value)}
-                  className="w-full rounded-lg border border-border-glass bg-surface px-2.5 py-2 text-[13px] text-text-secondary focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-50"
+                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
                 >
                   {candidates.map((m) => (
                     <option key={m.user_id} value={m.user_id}>
@@ -193,12 +191,12 @@ function PickerModal({
                 </select>
               </label>
               <label className="block">
-                <span className="mb-1 block text-[12px] font-medium text-text-secondary">Role</span>
+                <span className="mb-1 block text-ui font-medium text-ink-2">Role</span>
                 <select
                   value={role}
                   disabled={submitting}
                   onChange={(e) => setRole(e.target.value)}
-                  className="w-full rounded-lg border border-border-glass bg-surface px-2.5 py-2 text-[13px] text-text-secondary focus:border-accent/40 focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-50"
+                  className="w-full rounded-lg border border-line-1 bg-ground px-2.5 py-2 text-body text-ink-2 focus:border-warm/40 focus:outline-none focus:ring-2 focus:ring-warm/30 disabled:opacity-50"
                 >
                   {ADD_ROLES.map((r) => (
                     <option key={r} value={r}>
@@ -211,14 +209,14 @@ function PickerModal({
           )}
         </div>
 
-        {error && <p className="px-6 pt-2 text-[12px] text-dismiss">{error}</p>}
+        {error && <p className="px-6 pt-2 text-ui text-alarm">{error}</p>}
 
-        <div className="flex items-center justify-end gap-3 border-t border-border-subtle px-6 py-4">
+        <div className="flex items-center justify-end gap-3 border-t border-line-1 px-6 py-4">
           <button
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="text-[12px] text-text-tertiary transition-colors hover:text-text-secondary disabled:opacity-40"
+            className="text-ui text-ink-3 transition-colors hover:text-ink-2 disabled:opacity-40"
           >
             Cancel
           </button>
@@ -226,7 +224,7 @@ function PickerModal({
             type="button"
             onClick={submit}
             disabled={!selected || submitting || empty}
-            className="rounded-xl bg-accent px-5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-40"
+            className="rounded-xl bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
           >
             {submitting ? 'Adding…' : 'Add member'}
           </button>

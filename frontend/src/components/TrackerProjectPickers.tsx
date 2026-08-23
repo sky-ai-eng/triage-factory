@@ -106,26 +106,24 @@ export default function TrackerProjectPickers({
     <div className="space-y-3">
       <div>
         <div className="flex items-center justify-between mb-1">
-          <span className="text-[11px] font-medium text-text-tertiary uppercase tracking-wide">
-            Jira
-          </span>
+          <span className="text-reported font-medium text-ink-3 uppercase tracking-wide">Jira</span>
           {!loading && !jiraEnabled && (
-            <Link to={orgHref('/settings')} className="text-[11px] text-accent hover:underline">
+            <Link to={orgHref('/settings')} className="text-reported text-warm hover:underline">
               Configure Jira
             </Link>
           )}
         </div>
         {loading ? (
-          <div className="text-[12px] text-text-tertiary py-1">Loading…</div>
+          <div className="text-ui text-ink-3 py-1">Loading…</div>
         ) : showJiraPicker ? (
           <>
             <select
               value={jiraKey}
               onChange={(e) => onJiraChange(e.target.value)}
               className="
-                w-full rounded-lg border border-border-subtle
-                bg-white/60 px-3 py-2 text-[13px] text-text-primary
-                focus:outline-none focus:border-accent focus:bg-white
+                w-full rounded-lg border border-line-1
+                bg-raised px-3 py-2 text-body text-ink-1
+                focus:outline-none focus:border-warm focus:bg-raised
               "
             >
               <option value="">— None —</option>
@@ -142,14 +140,14 @@ export default function TrackerProjectPickers({
               ))}
             </select>
             {jiraStale && (
-              <div className="text-[11px] text-text-tertiary mt-1 italic">
+              <div className="text-reported text-ink-3 mt-1 italic">
                 This project key isn&rsquo;t in your current Jira config. Pick a configured one or
                 clear the link.
               </div>
             )}
           </>
         ) : (
-          <div className="text-[12px] text-text-tertiary py-1 italic">
+          <div className="text-ui text-ink-3 py-1 italic">
             {jiraEnabled
               ? 'No Jira projects in config — add them on the Settings page.'
               : 'Jira not configured.'}
@@ -159,13 +157,11 @@ export default function TrackerProjectPickers({
 
       <div>
         <div className="flex items-center justify-between mb-1">
-          <span className="text-[11px] font-medium text-text-tertiary uppercase tracking-wide">
+          <span className="text-reported font-medium text-ink-3 uppercase tracking-wide">
             Linear
           </span>
         </div>
-        <div className="text-[12px] text-text-tertiary py-1 italic">
-          Linear integration coming soon.
-        </div>
+        <div className="text-ui text-ink-3 py-1 italic">Linear integration coming soon.</div>
         {/* Hidden input so the parent's controlled-state plumbing doesn't
             need a special-case for "Linear is always empty" — when the
             integration ships, this swaps in a real <select> and the

@@ -314,10 +314,10 @@ export default function RepoPickerModal({
     <div className={`flex flex-col ${inline ? '' : 'h-full max-h-[80vh]'}`}>
       {/* Header */}
       <div className={inline ? 'pb-4' : 'px-6 pt-6 pb-4'}>
-        <h2 id={titleId} className="text-[19px] font-medium tracking-tight text-text-primary">
+        <h2 id={titleId} className="text-[19px] font-medium tracking-tight text-ink-1">
           Select repositories
         </h2>
-        <p className="text-[13px] text-text-tertiary mt-1 leading-relaxed">
+        <p className="text-body text-ink-3 mt-1 leading-relaxed">
           {appMode
             ? 'These are the repositories your GitHub App is installed on. Choose which to watch — PRs from them appear in your triage queue, and Jira tickets are matched to them for delegation.'
             : 'Choose which repos to watch. PRs from these repos appear in your triage queue, and Jira tickets are matched to these repos for delegation.'}
@@ -327,7 +327,7 @@ export default function RepoPickerModal({
             href={installUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors mt-2"
+            className="inline-flex items-center gap-1 text-ui font-medium text-warm hover:text-warm/80 transition-colors mt-2"
           >
             Install the App on more repositories
             <ExternalLink size={12} />
@@ -352,7 +352,7 @@ export default function RepoPickerModal({
             placeholder="Search repos..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full bg-white/50 border border-border-subtle rounded-xl px-4 py-2.5 text-[13px] text-text-primary placeholder-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/40 transition-colors"
+            className="w-full bg-raised border border-line-1 rounded-xl px-4 py-2.5 text-body text-ink-1 placeholder-ink-3 focus:outline-none focus:ring-2 focus:ring-warm/30 focus:border-warm/40 transition-colors"
           />
         )}
         {/* The count is renderable at all because the list is served from a
@@ -360,7 +360,7 @@ export default function RepoPickerModal({
             "showing N". The refresh beside it is the answer to "I just granted
             the App another repo and it isn't here", which is otherwise a wait. */}
         <div className="flex items-center justify-between mt-2">
-          <span className="text-[11px] text-text-tertiary">
+          <span className="text-[11px] text-ink-3">
             {discovering
               ? 'Discovering repositories…'
               : `Showing ${repos.length} of ${total} repositor${total === 1 ? 'y' : 'ies'}`}
@@ -369,7 +369,7 @@ export default function RepoPickerModal({
             type="button"
             onClick={onRefresh}
             disabled={refreshing}
-            className="flex items-center gap-1.5 text-[11px] font-medium text-text-tertiary hover:text-text-primary disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 text-[11px] font-medium text-ink-3 hover:text-ink-1 disabled:opacity-40 transition-colors"
           >
             <RotateCw size={11} className={refreshing ? 'animate-spin' : ''} />
             {refreshing ? 'Refreshing…' : 'Refresh'}
@@ -384,14 +384,14 @@ export default function RepoPickerModal({
           <div className="space-y-1 py-2">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
               <div key={i} className="flex items-center gap-3 px-3 py-2.5 rounded-xl">
-                <div className="w-4 h-4 rounded bg-black/[0.04] animate-pulse" />
+                <div className="w-4 h-4 rounded bg-tint-3 animate-pulse" />
                 <div className="flex-1 space-y-1.5">
                   <div
-                    className="h-3 rounded bg-black/[0.04] animate-pulse"
+                    className="h-3 rounded bg-tint-3 animate-pulse"
                     style={{ width: `${55 + ((i * 17) % 35)}%` }}
                   />
                   <div
-                    className="h-2.5 rounded bg-black/[0.03] animate-pulse"
+                    className="h-2.5 rounded bg-tint-2 animate-pulse"
                     style={{ width: `${30 + ((i * 23) % 40)}%` }}
                   />
                 </div>
@@ -402,11 +402,11 @@ export default function RepoPickerModal({
 
         {error && (
           <div className="flex flex-col items-center justify-center py-12 gap-3">
-            <div className="text-[13px] text-text-secondary text-center">{error}</div>
+            <div className="text-body text-ink-2 text-center">{error}</div>
             <button
               type="button"
               onClick={() => fetchPage(search.trim())}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+              className="flex items-center gap-1.5 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
             >
               <RotateCw size={13} />
               Retry
@@ -420,7 +420,7 @@ export default function RepoPickerModal({
             workspace rather than a list that has not loaded. */}
         {!loading && !discovering && !error && repos.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-3 py-8">
-            <p className="text-[13px] text-text-tertiary text-center">
+            <p className="text-body text-ink-3 text-center">
               {search
                 ? `No repos match "${search}"`
                 : appMode
@@ -432,7 +432,7 @@ export default function RepoPickerModal({
                 href={installUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-[12px] font-medium text-accent hover:text-accent/80 transition-colors"
+                className="inline-flex items-center gap-1 text-ui font-medium text-warm hover:text-warm/80 transition-colors"
               >
                 Install the App on repositories
                 <ExternalLink size={12} />
@@ -451,13 +451,13 @@ export default function RepoPickerModal({
                 role="checkbox"
                 aria-checked={isChecked}
                 onClick={() => toggle(repo.full_name)}
-                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-black/[0.02] ${
-                  isChecked ? 'bg-accent/[0.04]' : ''
+                className={`w-full flex items-start gap-3 px-3 py-2.5 text-left rounded-xl transition-colors hover:bg-tint-2 ${
+                  isChecked ? 'bg-warm/[0.04]' : ''
                 }`}
               >
                 <span
                   className={`mt-0.5 shrink-0 w-4 h-4 rounded border flex items-center justify-center transition-colors ${
-                    isChecked ? 'bg-accent border-accent text-white' : 'border-border-subtle'
+                    isChecked ? 'bg-warm border-warm text-warm-ink' : 'border-line-1'
                   }`}
                 >
                   {isChecked && (
@@ -477,22 +477,20 @@ export default function RepoPickerModal({
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="text-[12.5px] font-medium text-text-primary truncate">
+                    <span className="text-card-title font-medium text-ink-1 truncate">
                       {repo.full_name}
                     </span>
                     {repo.private && (
-                      <span className="text-[9px] text-text-tertiary border border-border-subtle rounded px-1 py-0.5">
+                      <span className="text-label-sm text-ink-3 border border-line-1 rounded px-1 py-0.5">
                         private
                       </span>
                     )}
                     {repo.language && (
-                      <span className="text-[10px] text-text-tertiary">{repo.language}</span>
+                      <span className="text-label text-ink-3">{repo.language}</span>
                     )}
                   </div>
                   {repo.description && (
-                    <p className="text-[11px] text-text-tertiary truncate mt-0.5">
-                      {repo.description}
-                    </p>
+                    <p className="text-reported text-ink-3 truncate mt-0.5">{repo.description}</p>
                   )}
                 </div>
               </button>
@@ -509,7 +507,7 @@ export default function RepoPickerModal({
               type="button"
               onClick={loadMore}
               disabled={loading}
-              className="flex items-center gap-1.5 text-[12px] font-medium text-accent hover:text-accent/80 disabled:opacity-40 transition-colors"
+              className="flex items-center gap-1.5 text-[12px] font-medium text-warm hover:text-warm/80 disabled:opacity-40 transition-colors"
             >
               {loading && <RotateCw size={12} className="animate-spin" />}
               {loading ? 'Loading…' : `Show more (${total - repos.length} left)`}
@@ -523,11 +521,11 @@ export default function RepoPickerModal({
           onSelectionChange. A standing selected-count keeps the host honest. */}
       {!hideFooter && (
         <div
-          className={`flex items-center justify-between border-t border-border-subtle py-4 ${
+          className={`flex items-center justify-between border-t border-line-1 py-4 ${
             inline ? 'mt-2' : 'px-6'
           }`}
         >
-          <span className="text-[12px] text-text-tertiary">
+          <span className="text-ui text-ink-3">
             {checked.size} repo{checked.size !== 1 ? 's' : ''} selected
           </span>
           <div className="flex gap-3">
@@ -535,7 +533,7 @@ export default function RepoPickerModal({
               <button
                 type="button"
                 onClick={onBack}
-                className="text-[13px] text-text-secondary hover:text-text-primary bg-white/50 hover:bg-white/80 border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+                className="text-body text-ink-2 hover:text-ink-1 bg-raised hover:bg-sunk border border-line-1 rounded-xl px-4 py-2 transition-colors"
               >
                 Back
               </button>
@@ -544,7 +542,7 @@ export default function RepoPickerModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="text-[13px] text-text-secondary hover:text-text-primary border border-border-subtle rounded-xl px-4 py-2 transition-colors"
+                className="text-body text-ink-2 hover:text-ink-1 border border-line-1 rounded-xl px-4 py-2 transition-colors"
               >
                 Cancel
               </button>
@@ -553,7 +551,7 @@ export default function RepoPickerModal({
               type="button"
               onClick={() => onSave(Array.from(checked))}
               disabled={checked.size === 0 || saving}
-              className="flex items-center gap-1.5 bg-accent hover:bg-accent/90 disabled:opacity-40 text-white font-medium rounded-xl px-5 py-2 text-[13px] transition-colors"
+              className="flex items-center gap-1.5 bg-warm hover:bg-warm/90 disabled:opacity-40 text-warm-ink font-medium rounded-xl px-5 py-2 text-body transition-colors"
             >
               {saving && <RotateCw size={13} className="animate-spin" />}
               {saving ? 'Saving…' : inline ? 'Continue' : 'Save'}
@@ -577,7 +575,7 @@ export default function RepoPickerModal({
   // and clipped inside the Repositories card instead of covering the viewport.
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/20 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-scrim backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -586,7 +584,7 @@ export default function RepoPickerModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-xl backdrop-blur-xl bg-surface-raised border border-border-glass rounded-2xl shadow-lg shadow-black/[0.06] overflow-hidden"
+        className="w-full max-w-xl backdrop-blur-xl bg-raised border border-line-1 rounded-2xl shadow-float shadow-black/[0.06] overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {content}

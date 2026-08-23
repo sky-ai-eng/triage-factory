@@ -1,0 +1,399 @@
+/* The gallery's own chrome. Deliberately plain: it is a measuring instrument,
+   so anything it draws around a specimen has to be quieter than the specimen.
+   Everything here resolves through the token layer like any other surface —
+   if the gallery looks wrong, that is the tokens telling you something. */
+
+.gal {
+  min-height: 100vh;
+  background: var(--color-ground);
+  color: var(--color-ink-1);
+  font-family: var(--font-sans);
+  display: grid;
+  grid-template-columns: 168px minmax(0, 1fr);
+}
+
+.gal-rail {
+  border-right: 1px solid var(--color-line-1);
+  padding: var(--space-8) 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.gal-mark {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  padding: 0 var(--space-8) var(--space-7);
+}
+
+.gal-nav {
+  appearance: none;
+  background: none;
+  border: 0;
+  text-align: left;
+  font: inherit;
+  font-size: var(--text-ui);
+  color: var(--color-ink-3);
+  padding: var(--space-3) var(--space-8);
+  transition: color var(--dur-hover) var(--ease-default);
+}
+.gal-nav:hover {
+  color: var(--color-ink-1);
+}
+.gal-nav[data-on] {
+  color: var(--color-warm);
+}
+
+.gal-foot {
+  margin-top: auto;
+  padding: var(--space-7) var(--space-8) 0;
+  border-top: 1px solid var(--color-line-1);
+}
+
+.gal-theme {
+  appearance: none;
+  background: none;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-3);
+  padding: 0;
+}
+.gal-theme:hover {
+  color: var(--color-ink-1);
+}
+
+.gal-main {
+  padding: var(--space-10) var(--space-11) var(--space-11);
+  max-width: 1080px;
+}
+
+.gal-h {
+  font-size: var(--text-page-title);
+  letter-spacing: var(--tracking-page-title);
+  font-weight: var(--font-weight-medium);
+  margin: 0 0 var(--space-3);
+}
+
+.gal-sub {
+  font-size: var(--text-body);
+  color: var(--color-ink-3);
+  margin: 0 0 var(--space-10);
+  max-width: var(--container-measure);
+  line-height: var(--leading-prose);
+}
+
+.gal-sec {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  margin: var(--space-10) 0 var(--space-6);
+}
+.gal-sec:first-of-type {
+  margin-top: 0;
+}
+
+.gal-note {
+  font-size: var(--text-secondary);
+  color: var(--color-ink-3);
+  max-width: var(--container-measure);
+  line-height: var(--leading-prose);
+  margin: 0 0 var(--space-7);
+}
+
+/* A swatch states the token and the value it actually resolved to, read back
+   off the document rather than repeated from the stylesheet. A specimen that
+   prints what it was told would agree with a broken token layer; this one
+   disagrees, which is the entire point of having it. */
+.gal-ramp {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-7);
+}
+
+.gal-sw {
+  width: 132px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  overflow: hidden;
+}
+
+.gal-swatch {
+  height: 46px;
+  border-bottom: 1px solid var(--color-line-1);
+}
+
+.gal-meta {
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+.gal-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-2);
+  display: block;
+}
+
+.gal-val {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  color: var(--color-ink-4);
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gal-val[data-missing] {
+  color: var(--color-alarm);
+}
+
+.gal-type {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-bottom: var(--space-7);
+}
+
+.gal-type-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-7);
+}
+
+.gal-type-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+  width: 148px;
+  flex: none;
+}
+
+.gal-boxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-box {
+  width: 168px;
+  height: 76px;
+  background: var(--color-raised);
+  border-radius: var(--radius-inflow);
+  display: flex;
+  align-items: flex-end;
+  padding: var(--space-4);
+}
+
+.gal-box span {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-3);
+}
+
+/* The empty state carries the rule for what may live here, because this is
+   where someone stands when they are about to add the wrong thing. */
+.gal-empty {
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  padding: var(--space-9);
+  max-width: var(--container-measure);
+}
+
+.gal-empty p {
+  font-size: var(--text-body);
+  color: var(--color-ink-3);
+  line-height: var(--leading-prose);
+  margin: 0 0 var(--space-5);
+}
+.gal-empty p:last-child {
+  margin-bottom: 0;
+}
+.gal-empty code {
+  font-size: var(--text-reported);
+  color: var(--color-ink-2);
+}
+
+/* ── Component cards ──────────────────────────────────────────────────
+   A card is a frame around one component and its toggles. In-flow, so it
+   takes an inset hairline and no cast — the component inside is the thing
+   that may float, not the box describing it. */
+
+.gal-card {
+  box-shadow: var(--shadow-edge);
+  border-radius: var(--radius-inflow);
+  padding: var(--space-8);
+  margin-bottom: var(--space-9);
+}
+
+.gal-cardhead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+
+.gal-cardhead > span:first-child {
+  font-size: var(--text-section);
+  letter-spacing: var(--tracking-section);
+  font-weight: var(--font-weight-medium);
+}
+
+.gal-route {
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-4);
+}
+
+.gal-btn,
+.gal-chip {
+  appearance: none;
+  background: none;
+  border: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-readout);
+  letter-spacing: var(--tracking-readout);
+  color: var(--color-ink-3);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-nested);
+  box-shadow: var(--shadow-edge);
+  transition:
+    color var(--dur-hover) var(--ease-default),
+    box-shadow var(--dur-hover) var(--ease-default);
+}
+
+.gal-btn:hover,
+.gal-chip:hover {
+  color: var(--color-ink-1);
+  box-shadow: var(--shadow-edge-strong);
+}
+
+/* On is a data attribute, not a second class name — the same rule every
+   component in the system follows. */
+.gal-chip[data-on] {
+  color: var(--color-warm);
+  box-shadow: var(--shadow-edge-measure);
+  background: var(--color-warm-1);
+}
+
+.gal-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-7);
+}
+
+.gal-specimens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-9);
+  margin-bottom: var(--space-7);
+}
+
+.gal-spec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.gal-spec-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-label-sm);
+  letter-spacing: var(--tracking-label-sm);
+  text-transform: uppercase;
+  color: var(--color-ink-4);
+}
+
+/* The shell is mounted at a real size rather than filling the gallery, so its
+   rail reads at the proportions it will have in the app. */
+.gal-viewport {
+  height: 620px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge-strong);
+  overflow: hidden;
+  /* The shell measures its overlays against its own root, so it needs to BE
+     the containing block rather than inherit one from the page. */
+  position: relative;
+}
+
+.gal-viewport .sh {
+  height: 100%;
+}
+
+.gal-page {
+  padding: var(--space-9) var(--space-10);
+  max-width: var(--container-measure);
+}
+
+.gal-page p {
+  font-size: var(--text-body);
+  line-height: var(--leading-prose);
+  color: var(--color-ink-2);
+  margin: 0 0 var(--space-6);
+}
+
+.gal-page kbd {
+  font-size: var(--text-reported);
+  color: var(--color-ink-1);
+  padding: 1px var(--space-2);
+  border-radius: var(--radius-nested);
+  box-shadow: var(--shadow-edge);
+}
+
+/* A stand-in for the surface a floating component sits over. Positioned,
+   because barPosition="absolute" resolves against the nearest positioned
+   ancestor — the same requirement a real table has. */
+.gal-barmount {
+  position: relative;
+  min-height: 190px;
+  border-radius: var(--radius-inflow);
+  box-shadow: var(--shadow-edge);
+  background: var(--color-tint-1);
+  padding: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-barmount > .gal-spec-tag {
+  display: block;
+}
+
+/* The table measures its auto page size against the tightest clipping or
+   scrolling ancestor, so the mount states a height rather than growing with
+   its content — a box that clips and still grows feeds the table's own height
+   back in. */
+.gal-tablemount {
+  position: relative;
+  margin-bottom: var(--space-7);
+}
+
+.gal-sources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  margin-bottom: var(--space-7);
+}
+
+.gal-boardmount {
+  margin-bottom: var(--space-7);
+}

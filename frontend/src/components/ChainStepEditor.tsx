@@ -77,9 +77,9 @@ export default function ChainStepEditor({
 
   return (
     <div className="space-y-3">
-      <label className="block text-[12px] font-medium text-text-secondary">Steps</label>
+      <label className="block text-ui font-medium text-ink-2">Steps</label>
       {steps.length === 0 && (
-        <div className="text-[12px] text-text-tertiary border border-dashed border-border-subtle rounded-lg px-3 py-4 text-center">
+        <div className="text-ui text-ink-3 border border-dashed border-line-1 rounded-lg px-3 py-4 text-center">
           No steps yet. Add a prompt to start the chain.
         </div>
       )}
@@ -94,25 +94,25 @@ export default function ChainStepEditor({
               onDragStart={onDragStart(i)}
               onDragOver={onDragOver(i)}
               onDragEnd={onDragEnd}
-              className={`group flex items-start gap-3 rounded-lg border bg-white/60 px-3 py-2.5 transition-colors ${
+              className={`group flex items-start gap-3 rounded-lg border bg-raised px-3 py-2.5 transition-colors ${
                 dragIndex === i
-                  ? 'border-accent/40 ring-1 ring-accent/30'
-                  : 'border-border-subtle hover:border-border-glass'
+                  ? 'border-warm/40 ring-1 ring-warm/30'
+                  : 'border-line-1 hover:border-line-2'
               } ${busy ? 'opacity-60' : ''}`}
             >
-              <div className="cursor-grab text-text-tertiary text-[14px] leading-none mt-1 select-none">
+              <div className="cursor-grab text-ink-3 text-body leading-none mt-1 select-none">
                 ⋮⋮
               </div>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-text-tertiary">
+                  <span className="text-label font-semibold uppercase tracking-wider text-ink-3">
                     Step {i + 1}
                   </span>
-                  <span className="text-[13px] font-medium text-text-primary truncate">
+                  <span className="text-body font-medium text-ink-1 truncate">
                     {prompt ? prompt.name : '(missing prompt)'}
                   </span>
                   {prompt && (
-                    <span className="text-[9px] uppercase font-semibold tracking-wider text-text-tertiary bg-black/[0.04] px-1.5 py-0.5 rounded">
+                    <span className="text-label-sm uppercase font-semibold tracking-wider text-ink-3 bg-tint-3 px-1.5 py-0.5 rounded">
                       {prompt.source}
                     </span>
                   )}
@@ -127,13 +127,13 @@ export default function ChainStepEditor({
                     update(next)
                   }}
                   placeholder="Optional one-line brief shown to the agent"
-                  className="mt-1.5 w-full px-2 py-1 rounded border border-border-subtle bg-white/70 text-[12px] text-text-secondary placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20"
+                  className="mt-1.5 w-full px-2 py-1 rounded border border-line-1 bg-raised text-ui text-ink-2 placeholder:text-ink-3 focus:outline-none focus:border-warm/40 focus:ring-1 focus:ring-warm/20"
                 />
               </div>
               <button
                 onClick={() => update(steps.filter((_, j) => j !== i))}
                 disabled={busy}
-                className="text-text-tertiary hover:text-red-500 text-[14px] px-1 leading-none transition-colors"
+                className="text-ink-3 hover:text-alarm text-body px-1 leading-none transition-colors"
                 title="Remove step"
               >
                 &times;
@@ -146,7 +146,7 @@ export default function ChainStepEditor({
       <button
         onClick={() => setPickerOpen(true)}
         disabled={busy}
-        className="text-[12px] font-medium text-accent hover:text-accent/80 transition-colors disabled:opacity-50"
+        className="text-ui font-medium text-warm hover:text-warm/80 transition-colors disabled:opacity-50"
       >
         + Add step
       </button>

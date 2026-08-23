@@ -221,16 +221,16 @@ export default function Cards() {
   if (loadState === 'loading' && tasks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-4">
-        <div className="w-16 h-16 rounded-full bg-accent-soft flex items-center justify-center">
+        <div className="w-16 h-16 rounded-full bg-warm-2 flex items-center justify-center">
           <motion.span
-            className="text-accent text-2xl"
+            className="text-warm text-2xl"
             animate={{ opacity: [0.3, 1, 0.3] }}
             transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
           >
             ~
           </motion.span>
         </div>
-        <p className="text-text-secondary text-sm">Polling for tasks...</p>
+        <p className="text-ink-2 text-sm">Polling for tasks...</p>
       </div>
     )
   }
@@ -239,18 +239,18 @@ export default function Cards() {
   if (tasks.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-4">
-        <div className="w-16 h-16 rounded-full bg-accent-soft flex items-center justify-center">
-          <span className="text-accent text-2xl">~</span>
+        <div className="w-16 h-16 rounded-full bg-warm-2 flex items-center justify-center">
+          <span className="text-warm text-2xl">~</span>
         </div>
-        <p className="text-text-secondary text-sm">All clear. Nothing to triage.</p>
+        <p className="text-ink-2 text-sm">All clear. Nothing to triage.</p>
         <div className="flex items-center gap-2 relative">
           <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
             onClick={() => setRulesOpen((o) => !o)}
-            className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
+            className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
               rulesOpen
-                ? 'bg-accent/10 text-accent border-accent/20'
-                : 'text-text-tertiary border-border-subtle hover:text-text-secondary'
+                ? 'bg-warm/10 text-warm border-warm/20'
+                : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
             title="Task rules"
           >
@@ -268,16 +268,16 @@ export default function Cards() {
       <div className="flex flex-col items-center justify-center min-h-[70vh] gap-8">
         {/* Counter + filter toggle */}
         <div className="flex items-center gap-3 relative">
-          <p className="text-[13px] text-text-tertiary font-medium tracking-wide">
+          <p className="text-body text-ink-3 font-medium tracking-wide">
             {tasks.length} item{tasks.length !== 1 ? 's' : ''} in queue
           </p>
           <TeamScopeSelect value={teamFilter} onChange={setTeamFilter} />
           <button
             onClick={() => setRulesOpen((o) => !o)}
-            className={`flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-full border transition-colors ${
+            className={`flex items-center gap-1.5 text-ui font-medium px-3 py-1.5 rounded-full border transition-colors ${
               rulesOpen
-                ? 'bg-accent/10 text-accent border-accent/20'
-                : 'text-text-tertiary border-border-subtle hover:text-text-secondary'
+                ? 'bg-warm/10 text-warm border-warm/20'
+                : 'text-ink-3 border-line-1 hover:text-ink-2'
             }`}
             title="Task rules"
           >
@@ -345,9 +345,9 @@ export default function Cards() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 20 }}
-              className="fixed bottom-8 left-1/2 -translate-x-1/2 backdrop-blur-xl bg-white/70 border border-border-glass rounded-full px-5 py-2.5 flex items-center gap-3 shadow-lg shadow-black/5"
+              className="fixed bottom-8 left-1/2 -translate-x-1/2 backdrop-blur-xl bg-raised border border-line-1 rounded-full px-5 py-2.5 flex items-center gap-3 shadow-float shadow-black/5"
             >
-              <span className="text-sm text-text-secondary">
+              <span className="text-sm text-ink-2">
                 {undoTask.action === 'dismiss'
                   ? 'Dismissed'
                   : undoTask.action === 'claim'
@@ -356,10 +356,7 @@ export default function Cards() {
                       ? 'Delegated'
                       : 'Snoozed'}
               </span>
-              <button
-                onClick={undo}
-                className="text-sm text-accent hover:text-accent/80 font-medium"
-              >
+              <button onClick={undo} className="text-sm text-warm hover:text-warm/80 font-medium">
                 Undo
               </button>
             </motion.div>
@@ -398,16 +395,16 @@ function ActionButton({
   shortcut: string
 }) {
   const colorMap = {
-    dismiss: 'hover:bg-dismiss/10 hover:text-dismiss hover:border-dismiss/20',
-    claim: 'hover:bg-claim/10 hover:text-claim hover:border-claim/20',
-    delegate: 'hover:bg-delegate/10 hover:text-delegate hover:border-delegate/20',
-    snooze: 'hover:bg-snooze/10 hover:text-snooze hover:border-snooze/20',
+    dismiss: 'hover:bg-alarm/10 hover:text-alarm hover:border-alarm/20',
+    claim: 'hover:bg-tint-2 hover:text-ink-2 hover:border-line-1',
+    delegate: 'hover:bg-tint-2 hover:text-ink-2 hover:border-line-1',
+    snooze: 'hover:bg-tint-2 hover:text-ink-2 hover:border-line-1',
   }
 
   return (
     <button
       onClick={onClick}
-      className={`text-[13px] text-text-tertiary border border-border-subtle rounded-full px-5 py-2 transition-all duration-200 ${colorMap[color]}`}
+      className={`text-body text-ink-3 border border-line-1 rounded-full px-5 py-2 transition-all duration-200 ${colorMap[color]}`}
     >
       <span className="opacity-50 mr-1">{shortcut}</span> {label}
     </button>
@@ -468,7 +465,7 @@ function SwipeCard({
       onDragEnd={interactive ? handleDragEnd : undefined}
     >
       {/* Card surface — flat fill, themed via CSS variables. */}
-      <div className="absolute inset-0 rounded-3xl bg-surface-raised border border-border-glass shadow-sm shadow-black/[0.04]" />
+      <div className="absolute inset-0 rounded-3xl bg-raised border border-line-1 shadow-float shadow-black/[0.04]" />
 
       {/* Directional tint overlays */}
       <motion.div className="absolute inset-0 rounded-3xl" style={{ background: dismissBg }} />
@@ -480,19 +477,19 @@ function SwipeCard({
         <>
           <motion.div
             style={{ opacity: leftOpacity }}
-            className="absolute top-6 right-6 text-dismiss font-semibold text-xs tracking-wide uppercase border border-dismiss/30 rounded-full px-3 py-1"
+            className="absolute top-6 right-6 text-alarm font-semibold text-xs tracking-wide uppercase border border-alarm/30 rounded-full px-3 py-1"
           >
             Dismiss
           </motion.div>
           <motion.div
             style={{ opacity: rightOpacity }}
-            className="absolute top-6 right-6 text-claim font-semibold text-xs tracking-wide uppercase border border-claim/30 rounded-full px-3 py-1"
+            className="absolute top-6 right-6 text-ink-2 font-semibold text-xs tracking-wide uppercase border border-line-1 rounded-full px-3 py-1"
           >
             Claim
           </motion.div>
           <motion.div
             style={{ opacity: upOpacity }}
-            className="absolute top-6 right-6 text-delegate font-semibold text-xs tracking-wide uppercase border border-delegate/30 rounded-full px-3 py-1"
+            className="absolute top-6 right-6 text-ink-2 font-semibold text-xs tracking-wide uppercase border border-line-1 rounded-full px-3 py-1"
           >
             Delegate
           </motion.div>
@@ -507,14 +504,14 @@ function SwipeCard({
           <EventBadge eventType={task.event_type} />
           <RequestedReviewerBadge task={task} />
           {task.severity && (
-            <span className="text-[11px] font-medium text-accent bg-accent-soft px-2 py-0.5 rounded-full">
+            <span className="text-reported font-medium text-warm bg-warm-2 px-2 py-0.5 rounded-full">
               {task.severity}
             </span>
           )}
         </div>
 
         {/* Title */}
-        <h2 className="text-[17px] leading-snug font-semibold text-text-primary mb-2 line-clamp-2 shrink-0">
+        <h2 className="text-section leading-snug font-semibold text-ink-1 mb-2 line-clamp-2 shrink-0">
           {task.title}
         </h2>
 
@@ -522,7 +519,7 @@ function SwipeCard({
         {task.ai_summary ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
             <svg
-              className="w-3.5 h-3.5 mt-0.5 shrink-0 text-text-tertiary opacity-50"
+              className="w-3.5 h-3.5 mt-0.5 shrink-0 text-ink-3 opacity-50"
               viewBox="0 0 16 16"
               fill="none"
             >
@@ -532,7 +529,7 @@ function SwipeCard({
                 fillRule="evenodd"
               />
             </svg>
-            <p className="text-[13px] text-text-secondary leading-relaxed">{task.ai_summary}</p>
+            <p className="text-body text-ink-2 leading-relaxed">{task.ai_summary}</p>
           </div>
         ) : isScoring ? (
           <div className="mb-3 shrink-0 space-y-2">
@@ -544,14 +541,12 @@ function SwipeCard({
         {task.priority_reasoning && task.priority_score != null ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
             <PriorityGauge value={task.priority_score} />
-            <p className="text-[13px] text-text-tertiary leading-relaxed">
-              {task.priority_reasoning}
-            </p>
+            <p className="text-body text-ink-3 leading-relaxed">{task.priority_reasoning}</p>
           </div>
         ) : isScoring ? (
           <div className="flex items-start gap-2 mb-3 shrink-0">
-            <div className="w-[18px] h-[12px] mt-0.5 shrink-0 rounded bg-black/[0.04] animate-pulse" />
-            <div className="flex-1 h-4 rounded bg-black/[0.04] animate-pulse" />
+            <div className="w-[18px] h-[12px] mt-0.5 shrink-0 rounded bg-tint-3 animate-pulse" />
+            <div className="flex-1 h-4 rounded bg-tint-3 animate-pulse" />
           </div>
         ) : null}
 
@@ -560,7 +555,7 @@ function SwipeCard({
 
         {/* Metadata footer */}
         <div className="flex items-end justify-between shrink-0">
-          <div className="text-[12px] text-text-tertiary">
+          <div className="text-ui text-ink-3">
             <span>{age}</span>
           </div>
 
@@ -568,14 +563,14 @@ function SwipeCard({
             {task.autonomy_suitability != null ? (
               <ConfidenceGauge value={task.autonomy_suitability} />
             ) : isScoring ? (
-              <div className="w-7 h-[18px] rounded bg-black/[0.04] animate-pulse" />
+              <div className="w-7 h-[18px] rounded bg-tint-3 animate-pulse" />
             ) : null}
             {task.source_url && (
               <a
                 href={task.source_url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="text-[12px] text-accent hover:text-accent/70 font-medium transition-colors"
+                className="text-ui text-warm hover:text-warm/70 font-medium transition-colors"
                 onClick={(e) => e.stopPropagation()}
                 onPointerDown={(e) => e.stopPropagation()}
               >
@@ -593,11 +588,7 @@ function PriorityGauge({ value }: { value: number }) {
   // 0.0 = low priority (cool), 1.0 = urgent (hot)
   const angle = -90 + value * 180
   const needleColor =
-    value >= 0.7
-      ? 'var(--color-dismiss)'
-      : value >= 0.4
-        ? 'var(--color-snooze)'
-        : 'var(--color-claim)'
+    value >= 0.7 ? 'var(--color-alarm)' : value >= 0.4 ? 'var(--color-warm)' : 'var(--color-ink-3)'
 
   return (
     <svg width="18" height="12" viewBox="0 0 28 18" fill="none" className="shrink-0 mt-0.5">
@@ -606,7 +597,7 @@ function PriorityGauge({ value }: { value: number }) {
         stroke="currentColor"
         strokeWidth="2"
         strokeLinecap="round"
-        className="text-black/[0.08]"
+        className="text-ink-4"
       />
       <path
         d="M 4 16 A 10 10 0 0 1 24 16"
@@ -641,11 +632,7 @@ function ConfidenceGauge({ value }: { value: number }) {
         ? 'Partially automatable'
         : 'Needs human attention'
   const needleColor =
-    value >= 0.7
-      ? 'var(--color-delegate)'
-      : value >= 0.4
-        ? 'var(--color-snooze)'
-        : 'var(--color-dismiss)'
+    value >= 0.7 ? 'var(--color-cool)' : value >= 0.4 ? 'var(--color-warm)' : 'var(--color-alarm)'
 
   return (
     <Tooltip.Root>
@@ -661,7 +648,7 @@ function ConfidenceGauge({ value }: { value: number }) {
               stroke="currentColor"
               strokeWidth="2"
               strokeLinecap="round"
-              className="text-black/[0.08]"
+              className="text-ink-4"
             />
             {/* Colored arc fill */}
             <path
@@ -691,10 +678,10 @@ function ConfidenceGauge({ value }: { value: number }) {
         <Tooltip.Content
           side="top"
           sideOffset={6}
-          className="z-50 rounded-lg backdrop-blur-xl bg-white/80 border border-border-glass px-3 py-2 shadow-lg shadow-black/5 text-[12px] max-w-[200px]"
+          className="z-50 rounded-lg backdrop-blur-xl bg-raised border border-line-1 px-3 py-2 shadow-float shadow-black/5 text-ui max-w-[200px]"
         >
-          <div className="font-medium text-text-primary mb-0.5">{label}</div>
-          <div className="text-text-tertiary">
+          <div className="font-medium text-ink-1 mb-0.5">{label}</div>
+          <div className="text-ink-3">
             {pct}% AI confidence —{' '}
             {value >= 0.7
               ? 'good candidate for delegation'
@@ -713,19 +700,19 @@ function ScoringShimmer() {
   return (
     <div className="flex items-start gap-2">
       <motion.div
-        className="w-3.5 h-3.5 mt-0.5 shrink-0 rounded-full bg-accent/20"
+        className="w-3.5 h-3.5 mt-0.5 shrink-0 rounded-full bg-warm/20"
         animate={{ opacity: [0.3, 0.7, 0.3] }}
         transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
       />
       <div className="flex-1 space-y-1.5">
         <motion.div
-          className="h-3.5 rounded bg-black/[0.04]"
+          className="h-3.5 rounded bg-tint-3"
           animate={{ opacity: [0.4, 0.7, 0.4] }}
           transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }}
           style={{ width: '85%' }}
         />
         <motion.div
-          className="h-3.5 rounded bg-black/[0.04]"
+          className="h-3.5 rounded bg-tint-3"
           animate={{ opacity: [0.4, 0.7, 0.4] }}
           transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut', delay: 0.2 }}
           style={{ width: '60%' }}

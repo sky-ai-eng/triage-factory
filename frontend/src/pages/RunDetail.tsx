@@ -208,20 +208,19 @@ export default function RunDetail() {
     return () => window.removeEventListener('keydown', onKey)
   }, [navigate, orgHref])
 
-  if (loading)
-    return <FloorMessage tone="text-text-tertiary">Spinning up the station…</FloorMessage>
+  if (loading) return <FloorMessage tone="text-ink-3">Spinning up the station…</FloorMessage>
 
   // Order matters: a 5xx leaves `conversation` null AND sets `error`; checking notFound
   // first would mask the real failure behind a misleading "not found".
   if (error)
     return (
-      <FloorMessage tone="text-dismiss" back={orgHref('/board')}>
+      <FloorMessage tone="text-alarm" back={orgHref('/board')}>
         Failed to load: {error}
       </FloorMessage>
     )
   if (notFound || !conversation)
     return (
-      <FloorMessage tone="text-text-tertiary" back={orgHref('/board')}>
+      <FloorMessage tone="text-ink-3" back={orgHref('/board')}>
         Run not found.
       </FloorMessage>
     )
@@ -306,11 +305,11 @@ function FloorMessage({
     <div className="relative">
       <GlassBackdrop />
       <div className="flex min-h-screen flex-col items-center justify-center gap-3">
-        <p className={`font-mono text-[12px] tracking-wide ${tone}`}>{children}</p>
+        <p className={`font-mono text-ui tracking-wide ${tone}`}>{children}</p>
         {back && (
           <Link
             to={back}
-            className="font-mono text-[11px] uppercase tracking-[0.12em] text-accent hover:underline"
+            className="font-mono text-reported uppercase tracking-[0.12em] text-warm hover:underline"
           >
             ← back to floor
           </Link>

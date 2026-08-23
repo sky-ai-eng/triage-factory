@@ -212,7 +212,7 @@ function ScreenTranscript({ messages, conversation, hasOlder, loadingOlder, onLo
             if (el) el.scrollTop = el.scrollHeight
             setPinned(true)
           }}
-          className="absolute bottom-4 left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full px-3 py-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.14em] backdrop-blur-sm transition-transform hover:scale-[1.02]"
+          className="absolute bottom-4 left-1/2 z-20 inline-flex -translate-x-1/2 items-center gap-1.5 rounded-full px-3 py-1.5 font-mono text-label font-semibold uppercase tracking-[0.14em] backdrop-blur-sm transition-transform hover:scale-[1.02]"
           style={{
             color: 'var(--hmi-ink-dim)',
             background: 'color-mix(in srgb, var(--hmi-screen-lift) 80%, transparent)',
@@ -312,7 +312,7 @@ function buildRows(messages: Message[], worktree: string | undefined): React.Rea
       rows.push(
         <ScreenRow key={`t-${msg.id}`} time={time}>
           <div
-            className="max-w-none text-[13px] leading-relaxed [&_a]:text-[color:var(--hmi-cyan-bright)] [&_a]:underline [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[11.5px] [&_h1]:mb-1 [&_h1]:mt-2 [&_h1]:text-[15px] [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-2 [&_h2]:text-[14px] [&_h2]:font-semibold [&_li]:my-0.5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-1.5 [&_pre]:my-2 [&_pre]:overflow-auto [&_pre]:rounded-[4px] [&_pre]:bg-[color:var(--hmi-code-bg)] [&_pre]:p-3 [&_pre]:text-[11.5px] [&_strong]:font-semibold [&_strong]:text-[color:var(--hmi-strong)] [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
+            className="max-w-none text-body leading-relaxed [&_a]:text-[color:var(--hmi-cyan-bright)] [&_a]:underline [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-secondary [&_h1]:mb-1 [&_h1]:mt-2 [&_h1]:text-column [&_h1]:font-semibold [&_h2]:mb-1 [&_h2]:mt-2 [&_h2]:text-body [&_h2]:font-semibold [&_li]:my-0.5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-1.5 [&_pre]:my-2 [&_pre]:overflow-auto [&_pre]:rounded-[4px] [&_pre]:bg-[color:var(--hmi-code-bg)] [&_pre]:p-3 [&_pre]:text-secondary [&_strong]:font-semibold [&_strong]:text-[color:var(--hmi-strong)] [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
             style={{ color: 'var(--hmi-ink)' }}
           >
             <MemoMarkdown>{msg.content}</MemoMarkdown>
@@ -342,7 +342,7 @@ function ScreenRow({ time, children }: { time: string; children: React.ReactNode
   return (
     <div className="flex items-center gap-3 border-b border-[color:var(--hmi-line)] py-2.5">
       <span
-        className="w-14 shrink-0 self-center font-mono text-[10px] tabular-nums tracking-tight"
+        className="w-14 shrink-0 self-center font-mono text-label tabular-nums tracking-tight"
         style={{ color: 'var(--hmi-ink-dim)' }}
       >
         {time}
@@ -361,14 +361,14 @@ const UserLine = memo(function UserLine({ text }: { text: string }) {
     <div>
       <div className="mb-0.5">
         <span
-          className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em]"
+          className="font-mono text-label-sm font-semibold uppercase tracking-[0.16em]"
           style={{ color: 'var(--hmi-cyan)' }}
         >
           you
         </span>
       </div>
       <div
-        className="whitespace-pre-wrap text-[13px] leading-relaxed"
+        className="whitespace-pre-wrap text-body leading-relaxed"
         style={{ color: 'var(--hmi-strong)' }}
       >
         {text}
@@ -390,7 +390,7 @@ const NoticeLine = memo(function NoticeLine({ text }: { text: string }) {
         aria-hidden
       />
       <span
-        className="whitespace-pre-wrap text-[12px] italic leading-relaxed"
+        className="whitespace-pre-wrap text-ui italic leading-relaxed"
         style={{ color: 'var(--hmi-ink-dim)' }}
       >
         {text}
@@ -408,7 +408,7 @@ const ThinkingLine = memo(function ThinkingLine({ text }: { text: string }) {
     <div>
       <div className="mb-0.5 flex items-center gap-2">
         <span
-          className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em]"
+          className="font-mono text-label-sm font-semibold uppercase tracking-[0.16em]"
           style={{ color: 'var(--hmi-ink-dim)' }}
         >
           thinking
@@ -417,7 +417,7 @@ const ThinkingLine = memo(function ThinkingLine({ text }: { text: string }) {
           <button
             type="button"
             onClick={() => setOpen((v) => !v)}
-            className="font-mono text-[9px] uppercase tracking-wider hover:underline"
+            className="font-mono text-label-sm uppercase tracking-wider hover:underline"
             style={{ color: 'var(--hmi-cyan)' }}
           >
             {open ? 'less' : 'more'}
@@ -425,7 +425,7 @@ const ThinkingLine = memo(function ThinkingLine({ text }: { text: string }) {
         )}
       </div>
       <div
-        className={`whitespace-pre-wrap text-[12px] italic leading-relaxed ${open ? '' : 'line-clamp-3'}`}
+        className={`whitespace-pre-wrap text-ui italic leading-relaxed ${open ? '' : 'line-clamp-3'}`}
         style={{ color: 'var(--hmi-ink-dim)' }}
       >
         {text}
@@ -469,19 +469,19 @@ const ToolLine = memo(function ToolLine({
         className="group/tool flex w-full items-center gap-2 text-left"
       >
         <span
-          className="shrink-0 font-mono text-[10px] font-semibold uppercase tracking-[0.12em]"
+          className="shrink-0 font-mono text-label font-semibold uppercase tracking-[0.12em]"
           style={{ color: 'var(--hmi-cyan)' }}
         >
           {call.name}
         </span>
         <span
-          className="min-w-0 flex-1 truncate font-mono text-[12px]"
+          className="min-w-0 flex-1 truncate font-mono text-ui"
           style={{ color: 'var(--hmi-ink)' }}
         >
           {headline}
         </span>
         <span
-          className="shrink-0 font-mono text-[10px] opacity-50 transition-opacity group-hover/tool:opacity-90"
+          className="shrink-0 font-mono text-label opacity-50 transition-opacity group-hover/tool:opacity-90"
           style={{ color: 'var(--hmi-ink-dim)' }}
         >
           {open ? '−' : '+'}
@@ -558,15 +558,15 @@ function Pane({
       className="rounded-[4px] border-l-2 py-1.5 pl-3 pr-2"
       style={{
         borderColor: error
-          ? 'var(--color-dismiss)'
+          ? 'var(--color-alarm)'
           : 'color-mix(in srgb, var(--hmi-cyan) 40%, transparent)',
         background: 'var(--hmi-code-bg)',
       }}
     >
       <div className="mb-1 flex items-center gap-2">
         <span
-          className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em]"
-          style={{ color: error ? 'var(--color-dismiss)' : 'var(--hmi-ink-dim)' }}
+          className="font-mono text-label-sm font-semibold uppercase tracking-[0.16em]"
+          style={{ color: error ? 'var(--color-alarm)' : 'var(--hmi-ink-dim)' }}
         >
           {label}
         </span>
@@ -574,7 +574,7 @@ function Pane({
           <button
             type="button"
             onClick={() => setExpanded((v) => !v)}
-            className="font-mono text-[9px] uppercase tracking-wider hover:underline"
+            className="font-mono text-label-sm uppercase tracking-wider hover:underline"
             style={{ color: 'var(--hmi-cyan)' }}
           >
             {expanded ? 'less' : `${text.length} ch`}
@@ -592,8 +592,8 @@ function Pane({
         </button>
       </div>
       <pre
-        className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed"
-        style={{ color: error ? 'var(--color-dismiss)' : 'var(--hmi-ink)' }}
+        className="max-h-[420px] overflow-auto whitespace-pre-wrap break-words font-mono text-reported leading-relaxed"
+        style={{ color: error ? 'var(--color-alarm)' : 'var(--hmi-ink)' }}
       >
         {shown}
         {truncatable && !expanded ? '…' : ''}
@@ -614,14 +614,14 @@ function Verdict({ conversation }: { conversation: Conversation }) {
           style={{ background: st.light, boxShadow: `0 0 8px ${st.light}` }}
         />
         <span
-          className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em]"
+          className="font-mono text-label font-semibold uppercase tracking-[0.18em]"
           style={{ color: st.light }}
         >
           {st.label}
         </span>
       </div>
       <div
-        className="max-w-none text-[12.5px] leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-[11px] [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
+        className="max-w-none text-card-title leading-relaxed [&_code]:rounded-[3px] [&_code]:bg-[color:var(--hmi-code-bg)] [&_code]:px-1 [&_code]:font-mono [&_code]:text-reported [&_li]:my-0.5 [&_p]:my-1.5 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5"
         style={{ color: 'var(--hmi-ink)' }}
       >
         <MemoMarkdown>{conversation.ResultSummary}</MemoMarkdown>
@@ -634,7 +634,7 @@ function EmptyReadout({ active }: { active: boolean }) {
   return (
     <div className="flex h-40 items-center justify-center">
       <span
-        className="inline-flex items-center gap-2 font-mono text-[11px]"
+        className="inline-flex items-center gap-2 font-mono text-reported"
         style={{ color: 'var(--hmi-ink-dim)' }}
       >
         {active && (
