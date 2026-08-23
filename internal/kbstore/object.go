@@ -24,9 +24,11 @@ type objectKB struct {
 // storage.Storage (storage.NewFS) without a live S3.
 func NewObject(blobs storage.Storage) KB { return &objectKB{blobs: blobs} }
 
-// rootPrefix is the key namespace for one root of one team's KB. It always ends
-// in a trailing slash so a List over it cannot match a sibling team whose id is
-// a prefix of this one, nor a sibling root that starts with the same letters.
+// rootPrefix is the OBJECT-KEY namespace for one root of one team's KB — not a
+// filesystem path; the local backend builds its own from paths.TeamKBDir, and
+// that one carries no org segment. It always ends in a trailing slash so a List
+// over it cannot match a sibling team whose id is a prefix of this one, nor a
+// sibling root that starts with the same letters.
 func rootPrefix(orgID, teamID string, root Root) string {
 	return orgID + "/teams/" + teamID + "/kb/" + string(root) + "/"
 }

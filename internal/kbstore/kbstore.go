@@ -2,10 +2,20 @@
 // and is the ONLY place those keys and paths are built. Callers address a KB
 // entry by (orgID, teamID, root, path) and never hand-assemble anything.
 //
-// One KB per team, two roots:
+// One KB per team, two roots. In multi mode that is an OBJECT KEY, handed to
+// the blob store as-is (the bucket is the store's, not ours):
 //
 //	<orgID>/teams/<teamID>/kb/private/<path…>
 //	<orgID>/teams/<teamID>/kb/shared/<path…>
+//
+// In local mode it is a path under the state root, and it carries NO org
+// segment — paths.OrgRoot collapses it at N=1, so the same team KB reads:
+//
+//	~/.triagefactory/teams/<teamID>/kb/private/<path…>
+//	~/.triagefactory/teams/<teamID>/kb/shared/<path…>
+//
+// The two forms differ only in that prefix; everything from the root name down
+// is identical, which is what lets one interface serve both.
 //
 // Visibility is the prefix, not an ACL: `private/` is readable only through
 // its own team's gate, `shared/` is readable by any member of the org.
@@ -20,11 +30,12 @@
 //
 // Two backends, chosen by runtime mode, behind one KB interface:
 //
-//   - multi: the shared internal/storage object seam (SeaweedFS S3), so every
-//     pod reads the same bytes and no executor owns a team's knowledge.
-//   - local: plain files under <OrgRoot>/teams/<teamID>/kb/{private,shared},
-//     with no object store in the picture at all — the single-machine posture,
-//     where the on-disk copy IS the durable copy.
+//   - multi: the shared internal/storage object seam (SeaweedFS S3), addressed
+//     by the key above, so every pod reads the same bytes and no executor owns
+//     a team's knowledge.
+//   - local: plain files at paths.TeamKBDir, with no object store in the
+//     picture at all — the single-machine posture, where the on-disk copy IS
+//     the durable copy and an operator can edit it with an ordinary editor.
 package kbstore
 
 import (
