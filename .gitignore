@@ -23,6 +23,7 @@ _scratch/
 _tfac/
 .claude/*
 .codex/*
+!.codex/hooks.json
 !.claude/settings.json
 docs/triagefactory-spec.md
 docs/oauth-smoke.html
