@@ -462,6 +462,37 @@ func dedupeNonEmpty(ids []string) []string {
 	return out
 }
 
+// MemberIDsSystem — identical query to the SQLite impl so both backends pin to
+// one result. Admin pool: the emitter is a claims-free notifier, and the
+// audience must not vary with who made the change.
+func (s *teamsStore) MemberIDsSystem(ctx context.Context, orgID, teamID string) ([]string, error) {
+	// memberships ⋈ teams, with the org in the WHERE clause as defense in
+	// depth: memberships carries no org_id (it FKs to teams), so the join is
+	// also what drops a dangling row whose team is gone. No deleted_at filter
+	// — archiving hides nothing a member could already see, and their KB page
+	// would otherwise go silently stale.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT DISTINCT m.user_id::text
+		FROM memberships m
+		JOIN teams t ON t.id = m.team_id
+		WHERE t.org_id = $1 AND m.team_id = $2
+		ORDER BY 1 ASC
+	`, orgID, teamID)
+	if err != nil {
+		return nil, fmt.Errorf("list team member ids: %w", err)
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan member user_id: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (s *teamsStore) TeamIDsForUserInOrgSystem(ctx context.Context, orgID, userID string) ([]string, error) {
 	// memberships ⋈ teams, scoped to the org. The join to teams is what
 	// applies the org filter (memberships carries no org_id — it FKs to

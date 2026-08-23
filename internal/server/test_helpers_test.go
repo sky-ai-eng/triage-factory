@@ -18,6 +18,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -65,7 +66,12 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
 	stores := sqlitestore.New(database)
-	return New(database, stores)
+	s := New(database, stores)
+	// The team knowledge base, rooted in a per-test temp dir: the real
+	// local-mode backend rather than a stub, so the KB routes are exercised
+	// against the same plain-files store a local install runs on.
+	s.SetTeamKB(kbstore.NewLocalAt(t.TempDir()))
+	return s
 }
 
 // configureEventSources binds the test org's GitHub and Jira credentials in a

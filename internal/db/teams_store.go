@@ -328,6 +328,25 @@ type TeamsStore interface {
 	// map without a query.
 	NamesForIDsSystem(ctx context.Context, orgID string, teamIDs []string) (map[string]string, error)
 
+	// MemberIDsSystem returns the distinct, sorted ids of every user enrolled
+	// on teamID — the websocket delivery scope for a team_knowledge_updated
+	// event whose changed root is `private`, which is readable through this
+	// team's gate and nowhere else. orgID is checked in the WHERE clause as
+	// defense in depth so a team id from another tenant resolves to nobody.
+	//
+	// Every role is included, viewers too: a viewer reads the team's KB page
+	// and must not be left looking at a stale listing. Archived teams are
+	// included for the same reason repo recipients include them — archiving
+	// force-stops a team's work without hiding anything it can already see.
+	//
+	// Admin pool in Postgres: the emitter is a claims-free notifier called at
+	// the write site, and the answer must not vary with who happened to make
+	// the change. Called fresh per emission, never cached, so a membership
+	// change takes effect on the next event — a connection-captured audience
+	// goes stale into exactly the disclosure this scoping prevents. Local mode
+	// never calls it (N=1 broadcasts org-wide).
+	MemberIDsSystem(ctx context.Context, orgID, teamID string) ([]string, error)
+
 	// ListMembers returns one page of teamID's members with their team role
 	// and host-scoped identity readiness, plus the unpaged total, ordered by
 	// display name then user id for a stable roster — the team-tier sibling of

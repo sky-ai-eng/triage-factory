@@ -33,6 +33,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
@@ -153,6 +154,10 @@ type App struct {
 	// blueprint workspace snapshots. Built once in buildExecution and
 	// shared — the spawner gets it via SetStorage.
 	blobStore storage.Storage
+	// teamKB is the process-wide team knowledge-base seam (kbstore.New): the
+	// blob store above in multi, plain files under the state root in local.
+	// Both the HTTP surface and the delegation spawner read through it.
+	teamKB kbstore.KB
 
 	// placementResolver computes the capacity-weighted rendezvous placement
 	// (TFAC-587): the (org, repo) affinity stamp the spawner writes at enqueue

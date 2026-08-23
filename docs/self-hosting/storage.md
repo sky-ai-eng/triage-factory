@@ -87,3 +87,37 @@ override (and remove `seaweedfs-postinit` from `triagefactory`'s `depends_on` in
 that override) if you don't want it running. Pre-create the bucket on the hosted
 side (the `seaweedfs-postinit` sidecar only ensures the bucket on the bundled
 SeaweedFS).
+
+## Team knowledge bases (multi mode)
+
+The same blob store is also where each **team's knowledge base** lives — the
+documents people upload on the Knowledge page — under keys of the form:
+
+```
+<orgID>/teams/<teamID>/kb/private/<path…>
+<orgID>/teams/<teamID>/kb/shared/<path…>
+```
+
+**Visibility is the prefix, not a setting.** A document under `private/` is
+readable only through its own team's gate; one under `shared/` is readable by
+any member of the org. Publishing is a move between the two roots, which is why
+there is no visibility column in the database and nothing to keep in step with
+the object store. The layout under each root is an ordinary folder tree; every
+path segment is validated (no traversal, no separators inside a segment, no dot
+files) at the one place keys are built, `internal/kbstore`.
+
+Every pod is equal here: control pods serve the read and write routes through
+the store, and an executor stages a run's knowledge from it at claim — the task
+team's whole KB plus every other team's `shared/` root, copied into the run tree
+under `_tfac/knowledge/`. There is no pod-local durable copy; a staged tree is
+rebuilt from the store on every launch and is deliberately excluded from a
+parked run's workspace snapshot.
+
+Knowledge is binary-safe: the same multipart uploader that carries workspace
+snapshots carries an uploaded document, so a diagram or a screenshot files
+alongside a runbook.
+
+Local mode keeps knowledge as plain files under the state root
+(`~/.triagefactory/teams/<teamID>/kb/{private,shared}/…`) and constructs no blob
+store for it — the on-disk copy is the durable copy, and an operator can edit
+their own team's notes with an ordinary text editor.

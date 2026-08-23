@@ -364,9 +364,22 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// It is a DB read and a tree copy that can run large, and the last thing
 	// between a rehydrated workspace and the agent starting — so one span
 	// covers the on-disk context the agent will read.
-	_, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
+	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
+
+	// The team knowledge base, copied into ./_tfac/knowledge/: the task team's
+	// own two roots plus every other team's published one, resolved from
+	// cfg.teamID alone. Still an in-tree write, so a warm step keeps whatever
+	// the first step's copy left there — a knowledge base edited mid-blueprint
+	// does not reach later steps, and the manifest describes what THIS launch
+	// staged rather than what the tree happens to hold.
+	knowledge := ""
+	if handedOff {
+		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
+	} else {
+		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
+	}
 
 	// A blueprint's steps share one tree and all write the same memory filename,
 	// so a step starting a fresh conversation must not be credited with whatever
@@ -418,7 +431,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// authorizes whatever branch the worktree lands on.
 	branchTemplate := s.resolveBranchTemplate(context.WithoutCancel(ctx), task)
 	runURL := s.runURLFor(orgID, conversationID)
-	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL)
+	prompt := buildPrompt(task, metadataJSON, cfg.prSkeleton, mission, cfg.scope, cfg.toolsRef, agentBin, agentRunRoot, branchTemplate, runURL, knowledge)
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, domain.ClaimPhaseAgentStarting)
 	if ctx.Err() != nil {

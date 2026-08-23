@@ -24,6 +24,7 @@ import TeamSettings from './pages/team/TeamSettings'
 import Marketplace from './pages/Marketplace'
 import Repos from './pages/Repos'
 import Factory from './pages/Factory'
+import Knowledge from './pages/knowledge/Knowledge'
 import Fleet from './pages/Fleet'
 import Usage from './pages/Usage'
 import Overview from './pages/Overview'
@@ -158,6 +159,10 @@ function LocalRoutes() {
         <Route path="/board" element={<Board />} />
         <Route path="/runs/:conversationID" element={<RunDetail />} />
         <Route path="/prs" element={<PRDashboard />} />
+        {/* Team knowledge — the page in BOTH mode tables. Local has knowledge
+            bases too: one team's worth, stored as plain files under the state
+            root instead of in an object store. */}
+        <Route path="/knowledge" element={<Knowledge />} />
         <Route path="/prompts" element={<Prompts />} />
         <Route path="/repos" element={<Repos />} />
         <Route path="/usage" element={<Usage />} />
@@ -243,6 +248,7 @@ function MultiRoutes() {
             <Route path="board" element={<Board />} />
             <Route path="runs/:conversationID" element={<RunDetail />} />
             <Route path="prs" element={<PRDashboard />} />
+            <Route path="knowledge" element={<Knowledge />} />
             {/* Prompts is its own destination. It used to redirect into a tab
                 on /team, which is where the editor lived before the rail gave
                 Prompts a row of its own with Library, Marketplace and Bindings

@@ -23,9 +23,12 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
+	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -79,7 +82,15 @@ type Server struct {
 	// single-pod deployment behaves exactly as before this existed — only
 	// the local s.ws.CloseUserConnections closes anything.
 	wsBackplane WSKicker
-	spawner     *delegate.Spawner
+	// teamKB is the team knowledge-base seam (internal/kbstore) the /kb routes
+	// read and write through — the object store in multi, plain files under the
+	// state root in local. Wired via SetTeamKB after construction, because the
+	// blob store it is built over is resolved with the rest of the execution
+	// subsystem; teamKBNotifier is its websocket half, built alongside it so
+	// the two can never disagree about which deployment shape they are in.
+	teamKB         kbstore.KB
+	teamKBNotifier *knowledgeevent.Notifier
+	spawner        *delegate.Spawner
 	// reconciler backs the Tier-2 conversation-scoped artifact refresh endpoint
 	// (TFAC-464) — the same Reconciler the background Tier-1 Manager runs.
 	// Wired via SetReconciler after construction; nil until then, so the
@@ -766,6 +777,17 @@ func (s *Server) routes() {
 	// collide with the top-level /api/repos registry resource.
 	s.api("GET /api/teams/{team_id}/github-repos", s.handleTeamReposGet)
 	s.apiMutating("PUT /api/teams/{team_id}/github-repos", s.handleTeamReposPut)
+	// The team knowledge base. Addressed at the team that OWNS the knowledge,
+	// in both modes: `shared/` is org-readable, so an org member browsing
+	// another team's published notes calls these same routes on THAT team id
+	// and the roots they may read narrow to shared alone (team_knowledge.go).
+	// The per-file routes carry "<root>/<path…>" in one wildcard segment,
+	// which is the address a listing entry renders and a person can copy.
+	s.apiMutating("POST /api/teams/{team_id}/kb/list", s.handleTeamKnowledgeList)
+	s.apiMutating("POST /api/teams/{team_id}/kb/files", s.handleTeamKnowledgeUpload)
+	s.apiMutating("POST /api/teams/{team_id}/kb/move", s.handleTeamKnowledgeMove)
+	s.api("GET /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeRead)
+	s.apiMutating("DELETE /api/teams/{team_id}/kb/{path...}", s.handleTeamKnowledgeDelete)
 	s.api("GET /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsGet)
 	s.apiMutating("PUT /api/teams/{team_id}/github-groups", s.handleTeamGitHubGroupsPut)
 	s.apiMutating("POST /api/teams/archived/list", th.handleTeamArchivedList)
@@ -1456,6 +1478,23 @@ func (s *Server) SetStatic(f fs.FS) {
 // SetSpawner sets the delegation spawner for agent conversations.
 func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
+}
+
+// SetTeamKB wires the team knowledge-base seam and its websocket notifier.
+// Called once at startup, after the blob store the multi-mode backend is built
+// over has been resolved.
+//
+// The notifier's audience resolution is the mode branch: multi resolves a
+// private-root change to the team's members at emit time, while local passes
+// nil and broadcasts org-wide, because N=1 has one user and no team boundary
+// to mirror.
+func (s *Server) SetTeamKB(kb kbstore.KB) {
+	s.teamKB = kb
+	var members knowledgeevent.MembersFunc
+	if runmode.Current() == runmode.ModeMulti {
+		members = s.teams.MemberIDsSystem
+	}
+	s.teamKBNotifier = knowledgeevent.NewNotifier(s.ws, members)
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).
