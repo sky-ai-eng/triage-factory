@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/reachability"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -25,7 +25,7 @@ type reachabilityRequest struct {
 // handleGitHubReachability probes whether this deployment can reach the API
 // host behind a user-entered GitHub base URL — one of the three free-entry
 // host classes (github.com, a *.ghe.com data-residency tenant, or a typically
-// private GHES host). No auth is sent; the derived API base (ghclient.APIBase)
+// private GHES host). No auth is sent; the derived API base (ghbase.APIBase)
 // only needs to *answer*. Always 200 — the body's `reachable` flag is the
 // verdict, mirroring handleGitHubPreflightSSH, so the client tells "host
 // unreachable" apart from "the server errored". A malformed URL is the one
@@ -42,7 +42,7 @@ func handleGitHubReachability(w http.ResponseWriter, r *http.Request) {
 		invalidBaseURLField(w, "url")
 		return
 	}
-	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), ghclient.APIBase(base)))
+	writeJSON(w, http.StatusOK, reachability.Probe(r.Context(), ghbase.APIBase(base)))
 }
 
 // handleJiraReachability is the Jira equivalent: it probes the same host a

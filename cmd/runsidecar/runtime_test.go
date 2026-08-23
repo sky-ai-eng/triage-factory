@@ -130,8 +130,10 @@ func TestRuntime_RejectsAnotherSidecarsBundle(t *testing.T) {
 func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 	// Fake api.github.com that reports back the Authorization it received.
 	gotAuth := make(chan string, 1)
+	gotPath := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth <- r.Header.Get("Authorization")
+		gotPath <- r.URL.Path
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
@@ -140,12 +142,15 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	// Relay a bundle carrying an LLM key (so the LLM proxy starts) and a
-	// repo-scoped GitHub token.
+	// Relay a bundle carrying an LLM key (so the LLM proxy starts), a
+	// repo-scoped GitHub token, and the host that token belongs to — the
+	// sidecar takes the proxy's upstream from BaseURL, so the fake server
+	// stands in for a GHES host and is reached at its /api/v3 mount.
 	bundle := &credbundle.Bundle{
 		LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
 		GitHub: &credbundle.GitHubCreds{
 			Mode:       "app",
+			BaseURL:    upstream.URL,
 			RepoTokens: map[string]credbundle.RepoToken{"acme/widgets": {Token: "ghs_REALINSTALLTOKEN"}},
 		},
 	}
@@ -155,9 +160,8 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 
 	var res sidecarproto.StartProxiesResult
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:        "127.0.0.1",
-		GitHubAPIEnabled:  true,
-		GitHubAPIUpstream: upstream.URL,
+		HostVethIP:       "127.0.0.1",
+		GitHubAPIEnabled: true,
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)
 	}
@@ -181,6 +185,11 @@ func TestRuntime_GitHubAPIProxyInjectsBundleToken(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream never received the proxied request")
+	}
+	// The bundle's BaseURL is what decided where the request landed: a
+	// non-github host is a GHES base, so its REST root is the /api/v3 mount.
+	if got := <-gotPath; got != "/api/v3/repos/acme/widgets/pulls/1" {
+		t.Errorf("upstream path = %q, want the bundle-derived GHES REST mount", got)
 	}
 }
 
@@ -645,5 +654,34 @@ func TestRuntime_SandboxNeverGetsLLMChannel(t *testing.T) {
 	}
 	if !has(res.LLMEnv, "ANTHROPIC_BASE_URL") {
 		t.Errorf("the executor got no provider address to dial: %v", res.LLMEnv)
+	}
+}
+
+// TestGitHubUpstreamsFromBundle pins the one derivation every GitHub lane in
+// this process reads. The host arrives sealed beside the token it belongs to,
+// so nothing here can be pointed at a host the credential was not resolved
+// for — and a bundle with no GitHub half still answers, because the lanes it
+// would feed are simply never started.
+func TestGitHubUpstreamsFromBundle(t *testing.T) {
+	for _, tt := range []struct {
+		name, base, wantGit, wantAPI string
+		noGitHub                     bool
+	}{
+		{name: "public", base: "https://github.com", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "unconfigured", base: "", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "no_github_half", noGitHub: true, wantGit: "https://github.com", wantAPI: "https://api.github.com"},
+		{name: "ghes", base: "https://ghes.acme.com", wantGit: "https://ghes.acme.com", wantAPI: "https://ghes.acme.com/api/v3"},
+		{name: "data_residency", base: "https://octocorp.ghe.com", wantGit: "https://octocorp.ghe.com", wantAPI: "https://api.octocorp.ghe.com"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			b := &credbundle.Bundle{}
+			if !tt.noGitHub {
+				b.GitHub = &credbundle.GitHubCreds{Mode: "app", BaseURL: tt.base}
+			}
+			git, api := githubUpstreams(b)
+			if git != tt.wantGit || api != tt.wantAPI {
+				t.Errorf("githubUpstreams = (%q, %q), want (%q, %q)", git, api, tt.wantGit, tt.wantAPI)
+			}
+		})
 	}
 }

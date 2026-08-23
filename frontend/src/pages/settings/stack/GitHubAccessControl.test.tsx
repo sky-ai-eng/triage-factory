@@ -39,8 +39,6 @@ import type { GitHubAppStatus, GitHubAppWebhookHealth } from '../../../lib/githu
 import { initialWizardState } from '../../setup/steps'
 import type { StepContext, WizardState } from '../../setup/types'
 
-const BASE_URL = 'https://github.example.com'
-
 function renderControl(over: Partial<WizardState> = {}) {
   const patch = vi.fn()
   const reload = vi.fn()
@@ -58,7 +56,7 @@ function renderControl(over: Partial<WizardState> = {}) {
     patch,
     advance: () => {},
   }
-  render(<GitHubAccessControl ctx={ctx} baseUrl={BASE_URL} reload={reload} />)
+  render(<GitHubAccessControl ctx={ctx} reload={reload} />)
   return { patch, reload }
 }
 
@@ -111,7 +109,7 @@ describe('GitHubAccessControl · PAT rotation', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Replace token' }))
     await waitFor(() => {
-      expect(credMocks.connectGitHubPAT).toHaveBeenCalledWith('org-1', BASE_URL, 'ghp_new')
+      expect(credMocks.connectGitHubPAT).toHaveBeenCalledWith('org-1', 'ghp_new')
     })
     await waitFor(() => expect(reload).toHaveBeenCalled())
     expect(patch).toHaveBeenCalledWith({ hasGitHubPat: true, githubPatLogin: 'acme-bot-2' })

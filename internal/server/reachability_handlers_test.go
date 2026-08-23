@@ -111,7 +111,7 @@ func TestHandleJiraReachability_BadURL(t *testing.T) {
 // TestNormalizeReachabilityURL pins the validator the handlers gate on. It is
 // the hermetic half of the *.ghe.com chain: this confirms a data-residency
 // host passes through untouched (a full handler probe of api.<tenant>.ghe.com
-// would force a flaky external DNS lookup), while internal/github.APIBase's
+// would force a flaky external DNS lookup), while ghbase.APIBase's
 // own table covers octocorp.ghe.com -> api.octocorp.ghe.com.
 func TestNormalizeReachabilityURL(t *testing.T) {
 	good := []struct{ in, want string }{

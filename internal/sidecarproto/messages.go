@@ -37,12 +37,10 @@ type StartProxiesBody struct {
 
 	// GitEnabled requests the git-over-HTTPS credential proxy. When false the
 	// run pre-clones nothing and pushes nowhere (a prompt-only or Jira-only
-	// run) and no git proxy is bound.
+	// run) and no git proxy is bound. Which host it forwards to is not asked
+	// here: every GitHub lane derives that from the sealed bundle's own
+	// BaseURL, so the token and the host it belongs to arrive together.
 	GitEnabled bool `json:"git_enabled"`
-
-	// GitUpstream is the real git host base (GHES override or github.com) the
-	// git proxy forwards to; empty defaults to github.com sidecar-side.
-	GitUpstream string `json:"git_upstream,omitempty"`
 
 	// IdentityConfigPairs are the org commit-identity git config (key,value)
 	// pairs (user.name/user.email) folded into the sandbox's GIT_CONFIG_*
@@ -51,10 +49,9 @@ type StartProxiesBody struct {
 
 	// GitHubAPIEnabled requests the GitHub REST credential proxy — the one
 	// the orchestrator's own GetPR + agenthost gh verbs route through so they
-	// hold only a placeholder, never the real token. Upstream is the REST API
-	// base (api.github.com or the GHES /api/v3 base); empty defaults host-side.
-	GitHubAPIEnabled  bool   `json:"github_api_enabled,omitempty"`
-	GitHubAPIUpstream string `json:"github_api_upstream,omitempty"`
+	// hold only a placeholder, never the real token. The REST mount is derived
+	// sidecar-side from the bundle's BaseURL.
+	GitHubAPIEnabled bool `json:"github_api_enabled,omitempty"`
 
 	// JiraAPIEnabled requests the Jira REST credential proxy for the
 	// orchestrator's agenthost jira verbs. Upstream is the org's Jira base;
@@ -66,11 +63,10 @@ type StartProxiesBody struct {
 	// GHChannelEnabled requests the real-gh credential-injector proxy — the
 	// TLS listener the sandboxed `gh` binary reaches via GH_HOST, holding only a
 	// per-run placeholder while the sidecar injects the team-set-scoped token
-	// upstream. GHChannelUpstream is the org's REST API base (api.github.com or a
-	// GHES /api/v3 base); empty defaults to api.github.com sidecar-side. HostVethIP
-	// is reused as the injector's TLS SAN so gh's forced-https verification passes.
-	GHChannelEnabled  bool   `json:"gh_channel_enabled,omitempty"`
-	GHChannelUpstream string `json:"gh_channel_upstream,omitempty"`
+	// upstream. It shares the REST mount the GitHub proxy derives from the
+	// bundle. HostVethIP is reused as the injector's TLS SAN so gh's
+	// forced-https verification passes.
+	GHChannelEnabled bool `json:"gh_channel_enabled,omitempty"`
 
 	// AgentHost, when non-nil, asks the sidecar to ALSO host the agenthost
 	// socket server for this run — moving the hostile-input exec verb parser
