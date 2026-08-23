@@ -333,7 +333,7 @@ func IsNoCredentials(err error) bool {
 
 // SystemEnvResolver adapts a Resolver to the agentproc.RunOptions.LLMResolver
 // shape for a brain-side system consumer (scorer / profiler / classifier /
-// curator) with a stable RoleSessionName — a brain-bound mint carrying NO
+// model-probe) with a stable RoleSessionName — a brain-bound mint carrying NO
 // network condition. Returns nil when r is nil (local mode / ambient) so the
 // consumer keeps Run's built-in resolution, unchanged. A mint failure
 // surfaces from the returned func so the consumer skips just that org's cycle

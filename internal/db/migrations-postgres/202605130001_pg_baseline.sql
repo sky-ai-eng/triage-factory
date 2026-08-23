@@ -1015,7 +1015,7 @@ CREATE TABLE public.org_settings (
     background_jobs_model text DEFAULT ''::text NOT NULL,
     -- Org-wide daily LLM spend cap (TFAC-477). NULL = no cap; the app layer also
     -- treats 0 as "no cap". When the org's spend for the current UTC calendar day
-    -- (summed across every category — autonomous + manual + curator + system
+    -- (summed across every category — autonomous + manual + system
     -- overhead) is at or above this value, the delegation choke point
     -- (Spawner.Delegate) refuses all new agent runs, a runaway-spend fuse. Mirrors
     -- the nullable max_llm_model_tier shape above; in-flight runs are unaffected
@@ -1196,7 +1196,6 @@ CREATE TABLE public.projects (
     visibility text DEFAULT 'team'::text NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
-    curator_session_id text,
     jira_project_key text,
     linear_project_key text,
     spec_authorship_blueprint_id text,
@@ -1466,8 +1465,8 @@ CREATE TABLE public.messages (
     -- result the flat text column can't carry.
     content_blocks jsonb,
     -- delivered=false marks a durable pending input (a steer, follow-up,
-    -- staged injection, or curator context notice) not yet folded into any
-    -- context assembly. Ordering among pending rows is insertion order.
+    -- or staged injection) not yet folded into any context assembly.
+    -- Ordering among pending rows is insertion order.
     -- Two different mechanisms carry exactly-once consumption, and which
     -- one applies is the consumer's, not this column's: the pending-input
     -- flush claims its rows in a single UPDATE … RETURNING predicated on
@@ -1554,7 +1553,7 @@ CREATE TABLE public.conversation_worktrees (
 
 -- conversations is the durable agent-context table: one row per transcript
 -- the system can rebuild for a model, regardless of surface. A delegated
--- task run, a curator chat, a future interactive session, and a future
+-- task run, a future interactive session, and a future
 -- subagent are all conversations. Per-engagement execution state (which
 -- executor drove it, when, under which sealed credentials, at what reported
 -- duration/turn telemetry) lives on claims (see the multi-mode machinery
@@ -1565,21 +1564,18 @@ CREATE TABLE public.conversations (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     -- type names the owning surface: 'delegation' (task runs — every
-    -- blueprint step today), 'curator' (per-(project, creator) chat),
-    -- 'interactive' (reserved: the taskless "pick repos and type" surface),
-    -- or a namespaced 'subagent:<kind>' ('subagent:clone',
-    -- 'subagent:explore', … — never the bare word). App-validated, no value
-    -- CHECK (house pattern, mirrors origin/source).
+    -- blueprint step today), 'interactive' (reserved: the taskless "pick
+    -- repos and type" surface), or a namespaced 'subagent:<kind>'
+    -- ('subagent:clone', 'subagent:explore', … — never the bare word).
+    -- App-validated, no value CHECK (house pattern, mirrors origin/source).
     type text DEFAULT 'delegation'::text NOT NULL,
     creator_user_id uuid,
     -- team_id is nullable: delegation conversations always carry their
-    -- team (pinned via the visibility CHECK below); a curator conversation
-    -- snapshots its project's team at creation, which is NULL for a
-    -- private/org project (spend attribution, not access control).
+    -- team (pinned via the visibility CHECK below).
     team_id uuid,
     visibility text DEFAULT 'team'::text NOT NULL,
     -- task_id / prompt_id are NULLABLE so a conversation need not descend
-    -- from a task or a saved prompt (curator/interactive/subagent rows).
+    -- from a task or a saved prompt (interactive/subagent rows).
     -- conversations_origin_requires_parents pins them for origin
     -- 'blueprint' (every delegation conversation today).
     task_id uuid,
@@ -1587,7 +1583,7 @@ CREATE TABLE public.conversations (
     trigger_id uuid,
     trigger_type text DEFAULT 'manual'::text NOT NULL,
     -- origin discriminates blueprint-step delegation from other creation
-    -- modes ('curator', future 'interactive'); app-validated (no value
+    -- modes (future 'interactive'); app-validated (no value
     -- CHECK). See the SQLite twin.
     origin text DEFAULT 'blueprint'::text NOT NULL,
     -- runtime picks the executing engine: 'sdk' (the Claude Code SDK
@@ -1617,8 +1613,7 @@ CREATE TABLE public.conversations (
     -- nothing else touches it.
     status text,
     model text,
-    -- sdk_session_id is the SDK-runtime resume handle, one column for every
-    -- conversation type (delegated and curator turns alike). Meaningless
+    -- sdk_session_id is the SDK-runtime resume handle. Meaningless
     -- (and left NULL) under runtime='native', where the message rows are
     -- the resume state.
     sdk_session_id text,
@@ -1648,17 +1643,13 @@ CREATE TABLE public.conversations (
     -- keys an open conversation off its last park.
     parked_at timestamp with time zone,
     -- archived_at retires a conversation from its surface's "current" view
-    -- without deleting history — the curator's reset/new-chat mechanism.
+    -- without deleting history.
     -- NULL = live. An archived conversation is never claimed again.
     archived_at timestamp with time zone,
     actor_agent_id uuid,
-    -- project_id anchors a curator conversation to its project (knowledge
-    -- base, homing, cascade-delete). NULL for every other type.
-    project_id uuid,
     -- parent_conversation_id links a subagent conversation to the
-    -- conversation that spawned it. Scoping anchors (task_id, or
-    -- project_id + creator_user_id) are denormalized from the parent at
-    -- mint so RLS never recurses.
+    -- conversation that spawned it. Scoping anchors (e.g. task_id) are
+    -- denormalized from the parent at mint so RLS never recurses.
     parent_conversation_id uuid,
     blueprint_run_id uuid,
     blueprint_step_index integer,
@@ -1869,7 +1860,7 @@ CREATE TABLE public.team_settings (
     -- Per-team daily LLM spend cap (TFAC-482, EE/governance-gated). NULL = no cap;
     -- the app layer also treats 0 as "no cap". When the team's spend for the
     -- current UTC calendar day (summed over its team_id rows ONLY — system
-    -- overhead + non-team curator carry a NULL team_id and never count toward a
+    -- overhead carries a NULL team_id and never counts toward a
     -- team cap) is at or above this value, the delegation choke point refuses new
     -- agent runs FOR THAT TEAM. Org-admin-configured (a team admin cannot set
     -- their own team's cap) and enforced only while the governance entitlement is
@@ -3081,9 +3072,6 @@ CREATE INDEX project_knowledge_org_idx ON public.project_knowledge USING btree (
 
 CREATE INDEX conversations_actor_agent_idx ON public.conversations USING btree (actor_agent_id) WHERE (actor_agent_id IS NOT NULL);
 
--- The curator's conversation lookup: one live conversation per
--- (project, creator); archived rows excluded by the app-side predicate.
-CREATE INDEX idx_conversations_project ON public.conversations USING btree (project_id, creator_user_id) WHERE (project_id IS NOT NULL);
 CREATE INDEX idx_conversations_parent ON public.conversations USING btree (parent_conversation_id) WHERE (parent_conversation_id IS NOT NULL);
 
 
@@ -3868,8 +3856,6 @@ ALTER TABLE ONLY public.conversations
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
-ALTER TABLE ONLY public.conversations
-    ADD CONSTRAINT conversations_project_id_org_id_fkey FOREIGN KEY (project_id, org_id) REFERENCES public.projects(id, org_id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.conversations
     ADD CONSTRAINT conversations_parent_id_org_id_fkey FOREIGN KEY (parent_conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
 
@@ -8664,8 +8650,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 -- rebalancer-written routing table.
 --
 -- Keyed (org_id, key_kind, key_value): key_kind is 'repo' (a delegation key,
--- key_value "owner/repo") or 'project' (a curator key, key_value a project
--- id). org_id is a plain text column (not a uuid FK) matching the rendezvous
+-- key_value "owner/repo"). org_id is a plain text column (not a uuid FK) matching the rendezvous
 -- key's own org fold and the instances-family convention — a pin is
 -- operational intent, not tenant content. pinned_instance_id / replicas are
 -- the two intents; a pin wins when both are set. Neither is FK-validated
@@ -8693,45 +8678,6 @@ ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 
 REVOKE ALL ON public.placement_overrides FROM PUBLIC;
 REVOKE ALL ON public.placement_overrides FROM anon, authenticated, service_role;
-
-
--- curator_homes (curator homing, spec §6.3): the durable (org, project) ->
--- home executor map. A curator session is the one *stateful* placement client
--- (sticky per-project cwd + shared-RO worktrees per (org, repo)); homing keeps
--- that cache on ~1 executor at N>1 (the TFAC-60/61 disk economics) AND makes
--- the session a singleton — the session lives at exactly one home, and every
--- control pod routes turns there, so a second control pod can't mint a second
--- live session for the same project.
---
--- The row is minted on the first turn from the capacity-weighted rendezvous
--- winner over live executors, kept sticky while the home's heartbeat stays
--- fresh (the hash is the initial map, this row pins it until death so a benign
--- fleet reshuffle never thrashes a warm cache), and re-minted by the next turn
--- once the home goes heartbeat-stale (re-home on death — the new executor
--- re-materializes worktrees via seed-on-demand, one cold blobless clone, rare
--- and self-healing). home_boot_epoch snapshots the home's registration epoch at
--- mint so a same-id/newer-boot home is legible.
---
--- Admin-pool-only / system table, same posture as instances / placement_-
--- overrides: pure placement coordination, never a browsable RLS surface. RLS
--- enabled with NO policy (deny-by-default to non-BYPASSRLS roles) + REVOKE ALL;
--- the admin pool does all I/O with org_id bound by argument.
-CREATE TABLE public.curator_homes (
-    org_id           text NOT NULL,
-    project_id       text NOT NULL,
-    home_instance_id text NOT NULL,
-    home_boot_epoch  bigint NOT NULL DEFAULT 0,
-    homed_at         timestamp with time zone NOT NULL DEFAULT now(),
-    updated_at       timestamp with time zone NOT NULL DEFAULT now()
-);
-
-ALTER TABLE ONLY public.curator_homes
-    ADD CONSTRAINT curator_homes_pkey PRIMARY KEY (org_id, project_id);
-
-ALTER TABLE public.curator_homes ENABLE ROW LEVEL SECURITY;
-
-REVOKE ALL ON public.curator_homes FROM PUBLIC;
-REVOKE ALL ON public.curator_homes FROM anon, authenticated, service_role;
 
 
 -- instance_stats: 1-minute telemetry samples, one row per pod per minute,
@@ -9028,8 +8974,8 @@ REVOKE ALL ON public.conversation_signals FROM anon, authenticated, service_role
 
 -- claims: one row per executor engagement with a conversation — the claim
 -- machinery that used to live as columns on runs (claimed_at / attempts /
--- executor_id / boot_epoch / cred_pubkey) and as whole rows in
--- curator_requests. A conversation is claimed (a row is minted here), driven
+-- executor_id / boot_epoch / cred_pubkey). A conversation is claimed (a row
+-- is minted here), driven
 -- for a while, and released; a retry or a resumed park is simply the next
 -- claim. At most one active (released_at IS NULL) claim per conversation,
 -- enforced below. Rows are immutable identity + terminal telemetry: the
@@ -9042,11 +8988,6 @@ CREATE TABLE public.claims (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     conversation_id uuid NOT NULL,
-    -- message_id is the queued turn this engagement was minted to drive —
-    -- curator pickups stamp it so failed (zero-message) claims stay
-    -- attributable to their exact turn; NULL for delegation claims and
-    -- pre-refactor history.
-    message_id bigint,
     executor_id text NOT NULL,
     -- boot_epoch pairs with executor_id (an instance's persistent id
     -- survives restarts); the boot self-sweep only releases claims where
@@ -9105,8 +9046,6 @@ ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.claims
     ADD CONSTRAINT claims_conversation_id_org_id_fkey FOREIGN KEY (conversation_id, org_id) REFERENCES public.conversations(id, org_id) ON DELETE CASCADE;
-ALTER TABLE ONLY public.claims
-    ADD CONSTRAINT claims_message_id_fkey FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE SET NULL;
 
 -- The single-active-claim invariant: a conversation has at most one live
 -- executor engagement at any moment.
@@ -9140,7 +9079,6 @@ ALTER TABLE ONLY public.messages
 
 
 -- claim_credentials: the sealed per-claim credential bundle channel — one
--- channel for both surfaces (delegated engagements and curator turns), one
 -- sealed bundle per engagement. An executor claims a conversation and parks
 -- the claim in phase='awaiting_credentials'; the brain resolves the
 -- engagement's
@@ -9377,7 +9315,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_s
 --
 
 -- Unified spend view: one row-per-spend shape UNION-ing the messages
--- ledger (both agent surfaces) and headless system jobs onto a single
+-- ledger (delegated conversations) and headless system jobs onto a single
 -- category axis. Placed here (not with the tables) because the historical
 -- tail position survives the table-order shuffle — every dependency
 -- already exists by here.
@@ -9385,28 +9323,21 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.workspace_snapshots TO tf_s
 -- The agent arm reads messages directly: a row participates when it
 -- carries tokens (an assistant row) or settled dollars (any cost-stamped
 -- row — the runtime's one-lump terminal stamp), attributed through the
--- owning conversation's team/creator/actor/trigger snapshot (curator
--- conversations carry NULL actor/trigger by construction). category:
--- curator conversations → 'curator'; delegation splits on trigger_type
--- (manual → per-user, anything else → autonomous); system jobs are
--- 'system_overhead' with the job carried as subtype. source_id is the
--- message id (system arm: the job row id), cast to text so the UNION's
--- column type is uniform.
+-- owning conversation's team/creator/actor/trigger snapshot. category:
+-- delegation splits on trigger_type (manual → per-user, anything else →
+-- autonomous); system jobs are 'system_overhead' with the job carried as
+-- subtype. source_id is the message id (system arm: the job row id), cast
+-- to text so the UNION's column type is uniform.
 --
 -- security_invoker = true is LOAD-BEARING and mandatory (PG 15+): the base
 -- tables' RLS (messages-through-conversation, conversations' visibility
 -- arms, system_llm_runs org) applies under the querying app-pool identity.
 CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
- SELECT
-        CASE c.type
-            WHEN 'delegation'::text THEN 'run'::text
-            ELSE 'curator'::text
-        END AS source,
+ SELECT 'run'::text AS source,
     (m.id)::text AS source_id,
     m.org_id,
     c.team_id,
         CASE
-            WHEN (c.type = 'curator'::text) THEN 'curator'::text
             WHEN (c.trigger_type = 'manual'::text) THEN 'manual'::text
             ELSE 'autonomous'::text
         END AS category,
@@ -9423,7 +9354,7 @@ CREATE VIEW public.llm_spend WITH (security_invoker='true') AS
     m.created_at AS occurred_at
    FROM (public.messages m
      JOIN public.conversations c ON (((c.id = m.conversation_id) AND (c.org_id = m.org_id))))
-  WHERE ((c.type = ANY (ARRAY['delegation'::text, 'curator'::text]))
+  WHERE ((c.type = 'delegation'::text)
      AND ((m.role = 'assistant'::text) OR (m.cost_usd IS NOT NULL)))
 UNION ALL
 
@@ -9580,10 +9511,6 @@ GRANT SELECT ON TABLE public.jira_project_status_rules TO tf_system;
 -- llm_spend is security_invoker: reading it needs SELECT on its own base
 -- tables too (conversations, claims, system_llm_runs), not just the view.
 GRANT SELECT ON TABLE public.llm_spend TO tf_system;
--- curator_homes: the control pod upserts the (org, project) -> home mapping at
--- turn dispatch and the executor claim loop reads it; the reaper/reset clears
--- it. All I/O is admin-pool with org_id bound by argument (curator homing).
-GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.curator_homes TO tf_system;
 GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- Slack provider policy ops (ee/slack/exec_provider_ops.go): the orchestrator
 -- serves the sidecar's relayed `exec slack` calls against these, resolving an

@@ -9,14 +9,14 @@ import (
 
 // SpendStore is a read-only aggregation over the llm_spend view (TFAC-472) —
 // the unified shape that UNION-ALLs conversation messages + system_llm_runs
-// onto the category axis (autonomous / manual / curator / system_overhead) so
-// the team dashboard + safety cap read from one place and totals reconcile with
-// the Anthropic bill. It owns no table; the view is the abstraction boundary.
+// onto the category axis (autonomous / manual / system_overhead) so the team
+// dashboard + safety cap read from one place and totals reconcile with the
+// Anthropic bill. It owns no table; the view is the abstraction boundary.
 //
 // Postgres / RLS: every method runs on the APP pool. The view is
 // security_invoker, so the base tables' existing RLS scopes the read under the
 // querying user's identity — a team member sees their team's spend but not
-// another team's, with system/curator rows visible at org scope. Wiring it to
+// another team's, with system rows visible at org scope. Wiring it to
 // the admin pool would bypass that and leak cross-team spend. SQLite is N=1 and
 // unscoped; both impls take orgID and filter on it as defense in depth.
 //
@@ -57,8 +57,8 @@ type SpendStore interface {
 	// safety cap (TFAC-477) reads it from Spawner.Delegate, which runs under
 	// context.Background() with no tf.current_org_id(): an app-pool read there
 	// would see nothing and the cap would never trip, so it MUST use this
-	// variant. Returns spend summed across EVERY team + curator + system row in
-	// the org (the runaway-spend fuse counts all categories). Mirrors
+	// variant. Returns spend summed across EVERY team + system row in the org
+	// (the runaway-spend fuse counts all categories). Mirrors
 	// OrgsStore.GetSettingsSystem / ArtifactStore.ListByConversationSystem. SQLite is N=1
 	// / no RLS, so it delegates to SpendByCategory.
 	SpendByCategorySystem(ctx context.Context, orgID string, since, until time.Time) ([]domain.SpendBucket, error)
@@ -67,9 +67,9 @@ type SpendStore interface {
 	// the same ADMIN-pool aggregate, plus `AND team_id = teamID`. The per-team
 	// daily spend cap (TFAC-482) reads it from Spawner.Delegate to sum a team's
 	// settled spend for today. Filtering on team_id automatically excludes the
-	// org's NULL-team rows — system overhead and curator turns on non-team
-	// projects — so a team cap never counts spend that isn't the team's (those
-	// belong to the org cap alone). Like SpendByCategorySystem it MUST use the
+	// org's NULL-team rows — system overhead, which is org-level — so a team
+	// cap never counts spend that isn't the team's (those belong to the org
+	// cap alone). Like SpendByCategorySystem it MUST use the
 	// admin pool: Delegate is claims-less, so an app-pool/RLS read would see
 	// nothing and the cap would never trip. SQLite is N=1 / no RLS, so it
 	// delegates to SpendByCategory with the same team filter applied.

@@ -1,3 +1,0 @@
-<context_changes>
-The user can change pinned repos or tracker links between turns by editing the project's settings. When that happens, you'll see a [system note] block prepended to the user's next message describing what changed (e.g. "Added repo X. Removed repo Y."). Treat those notes as ground truth — your earlier view of these values may be stale until you read the note. The user did not write the note; the system inserted it on their behalf, so respond to the user's actual question rather than acknowledging the note unless they ask about the change.
-</context_changes>

@@ -10,22 +10,21 @@ import (
 )
 
 // seedRenamedRepoDirs fabricates the on-disk shape a rename orphans: the old
-// slug's bare, a registered (cold) checkout for it, the shared curator
-// checkout, and a sibling repository's bare that must survive every case.
-func seedRenamedRepoDirs(t *testing.T) (bare, curator, sibling string) {
+// slug's bare, a registered (cold) checkout for it, and a sibling
+// repository's bare that must survive every case.
+func seedRenamedRepoDirs(t *testing.T) (bare, sibling string) {
 	t.Helper()
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
 
 	bare = paths.BareCacheDir(org, "octo", "api")
-	curator = paths.CuratorSharedRepoDir(org, "octo", "api")
 	sibling = paths.BareCacheDir(org, "octo", "api-gateway")
-	for _, dir := range []string{bare, curator, sibling} {
+	for _, dir := range []string{bare, sibling} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("seed %s: %v", dir, err)
 		}
 	}
-	return bare, curator, sibling
+	return bare, sibling
 }
 
 // registerWorktree writes the bare-admin entry bareHasLiveWorktrees reads —
@@ -43,7 +42,7 @@ func registerWorktree(t *testing.T, bare, name, checkout string) {
 }
 
 func TestDisposeRenamedRepoDirs_RemovesTheOrphanedTrees(t *testing.T) {
-	bare, curator, sibling := seedRenamedRepoDirs(t)
+	bare, sibling := seedRenamedRepoDirs(t)
 
 	// A registered checkout whose directory is gone — the cold ghost a
 	// crashed run leaves — must not read as live.
@@ -54,9 +53,6 @@ func TestDisposeRenamedRepoDirs_RemovesTheOrphanedTrees(t *testing.T) {
 	}
 	if _, err := os.Stat(bare); !os.IsNotExist(err) {
 		t.Errorf("old bare still on disk: %v", err)
-	}
-	if _, err := os.Stat(curator); !os.IsNotExist(err) {
-		t.Errorf("old curator checkout still on disk: %v", err)
 	}
 	// The no-eviction promise for everything the rename did not touch: the
 	// sibling repository keeps its clone whatever happens next door.
@@ -71,7 +67,7 @@ func TestDisposeRenamedRepoDirs_RemovesTheOrphanedTrees(t *testing.T) {
 }
 
 func TestDisposeRenamedRepoDirs_ALiveWorktreeBlocksEverything(t *testing.T) {
-	bare, curator, sibling := seedRenamedRepoDirs(t)
+	bare, sibling := seedRenamedRepoDirs(t)
 
 	checkout := t.TempDir() // exists → the worktree is live
 	registerWorktree(t, bare, "live-run", checkout)
@@ -79,37 +75,10 @@ func TestDisposeRenamedRepoDirs_ALiveWorktreeBlocksEverything(t *testing.T) {
 	if DisposeRenamedRepoDirs(runmode.LocalDefaultOrgID, "octo", "api") {
 		t.Fatal("DisposeRenamedRepoDirs = true, want a refusal under a live worktree")
 	}
-	for _, dir := range []string{bare, curator, sibling} {
+	for _, dir := range []string{bare, sibling} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Errorf("%s was removed under a live worktree: %v", dir, err)
 		}
-	}
-}
-
-func TestDisposeRenamedRepoDirs_CuratorReadersBlockTheCheckout(t *testing.T) {
-	bare, curator, _ := seedRenamedRepoDirs(t)
-
-	// A live jail is reading the shared checkout. The bare's registration for
-	// it is deliberately absent here (the checkout outlived its bare), so the
-	// reader count is the only thing standing between it and removal.
-	key := sharedReadersKey(curator)
-	sharedReadersMu.Lock()
-	sharedReaders[key]++
-	sharedReadersMu.Unlock()
-	t.Cleanup(func() {
-		sharedReadersMu.Lock()
-		delete(sharedReaders, key)
-		sharedReadersMu.Unlock()
-	})
-
-	if !DisposeRenamedRepoDirs(runmode.LocalDefaultOrgID, "octo", "api") {
-		t.Fatal("DisposeRenamedRepoDirs = false, want the bare removed even while the checkout is held")
-	}
-	if _, err := os.Stat(bare); !os.IsNotExist(err) {
-		t.Errorf("old bare still on disk: %v", err)
-	}
-	if _, err := os.Stat(curator); err != nil {
-		t.Errorf("held curator checkout was removed under a live reader: %v", err)
 	}
 }
 

@@ -138,13 +138,6 @@ func New(secrets agentproc.SecretsReader, resolver func(ctx context.Context, org
 // thing available: the ratchet lives on a conversations row and a probe has no
 // conversation, being one (org, model) question asked before any work exists.
 //
-// The curator is the exception, and it is the reason this is stated as a rule
-// about delegations. Its conversations still mint under the column DEFAULT of
-// 'sdk' in both dialects, so a multi curator turn goes through the subprocess
-// while this probes direct. Harmless — both reach the same provider with the
-// same org credential, which is all a verdict claims — and it closes on its
-// own when the curator cuts over to native.
-//
 // Both transports produce the same three verdicts from the same status sets:
 // what differs is where the status is read from, not what it means.
 func (p *Prober) Probe(ctx context.Context, orgID string, entry modelcatalog.Entry) (Result, error) {

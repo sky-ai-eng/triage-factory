@@ -12,7 +12,7 @@ import (
 
 // SpendStoreFixture is what a per-backend factory hands the conformance suite:
 // the wired read-only SpendStore plus the identifiers the seeder threads into
-// the three source tables. SQLite returns the local sentinels; Postgres returns
+// the two source tables. SQLite returns the local sentinels; Postgres returns
 // freshly-seeded org/team/user/agent rows. The store reads RLS-bypassed in both
 // (SQLite is N=1; the Postgres factory wires admin-on-both) so this suite proves
 // SQL/view *correctness* — RLS gets its own dedicated Postgres test.
@@ -61,24 +61,6 @@ type ConversationSpendFixture struct {
 	StartedAt time.Time
 }
 
-// CuratorSpendFixture stages one curator conversation plus ONE cost-stamped
-// assistant ledger row on it (the turn's stream + settlement lump collapsed to
-// a single row). Status is advisory only — the view reads the ledger, not any
-// turn state. TeamID selects which project the curator conversation is
-// attributed to (TFAC-476): "" → a null-team (org/private) project, so the
-// snapshotted team_id is NULL; non-empty → the fixture's team-scoped project, so
-// the snapshot carries that team. The per-backend seeder owns mapping this to a
-// project and snapshotting team_id from it via (SELECT team_id FROM projects …),
-// exactly as production does — proving project team → conversation team → view.
-type CuratorSpendFixture struct {
-	CreatorUserID string
-	Cost          float64
-	Tokens        SpendTokens
-	Status        string
-	CreatedAt     time.Time
-	TeamID        string
-}
-
 // SystemSpendFixture stages one system_llm_runs row.
 type SystemSpendFixture struct {
 	Job       string
@@ -90,12 +72,11 @@ type SystemSpendFixture struct {
 
 // SpendSeeder is the per-backend insert layer. Each closure inserts one
 // view-visible source row via the backend's admin/raw connection and returns
-// its source_id — the ledger message id (rendered decimal) for the two agent
-// arms, the job row id for the system arm — so the suite can index results
-// without knowing either schema.
+// its source_id — the ledger message id (rendered decimal) for the
+// conversation arm, the job row id for the system arm — so the suite can
+// index results without knowing either schema.
 type SpendSeeder struct {
 	Conversation func(t *testing.T, f ConversationSpendFixture) string
-	Curator      func(t *testing.T, f CuratorSpendFixture) string
 	System       func(t *testing.T, f SystemSpendFixture) string
 }
 
@@ -106,10 +87,10 @@ const spendEps = 1e-4
 
 // RunSpendStoreConformance runs the dialect-agnostic assertion suite against any
 // db.SpendStore impl. Covers the contract: one row per view-visible source row
-// (a ledger message for the agent arms, a job row for the system arm), correct
-// category derivation (manual / autonomous / curator / system_overhead), native
-// + correct cost & token breakdown for all three sources, settled-spend
-// semantics (terminal non-completed rows carry tokens; in-flight rows read 0),
+// (a ledger message for the conversation arm, a job row for the system arm),
+// correct category derivation (manual / autonomous / system_overhead), native
+// + correct cost & token breakdown for both sources, settled-spend semantics
+// (terminal non-completed rows carry tokens; in-flight rows read 0),
 // SpendByCategory sums, and the ListSpend filters.
 func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	t.Helper()
@@ -135,16 +116,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			ActorAgentID: fx.AgentID, Model: "claude-haiku-4-5", Cost: spendCostPtr(0.25),
 			Tokens: SpendTokens{10, 20, 30, 40}, Status: "completed", StartedAt: t2,
 		})
-		// Curator on a TEAM-visible project → team_id snapshotted from the project.
-		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{
-			CreatorUserID: fx.UserID, Cost: 0.75, TeamID: fx.TeamID,
-			Tokens: SpendTokens{11, 22, 33, 44}, Status: "completed", CreatedAt: t3,
-		})
-		// Curator on a null-team (org/private) project → team_id NULL (TFAC-476).
-		orgCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{
-			CreatorUserID: fx.UserID, Cost: 0.10,
-			Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t3,
-		})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{
 			Job: "scorer", Model: "claude-haiku-4-5", Cost: 0.05,
 			Tokens: SpendTokens{1, 2, 3, 4}, StartedAt: t4,
@@ -155,8 +126,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpend: %v", err)
 		}
 		byID := indexSpend(t, rows)
-		if len(rows) != 5 {
-			t.Fatalf("ListSpend returned %d rows, want 5 (one per seeded source row)", len(rows))
+		if len(rows) != 3 {
+			t.Fatalf("ListSpend returned %d rows, want 3 (one per seeded source row)", len(rows))
 		}
 
 		// Manual run → category 'manual', full passthrough.
@@ -183,29 +154,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertPtrEq(t, "event.team_id", er.TeamID, fx.TeamID)
 		assertCost(t, "event.cost", er.TotalCostUSD, 0.25)
 
-		// Curator on a team project → category 'curator'; team_id snapshotted from
-		// the project (TFAC-476); no model, no agent.
-		cr := byID[curatorID]
-		assertEq(t, "curator.source", cr.Source, domain.SpendSourceCurator)
-		assertEq(t, "curator.category", cr.Category, domain.SpendCategoryCurator)
-		assertPtrEq(t, "curator.team_id", cr.TeamID, fx.TeamID)
-		assertNilStr(t, "curator.subtype", cr.Subtype)
-		assertNilStr(t, "curator.model", cr.Model)
-		assertNilStr(t, "curator.actor_agent_id", cr.ActorAgentID)
-		assertPtrEq(t, "curator.creator_user_id", cr.CreatorUserID, fx.UserID)
-		assertCost(t, "curator.cost", cr.TotalCostUSD, 0.75)
-		assertTokens(t, "curator", cr, SpendTokens{11, 22, 33, 44})
-		if !cr.OccurredAt.Truncate(time.Second).Equal(t3) {
-			t.Errorf("curator.occurred_at = %s, want %s (the ledger row's created_at)", cr.OccurredAt, t3)
-		}
-
-		// Curator on a null-team (org/private) project → team_id NULL: still
-		// creator-visible, just absent from team dashboards (TFAC-476).
-		ocr := byID[orgCuratorID]
-		assertEq(t, "org-curator.category", ocr.Category, domain.SpendCategoryCurator)
-		assertNilStr(t, "org-curator.team_id", ocr.TeamID)
-		assertPtrEq(t, "org-curator.creator_user_id", ocr.CreatorUserID, fx.UserID)
-
 		// System → category 'system_overhead'; job carried as subtype; no team,
 		// no creator, no agent; model present.
 		sr := byID[systemID]
@@ -221,8 +169,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	})
 
 	// Terminal-spend completeness: the view reads the ledger rows themselves,
-	// so a cancelled/failed run or curator turn surfaces its real token spend
-	// regardless of how it ended — no terminal roll-up exists to miss.
+	// so a cancelled/failed run surfaces its real token spend regardless of
+	// how it ended — no terminal roll-up exists to miss.
 	t.Run("TerminalSpend_NonCompletedRowsCarryTokens", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
@@ -240,10 +188,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			Model: "m", Cost: spendCostPtr(0.10),
 			Tokens: SpendTokens{5, 6, 7, 8}, Status: "failed", StartedAt: t2,
 		})
-		cancelledCurator := fx.Seeder.Curator(t, CuratorSpendFixture{
-			CreatorUserID: fx.UserID, Cost: 0.30,
-			Tokens: SpendTokens{9, 8, 7, 6}, Status: "cancelled", CreatedAt: t3,
-		})
 
 		rows, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{})
 		if err != nil {
@@ -253,7 +197,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertTokens(t, "parked-run", byID[parkedConversation], SpendTokens{50, 60, 70, 80})
 		assertCost(t, "cancelled-run.cost", byID[parkedConversation].TotalCostUSD, 0.40)
 		assertTokens(t, "failed-run", byID[failedConversation], SpendTokens{5, 6, 7, 8})
-		assertTokens(t, "cancelled-curator", byID[cancelledCurator], SpendTokens{9, 8, 7, 6})
 	})
 
 	// In-flight (non-terminal) rows: the streamed ledger row carries no
@@ -287,8 +230,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{100, 10, 1, 0}, Status: "completed", StartedAt: t1})
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(2.00), Tokens: SpendTokens{200, 20, 2, 0}, Status: "completed", StartedAt: t2})
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.70, Tokens: SpendTokens{7, 7, 7, 7}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "classifier", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
 		// All-time (zero since + zero until → both bounds dropped).
@@ -299,19 +240,16 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertEq(t, "manual.output", byCat[domain.SpendCategoryManual].OutputTokens, 30)
 		assertEq(t, "manual.cache_read", byCat[domain.SpendCategoryManual].CacheReadTokens, 3)
 		assertCost(t, "autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
-		assertCost(t, "curator.sum", byCat[domain.SpendCategoryCurator].TotalCostUSD, 1.00)
-		assertEq(t, "curator.input", byCat[domain.SpendCategoryCurator].InputTokens, 10)
 		assertCost(t, "system.sum", byCat[domain.SpendCategorySystemOverhead].TotalCostUSD, 0.05)
 		assertEq(t, "system.cache_creation", byCat[domain.SpendCategorySystemOverhead].CacheCreationTokens, 1)
 
 		// Closed window [t2, t4) — the billing-period shape. Excludes the t1
 		// manual run (since lower bound) and the t4 system row (until upper
-		// bound, exclusive); keeps the t2 runs + t3 curator turns.
+		// bound, exclusive); keeps the t2 runs.
 		winBuckets, err := fx.Store.SpendByCategory(ctx, fx.OrgID, t2, t4)
 		win := spendByCat(t, winBuckets, err)
 		assertCost(t, "win.manual", win[domain.SpendCategoryManual].TotalCostUSD, 2.00) // only the t2 run, not t1
 		assertCost(t, "win.autonomous", win[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
-		assertCost(t, "win.curator", win[domain.SpendCategoryCurator].TotalCostUSD, 1.00)
 		if _, ok := win[domain.SpendCategorySystemOverhead]; ok {
 			t.Errorf("window [t2,t4) included a system_overhead bucket; the t4 row should be excluded by the exclusive until bound")
 		}
@@ -329,14 +267,12 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
 		allBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, time.Time{}, time.Time{})
 		byCat := spendByCat(t, allBuckets, err)
 		assertCost(t, "system.manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 1.00)
 		assertCost(t, "system.autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
-		assertCost(t, "system.curator.sum", byCat[domain.SpendCategoryCurator].TotalCostUSD, 0.30)
 		assertCost(t, "system.overhead.sum", byCat[domain.SpendCategorySystemOverhead].TotalCostUSD, 0.05)
 
 		// Total across all categories — the figure the daily-cost cap sums.
@@ -344,7 +280,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		for _, b := range allBuckets {
 			total += b.TotalCostUSD
 		}
-		assertCost(t, "system.grand_total", total, 1.85)
+		assertCost(t, "system.grand_total", total, 1.55)
 
 		// Window bound honored: since t2 drops the t1 manual run.
 		winBuckets, err := fx.Store.SpendByCategorySystem(ctx, fx.OrgID, t2, time.Time{})
@@ -356,41 +292,37 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	})
 
 	// SpendByCategorySystemForTeam is the admin-pool per-team aggregate the
-	// TFAC-482 per-team daily cap reads. The team_id filter sums ONLY the team's
-	// own rows — it INCLUDES the team's runs + its team-attributed curator (the
-	// curator's project carries the team, TFAC-476) and EXCLUDES the org's
-	// NULL-team rows (system overhead + non-team curator), so a team cap never
-	// counts spend that belongs to the org cap alone.
+	// TFAC-482 per-team daily cap reads. The team_id filter sums ONLY the
+	// team's own rows — it INCLUDES the team's runs and EXCLUDES the org's
+	// NULL-team rows (system overhead), so a team cap never counts spend that
+	// belongs to the org cap alone.
 	t.Run("SpendByCategorySystemForTeam_SumsTeamOnly", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
-		// The team's own spend: a manual run, an autonomous run, a team curator.
+		// The team's own spend: a manual run, an autonomous run.
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{10, 1, 0, 0}, Status: "completed", StartedAt: t1})
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.50), Tokens: SpendTokens{5, 5, 5, 5}, Status: "completed", StartedAt: t2})
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.30, TeamID: fx.TeamID, Tokens: SpendTokens{3, 3, 3, 3}, Status: "completed", CreatedAt: t3})
-		// NOT the team's: a NULL-team (org/private project) curator + a system row.
-		// Both carry a NULL team_id and must be excluded by the team filter.
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.40, Tokens: SpendTokens{4, 4, 4, 4}, Status: "completed", CreatedAt: t3})
+		// NOT the team's: a system row. It carries a NULL team_id and must be
+		// excluded by the team filter.
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
 		buckets, err := fx.Store.SpendByCategorySystemForTeam(ctx, fx.OrgID, fx.TeamID, time.Time{}, time.Time{})
 		byCat := spendByCat(t, buckets, err)
 		assertCost(t, "team.manual.sum", byCat[domain.SpendCategoryManual].TotalCostUSD, 1.00)
 		assertCost(t, "team.autonomous.sum", byCat[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
-		assertCost(t, "team.curator.sum", byCat[domain.SpendCategoryCurator].TotalCostUSD, 0.30)
 		if _, ok := byCat[domain.SpendCategorySystemOverhead]; ok {
 			t.Errorf("per-team aggregate included a system_overhead bucket; the NULL-team system row must be excluded")
 		}
 
-		// Grand total counts the team's rows ONLY (1.00 + 0.50 + 0.30 = 1.80); the
-		// NULL-team curator (0.40) + system (0.05) are excluded — the team-cap
-		// invariant (system spend is the org cap's concern, never apportioned).
+		// Grand total counts the team's rows ONLY (1.00 + 0.50 = 1.50); the
+		// system row (0.05) is excluded — the team-cap invariant (system
+		// spend is the org cap's concern, never apportioned).
 		var total float64
 		for _, b := range buckets {
 			total += b.TotalCostUSD
 		}
-		assertCost(t, "team.grand_total", total, 1.80)
+		assertCost(t, "team.grand_total", total, 1.50)
 
 		// A different team sees none of it.
 		other := "00000000-0000-0000-0000-0000000004ff"
@@ -411,19 +343,15 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		assertCost(t, "team.win.autonomous", winTeam[domain.SpendCategoryAutonomous].TotalCostUSD, 0.50)
 	})
 
-	// TeamID filter narrows to one team's spend — two-sided: it INCLUDES
-	// team-scoped runs AND team-attributed curator (its project carries the team,
-	// TFAC-476), and EXCLUDES null-team curator + system (NULL team_id) so the team
-	// dashboard sees its own work, not org-level overhead or another project's.
+	// TeamID filter narrows to one team's spend — it INCLUDES team-scoped runs
+	// and EXCLUDES system (NULL team_id) so the team dashboard sees its own
+	// work, not org-level overhead.
 	t.Run("ListSpend_TeamFilter", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
 		conversationID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
-		// Team-attributed curator (project carries fx.TeamID) → included.
-		teamCuratorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
-		// Null-team curator (org/private project) + system → NULL team_id, excluded.
-		fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
+		// System → NULL team_id, excluded.
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
 		team := fx.TeamID
@@ -435,8 +363,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		for _, r := range got {
 			gotIDs[r.SourceID] = true
 		}
-		if len(got) != 2 || !gotIDs[conversationID] || !gotIDs[teamCuratorID] {
-			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s + team-attributed curator %s (null-team curator/system excluded)", len(got), gotIDs, conversationID, teamCuratorID)
+		if len(got) != 1 || !gotIDs[conversationID] {
+			t.Fatalf("TeamID filter = %d rows %v, want exactly the run %s (system excluded)", len(got), gotIDs, conversationID)
 		}
 
 		other := "00000000-0000-0000-0000-0000000009ff"
@@ -454,16 +382,15 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		ctx := context.Background()
 
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
-		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.5, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
-		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
+		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
-		cat := domain.SpendCategoryCurator
+		cat := domain.SpendCategorySystemOverhead
 		got, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{Category: &cat})
 		if err != nil {
 			t.Fatalf("ListSpend category filter: %v", err)
 		}
-		if len(got) != 1 || got[0].SourceID != curatorID {
-			t.Fatalf("Category=curator = %d rows, want exactly the curator row %s", len(got), curatorID)
+		if len(got) != 1 || got[0].SourceID != systemID {
+			t.Fatalf("Category=system_overhead = %d rows, want exactly the system row %s", len(got), systemID)
 		}
 	})
 
@@ -519,7 +446,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		ctx := context.Background()
 
 		conversationID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
-		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
 
 		all, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{})
@@ -527,7 +453,7 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Fatalf("ListSpendSystem: %v", err)
 		}
 		byID := indexSpend(t, all)
-		for _, id := range []string{conversationID, curatorID, systemID} {
+		for _, id := range []string{conversationID, systemID} {
 			if _, ok := byID[id]; !ok {
 				t.Errorf("ListSpendSystem missing %s; want every source org-wide", id)
 			}
@@ -542,8 +468,8 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 			t.Errorf("ListSpendSystem(since=t2) included the t1 conversation; lower bound not applied")
 		}
 
-		// TeamID filter narrows to the team's rows (conversation + team-attributed
-		// curator); the NULL-team system row is excluded.
+		// TeamID filter narrows to the team's conversation; the NULL-team
+		// system row is excluded.
 		team := fx.TeamID
 		teamRows, err := fx.Store.ListSpendSystem(ctx, fx.OrgID, domain.SpendFilter{TeamID: &team})
 		if err != nil {
@@ -559,14 +485,13 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 	})
 
 	// CreatorUserID narrows to one human's spend — the /api/me/usage personal
-	// view (TFAC-478): manual runs + curator turns they created. Autonomous runs
-	// (NULL creator) and system rows (NULL creator) are excluded.
+	// view (TFAC-478): manual runs they created. Autonomous runs (NULL
+	// creator) and system rows (NULL creator) are excluded.
 	t.Run("ListSpend_CreatorUserIDFilter", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
 		manualID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
-		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t2})
 		// Autonomous run + system row both carry a NULL creator → excluded.
 		fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
 		fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t3})
@@ -583,14 +508,14 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 				t.Errorf("CreatorUserID filter returned %s with creator %v, want %s", r.SourceID, r.CreatorUserID, self)
 			}
 		}
-		if len(got) != 2 || !ids[manualID] || !ids[curatorID] {
-			t.Fatalf("CreatorUserID filter = %d rows %v, want exactly manual %s + curator %s (autonomous/system excluded)", len(got), ids, manualID, curatorID)
+		if len(got) != 1 || !ids[manualID] {
+			t.Fatalf("CreatorUserID filter = %d rows %v, want exactly manual %s (autonomous/system excluded)", len(got), ids, manualID)
 		}
 	})
 
 	// trigger_id surfaces on the runs arm (the autonomous by-rule attribution,
-	// TFAC-478) and is NULL for manual runs, curator turns, and system jobs.
-	t.Run("TriggerID_PopulatedForConversations_NullForCuratorSystem", func(t *testing.T) {
+	// TFAC-478) and is NULL for manual runs and system jobs.
+	t.Run("TriggerID_PopulatedForConversations_NullForManualAndSystem", func(t *testing.T) {
 		fx := factory(t)
 		ctx := context.Background()
 
@@ -598,7 +523,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		autoID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: "", TriggerType: "event", TriggerID: fx.TriggerID, Model: "m", Cost: spendCostPtr(0.25), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t1})
 		// Manual run with no firing trigger → NULL trigger_id.
 		manualID := fx.Seeder.Conversation(t, ConversationSpendFixture{TeamID: fx.TeamID, CreatorUserID: fx.UserID, TriggerType: "manual", Model: "m", Cost: spendCostPtr(1.00), Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", StartedAt: t2})
-		curatorID := fx.Seeder.Curator(t, CuratorSpendFixture{CreatorUserID: fx.UserID, Cost: 0.50, TeamID: fx.TeamID, Tokens: SpendTokens{1, 1, 1, 1}, Status: "completed", CreatedAt: t3})
 		systemID := fx.Seeder.System(t, SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: SpendTokens{1, 1, 1, 1}, StartedAt: t4})
 
 		rows, err := fx.Store.ListSpend(ctx, fx.OrgID, domain.SpendFilter{})
@@ -608,7 +532,6 @@ func RunSpendStoreConformance(t *testing.T, factory SpendStoreFactory) {
 		byID := indexSpend(t, rows)
 		assertPtrEq(t, "autonomous.trigger_id", byID[autoID].TriggerID, fx.TriggerID)
 		assertNilStr(t, "manual.trigger_id", byID[manualID].TriggerID)
-		assertNilStr(t, "curator.trigger_id", byID[curatorID].TriggerID)
 		assertNilStr(t, "system.trigger_id", byID[systemID].TriggerID)
 	})
 }

@@ -86,8 +86,8 @@ func lockRepo(owner, repo string) *sync.Mutex {
 // mutex. Used by callers outside the worktree package — the
 // pending-PR live-diff path in particular runs `git fetch` against
 // the bare to sync the agent's pushed branch, which races with
-// curator refresh / bootstrap / worktree creation if those are
-// happening concurrently for the same repo. Concurrent fetches on a
+// bootstrap / worktree creation if those are happening concurrently
+// for the same repo. Concurrent fetches on a
 // single bare can fail with "fatal: Unable to create
 // '<bare>/refs/remotes/origin/<branch>.lock'" or otherwise corrupt
 // the ref, hence the lock.
@@ -120,7 +120,7 @@ const runsDir = "triagefactory-runs" // worktrees: /tmp/triagefactory-runs/{root
 // This package stays credential-agnostic by design: it doesn't know whether
 // the token is a GitHub App installation token or a PAT, only that it's the
 // bearer half of GitHub's `x-access-token:<token>` HTTPS Basic credential.
-// Resolver-aware callers (the spawner, the curator) mint it; this leaf
+// Resolver-aware callers (the spawner) mint it; this leaf
 // package just attaches it. Build a value with CloneAuthFor.
 type CloneAuth struct {
 	// urlPrefix is the `scheme://host[:port]/` the extraHeader is scoped to,
@@ -308,7 +308,6 @@ type CloneOption func(*cloneConfig)
 
 type cloneConfig struct {
 	auth       CloneAuth
-	seedURL    string
 	baseBranch string
 }
 
@@ -317,22 +316,6 @@ type cloneConfig struct {
 // or empty token) is a no-op, so callers can pass it unconditionally.
 func WithCloneAuth(auth CloneAuth) CloneOption {
 	return func(c *cloneConfig) { c.auth = auth }
-}
-
-// WithCloneURL supplies the upstream clone URL an entry point may use to
-// seed a missing bare on demand. EnsureCuratorWorktree consumes it to
-// retire its old refuse-to-seed behavior (TFAC-60/-62): a curator dispatch
-// on a pinned repo that was never delegated against now seeds the bare
-// itself via the same idempotent path delegation uses, rather than erroring
-// with the misleading "repo profiling has not run yet". Empty is a no-op —
-// the entry point falls back to whatever its no-URL behavior was.
-//
-// Only EnsureCuratorWorktree honors this option. EnsureBareClone,
-// CreateForPR, and CreateForBranch* already take the clone URL as an
-// explicit positional parameter, so passing WithCloneURL to them is a
-// silent no-op — use the positional argument there.
-func WithCloneURL(url string) CloneOption {
-	return func(c *cloneConfig) { c.seedURL = url }
 }
 
 // WithBaseBranch names the PR's base branch (e.g. "main") so CreateForPR /

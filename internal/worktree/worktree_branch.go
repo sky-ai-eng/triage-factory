@@ -38,9 +38,9 @@ func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, fea
 //
 // No live production caller: `workspace add` routes to CreateForCheckoutInRoot
 // (the detached default/--ref path, TFAC-498), not here. Retained as the
-// prescribed-feature-branch variant — exercised by curator_test — for a future
-// caller that needs a named branch checked out up front rather than a detached
-// checkout the agent branches from itself.
+// prescribed-feature-branch variant for a future caller that needs a named
+// branch checked out up front rather than a detached checkout the agent
+// branches from itself.
 func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
@@ -561,16 +561,13 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 	}
 
 	// Fetch the base branch into the remote-tracking ref rather than
-	// the local branch ref. The Curator's per-project worktrees
-	// (EnsureCuratorWorktree) check out the base branch as a real local
-	// branch in <projectDir>/repos/<owner>/<repo>/; if we fetched with
-	// `+refs/heads/<b>:refs/heads/<b>`, git would refuse with "fatal:
-	// refusing to fetch into branch '<b>' checked out at '<path>'"
-	// because that local branch ref is live in the curator's worktree.
-	// Fetching into refs/remotes/origin/<b> sidesteps the conflict and
-	// matches the pattern EnsureCuratorWorktree already uses (see
-	// internal/worktree/curator.go:93-100). The new feature branch is
-	// then created off the just-fetched remote-tracking ref.
+	// the local branch ref. If a caller keeps that base branch checked out
+	// as a real local branch elsewhere in this bare's worktrees, fetching
+	// with `+refs/heads/<b>:refs/heads/<b>` would have git refuse with
+	// "fatal: refusing to fetch into branch '<b>' checked out at '<path>'".
+	// Fetching into refs/remotes/origin/<b> sidesteps the conflict. The new
+	// feature branch is then created off the just-fetched remote-tracking
+	// ref.
 	if baseBranch == "" {
 		baseBranch = detectDefaultBranch(ctx, bareDir)
 	}

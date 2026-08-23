@@ -16,21 +16,16 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 type fakeProbe struct {
 	cloneURLs map[string]string
 	errs      map[string]error
-}
-
-type jsonLineFixture struct {
-	ID string `json:"id"`
 }
 
 func (p fakeProbe) CloneURLForRepo(_ context.Context, owner, repo string) (string, error) {
@@ -60,10 +55,7 @@ func newBundleTestDB(t *testing.T) *sql.DB {
 }
 
 type fixture struct {
-	projectID    string
-	projectName  string
-	sessionID    string
-	resolvedRoot string
+	projectID string
 }
 
 func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
@@ -82,7 +74,6 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 		t.Fatalf("seed repository: %v", err)
 	}
 
-	sessionID := "11111111-2222-3333-4444-555555555555"
 	created, err := sqlitestore.New(database).Projects.Create(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.Project{
 		Name:           projectName,
 		Description:    "Fixture project",
@@ -94,11 +85,10 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 	}
 	projectID := created.ID
 
-	root, err := curator.KnowledgeDir(runmode.LocalDefaultOrgID, projectID)
-	if err != nil {
-		t.Fatalf("resolve knowledge dir: %v", err)
+	if _, err := paths.StateRootErr(); err != nil {
+		t.Fatalf("resolve state root: %v", err)
 	}
-	kbDir := filepath.Join(root, "knowledge-base")
+	kbDir := filepath.Join(paths.ProjectKBDir(runmode.LocalDefaultOrgID, projectID), "knowledge-base")
 	if err := os.MkdirAll(kbDir, 0o755); err != nil {
 		t.Fatalf("mkdir knowledge dir: %v", err)
 	}
@@ -109,86 +99,7 @@ func seedFixture(t *testing.T, database *sql.DB, projectName string) fixture {
 		t.Fatalf("write diagram.png: %v", err)
 	}
 
-	// One completed turn (conversation + delivered user message + claimed
-	// engagement + streamed reply) plus a pending injection — the write set
-	// SendMessage → dispatch produces.
-	stores := sqlitestore.New(database)
-	org, user := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
-	ctx := context.Background()
-	conv, err := stores.Curator.GetOrCreateConversation(ctx, org, projectID, user)
-	if err != nil {
-		t.Fatalf("mint conversation: %v", err)
-	}
-	msgID, err := stores.Curator.EnqueueUserMessage(ctx, org, conv.ID, user, "hello")
-	if err != nil {
-		t.Fatalf("enqueue turn: %v", err)
-	}
-	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, "fixture-exec", 1, db.ClaimPlacement{})
-	if err != nil || claimed == nil || claimed.ID != conv.ID {
-		t.Fatalf("claim turn = (%+v, %v), want conversation %s", claimed, err, conv.ID)
-	}
-	claimID := claimed.ClaimID
-	if _, err := stores.Curator.BeginTurn(ctx, org, projectID, conv.ID, msgID); err != nil {
-		t.Fatalf("begin turn: %v", err)
-	}
-	if _, err := stores.Curator.SetSDKSession(ctx, org, conv.ID, sessionID); err != nil {
-		t.Fatalf("set sdk session: %v", err)
-	}
-	if _, err := stores.Conversations.InsertMessage(ctx, org, &domain.Message{
-		ConversationID: conv.ID, UserID: user, ClaimID: claimID,
-		Role: "assistant", Content: "done", CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("insert curator message: %v", err)
-	}
-	if _, err := stores.Curator.ReleaseActiveTurnSystem(ctx, org, conv.ID, "completed", "", 0.12, 2400, 4); err != nil {
-		t.Fatalf("release turn: %v", err)
-	}
-	if err := stores.Curator.QueueContextChangeSystem(ctx, org, projectID, domain.ChangeTypePinnedRepos, `["sky-ai-eng/triage-factory"]`); err != nil {
-		t.Fatalf("queue pending context: %v", err)
-	}
-
-	resolvedRoot := worktree.ResolveClaudeProjectCwd(root)
-	encoded := worktree.EncodeClaudeProjectDir(resolvedRoot)
-	claudeRoot := filepath.Join(os.Getenv("HOME"), ".claude", "projects", encoded)
-	if err := os.MkdirAll(claudeRoot, 0o700); err != nil {
-		t.Fatalf("mkdir claude root: %v", err)
-	}
-	transcript := filepath.Join(claudeRoot, sessionID+".jsonl")
-	transcriptBody := strings.Join([]string{
-		fmt.Sprintf(`{"type":"permission-mode","sessionId":"%s"}`, sessionID),
-		fmt.Sprintf(`{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","cwd":"%s","sessionId":"%s","compactMetadata":{"trigger":"manual"}}`, resolvedRoot, sessionID),
-		fmt.Sprintf(`{"type":"user","message":{"content":"Summary block"},"cwd":"%s","sessionId":"%s"}`, resolvedRoot, sessionID),
-		fmt.Sprintf(`{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","cwd":"%s","sessionId":"%s","compactMetadata":{"trigger":"manual"}}`, resolvedRoot, sessionID),
-		"",
-	}, "\n")
-	if err := os.WriteFile(transcript, []byte(transcriptBody), 0o600); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
-
-	subagentDir := filepath.Join(claudeRoot, sessionID, "subagents")
-	toolDir := filepath.Join(claudeRoot, sessionID, "tool-results")
-	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
-		t.Fatalf("mkdir subagent dir: %v", err)
-	}
-	if err := os.MkdirAll(toolDir, 0o700); err != nil {
-		t.Fatalf("mkdir tool-results dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(subagentDir, "agent-one.jsonl"), []byte(fmt.Sprintf(`{"sessionId":"%s","cwd":"%s","agentId":"agent-one"}`+"\n", sessionID, resolvedRoot)), 0o600); err != nil {
-		t.Fatalf("write subagent jsonl: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(subagentDir, "agent-one.meta.json"), []byte(fmt.Sprintf(`{"cwd":"%s","sessionId":"%s"}`, resolvedRoot, sessionID)), 0o600); err != nil {
-		t.Fatalf("write subagent meta: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(toolDir, "toolu_123.txt"), []byte(fmt.Sprintf("session=%s cwd=%s\n", sessionID, resolvedRoot)), 0o600); err != nil {
-		t.Fatalf("write tool-results: %v", err)
-	}
-
-	return fixture{
-		projectID:    projectID,
-		projectName:  projectName,
-		sessionID:    sessionID,
-		resolvedRoot: resolvedRoot,
-	}
+	return fixture{projectID: projectID}
 }
 
 func exportFixtureBundle(t *testing.T, database *sql.DB, projectID string) []byte {
@@ -233,7 +144,7 @@ func buildZipEntries(t *testing.T, files map[string][]byte) map[string]*zip.File
 	return entries
 }
 
-func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
+func TestImport_RoundTrip(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -245,7 +156,6 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	imported, warnings, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
-		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -261,103 +171,17 @@ func TestImport_RoundTripSessionTreeAndCompactions(t *testing.T) {
 	if imported.ID == f.projectID {
 		t.Fatal("import should allocate a new project id")
 	}
-	targetStores := sqlitestore.New(targetDB)
-	importedConv, err := targetStores.Curator.GetLiveConversation(t.Context(), runmode.LocalDefaultOrgID, imported.ID, runmode.LocalDefaultUserID)
-	if err != nil {
-		t.Fatalf("read imported conversation: %v", err)
-	}
-	if importedConv == nil {
-		t.Fatal("import did not restore the curator conversation")
-	}
-	newSessionID := importedConv.SessionID
-	if newSessionID == "" || newSessionID == f.sessionID {
-		t.Fatalf("expected fresh curator session id, got %q", newSessionID)
-	}
 
-	newRoot, err := curator.KnowledgeDir(runmode.LocalDefaultOrgID, imported.ID)
-	if err != nil {
-		t.Fatalf("resolve imported root: %v", err)
+	if _, err := paths.StateRootErr(); err != nil {
+		t.Fatalf("resolve state root: %v", err)
 	}
+	newRoot := paths.ProjectKBDir(runmode.LocalDefaultOrgID, imported.ID)
 	notes, err := os.ReadFile(filepath.Join(newRoot, "knowledge-base", "notes.md"))
 	if err != nil {
 		t.Fatalf("read imported notes: %v", err)
 	}
 	if string(notes) != "# Notes\nkeep this" {
 		t.Fatalf("imported notes mismatch: %q", string(notes))
-	}
-
-	newResolved := worktree.ResolveClaudeProjectCwd(newRoot)
-	newEncoded := worktree.EncodeClaudeProjectDir(newResolved)
-	newTranscript := filepath.Join(home, ".claude", "projects", newEncoded, newSessionID+".jsonl")
-	transcriptBody, err := os.ReadFile(newTranscript)
-	if err != nil {
-		t.Fatalf("read imported transcript: %v", err)
-	}
-	body := string(transcriptBody)
-	if strings.Count(body, `"subtype":"compact_boundary"`) != 2 {
-		t.Fatalf("expected two compact_boundary markers in imported transcript, got %d", strings.Count(body, `"subtype":"compact_boundary"`))
-	}
-	if strings.Contains(body, f.sessionID) {
-		t.Fatalf("imported transcript still contains old session id %s", f.sessionID)
-	}
-	if !strings.Contains(body, newSessionID) {
-		t.Fatalf("imported transcript missing new session id %s", newSessionID)
-	}
-	if strings.Contains(body, f.resolvedRoot) {
-		t.Fatalf("imported transcript still contains old cwd %s", f.resolvedRoot)
-	}
-	if !strings.Contains(body, newResolved) {
-		t.Fatalf("imported transcript missing rewritten cwd %s", newResolved)
-	}
-
-	subagentBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, newSessionID, "subagents", "agent-one.jsonl"))
-	if err != nil {
-		t.Fatalf("read imported subagent jsonl: %v", err)
-	}
-	if strings.Contains(string(subagentBody), f.sessionID) || strings.Contains(string(subagentBody), f.resolvedRoot) {
-		t.Fatalf("subagent jsonl did not rewrite old session/cwd: %s", string(subagentBody))
-	}
-	toolBody, err := os.ReadFile(filepath.Join(home, ".claude", "projects", newEncoded, newSessionID, "tool-results", "toolu_123.txt"))
-	if err != nil {
-		t.Fatalf("read imported tool result: %v", err)
-	}
-	if strings.Contains(string(toolBody), f.sessionID) || strings.Contains(string(toolBody), f.resolvedRoot) {
-		t.Fatalf("tool result did not rewrite old session/cwd: %s", string(toolBody))
-	}
-
-	// Conversation state round-tripped: one claim with its accounting, the
-	// delivered user turn, the claim-attributed reply, and the pending
-	// injection (still undelivered — a queued delta survives the trip).
-	claims, err := targetStores.Curator.ListClaims(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID)
-	if err != nil {
-		t.Fatalf("list imported claims: %v", err)
-	}
-	if len(claims) != 1 || claims[0].Outcome != "completed" {
-		t.Fatalf("imported claims = %+v, want one completed engagement", claims)
-	}
-	msgs, err := targetStores.Curator.ListConversationMessages(t.Context(), runmode.LocalDefaultOrgID, importedConv.ID, 0)
-	if err != nil {
-		t.Fatalf("list imported messages: %v", err)
-	}
-	var userTurns, replies, pendingInjections int
-	for _, m := range msgs {
-		switch {
-		case m.Role == "user" && m.Subtype == "":
-			userTurns++
-		case m.Role == "assistant":
-			replies++
-			if m.ClaimID != claims[0].ID {
-				t.Errorf("imported reply claim = %q, want remapped %q", m.ClaimID, claims[0].ID)
-			}
-		case m.Subtype == "injection:context":
-			pendingInjections++
-			if m.Delivered == nil || *m.Delivered {
-				t.Errorf("imported injection row delivered = %v, want undelivered", m.Delivered)
-			}
-		}
-	}
-	if userTurns != 1 || replies != 1 || pendingInjections != 1 {
-		t.Fatalf("imported transcript shape = (turns=%d, replies=%d, injections=%d), want (1,1,1): %+v", userTurns, replies, pendingInjections, msgs)
 	}
 
 	// The imported pin must be tracked for the importing team, not just
@@ -391,7 +215,6 @@ func TestImport_MissingReposAbortsWithoutWrites(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
-		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -429,7 +252,6 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	_, _, err := Import(
 		context.Background(),
 		sqlitestore.New(targetDB).Tx,
-		sqlitestore.New(targetDB).Curator,
 		nil,
 		runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID,
 		bytes.NewReader(bundleBytes),
@@ -449,51 +271,6 @@ func TestImport_DuplicateNameAborts(t *testing.T) {
 	}
 }
 
-func TestDecodeZipJSONLines_EnforcesRowLimit(t *testing.T) {
-	entries := buildZipEntries(t, map[string][]byte{
-		curatorClaimsPath: []byte(`{"id":"r1"}` + "\n" + `{"id":"r2"}` + "\n"),
-	})
-	zf := entries[curatorClaimsPath]
-	if zf == nil {
-		t.Fatal("missing curator claims entry")
-	}
-	var seen int
-	err := decodeZipJSONLines(
-		zf,
-		1<<20,
-		1,
-		func(row jsonLineFixture) error {
-			seen++
-			return nil
-		},
-	)
-	if err == nil || !strings.Contains(err.Error(), "row limit") {
-		t.Fatalf("expected row-limit error, got %v", err)
-	}
-	if seen != 1 {
-		t.Fatalf("expected callback to run once before row-limit failure, got %d", seen)
-	}
-}
-
-func TestDecodeZipJSONLines_EnforcesByteLimit(t *testing.T) {
-	entries := buildZipEntries(t, map[string][]byte{
-		curatorMessagesPath: []byte(`{"id":"message-that-is-longer-than-limit"}` + "\n"),
-	})
-	zf := entries[curatorMessagesPath]
-	if zf == nil {
-		t.Fatal("missing curator messages entry")
-	}
-	err := decodeZipJSONLines[jsonLineFixture](
-		zf,
-		8,
-		10,
-		func(jsonLineFixture) error { return nil },
-	)
-	if err == nil || !strings.Contains(err.Error(), "8-byte limit") {
-		t.Fatalf("expected byte-limit error, got %v", err)
-	}
-}
-
 func TestCopyZipEntryRaw_EnforcesTotalExtractionLimit(t *testing.T) {
 	entries := buildZipEntries(t, map[string][]byte{
 		knowledgePrefix + "big.bin": []byte("abcdef"),
@@ -506,30 +283,6 @@ func TestCopyZipEntryRaw_EnforcesTotalExtractionLimit(t *testing.T) {
 	err := copyZipEntryRaw(zf, dest, 0o644, newZipExtractionBudget(5, 32))
 	if err == nil || !strings.Contains(err.Error(), "total limit") {
 		t.Fatalf("expected total-limit error, got %v", err)
-	}
-	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
-		t.Fatalf("destination file should not exist after limit failure; stat err=%v", statErr)
-	}
-}
-
-func TestCopyZipEntryRewritten_EnforcesPerFileLimit(t *testing.T) {
-	entries := buildZipEntries(t, map[string][]byte{
-		sessionTranscriptPath: []byte("abcdef"),
-	})
-	zf := entries[sessionTranscriptPath]
-	if zf == nil {
-		t.Fatal("missing session transcript entry")
-	}
-	dest := filepath.Join(t.TempDir(), "transcript.jsonl")
-	err := copyZipEntryRewritten(
-		zf,
-		dest,
-		[]byteReplacement{},
-		0o600,
-		newZipExtractionBudget(64, 5),
-	)
-	if err == nil || !strings.Contains(err.Error(), "5-byte limit") {
-		t.Fatalf("expected per-file limit error, got %v", err)
 	}
 	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
 		t.Fatalf("destination file should not exist after limit failure; stat err=%v", statErr)

@@ -220,7 +220,7 @@ RUN apk add --no-cache \
 #
 # Unlike a purely-service identity, this one DOES need a real, owned
 # home directory — but NOT for tenant content. In multi mode the
-# sandboxed agents (curator + delegated runs) execute with HOME=/work,
+# sandboxed agents (delegated runs) execute with HOME=/work,
 # so their ~/.claude session state lands inside each run's own
 # org-scoped directory on the data volume; host-side consumers resolve
 # it via worktree.ClaudeProjectDir (TFAC-109), never this HOME. What

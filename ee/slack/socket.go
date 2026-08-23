@@ -81,7 +81,7 @@ const (
 // connection that hasn't reached open or hasn't seen an event yet. A nil
 // pointer, by contrast, omitempty genuinely elides — the convention every
 // other optional timestamp in this codebase already follows (ee/sso's
-// domains, invites_handler, event_queue, curator, ...).
+// domains, invites_handler, event_queue, ...).
 type connStatus struct {
 	State               string         `json:"state"`
 	ConnectedAt         *time.Time     `json:"connected_at,omitempty"`

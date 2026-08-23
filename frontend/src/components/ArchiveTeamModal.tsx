@@ -11,17 +11,16 @@ interface ArchiveTeamModalProps {
   // opened empty, so the counts are a prop rather than a fetch in here.
   preview: ArchivePreview
   // onDone fires after a successful archive (parent refreshes the team list +
-  // toasts the counts). onClose is cancel / backdrop / Escape.
-  onDone: (cancelledRuns: number, cancelledCuratorSessions: number) => void
+  // toasts the count). onClose is cancel / backdrop / Escape.
+  onDone: (cancelledRuns: number) => void
   onClose: () => void
 }
 
 // ArchiveTeamModal is the org-admin destructive confirm for archiving a team.
-// It opens already knowing the live-work counts, so the warning is concrete
-// ("ends N delegations and M curator sessions now") from its first frame, then
-// performs a single destructive confirm — there is no "let it finish" branch
-// by design. Styling mirrors TransferOwnershipModal (the shared
-// destructive-modal shell).
+// It opens already knowing the live-work count, so the warning is concrete
+// ("ends N delegations now") from its first frame, then performs a single
+// destructive confirm — there is no "let it finish" branch by design.
+// Styling mirrors TransferOwnershipModal (the shared destructive-modal shell).
 export default function ArchiveTeamModal({
   teamId,
   teamName,
@@ -54,7 +53,7 @@ export default function ArchiveTeamModal({
     setError(null)
     try {
       const res = await archiveTeam(teamId)
-      onDone(res.cancelled_runs, res.cancelled_curator_sessions)
+      onDone(res.cancelled_runs)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not archive the team.')
     } finally {
@@ -63,7 +62,6 @@ export default function ArchiveTeamModal({
   }
 
   const runs = preview.active_runs
-  const sessions = preview.active_curator_sessions
 
   return (
     <div
@@ -98,10 +96,6 @@ export default function ArchiveTeamModal({
             Archiving ends{' '}
             <strong className="font-semibold text-ink-1">
               {runs} active {runs === 1 ? 'delegation' : 'delegations'}
-            </strong>{' '}
-            and{' '}
-            <strong className="font-semibold text-ink-1">
-              {sessions} curator {sessions === 1 ? 'session' : 'sessions'}
             </strong>{' '}
             now. The team disappears for everyone and all writes are blocked.
           </p>

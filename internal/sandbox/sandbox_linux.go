@@ -83,7 +83,7 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 	// ahead of Wrap (Config.Network, the executor path — proxies + sidecar are
 	// already live on its HostIP), reuse it: no allocation, no SetupNetwork, no
 	// ConfigureProxies, and Close leaves its teardown to the caller. Otherwise
-	// (the self-contained all/local/curator path) allocate + build + own it.
+	// (the self-contained all/local path) allocate + build + own it.
 	var (
 		idx         uint8
 		netSt       NetworkState

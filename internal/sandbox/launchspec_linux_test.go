@@ -304,7 +304,7 @@ func TestValidateLaunchParams_RejectsCrossOrgMountSource(t *testing.T) {
 	paths.SetForTest(t, root)
 
 	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
-	mountSource := filepath.Join(root, "orgs", "org-b", "curator-repos", "acme", "widgets")
+	mountSource := filepath.Join(root, "orgs", "org-b", "shared-repos", "acme", "widgets")
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir worktree fixture: %v", err)
 	}
@@ -326,13 +326,13 @@ func TestValidateLaunchParams_RejectsCrossOrgMountSource(t *testing.T) {
 
 // TestValidateLaunchParams_AcceptsSameOrgMountSource is the positive half
 // of the same case: a mount source under the SAME org as the worktree
-// (the curator's shared read-only repo mount shape) is accepted.
+// (a shared read-only repo mount under the org-scoped tree) is accepted.
 func TestValidateLaunchParams_AcceptsSameOrgMountSource(t *testing.T) {
 	root := t.TempDir()
 	paths.SetForTest(t, root)
 
 	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
-	mountSource := filepath.Join(root, "orgs", "org-a", "curator-repos", "acme", "widgets")
+	mountSource := filepath.Join(root, "orgs", "org-a", "shared-repos", "acme", "widgets")
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir worktree fixture: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestValidateLaunchParams_AcceptsSameOrgMountSource(t *testing.T) {
 // symlink-resolution half of case (a): a mount source that is LEXICALLY
 // under the worktree's own org tree, but is (or transits) a symlink whose
 // REAL target is another org's tree, must still be rejected. Org A
-// legitimately owns and writes its own curator-repos subtree, so it can
+// legitimately owns and writes its own shared-repos subtree, so it can
 // plant this symlink itself — a purely lexical filepath.Rel check would
 // have waved it through; realPath's resolution is what closes it.
 func TestValidateLaunchParams_RejectsSymlinkedMountSourceEscape(t *testing.T) {
@@ -364,16 +364,16 @@ func TestValidateLaunchParams_RejectsSymlinkedMountSourceEscape(t *testing.T) {
 	paths.SetForTest(t, root)
 
 	worktree := filepath.Join(root, "orgs", "org-a", "projects", "proj-1")
-	orgBSecret := filepath.Join(root, "orgs", "org-b", "curator-repos", "acme", "widgets")
+	orgBSecret := filepath.Join(root, "orgs", "org-b", "shared-repos", "acme", "widgets")
 	if err := os.MkdirAll(worktree, 0o755); err != nil {
 		t.Fatalf("mkdir worktree fixture: %v", err)
 	}
 	if err := os.MkdirAll(orgBSecret, 0o755); err != nil {
 		t.Fatalf("mkdir org-b secret fixture: %v", err)
 	}
-	// A symlink living INSIDE org A's own curator-repos tree — lexically
+	// A symlink living INSIDE org A's own shared-repos tree — lexically
 	// under org A's prefix — whose real target is org B's data.
-	symlinkSource := filepath.Join(root, "orgs", "org-a", "curator-repos", "acme", "widgets")
+	symlinkSource := filepath.Join(root, "orgs", "org-a", "shared-repos", "acme", "widgets")
 	if err := os.MkdirAll(filepath.Dir(symlinkSource), 0o755); err != nil {
 		t.Fatalf("mkdir symlink parent: %v", err)
 	}
@@ -505,8 +505,8 @@ func TestValidateLaunchParams_RejectsForeignAgentHostSocket(t *testing.T) {
 // TestValidateLaunchParams_AcceptsRealisticMountSet is acceptance case (d):
 // the actual mount set a normal delegated run assembles (TF binary,
 // git-hooks, the run's own agenthost socket — mirroring
-// internal/agentproc's extraMounts assembly, no curator mounts) against
-// the ephemeral worktree shape is accepted unchanged.
+// internal/agentproc's extraMounts assembly, no shared read-only repo
+// mounts) against the ephemeral worktree shape is accepted unchanged.
 func TestValidateLaunchParams_AcceptsRealisticMountSet(t *testing.T) {
 	ensureGitHooksFixture(t)
 	tfBin, err := TrustedTFBinaryPath()

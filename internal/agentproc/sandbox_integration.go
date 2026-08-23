@@ -3,7 +3,6 @@ package agentproc
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -37,84 +36,11 @@ func shouldSandbox() bool {
 const SandboxWorkRoot = "/work"
 
 // WillSandbox reports whether a Run on this host will route through the gVisor
-// sandbox (multi mode + Linux). Callers that must pre-stage sandbox-only
-// inputs branch on this: the Curator materializes its pinned repos as shared
-// read-only mounts only when a jail is active, and keeps the per-project
-// on-disk worktree on the local/non-Linux path. Exported form of the internal
-// shouldSandbox gate so the predicate stays single-sourced.
+// sandbox (multi mode + Linux). A caller that must pre-stage sandbox-only
+// inputs branches on this. Exported form of the internal shouldSandbox gate so
+// the predicate stays single-sourced.
 func WillSandbox() bool {
 	return shouldSandbox()
-}
-
-// cleanRepoMountRelPath validates and normalizes a ReadOnlyRepoMount.RelPath
-// as a safe subpath under the agent's Cwd. RelPath is caller-built
-// ("repos/<owner>/<repo>"), but this is a sandbox-setup security boundary, so
-// reject anything that could place the mount point / bind destination OUTSIDE
-// /work: an empty value, an absolute path (filepath.Join would discard the
-// /work or Cwd prefix — e.g. RelPath="/etc" → destination "/etc"), the cwd
-// itself ("."), or a path that climbs out via "..". Returns the cleaned
-// relative path and ok; callers drop the entry on !ok.
-func cleanRepoMountRelPath(rel string) (string, bool) {
-	if rel == "" {
-		return "", false
-	}
-	cleaned := filepath.Clean(rel)
-	if filepath.IsAbs(cleaned) || cleaned == "." || cleaned == ".." ||
-		strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
-		return "", false
-	}
-	return cleaned, true
-}
-
-// ensureRepoMountPoints creates the empty mount-point directories the
-// read-only repo bind-mounts (opts.ReadOnlyRepoMounts) land on, under workCwd.
-// They must exist before the per-run chown (so they're owned by the sandbox
-// UID like the rest of /work) and before sandbox.Wrap (so each nested bind
-// mount has a target inside the /work mount). The shared worktree each mount
-// exposes lives OUTSIDE workCwd and is never created or chowned here.
-//
-// Entries are filtered identically to readOnlyRepoMounts (empty Source or an
-// unsafe/empty RelPath dropped), so the mount points created here line up
-// exactly with the bind mounts added there — no orphan dir, no missing target.
-func ensureRepoMountPoints(workCwd string, mounts []ReadOnlyRepoMount) error {
-	for _, m := range mounts {
-		rel, ok := cleanRepoMountRelPath(m.RelPath)
-		if m.Source == "" || !ok {
-			continue
-		}
-		mp := filepath.Join(workCwd, rel)
-		if err := os.MkdirAll(mp, 0o755); err != nil {
-			return fmt.Errorf("create repo mount point %s: %w", mp, err)
-		}
-	}
-	return nil
-}
-
-// readOnlyRepoMounts translates opts.ReadOnlyRepoMounts into sandbox bind
-// mounts: each Source (a shared worktree, a host path outside Cwd) exposed
-// read-only at /work/<RelPath>. The "ro" option is the enforcement boundary —
-// it makes an in-jail write to the shared tree fail, so one session can't
-// mutate what another reads. Entries with no Source or an unsafe/empty RelPath
-// (see cleanRepoMountRelPath) are dropped so a bad descriptor can never mount
-// Source outside /work.
-func readOnlyRepoMounts(mounts []ReadOnlyRepoMount) []sandbox.Mount {
-	out := make([]sandbox.Mount, 0, len(mounts))
-	for _, m := range mounts {
-		rel, ok := cleanRepoMountRelPath(m.RelPath)
-		if m.Source == "" || !ok {
-			continue
-		}
-		out = append(out, sandbox.Mount{
-			Source:      m.Source,
-			Destination: filepath.Join(SandboxWorkRoot, rel),
-			// Only "ro" here — sandbox.mountsFromExtra auto-prepends "rbind" for
-			// every extra mount (asserted by TestBuildSpec_ReadOnlyRepoMountIsRO),
-			// so the final mount is a recursive read-only bind. Don't duplicate
-			// "rbind" or it'd appear twice in the spec.
-			Options: []string{"ro"},
-		})
-	}
-	return out
 }
 
 // AgentVisibleRoot returns the absolute path the agent observes for hostRoot

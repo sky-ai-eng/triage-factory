@@ -40,8 +40,8 @@ type RunOptions struct {
 
 	// SessionID, when non-empty, switches the invocation to
 	// `--resume <id>`. Used for the crash-reclaim resume, the open-run
-	// resume path, and the curator's per-message resumption against a
-	// long-lived project session.
+	// resume path, and per-message resumption against a long-lived
+	// session.
 	SessionID string
 
 	// Message is the value passed to `-p`. For an initial invocation
@@ -50,9 +50,8 @@ type RunOptions struct {
 	Message string
 
 	// AllowedTools is the comma-joined --allowedTools value. Callers
-	// build this themselves (see internal/delegate.BuildAllowedTools
-	// and internal/curator.BuildAllowedTools) — different runtimes
-	// have different threat models.
+	// build this themselves (see internal/delegate.BuildAllowedTools) —
+	// different runtimes have different threat models.
 	AllowedTools string
 
 	// AddDirs is the list of paths passed as `--add-dir`. Claude Code's
@@ -65,9 +64,9 @@ type RunOptions struct {
 
 	// SystemPrompt, if non-empty, is passed as --append-system-prompt.
 	// Sits after Claude Code's default system prompt rather than
-	// replacing it; useful for runtime-specific role-shaping (the
-	// curator's "you are the Curator for project X" prompt) without
-	// clobbering CC's safety / tool-use defaults.
+	// replacing it; useful for runtime-specific role-shaping (e.g. a
+	// non-terminal blueprint step's completion-protocol addendum)
+	// without clobbering CC's safety / tool-use defaults.
 	SystemPrompt string
 
 	// MaxTurns sets --max-turns. Zero omits the flag.
@@ -132,9 +131,8 @@ type RunOptions struct {
 	// Wired per call site rather than derived from runmode here, because the
 	// mount plan is a claim about where the run's files ARE and only the
 	// caller knows that: the delegate populates it whenever
-	// runmode.LocalSandboxEnabled(), and the curator and the toolless system
-	// jobs pass nil — the curator's cwd, git path and repo mounts differ
-	// enough to need their own plan rather than a wider version of this one.
+	// runmode.LocalSandboxEnabled(), and the toolless system jobs pass nil —
+	// they have no cwd, git path, or repo mounts to isolate in the first place.
 	//
 	// A run that carries a Spec fails rather than degrading if the namespace
 	// cannot be built: the boot probe already established bubblewrap works on
@@ -144,14 +142,15 @@ type RunOptions struct {
 	LocalSandbox *localsandbox.Spec
 
 	// TraceID is stamped onto every emitted message's ConversationID field.
-	// Storage-neutral: delegate uses the conversation id, the curator
-	// uses its own message-group id.
+	// Storage-neutral: delegate uses the conversation id, the toolless
+	// system jobs use a fixed per-job label (e.g. "scorer-batch").
 	TraceID string
 
 	// ClaimID is the executor engagement this launch belongs to — the claims
-	// row the dispatcher minted (or, for a curator turn, the one that claimed
-	// the queued message). It exists so the launch's measured sandbox cost can
-	// be stamped against the engagement that paid it; nothing else reads it.
+	// row the dispatcher minted (or, for a driven follow-up, the claim that
+	// picked up the queued message). It exists so the launch's measured
+	// sandbox cost can be stamped against the engagement that paid it;
+	// nothing else reads it.
 	// Empty for launches that belong to no engagement at all (the toolless
 	// system jobs — scorer, classifier, profiler), which record no actuals.
 	ClaimID string
@@ -313,33 +312,6 @@ type RunOptions struct {
 	// Sandbox-only. Local mode materializes the same tree into the worktree
 	// instead — it owns the tree, and there is no jail to mount into.
 	MemorySourcePath string
-
-	// ReadOnlyRepoMounts are extra host directories bind-mounted READ-ONLY
-	// into the sandbox under Cwd. The Curator populates this with its shared
-	// per-(org, repo) pinned-repo worktrees so the agent reads them without a
-	// per-session checkout copy and cannot write them (the mount is ro, so an
-	// in-jail write fails). Each Source MUST live outside Cwd — the per-run
-	// chown of the writable Cwd never touches the shared tree.
-	//
-	// Sandbox-only: the direct (local / non-Linux) path ignores these entirely
-	// because local materializes the worktree under Cwd directly (N=1, no jail,
-	// no cross-session sharing). See ReadOnlyRepoMount. TFAC-61.
-	ReadOnlyRepoMounts []ReadOnlyRepoMount
-}
-
-// ReadOnlyRepoMount is one host directory exposed read-only inside the sandbox
-// at RelPath under the agent's Cwd (/work). agentproc creates the empty
-// mount-point directory under Cwd (so it's owned by the sandbox UID like the
-// rest of /work and exists as a bind target inside the /work mount), then adds
-// a `ro`-option nested bind mount of Source onto /work/<RelPath>.
-type ReadOnlyRepoMount struct {
-	// Source is the host path of the shared worktree to expose read-only. It
-	// MUST be outside the run's Cwd so chownWorktreeForSandbox never recurses
-	// into it (chowning a shared tree to one session's UID is the bug this
-	// avoids).
-	Source string
-	// RelPath is the mount location relative to Cwd, e.g. "repos/owner/repo".
-	RelPath string
 }
 
 // GHChannelParams carries the per-run coordinates needed to wire the real-gh
@@ -442,8 +414,8 @@ func (s *UsageSink) OnMessage(m *domain.Message) error {
 type Sink interface {
 	// OnSession fires once, the first time the stream emits a
 	// system/init event with a session_id. Implementations persist
-	// the id to conversations.sdk_session_id — one column for both
-	// surfaces, delegate and curator alike. Returning an error is
+	// the id to conversations.sdk_session_id — one column shared across
+	// every conversation surface. Returning an error is
 	// logged but does not abort the run — the stream continues and
 	// the result still lands; callers can re-attempt session capture
 	// on resume.
@@ -698,9 +670,9 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 
 	// Every sandboxed run launches into a prebuilt per-run network whose
 	// credential sidecar already runs the proxies over the run's sealed
-	// bundle — delegated runs and homed curator turns alike. This process
-	// resolves no credential here (the executor's secret store is disabled,
-	// and multi mode is per-run-isolated by construction); the former
+	// bundle. This process resolves no credential here (the executor's
+	// secret store is disabled, and multi mode is per-run-isolated by
+	// construction); the former
 	// in-process proxy bring-up no longer exists, so a sandboxed caller
 	// without a prebuilt network is a wiring bug, surfaced before the
 	// subprocess spawns rather than degraded into a fused fallback.
@@ -723,16 +695,6 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		}
 		scratchCwd = scratch
 		workCwd = scratch
-	}
-	// Create the empty mount-point dirs the read-only repo bind-mounts land on
-	// BEFORE the chown — so they're owned by the sandbox UID like the rest of
-	// /work, and exist as bind targets inside the /work mount when Wrap runs.
-	// The shared worktree each one exposes lives outside workCwd and is never
-	// chowned here (skipping the per-session chown of the shared tree is the
-	// whole point — TFAC-61).
-	if err := ensureRepoMountPoints(workCwd, opts.ReadOnlyRepoMounts); err != nil {
-		cleanup()
-		return nil, cleanup, fmt.Errorf("sandbox: %w", err)
 	}
 	if err := chownWorktreeForSandbox(runCtx, workCwd); err != nil {
 		cleanup()
@@ -824,14 +786,6 @@ func newSandboxCommand(runCtx context.Context, opts RunOptions, wrapperPath stri
 		extraMounts = append(extraMounts, mount)
 		ahCloser = closer
 	}
-
-	// Shared read-only pinned-repo worktrees (Curator multi-mode). Each is
-	// nested under /work — the base spec mounts /work first, then these
-	// overlay onto the empty mount points created above, exactly as /dev/pts
-	// nests under /dev. The "ro" option is load-bearing: it's what makes an
-	// in-jail write to the shared tree fail, so one session can't mutate what
-	// another reads.
-	extraMounts = append(extraMounts, readOnlyRepoMounts(opts.ReadOnlyRepoMounts)...)
 
 	// Real-gh channel mounts: the per-run injector cert (RO, from the
 	// sidecar-written source) and the TF-pinned gh binary (RO, from the host
@@ -1112,9 +1066,8 @@ const maxStreamLineBytes = 64 * 1024 * 1024
 // a transient DB hiccup on one row doesn't abandon the whole run.
 //
 // Session id is delivered to the sink the first time it appears, not
-// at stream close — any mid-run consumer (the future curator UI, a
-// memory-gate retry, a takeover) can read it without waiting for the
-// stream to complete.
+// at stream close — any mid-run consumer (a live UI, a memory-gate retry,
+// a takeover) can read it without waiting for the stream to complete.
 //
 // Reader choice: a bounded readLine loop instead of bufio.Scanner
 // because each NDJSON line is one whole stream event, and a single

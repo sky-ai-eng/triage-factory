@@ -111,12 +111,6 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 	return p, nil
 }
 
-// GetSystem is N=1-unscoped in SQLite — it collapses to Get (there is no
-// admin/app pool split locally). See the interface doc.
-func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error) {
-	return s.Get(ctx, orgID, id)
-}
-
 func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Project, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err

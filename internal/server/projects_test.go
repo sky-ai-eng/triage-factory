@@ -749,8 +749,8 @@ func TestValidatePinnedRepoShape_NormalizesWhitespace(t *testing.T) {
 // TestValidatePinnedRepos_RejectsUnconfigured pins the two-part check: an id
 // must name a registry row, and that row must be tracked by the project's team
 // (team_github_repos). Together they stop a curl-crafted POST from pinning a
-// repo the team has never set up (no creds, no clone URL, nothing for the
-// Curator to materialize).
+// repo the team has never set up (no creds, no clone URL, nothing to
+// materialize).
 //
 // It also pins what validation RETURNS: the names the store persists, resolved
 // from the ids the wire carries. That translation is the edge's job and lives
@@ -1581,8 +1581,8 @@ func TestProjectPatch_PartialTrackerUpdateValidatesOnlyChangedSide(t *testing.T)
 }
 
 // listKnowledge reads a project's whole knowledge listing off the list route,
-// unwrapping the envelope. The knowledge base is small by construction (a
-// curator's working files), so one page holds it.
+// unwrapping the envelope. The knowledge base is small by construction, so
+// one page holds it.
 func listKnowledge(t *testing.T, s *Server, projectID string) []knowledgeFile {
 	t.Helper()
 	return decodeList[knowledgeFile](t, doJSON(t, s, http.MethodPost,

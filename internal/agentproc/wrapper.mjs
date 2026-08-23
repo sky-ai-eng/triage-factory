@@ -7,7 +7,7 @@
 //
 // Two modes, selected by argv:
 //   - one-shot (default): a string `-p` prompt → query({prompt:string}).
-//     Used by the scorer, classifier, profiler, curator, and
+//     Used by the scorer, classifier, profiler, and
 //     delegate-resume callers. Byte-for-byte the historical behavior.
 //   - streaming-input (`--input-format stream-json`): the prompt is an
 //     AsyncIterable<SDKUserMessage> fed from newline-delimited control

@@ -4,43 +4,38 @@ import "time"
 
 // Spend categories — the axis the llm_spend view (TFAC-472) normalizes its
 // sources onto. A delegated conversation is 'manual' (per-user) or
-// 'autonomous' (event-triggered) by its trigger_type; a curator turn is
-// 'curator'; a headless system job (scorer / repo-profiler / classifier) is
-// 'system_overhead'. The dashboards + safety cap group on these.
+// 'autonomous' (event-triggered) by its trigger_type; a headless system job
+// (scorer / repo-profiler / classifier) is 'system_overhead'. The dashboards
+// + safety cap group on these.
 const (
 	SpendCategoryManual         = "manual"
 	SpendCategoryAutonomous     = "autonomous"
-	SpendCategoryCurator        = "curator"
 	SpendCategorySystemOverhead = "system_overhead"
 )
 
 // Spend sources — the view's `source` discriminator, so callers can tell a
-// row's origin without re-querying. 'run' and 'curator' rows both derive from
-// conversation messages (delegated conversations and curator turns);
-// 'system' rows come from system_llm_runs. The values are persisted strings.
+// row's origin without re-querying. 'run' rows derive from conversation
+// messages (delegated conversations); 'system' rows come from
+// system_llm_runs. The values are persisted strings.
 const (
-	SpendSourceRun     = "run"
-	SpendSourceCurator = "curator"
-	SpendSourceSystem  = "system"
+	SpendSourceRun    = "run"
+	SpendSourceSystem = "system"
 )
 
 // SpendRow is one row from the llm_spend view — a single unit of settled LLM
-// spend from any of the three sources. Read-only; assembled by db.SpendStore.
+// spend from either source. Read-only; assembled by db.SpendStore.
 //
 // Settled-spend semantics: TotalCostUSD and the four token counts are 0 for an
-// in-flight (non-terminal) delegated conversation or curator turn and carry
-// their real values once a terminal write lands (normal completion, cancel,
-// infra-failure, or a boot-time orphan sweep). System rows are always
-// terminal.
+// in-flight (non-terminal) delegated conversation and carry their real values
+// once a terminal write lands (normal completion, cancel, infra-failure, or a
+// boot-time orphan sweep). System rows are always terminal.
 //
-// Nullable columns are pointers: TeamID is set only for 'run' rows (curator +
-// system are org-level, but TFAC-476 attributes a curator turn to its
-// project's team); Subtype carries the job name for system rows (NULL
-// otherwise); CreatorUserID is the human for 'run'/'curator' rows (NULL for
-// system); ActorAgentID is the executing org agent for 'run' rows (NULL for
-// curator/system); TriggerID is the event_handler that fired an autonomous
-// conversation (NULL for manual conversations, curator, and system —
-// TFAC-478); Model is NULL for curator turns.
+// Nullable columns are pointers: TeamID is set only for 'run' rows (system
+// rows are org-level); Subtype carries the job name for system rows (NULL
+// otherwise); CreatorUserID is the human for 'run' rows (NULL for system);
+// ActorAgentID is the executing org agent for 'run' rows (NULL for system);
+// TriggerID is the event_handler that fired an autonomous conversation (NULL
+// for manual conversations and system — TFAC-478).
 type SpendRow struct {
 	Source              string    `json:"source"`
 	SourceID            string    `json:"source_id"`
@@ -76,11 +71,10 @@ type SpendBucket struct {
 // a nil pointer / zero time / non-positive Limit drops that clause. TeamID
 // narrows to one team's spend (system rows carry a NULL team_id and so are
 // excluded by a non-nil TeamID — intended: the team dashboard sees its own
-// runs + team-attributed curator, not org-level overhead). CreatorUserID
-// narrows to one human's spend (the /api/me/usage personal view, TFAC-478):
-// manual runs + curator turns that human created — autonomous/system rows
-// carry a NULL creator and are excluded. Rows come back newest-first
-// (occurred_at DESC).
+// runs, not org-level overhead). CreatorUserID narrows to one human's spend
+// (the /api/me/usage personal view, TFAC-478): manual runs that human
+// created — autonomous/system rows carry a NULL creator and are excluded.
+// Rows come back newest-first (occurred_at DESC).
 type SpendFilter struct {
 	TeamID        *string
 	CreatorUserID *string

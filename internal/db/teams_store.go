@@ -268,7 +268,7 @@ type TeamsStore interface {
 	// Restore clears teamID's deleted_at (back to NULL), but only when the team
 	// is currently archived (deleted_at IS NOT NULL). Returns ErrTeamNotFound when
 	// no archived row matches. Restore makes the team visible + writable again; it
-	// deliberately does NOT resurrect the runs / curator sessions that archive
+	// deliberately does NOT resurrect the runs that archive
 	// force-stopped — those stay terminal. App pool: teams_update RLS (org-admin
 	// via the handler gate).
 	//

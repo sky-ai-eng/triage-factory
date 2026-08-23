@@ -29,9 +29,9 @@ import (
 // + a creator filter scope it to them). /teams names the team in the path and
 // resolves the org from the session, like every other {team_id} route; it is
 // team-admin-only, so its names resolve under the member's own claims, while
-// its spend read uses ListSpendSystem because curator conversations are
-// private-visibility (creator-scoped RLS — an app-pool read would miss peers'
-// curator turns) and the team-admin gate authorizes it. /orgs names the org in
+// its spend read uses ListSpendSystem — the authorized cross-RLS read — since
+// the team-admin gate is what authorizes it, not the caller's own claims.
+// /orgs names the org in
 // the path and authorizes the caller against THAT org, so an admin of three
 // orgs can read all three without first moving a session cursor: it is the
 // org-admin governance rollup, a cross-team ListSpendSystem read with no
@@ -72,8 +72,8 @@ type usageDayBucket struct {
 }
 
 // usageDayModelBucket is one (UTC day, model) cell — the long-format series the
-// FE pivots into a stacked-by-model area over time. Rows naming no model —
-// curator (NULL) and runtime-composed (domain.ModelSynthetic) — are excluded,
+// FE pivots into a stacked-by-model area over time. Rows naming no model
+// (NULL) or a runtime-composed one (domain.ModelSynthetic) are excluded,
 // same as by_model, so the stack covers model-attributed spend; the per-day
 // total (by_day) still includes their share.
 type usageDayModelBucket struct {
@@ -128,8 +128,8 @@ type usageTeamResponse struct {
 
 // usageOrgResponse is the org rollup. Partition invariant: total_cost_usd ==
 // sum(by_team[*].cost) + sum(org_level[*].cost) — by_team covers the team-
-// attributed rows, org_level the NULL-team rows (curator-on-non-team-projects +
-// system_overhead). by_user and by_category slice the SAME total on different
+// attributed rows, org_level the NULL-team rows (system_overhead). by_user
+// and by_category slice the SAME total on different
 // axes (creator / category), so neither sums to total on its own; a consumer
 // reproducing the total must add by_team + org_level, not by_team alone.
 type usageOrgResponse struct {
@@ -150,8 +150,8 @@ type usageOrgResponse struct {
 
 // --- handlers ---
 
-// handleUsageMe returns the caller's own spend: manual runs + curator turns
-// they created (autonomous/system rows carry a NULL creator and are excluded by
+// handleUsageMe returns the caller's own spend: manual runs they created
+// (autonomous/system rows carry a NULL creator and are excluded by
 // the filter). Gate: any authenticated org member. Read on the app pool under
 // the caller's claims, narrowed by CreatorUserID = self.
 //
@@ -197,10 +197,9 @@ func (h *usageHandler) handleUsageMe(w http.ResponseWriter, r *http.Request) {
 // Because the caller is a team member, every name resolves under their own RLS:
 // by_rule reads the team's event_handlers / blueprints through the app pool
 // (team-scoped RLS permits a member), and by_user reads org-scoped display
-// names. The spend READ still uses ListSpendSystem: curator conversations
-// are private-visibility (creator-scoped RLS), so a single admin's app-pool
-// read would miss peers' curator turns — the team-admin gate authorizes the System read that captures the whole
-// team. by_user groups manual+curator rows by creator; by_rule groups autonomous
+// names. The spend READ still uses ListSpendSystem — the authorized cross-RLS
+// read, since it is the team-admin gate that authorizes it, not the caller's
+// own claims. by_user groups manual rows by creator; by_rule groups autonomous
 // rows by the firing trigger; system rows (NULL team) never appear (the TeamID
 // filter excludes them).
 //
@@ -282,13 +281,13 @@ func (h *usageHandler) handleUsageTeam(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUsageOrg returns the org rollup across every team + curator + system
-// job. Gate: org admin (a cross-team read — the authorized intent, not a
-// workaround). This is the governance lens: by_team groups the team-attributed
-// rows (and drives the FE team dropdown), by_user groups the human creators
-// org-wide, by_category splits automated / delegated / curator / system, and
-// org_level is the NULL-team rows (curator on non-team projects + system_
-// overhead) by category. Deliberately NO by_rule — per-rule detail stays with
+// handleUsageOrg returns the org rollup across every team + system job. Gate:
+// org admin (a cross-team read — the authorized intent, not a workaround).
+// This is the governance lens: by_team groups the team-attributed rows (and
+// drives the FE team dropdown), by_user groups the human creators org-wide,
+// by_category splits automated / delegated / system, and org_level is the
+// NULL-team rows (system_overhead) by category. Deliberately NO by_rule —
+// per-rule detail stays with
 // the owning team (/api/teams/{team_id}/usage), so the org view never reaches
 // into another team's event_handlers.
 //
@@ -640,8 +639,8 @@ func spendByCategory(rows []domain.SpendRow) []usageCategoryBucket {
 }
 
 // spendByModel sums cost per model, highest-cost-first (ties broken by model
-// name). Rows with a NULL model (curator turns) are excluded — by_model is a
-// per-model breakdown, not a total, so the curator share lives only in
+// name). Rows with a NULL model are excluded — by_model is a
+// per-model breakdown, not a total, so their share lives only in
 // by_category. Runtime-composed rows (domain.ModelSynthetic) are excluded on
 // the same grounds: they name no model. Settlement no longer targets those
 // rows, so this covers rows stamped before that fix plus the last-resort
@@ -684,7 +683,7 @@ func spendByDay(rows []domain.SpendRow) []usageDayBucket {
 
 // spendByDayModel sums cost per (UTC calendar day, model) — the long-format
 // series the FE pivots into a stacked-by-model area. Rows with a NULL model
-// (curator) or a runtime-composed one (domain.ModelSynthetic) are excluded,
+// or a runtime-composed one (domain.ModelSynthetic) are excluded,
 // matching by_model; their share still lands in by_day's per-day total. Sorted
 // by date then model for a stable response.
 func spendByDayModel(rows []domain.SpendRow) []usageDayModelBucket {
@@ -716,7 +715,7 @@ type userProfile struct {
 	avatar string
 }
 
-// spendByUser sums cost per human creator (manual runs + curator turns),
+// spendByUser sums cost per human creator (manual runs),
 // resolving display name + avatar from the supplied map. Rows with a NULL creator
 // (autonomous/system) are excluded. Sorted cost-desc.
 func spendByUser(rows []domain.SpendRow, profiles map[string]userProfile) []usageUserBucket {
@@ -790,9 +789,9 @@ func spendByTeam(rows []domain.SpendRow, names map[string]string) []usageTeamBuc
 	return out
 }
 
-// spendOrgLevel sums the NULL-team rows (curator on non-team projects +
-// system_overhead) per category — the org-level spend that isn't attributable
-// to any one team. Sorted by category.
+// spendOrgLevel sums the NULL-team rows (system_overhead) per category —
+// the org-level spend that isn't attributable to any one team. Sorted by
+// category.
 func spendOrgLevel(rows []domain.SpendRow) []usageOrgLevelBucket {
 	byCat := map[string]float64{}
 	for _, r := range rows {
@@ -814,7 +813,7 @@ func spendOrgLevel(rows []domain.SpendRow) []usageOrgLevelBucket {
 // resolveSpendUserProfiles maps each distinct human creator in rows to a (display
 // name, avatar URL) pair. Runs on the app pool under the caller's claims —
 // users_select RLS is org-scoped, so a caller (always an org member here)
-// resolves any co-member's profile, which covers every run/curator creator in
+// resolves any co-member's profile, which covers every run creator in
 // their org. avatar_url is whatever the OAuth login captured (often empty in
 // local mode); the FE roster falls back to a monogram when it's blank.
 func resolveSpendUserProfiles(ctx context.Context, tx db.TxStores, rows []domain.SpendRow) (map[string]userProfile, error) {

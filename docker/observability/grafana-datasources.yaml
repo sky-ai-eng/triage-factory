@@ -78,7 +78,7 @@ datasources:
     correlations:
       - targetUID: tf-tempo
         label: Traces for this conversation
-        description: Every trace carrying this conversation.id — the engagement's other attempts, its curator turns, the events that produced it.
+        description: Every trace carrying this conversation.id — the engagement's other attempts, the events that produced it.
         type: query
         config:
           field: traceID

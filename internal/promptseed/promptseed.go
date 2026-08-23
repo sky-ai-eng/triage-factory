@@ -45,12 +45,6 @@ var ciFix string
 //go:embed prompts/fix-review-feedback.txt
 var fixReviewFeedback string
 
-//go:embed prompts/ticket-spec.txt
-var ticketSpec string
-
-//go:embed prompts/jira-formatting.md
-var jiraFormatting string
-
 // Prompts returns the system prompts every team gets seeded with — the single
 // source of truth shared by the local provision action (db.BootstrapLocalOrg,
 // fired by POST /api/orgs), the multi-mode org-create bootstrap
@@ -104,31 +98,15 @@ func Prompts() []domain.Prompt {
 		// read the review, fix what's right, push back on what isn't,
 		// push to branch.
 		{SystemSlug: "system-fix-review-feedback", Name: "Fix Review Feedback", Body: fixReviewFeedback, Source: "system"},
-
-		// Default Curator spec-authorship skill. The Curator
-		// materializes whichever prompt a project's blueprint points at as a
-		// literal Claude Code skill on each dispatch; new projects start
-		// pointing at this one's blueprint. Users override per-project via the
-		// Projects page.
-		{SystemSlug: domain.SystemTicketSpecPromptID, Name: "Curator: Ticket as a Spec", Body: ticketSpec, Source: "system"},
-
-		// Jira markup guidance the Curator materializes as an always-on
-		// skill, resolved by slug rather than through a project's blueprint.
-		// A row rather than an embedded file so a team with different Jira
-		// conventions can fix it.
-		{SystemSlug: domain.SystemJiraFormattingPromptID, Name: "Curator: Jira Formatting", Body: jiraFormatting, Source: "system"},
 	}
 }
 
 // Blueprints returns the shipped blueprints. Most are a 1-step blueprint
 // wrapping a single prompt: the blueprint reuses the wrapped prompt's
 // system_slug (distinct table, no collision) and its single step points at that
-// prompt's slug. Each such prompt is either fired by a trigger
-// (CI-fix, conflict-resolution, jira-implement, fix-review-feedback) or used by
-// the curator (system-ticket-spec, system-jira-formatting), so wrapping it
-// keeps the trigger→blueprint and project→blueprint references resolvable —
-// and, for the curator's two, keeps the prompt inside the drift sync, which
-// walks blueprints and would never reach an unwrapped row.
+// prompt's slug. Each such prompt is fired by a trigger (CI-fix,
+// conflict-resolution, jira-implement, fix-review-feedback), so wrapping it
+// keeps the trigger→blueprint reference resolvable.
 //
 // The exception is PR review (system-pr-review), the one multi-step shipped
 // blueprint: security → correctness → aggregate. Its step prompts

@@ -1546,7 +1546,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
     <strong>Materialize / ingest pattern.</strong> Memories and project knowledge in multi mode follow the same shape:
     <ol style="margin: 8px 0 0; padding-left: 18px; font-size: 13px;">
       <li><strong>At delegation start:</strong> agent-runner queries Postgres for the org's relevant rows, writes them as files into the worktree's <code>_scratch/entity-memory/</code> and <code>_scratch/project-knowledge/</code> dirs. The gVisor-sandboxed agent reads them as ordinary files via the SDK's tools.</li>
-      <li><strong>At completion:</strong> agent-runner reads back the same dirs, diffs against what it wrote, upserts changed files as rows. Curator runs are how knowledge bases get updated; ordinary delegations write only memories.</li>
+      <li><strong>At completion:</strong> agent-runner reads back the same dirs, diffs against what it wrote, upserts changed files as rows. This write-back pattern was fed by curator turns; curator was removed (TFAC-894), and ordinary delegations write only memories, so project knowledge base write-back currently has no writer.</li>
       <li><strong>Why this shape:</strong> the agent's tooling (Read/Write/Edit) operates on files. We don't want the agent to know about Postgres. The runner bridges DB → filesystem at the gVisor boundary.</li>
     </ol>
     Identical to today's local-mode flow, just with Postgres as the source instead of <code>~/.triagefactory/projects/</code> and <code>memories</code> rows in the local SQLite.
@@ -1815,7 +1815,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
   filename        <span class="kw">TEXT NOT NULL</span>,                       <span class="com">-- e.g. 'architecture.md', 'glossary.md'</span>
   content         <span class="kw">TEXT NOT NULL</span>,                       <span class="com">-- markdown body; capped at ~64KB per file (soft)</span>
   size_bytes      <span class="kw">INT NOT NULL</span>,
-  last_updated_by <span class="kw">UUID REFERENCES</span> runs(id),              <span class="com">-- which curator run last touched this; NULL = manual edit via UI</span>
+  last_updated_by <span class="kw">UUID REFERENCES</span> runs(id),              <span class="com">-- which run last touched this; NULL = manual edit via UI</span>
   created_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
   updated_at      <span class="kw">TIMESTAMPTZ NOT NULL DEFAULT</span> now(),
   <span class="kw">UNIQUE</span> (project_id, filename)
@@ -1823,7 +1823,7 @@ Set-Cookie: sid=<span class="num">a1b2c3d4-...</span>;     <span class="com">// 
 <span class="kw">CREATE INDEX</span> project_knowledge_project_idx <span class="kw">ON</span> project_knowledge(project_id);
 
 <span class="com">-- agent-runner queries by project_id at delegation start, writes files into the</span>
-<span class="com">-- worktree's _scratch/project-knowledge/. On curator-run completion, runner reads</span>
+<span class="com">-- worktree's _scratch/project-knowledge/. On run completion, runner reads</span>
 <span class="com">-- back the dir and upserts changed files. Web tier reads/writes via SQL with RLS.</span></pre>
     </div>
   </details>
@@ -2563,7 +2563,7 @@ POST /admin/sso/providers
         <li>New package <code>internal/paths</code></li>
         <li>Functions: <code>WorktreeDir(orgID, runID)</code>, <code>TakeoverDir(orgID, runID)</code>, <code>ProjectKBDir(orgID, projectID)</code>, etc.</li>
         <li>Mode flag <code>TF_MODE</code> read once at startup, stored in package-level config</li>
-        <li>Audit every <code>filepath.Join</code> in worktree.go, delegate/*.go, repoprofile, curator — route through paths</li>
+        <li>Audit every <code>filepath.Join</code> in worktree.go, delegate/*.go, repoprofile — route through paths</li>
         <li>Local mode: <code>orgID == "default"</code>, gets stripped from path; preserves backward compat</li>
       </ul>
       <h5>Acceptance</h5>

@@ -303,10 +303,8 @@ export default function TeamSettings() {
       .then((res) => {
         setArchive('closed')
         const runs = res.cancelled_runs
-        const sessions = res.cancelled_curator_sessions
         toast.success(
-          `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ` +
-            `${sessions} curator ${sessions === 1 ? 'session' : 'sessions'}.`,
+          `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'}.`,
         )
         // The team is gone from /api/teams, which drives this page to whichever
         // team is left — or to its own empty state.
@@ -335,10 +333,7 @@ export default function TeamSettings() {
     })
     if (preview)
       out.push({
-        text:
-          `${preview.active_runs} ${preview.active_runs === 1 ? 'delegation' : 'delegations'} and ` +
-          `${preview.active_curator_sessions} curator ` +
-          `${preview.active_curator_sessions === 1 ? 'session' : 'sessions'} stop now`,
+        text: `${preview.active_runs} ${preview.active_runs === 1 ? 'delegation' : 'delegations'} stop now`,
         tone: 'loss',
       })
     out.push({ text: 'Run history and cost records are kept', tone: 'keep' })

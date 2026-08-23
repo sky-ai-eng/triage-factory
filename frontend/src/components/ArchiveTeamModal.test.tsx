@@ -18,7 +18,6 @@ const PREVIEW = {
   name: 'Platform',
   archived: false,
   active_runs: 3,
-  active_curator_sessions: 1,
 }
 
 describe('ArchiveTeamModal', () => {
@@ -38,20 +37,18 @@ describe('ArchiveTeamModal', () => {
     )
 
     expect(screen.getByText(/3 active delegations/)).toBeInTheDocument()
-    // Singular curator session, pluralization respected.
-    expect(screen.getByText(/1 curator session\b/)).toBeInTheDocument()
     // Nothing to wait for: the confirm is live immediately.
     expect(screen.getByRole('button', { name: /Archive team/ })).toBeEnabled()
   })
 
-  it('archives on confirm and reports the cancelled counts', async () => {
-    archive.mockResolvedValue({ cancelled_runs: 2, cancelled_curator_sessions: 0 })
+  it('archives on confirm and reports the cancelled count', async () => {
+    archive.mockResolvedValue({ cancelled_runs: 2 })
     const onDone = vi.fn()
     render(
       <ArchiveTeamModal
         teamId="t1"
         teamName="Platform"
-        preview={{ ...PREVIEW, active_runs: 2, active_curator_sessions: 0 }}
+        preview={{ ...PREVIEW, active_runs: 2 }}
         onDone={onDone}
         onClose={vi.fn()}
       />,
@@ -61,7 +58,7 @@ describe('ArchiveTeamModal', () => {
 
     await waitFor(() => {
       expect(archive).toHaveBeenCalledWith('t1')
-      expect(onDone).toHaveBeenCalledWith(2, 0)
+      expect(onDone).toHaveBeenCalledWith(2)
     })
   })
 

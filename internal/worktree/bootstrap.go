@@ -33,10 +33,9 @@ type BootstrapTarget struct {
 // correctly configured.
 //
 // Once a correctness prerequisite ("bootstrap is the producer"), now an
-// optional latency optimization: everything self-seeds on demand
-// (delegation always did; the curator does after TFAC-60), so the warmer
-// only hides the first-dispatch clone cost. It runs after repo profiling
-// (so CloneURLs are populated).
+// optional latency optimization: everything self-seeds on demand, so the
+// warmer only hides the first-dispatch clone cost. It runs after repo
+// profiling (so CloneURLs are populated).
 //
 // Iteration is serial under per-repo locks. Parallelism would only
 // help the cold-start case where every repo needs its initial clone,

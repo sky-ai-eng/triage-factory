@@ -171,8 +171,8 @@ func (s *promptStore) GetBySystemSlug(ctx context.Context, orgID, teamID, system
 //     ShippedDefaultsStore.SeedShippedIntoTeam on the admin pool — the
 //     prompts_system_has_no_creator CHECK rejects source='system' rows
 //     that come through this Create path.
-//   - SQLite Create handles both source='system' (system tests +
-//     curator skill seeds) and source∈('user','imported') in one
+//   - SQLite Create handles both source='system' (system tests)
+//     and source∈('user','imported') in one
 //     entry point because local mode has no request context to
 //     derive identity from and tests reach into Create directly.
 //

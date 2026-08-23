@@ -16,7 +16,7 @@ import (
 
 // This file is the bounded, evictable layer of the one bare+worktree
 // cache both modes go through (TFAC-60). The seed/refresh/account half
-// lives in worktree.go / curator.go / worktree_pr.go; here is the
+// lives in worktree.go / worktree_pr.go; here is the
 // account-and-evict half: per-bare last-used accounting, a disk-budget +
 // TTL reaper, and the safe-eviction guard that never reclaims a bare
 // with a live worktree.
@@ -113,7 +113,7 @@ var (
 )
 
 // touchBare stamps bareDir as used now. Called from every cache entry
-// point (seed, curator refresh, PR/branch worktree setup) so the LRU
+// point (seed, PR/branch worktree setup) so the LRU
 // reflects real access, not just clone time.
 func touchBare(bareDir string) {
 	if bareDir == "" {
@@ -162,7 +162,7 @@ type bareEntry struct {
 // passes a real budget + TTL.
 //
 // Two passes, both skipping any bare that has a live worktree (an
-// in-flight delegation run or a live curator session reading it):
+// in-flight delegation run reading it):
 //
 //   - TTL: evict every bare untouched longer than policy.TTL.
 //   - Budget: while the total on-disk size exceeds policy.MaxBytes, evict
@@ -356,57 +356,6 @@ func bareCacheRoots() []string {
 	return roots
 }
 
-// curatorSharedRoots returns every dir tree that holds shared curator
-// worktrees: <StateRoot>/curator-repos and (multi) <StateRoot>/orgs/*/curator-repos.
-// Mirrors bareCacheRoots so the reaper recognizes a shared-worktree checkout
-// regardless of org layout. Returns nil when the state root can't be resolved.
-func curatorSharedRoots() []string {
-	if _, err := paths.StateRootErr(); err != nil {
-		return nil
-	}
-	roots := []string{paths.CuratorSharedReposRoot(runmode.LocalDefaultOrgID)}
-	if runmode.Current() == runmode.ModeMulti {
-		if matches, err := filepath.Glob(filepath.Join(paths.StateRoot(), "orgs", "*", "curator-repos")); err == nil {
-			roots = append(roots, matches...)
-		}
-	}
-	return roots
-}
-
-// resolveSymlinksBestEffort returns p with symlinks resolved, or p unchanged
-// when it can't be resolved (e.g. the path doesn't exist yet). git canonicalizes
-// a linked worktree's recorded gitdir to its real path, while paths TF derives
-// from the configured state root stay unresolved — and on macOS $TMPDIR is
-// /var/folders/... (a symlink to /private/var/folders/...), so the two forms
-// diverge. The curator liveness keys (the sharedReaders refcount map) and the
-// shared-root prefix check must agree on one canonical form, or a quiescent
-// shared worktree reads as live and defeats bare eviction. This is a macOS
-// dev/test-only divergence — Linux state roots have no such indirection, so
-// resolution is a no-op there.
-func resolveSymlinksBestEffort(p string) string {
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
-	}
-	return p
-}
-
-// isCuratorSharedWorktree reports whether wt is a shared curator worktree
-// checkout (strictly under a curator-shared-repos root). Such a checkout's
-// liveness is the sharedReaders refcount, not mere on-disk existence, so the
-// reaper can reclaim a quiescent one (TFAC-61) — unlike a per-project curator
-// worktree (under the project KB dir) or a delegation worktree, which stay
-// live by existence. Both sides are symlink-resolved so a git-canonicalized
-// worktree path matches a state-root-derived root (see resolveSymlinksBestEffort).
-func isCuratorSharedWorktree(wt string) bool {
-	wt = resolveSymlinksBestEffort(wt)
-	for _, root := range curatorSharedRoots() {
-		if strings.HasPrefix(wt, resolveSymlinksBestEffort(root)+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
-}
-
 // dirSize sums the size of every regular file under dir. Used to account
 // a bare's on-disk footprint for the budget pass.
 func dirSize(dir string) int64 {
@@ -440,12 +389,11 @@ func ownerRepoFromBareDir(dir string) (owner, repo string, ok bool) {
 }
 
 // bareHasLiveWorktrees reports whether bareDir has any linked worktree
-// with an on-disk checkout — a live delegation run or a live curator
-// session reading this bare. Safe eviction (TFAC-60) must never reclaim
-// such a bare. Reads the bare's worktrees/ admin dir directly rather than
-// shelling out to `git worktree list` so the reaper's guard stays cheap
-// and lock-free; recordedWorktreePath (cleanup.go) parses each entry's
-// gitdir pointer.
+// with an on-disk checkout — a live delegation run reading this bare.
+// Safe eviction (TFAC-60) must never reclaim such a bare. Reads the bare's
+// worktrees/ admin dir directly rather than shelling out to `git worktree
+// list` so the reaper's guard stays cheap and lock-free; recordedWorktreePath
+// (cleanup.go) parses each entry's gitdir pointer.
 func bareHasLiveWorktrees(bareDir string) bool {
 	entries, err := os.ReadDir(filepath.Join(bareDir, "worktrees"))
 	if err != nil {
@@ -466,18 +414,7 @@ func bareHasLiveWorktrees(bareDir string) bool {
 		if _, err := os.Stat(wt); err != nil {
 			continue // checkout gone → this entry isn't live
 		}
-		// The checkout exists. A shared curator worktree (TFAC-61) is live only
-		// while a jail is actively reading it (sharedReaders > 0); a quiescent
-		// one is cold cache the reaper may reclaim — evictBare removes the
-		// checkout and EnsureSharedCuratorWorktree re-materializes it on the
-		// next turn. Every other worktree (delegation run, per-project curator)
-		// is live by mere existence, as before. The per-repo lock evictBare
-		// holds while it re-checks this serializes against a concurrent
-		// EnsureSharedCuratorWorktree, which takes the same lock before it can
-		// bump the reader count — so a reader can't appear mid-eviction.
-		if isCuratorSharedWorktree(wt) && sharedReadersCount(wt) == 0 {
-			continue
-		}
+		// The checkout exists — live by mere existence.
 		return true
 	}
 	return false
@@ -509,8 +446,8 @@ func evictBare(entry bareEntry) int64 {
 
 	// The guard above proved no checkout is live, so every worktree this
 	// bare still registers is cold scratch — remove those dirs too so an
-	// eviction doesn't strand a curator worktree pointing at a now-gone
-	// bare. Re-stat the size under the lock to account a fault-in between
+	// eviction doesn't strand a worktree pointing at a now-gone bare.
+	// Re-stat the size under the lock to account a fault-in between
 	// scan and now.
 	removeRegisteredWorktrees(entry.dir)
 	size := dirSize(entry.dir)

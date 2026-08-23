@@ -15,22 +15,20 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/projectbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// Projects are the data layer underneath the Curator stack —
-// the long-lived per-project context that the rest of the
+// Projects are the long-lived per-project context that the rest of the
 // family hangs work onto. This file is pure CRUD + on-disk knowledge
-// dir cleanup; the Curator runtime, classifier, and UI all land in
-// later tickets and can hit the same handlers without changes here.
+// dir cleanup; the classifier and UI can hit the same handlers without
+// changes here.
 
 // writeKnowledgePathError shapes resolveKnowledgePath's (status, message)
 // pair: a client-side path fault names the path segment it came from, a
@@ -65,8 +63,8 @@ func writeInvalidVisibility(w http.ResponseWriter) {
 }
 
 // projectIDOr404 guards the {id} path value on every project-scoped route —
-// projects.id is a uuid column on Postgres. See uuidPathOr404. Shared with the
-// curator and knowledge surfaces, which address projects the same way.
+// projects.id is a uuid column on Postgres. See uuidPathOr404. Shared with
+// the knowledge surface, which addresses projects the same way.
 func projectIDOr404(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return uuidPathOr404(w, r, "id", "project")
 }
@@ -232,11 +230,15 @@ func (s *Server) handleProjectCreate(w http.ResponseWriter, r *http.Request) {
 		// seeded system blueprint when it exists. Doing this at the API layer
 		// (not in db.CreateProject) keeps the DB layer free of any "system
 		// blueprint must exist" coupling — tests that don't seed blueprints
-		// get NULL on insert and the curator runtime falls back to the same
-		// default at dispatch time anyway. Resolve the team's own copy of the
+		// get NULL on insert. Resolve the team's own copy of the
 		// shipped spec-authorship blueprint by slug (id is a random UUID per
 		// team copy); store the resolved UUID. Skipped entirely for a
 		// teamless private/org project — there's no team copy to resolve.
+		//
+		// TODO(TFAC-895): GetBySystemSlug always misses now that the curator
+		// removal deleted the system-ticket-spec seed — every new project gets
+		// NULL here. TFAC-895 removes spec authorship (and this whole block)
+		// entirely, so this is left as a silent no-op rather than fixed.
 		specBlueprintID := ""
 		if teamID != "" {
 			def, defErr := tx.Blueprints.GetBySystemSlug(r.Context(), orgID, teamID, domain.SystemTicketSpecPromptID)
@@ -546,7 +548,6 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 	project, warnings, err := projectbundle.Import(
 		r.Context(),
 		s.tx,
-		s.curatorStore,
 		s.kb,
 		orgID,
 		teamID,
@@ -812,10 +813,10 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		// a typo would silently break ticket authorship.
 		trimmed := strings.TrimSpace(*req.SpecAuthorshipBlueprintID)
 		if trimmed != "" {
-			// Validate against the project's OWN team, not just the org: the
-			// curator runs this blueprint under existing.TeamID, so a
-			// cross-team blueprint would let a team-A project run a team-B
-			// blueprint. List the team's blueprints and require membership.
+			// Validate against the project's OWN team, not just the org: this
+			// blueprint runs under existing.TeamID, so a cross-team blueprint
+			// would let a team-A project run a team-B blueprint. List the
+			// team's blueprints and require membership.
 			// SQLite ignores teamID (local is single-team). Empty is a
 			// legitimate state since TFAC-562 (a private/org-visibility
 			// project has no team) — a blueprint override just isn't
@@ -904,16 +905,6 @@ func (s *Server) handleProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Queue context-change deltas for every LIVE curator conversation of
-	// the project (all creators — a teammate's mid-session agent needs the
-	// note just as much as the PATCHing user's, and the app-pool
-	// private-visibility RLS couldn't reach their conversations, which is
-	// why the producer is an admin-pool System method that no-ops when no
-	// live conversation exists). Failures here are logged but do not abort
-	// the PATCH; the user's settings change has already been persisted, and
-	// the worst case is the agent missing one delta on its next turn (which
-	// a follow-up PATCH or the user's next message itself can correct).
-	queuePendingContextChanges(r.Context(), s.curatorStore, orgID, *existing, updated)
 	// Rendered from the row the write returned, not from `updated` — the merged
 	// struct is missing everything the statement decided (the restamped
 	// updated_at, the reconciled pin set) — and not from a second read, which
@@ -957,35 +948,6 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
-
-	// Snapshot pinned_repos BEFORE the cascade fires so we can prune
-	// each affected bare clone's worktree registration list after the
-	// project's repos/ subtree gets RemoveAll'd. Without the prune,
-	// stale entries accumulate in <bare>/worktrees/ — recoverable but
-	// noisy, and they block re-creating the same name in a future
-	// project's worktree. A read failure here is non-fatal: skip the
-	// prune step, the on-disk cleanup still happens.
-	var pinned []string
-	_ = s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		existing, e := tx.Projects.Get(r.Context(), orgID, id)
-		if e == nil && existing != nil {
-			pinned = existing.PinnedRepos
-		}
-		return nil
-	})
-
-	// Stop any in-flight Curator chat for this project BEFORE the DB
-	// delete: the goroutine releases the turn's claim, and the claim rows
-	// are what the FK cascade is about to drop. Doing it in the right
-	// order means a user who deletes a project mid-chat sees a
-	// deterministic terminal state rather than relying on cascade
-	// behavior to handle a live engagement. Queued turns are undelivered
-	// messages the cascade simply deletes — the queued-cancel semantic.
-	// No-op when the curator runtime hasn't been wired (test
-	// harnesses, fresh-install before first message).
-	if s.curator != nil {
-		s.curator.CancelProject(orgID, id, "project deleted")
-	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		return tx.Projects.Delete(r.Context(), orgID, id)
@@ -1035,14 +997,14 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 			projectsLog.Warn("cleanup of project kb store prefix failed", "project", id, "error", delErr)
 			w.Header().Set("X-Cleanup-Warning", cleanupWarning)
 		}
-		if dir, dirErr := curator.KnowledgeDir(orgID, id); dirErr == nil {
+		if dir, dirErr := projectKnowledgeDir(orgID, id); dirErr == nil {
 			if rmErr := os.RemoveAll(dir); rmErr != nil && !os.IsNotExist(rmErr) {
 				projectsLog.Warn("cleanup of local project dir failed", "project", id, "dir", dir, "error", rmErr)
 			}
 		}
-		s.kbChanged("project_deleted", orgID, id)
+		s.kbChanged(orgID, id)
 	} else {
-		dir, dirErr := curator.KnowledgeDir(orgID, id)
+		dir, dirErr := projectKnowledgeDir(orgID, id)
 		switch {
 		case dirErr != nil:
 			projectsLog.Warn("cannot resolve knowledge dir, on-disk cleanup skipped", "project", id, "error", dirErr)
@@ -1055,25 +1017,25 @@ func (s *Server) handleProjectDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Prune the bare clone of each pinned repo — the per-project
-	// worktrees we just RemoveAll'd would otherwise leave behind
-	// dangling entries in <bare>/worktrees/ that block re-creating
-	// the same name in a future project. Best-effort, post-RemoveAll
-	// because prune is what reads the now-missing dirs.
-	for _, slug := range pinned {
-		owner, repo, ok := splitOwnerRepo(slug)
-		if !ok {
-			continue
-		}
-		worktree.PruneCuratorBare(owner, repo)
-	}
-
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// splitOwnerRepo splits "owner/repo" once. Mirrors the helper in
-// internal/curator; duplicated here rather than imported to avoid
-// pulling the curator package's surface into the projects handler.
+// projectKnowledgeDir resolves a project's on-disk working directory —
+// the knowledge base plus its pinned worktrees — routed through
+// internal/paths (paths.ProjectKBDir). It pre-flights paths.StateRootErr
+// so a missing $HOME surfaces as an actionable error rather than letting
+// the underlying paths.ProjectKBDir panic.
+func projectKnowledgeDir(orgID, projectID string) (string, error) {
+	if projectID == "" {
+		return "", fmt.Errorf("project id is required")
+	}
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", fmt.Errorf("resolve state root: %w", err)
+	}
+	return paths.ProjectKBDir(orgID, projectID), nil
+}
+
+// splitOwnerRepo splits "owner/repo" once.
 func splitOwnerRepo(slug string) (owner, repo string, ok bool) {
 	for i := 0; i < len(slug); i++ {
 		if slug[i] == '/' {
@@ -1125,8 +1087,7 @@ func validatePinnedRepoShape(repoIDs []string) ([]string, string) {
 // track it. This pins the UX contract — the frontend presents the pin picker
 // as a multi-select over the team's tracked repos, so an untracked id arriving
 // here is a stale client or a hand-crafted curl. Rejecting it up front keeps
-// the Curator from later trying to materialize a worktree for a repo the team
-// can't authenticate against.
+// a pin from naming a repo the team can't authenticate against.
 //
 // It returns what the store persists: each pin as the provider's current name
 // (see domain.Project.PinnedRepos). The translation lives here, at the edge,
@@ -1299,84 +1260,6 @@ func validateTrackerKeys(teamRules []domain.JiraProjectStatusRules, jiraKey, lin
 	return "", "", "jira_project_key", jiraNorm + " is not in the configured Jira projects list (add it on the Settings page first)"
 }
 
-// queuePendingContextChanges diffs the project's pre-PATCH state against the
-// freshly-merged value and records an 'injection:context' delta on every
-// live curator conversation of the project for each field that meaningfully
-// changed. The store's producer no-ops when no live conversation exists —
-// there's no point queueing for a project nobody has chatted with: the next
-// conversation's static envelope renders fresh values directly.
-//
-// One-pending-per-type: the producer replaces an existing undelivered row of
-// the same change_type per conversation, so a run of PATCHes between user
-// messages leaves one delta per field.
-//
-// Failures are logged, not returned. The PATCH itself has already
-// committed (queueing is best-effort context decoration), and the
-// agent will at worst miss a delta on its next turn — recoverable
-// from the user's next message or a follow-up PATCH. Surfacing the
-// failure as a 500 would imply the settings change failed, which is
-// strictly worse.
-func queuePendingContextChanges(ctx context.Context, curatorStore db.CuratorStore, orgID string, before, after domain.Project) {
-	if !pinnedReposSetEqual(before.PinnedRepos, after.PinnedRepos) {
-		baseline, err := curator.EncodeStringSliceBaseline(before.PinnedRepos)
-		if err != nil {
-			projectsLog.Warn("encode pinned-repos baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypePinnedRepos, baseline); err != nil {
-			projectsLog.Warn("queue pinned-repos pending context failed", "project", before.ID, "error", err)
-		}
-	}
-	if before.JiraProjectKey != after.JiraProjectKey {
-		baseline, err := curator.EncodeNullableStringBaseline(before.JiraProjectKey)
-		if err != nil {
-			projectsLog.Warn("encode jira baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypeJiraProjectKey, baseline); err != nil {
-			projectsLog.Warn("queue jira pending context failed", "project", before.ID, "error", err)
-		}
-	}
-	if before.LinearProjectKey != after.LinearProjectKey {
-		baseline, err := curator.EncodeNullableStringBaseline(before.LinearProjectKey)
-		if err != nil {
-			projectsLog.Warn("encode linear baseline failed", "project", before.ID, "error", err)
-		} else if err := curatorStore.QueueContextChangeSystem(ctx, orgID, before.ID, domain.ChangeTypeLinearProjectKey, baseline); err != nil {
-			projectsLog.Warn("queue linear pending context failed", "project", before.ID, "error", err)
-		}
-	}
-}
-
-// pinnedReposSetEqual compares two pinned-repo slices as sets — order
-// AND multiplicity are irrelevant. The diff renderer in the curator
-// package treats pinned_repos as a set (added/removed semantics), so
-// a PATCH that only reorders OR re-emits the same elements with
-// duplicates collapsed (e.g. ["a","a"] → ["a"]) produces no rendered
-// diff; without dedup-aware equality here we'd queue a pending row
-// that goes through claim/render/finalize and produces an empty note,
-// which is wasted I/O and a noisy audit trail.
-//
-// validatePinnedRepoShape currently does not dedupe, so duplicates
-// can in principle land in the column. Comparing as sets here means
-// the queue-side check stays correct even if the validator never
-// tightens; if the validator does tighten in the future, the dedup
-// here is a cheap no-op.
-func pinnedReposSetEqual(a, b []string) bool {
-	aset := make(map[string]struct{}, len(a))
-	for _, v := range a {
-		aset[v] = struct{}{}
-	}
-	bset := make(map[string]struct{}, len(b))
-	for _, v := range b {
-		bset[v] = struct{}{}
-	}
-	if len(aset) != len(bset) {
-		return false
-	}
-	for k := range aset {
-		if _, ok := bset[k]; !ok {
-			return false
-		}
-	}
-	return true
-}
-
 // knowledgeFile is the per-file shape returned by the knowledge
 // endpoint. We surface the relative path (under
 // <KnowledgeDir>/knowledge-base/) rather than the absolute path so
@@ -1415,10 +1298,10 @@ type knowledgeFile struct {
 // stays snappy.
 const knowledgeInlineMaxBytes = 256 * 1024
 
-// knowledgeMaxUploadBytes caps individual file uploads at 5MB. The
-// Curator's agent has to read these into context at some point, so
-// extremely large files are the wrong shape for a knowledge base.
-// Multi-file uploads are bounded by knowledgeMaxRequestBytes below.
+// knowledgeMaxUploadBytes caps individual file uploads at 5MB. An
+// agent has to read these into context at some point, so extremely
+// large files are the wrong shape for a knowledge base. Multi-file
+// uploads are bounded by knowledgeMaxRequestBytes below.
 const knowledgeMaxUploadBytes = 5 * 1024 * 1024
 
 // knowledgeMaxRequestBytes caps a single multipart request at 25MB
@@ -1502,7 +1385,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else {
-		root, err := curator.KnowledgeDir(orgID, id)
+		root, err := projectKnowledgeDir(orgID, id)
 		if err != nil {
 			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
 			return
@@ -1752,7 +1635,7 @@ func sanitizeKnowledgeFilename(raw string) (string, string) {
 // cases to a 400, which misclassified internal failures as bad
 // input and made operator triage harder.
 func resolveKnowledgePath(orgID, projectID, rawPath string) (string, string, int, string) {
-	root, err := curator.KnowledgeDir(orgID, projectID)
+	root, err := projectKnowledgeDir(orgID, projectID)
 	if err != nil {
 		projectsLog.Error("resolve knowledge dir failed", "project", projectID, "error", err)
 		return "", "", http.StatusInternalServerError, "failed to resolve knowledge dir"
@@ -1979,7 +1862,7 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 	multi := runmode.Current() == runmode.ModeMulti
 	var kbDir string
 	if !multi {
-		root, err := curator.KnowledgeDir(orgID, id)
+		root, err := projectKnowledgeDir(orgID, id)
 		if err != nil {
 			internalError(w, "projects", fmt.Errorf("resolve knowledge dir for project %s: %w", id, err))
 			return
@@ -2060,10 +1943,9 @@ func (s *Server) handleProjectKnowledgeUpload(w http.ResponseWriter, r *http.Req
 			// not part of the upload's correctness contract.
 			projectsLog.Warn("knowledge upload: bump updated_at failed", "project", id, "error", err)
 		}
-		// Multi mode: tell browsers the panel changed and nudge the home
-		// executor to materialize the upload into a live session's dir.
+		// Multi mode: tell browsers the panel changed.
 		if multi {
-			s.kbChanged("", orgID, id)
+			s.kbChanged(orgID, id)
 		}
 	}
 
@@ -2162,10 +2044,9 @@ func writeUploadedFile(fh *multipart.FileHeader, dst string) string {
 }
 
 // handleProjectKnowledgeDelete removes a single file from the
-// knowledge-base directory. The Curator's RemoveAll on project
-// delete handles whole-dir cleanup; this is the per-file pair to
-// the upload endpoint, mirrored on the frontend by the per-file
-// trash button.
+// knowledge-base directory. The project-delete handler's RemoveAll
+// handles whole-dir cleanup; this is the per-file pair to the upload
+// endpoint, mirrored on the frontend by the per-file trash button.
 func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {
@@ -2241,7 +2122,7 @@ func (s *Server) handleProjectKnowledgeDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if multi {
-		s.kbChanged("", orgID, id)
+		s.kbChanged(orgID, id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -169,16 +169,15 @@ export type ConversationStatus = (typeof CONVERSATION_STATUSES)[number]
 // It exists to be a NAME rather than a type constraint. The lint rule reads a
 // status comparison two ways — `<expr>.Status` (the PascalCase Conversation
 // projection; every other DTO in this file spells its own status lowercase, so
-// the case alone separates the curator-turn and blueprint-run vocabularies from
-// this one) and any value annotated with this alias. So a helper that takes a
-// status second-hand — `conversationStatusColor(status)`, a tone switch — says so in its
-// signature and gets checked like the property access it came from.
+// the case alone separates the blueprint-run vocabulary from this one) and any
+// value annotated with this alias. So a helper that takes a status
+// second-hand — `conversationStatusColor(status)`, a tone switch — says so in
+// its signature and gets checked like the property access it came from.
 export type ConversationStatusValue = string
 
 // Conversation is the durable agent-context row's display projection —
 // served through a handler-side map, so its fields are PascalCase (mirroring
-// internal/domain/agent.go's Conversation). One conversation is one delegation
-// today; curator conversations are surfaced through the curator turn DTOs.
+// internal/domain/agent.go's Conversation). One conversation is one delegation.
 export interface Conversation {
   ID: string
   TaskID: string
@@ -369,9 +368,8 @@ export interface ActivityAction {
 }
 
 // Message is the single snake_case transcript-row DTO shared by every
-// surface (delegated conversations and curator chat), mirroring domain.MessageDTO
-// (internal/domain/agent.go). conversation_id links the row to its owning
-// conversation; curator groups these into turns client-side.
+// surface, mirroring domain.MessageDTO (internal/domain/agent.go).
+// conversation_id links the row to its owning conversation.
 export interface Message {
   id: number
   conversation_id: string
@@ -451,31 +449,6 @@ export interface ContentFile {
   file_id?: string
   filename?: string
   file_type?: string
-}
-
-// CuratorRequest mirrors the Go domain type in internal/domain/curator.go —
-// one curator chat turn (a user message plus the claim that executed it). Its
-// agent-side rows are the shared snake_case Message DTO.
-export type CuratorRequestStatus = 'queued' | 'running' | 'done' | 'cancelled' | 'failed'
-
-export interface CuratorRequest {
-  id: string
-  project_id: string
-  status: CuratorRequestStatus
-  user_input: string
-  error_msg?: string
-  cost_usd: number
-  duration_ms: number
-  num_turns: number
-  started_at?: string
-  finished_at?: string
-  created_at: string
-}
-
-// History endpoint envelope: each request carries its message stream
-// inline. Frontend dedupes incoming WS messages against this.
-export interface CuratorRequestWithMessages extends CuratorRequest {
-  messages: Message[]
 }
 
 export interface TriageEvent {
@@ -1011,11 +984,8 @@ export interface Project {
   pinned_repository_ids: string[]
   jira_project_key: string
   linear_project_key: string
-  /** Per-project Curator spec-authorship skill. Empty string =
-   *  use the seeded `system-ticket-spec` default. The Curator dispatch
-   *  materializes whichever prompt this points at as a literal Claude
-   *  Code skill at `<cwd>/.claude/skills/ticket-spec/SKILL.md` on every
-   *  turn — changes apply immediately without a session reset. */
+  /** The blueprint used for this project's ticket-authorship dispatch.
+   *  Empty string = use the seeded `system-ticket-spec` default. */
   spec_authorship_blueprint_id: string
   created_at: string
   updated_at: string
@@ -1155,22 +1125,20 @@ export interface FactorySnapshot {
 }
 
 export type WSEvent =
-  // One transcript row for a conversation — delegated conversation or curator turn
-  // alike (the two former agent_message / curator_message events converged).
-  // conversation_id is set for delegated conversations; project_id is set for curator
-  // turns (the curator surface filters by project and appends to its active
-  // turn). data is the shared snake_case Message DTO.
-  | { type: 'message'; conversation_id?: string; project_id?: string; data: Message }
-  // Conversation lifecycle/status change. A delegated conversation carries conversation_id and a
+  // One transcript row for a conversation. data is the shared snake_case
+  // Message DTO. conversation_id is optional on the wire (pkg/websocket.Event
+  // omits it when empty) — every real emitter sets it, but a consumer must
+  // not assume it, since a frame arrives from the network, not from the type.
+  | { type: 'message'; conversation_id?: string; data: Message }
+  // Conversation lifecycle/status change. Carries conversation_id and a
   // coalesced display status (fetching/cloning/agent_starting/
-  // awaiting_credentials/running/terminal) plus failure_kind on a failure; a
-  // curator turn carries project_id and { request_id, status }. failure_kind
-  // rides along only when status === 'failed' AND the backend classified the
-  // cause (domain.ConversationFailureKind); absent === generic failure.
+  // awaiting_credentials/running/terminal) plus failure_kind on a failure.
+  // failure_kind rides along only when status === 'failed' AND the backend
+  // classified the cause (domain.ConversationFailureKind); absent === generic
+  // failure.
   | {
       type: 'conversation_update'
-      conversation_id?: string
-      project_id?: string
+      conversation_id: string
       data: {
         status?: string
         failure_kind?: string
@@ -1238,16 +1206,6 @@ export type WSEvent =
       type: 'entities_assigned_to_project'
       project_id: string
       data: { entity_ids: string[] }
-    }
-  | {
-      // The requesting user's live curator conversation was archived (reset).
-      // Scoped to the resetting user server-side; carries the archived
-      // conversation id so a client that already began a fresh conversation
-      // ignores the stale reset instead of wiping it.
-      type: 'conversation_reset'
-      project_id: string
-      conversation_id?: string
-      data: { conversation_id: string }
     }
   | { type: 'event'; data: DomainEvent }
   | { type: 'tasks_updated'; data: Record<string, never> }
@@ -1317,7 +1275,7 @@ export type WSEvent =
 // ──────────────────────────────────────────────────────────────────────
 
 /** One spend category's cost + token totals over the window. `category` is one
- *  of the domain.SpendCategory* values — 'manual' | 'autonomous' | 'curator' |
+ *  of the domain.SpendCategory* values — 'manual' | 'autonomous' |
  *  'system_overhead' — rendered via the categoryLabel map in Usage.tsx. */
 export interface UsageCategoryBucket {
   category: string
@@ -1328,8 +1286,8 @@ export interface UsageCategoryBucket {
   cache_creation_tokens: number
 }
 
-/** One model's summed cost, highest-first. Curator turns carry a NULL model and
- *  are excluded server-side, so by_model is a per-model slice, not a total. */
+/** One model's summed cost, highest-first. Rows with no resolved model are
+ *  excluded server-side, so by_model is a per-model slice, not a total. */
 export interface UsageModelBucket {
   model: string
   cost: number
@@ -1343,15 +1301,15 @@ export interface UsageDayBucket {
 }
 
 /** One (UTC day, model) cell — long-format, oldest-first then by model. The FE
- *  pivots it into a stacked-by-model area over time. Curator rows (NULL model)
- *  are excluded (their share is still in by_day's per-day total). */
+ *  pivots it into a stacked-by-model area over time. Rows with no resolved
+ *  model are excluded (their share is still in by_day's per-day total). */
 export interface UsageDayModelBucket {
   date: string
   model: string
   cost: number
 }
 
-/** One human creator's summed cost (their manual runs + curator turns). */
+/** One human creator's summed cost (their manual runs). */
 export interface UsageUserBucket {
   user_id: string
   display_name: string
@@ -1380,8 +1338,8 @@ export interface UsageTeamBucket {
   cost: number
 }
 
-/** One category of org-level spend — the NULL-team rows (curator on non-team
- *  projects + system overhead) that aren't attributable to any one team. */
+/** One category of org-level spend — the NULL-team rows (system overhead)
+ *  that aren't attributable to any one team. */
 export interface UsageOrgLevelBucket {
   category: string
   cost: number

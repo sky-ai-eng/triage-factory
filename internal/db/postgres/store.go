@@ -207,8 +207,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// in depth.
 		Entities: newEntityStore(app, admin),
 		// Repos wires both pools: app for request-
-		// equivalent consumers (repos/settings/projects handlers,
-		// curator) and admin for the `...System` variants the
+		// equivalent consumers (repos/settings/projects handlers)
+		// and admin for the `...System` variants the
 		// poller bootstrap + startup clone-status writes use. RLS
 		// policy repositories_all gates on (org_id = current_org_id()
 		// AND user_has_org_access) on the app side; admin bypasses
@@ -297,14 +297,6 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// TracksRepoSystem (router gate, no JWT claims) + the
 		// repositories reconcile (org-wide union, commits autonomously).
 		TeamGitHubRepos: newTeamGitHubReposStore(app, admin),
-		// Curator holds both pools: app for the claims-bound send/history/
-		// dispatch message writes (the per-project goroutine wraps each
-		// turn in Tx.SyntheticClaimsWithTx under the requesting user's
-		// identity; the tx-bound variant composed inside tx.go is what
-		// services those calls), admin for the `...System` claim writes,
-		// the executor claim loop's cross-user scan, the boot sweeps, the
-		// pending-context producer, and the brain's provisioning reads.
-		Curator: newCuratorStore(app, admin),
 		// GitHubApps: app pool for request-handler reads/writes
 		// (RLS-gated); admin pool for installation-mirror writes (tf_app
 		// is denied all writes to org_github_app_installations) + the
@@ -354,7 +346,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		ExternalActions: newExternalActionStore(app, admin),
 		// Spend holds both pools: app for ListSpend + SpendByCategory (the
 		// llm_spend view is security_invoker, so reading it under tf_app applies
-		// the base tables' RLS — team-scoped runs + org-scoped system/curator),
+		// the base tables' RLS — team-scoped runs + org-scoped system),
 		// admin for SpendByCategorySystem (the org-wide aggregate the TFAC-477
 		// safety cap reads from a claims-less Spawner.Delegate goroutine). Read-
 		// only; owns no table. See TFAC-472 / TFAC-477.
@@ -429,10 +421,6 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// the placement pin/replica overrides (TFAC-587) read for an already-
 		// authorized, operator-gated orgID, never a browsable RLS surface.
 		PlacementOverrides: newPlacementOverrideStore(admin),
-		// CuratorHomes is admin-pool only, same posture as PlacementOverrides:
-		// the (org, project) -> home executor map for curator homing (spec
-		// §6.3), coordination state read/written for an explicit orgID.
-		CuratorHomes: newCuratorHomeStore(admin),
 		// ClaimCredentials is admin-pool only, same posture as Instances/
 		// ConversationSignals: the sealed per-run credential bundle channel
 		// (TFAC-614) never serves a request handler.
@@ -510,7 +498,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		JiraStatusRules:       newJiraStatusRulesStore(tx, tx),
 		TeamGitHubGroups:      newTeamGitHubGroupsStore(tx, tx),
 		TeamGitHubRepos:       newTeamGitHubReposStore(tx, tx),
-		Curator:               newCuratorStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's
 		// GetSystem would hit tf_app and be denied here — tests that exercise
 		// it use New(admin, app, key) directly, same as the SecretStore tests.

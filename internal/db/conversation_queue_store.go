@@ -36,9 +36,9 @@ func AssertBlueprintStepIndexed(conv domain.Conversation) error {
 // input. A worker claims it (Postgres: FOR UPDATE SKIP LOCKED over that
 // predicate, with idx_claims_one_active as the actual mutual exclusion;
 // SQLite: a plain single-statement claim — N=1, no contention), drives it,
-// and releases the claim. Type-conditional gates ride alongside the shared
+// and releases the claim. A type-conditional gate rides alongside the shared
 // predicate: a delegation conversation's blueprint parent must still be
-// running, a curator conversation must hold a queued turn and be homed here.
+// running.
 //
 // This is a system-service store: the dispatcher runs as a background worker
 // with no per-user identity, so the Postgres impl wires against the admin pool
@@ -236,7 +236,6 @@ type ConversationQueueStore interface {
 	// ListAwaitingCredentials returns every conversation — of EVERY surface
 	// — whose active claim is currently parked in
 	// phase='awaiting_credentials'. One scan serves the whole provisioner:
-	// a curator turn parks its claim exactly like a delegated conversation does, so
 	// the phase column is the substrate and ConversationType is how the
 	// caller routes. The brain-side backstop sweep's input; primary
 	// provisioning happens synchronously off the executor's cred_request
@@ -395,9 +394,9 @@ type OrgQueueShare struct {
 type AwaitingCredentialsConversation struct {
 	ConversationID string
 	OrgID          string
-	// ConversationType is the owning surface ('delegation' | 'curator' | …)
-	// — what the unified provisioner sweep routes on, since the two
-	// surfaces resolve different credential sets for the same parked claim.
+	// ConversationType is the owning surface ('delegation' | …) — what the
+	// unified provisioner sweep routes on, since different surfaces may
+	// resolve different credential sets for the same parked claim.
 	ConversationType string
 	TeamID           string
 	TaskID           string

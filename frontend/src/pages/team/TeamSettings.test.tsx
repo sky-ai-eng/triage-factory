@@ -145,9 +145,8 @@ beforeEach(() => {
     name: 'platform',
     archived: false,
     active_runs: 3,
-    active_curator_sessions: 1,
   })
-  life.archiveTeam.mockResolvedValue({ cancelled_runs: 3, cancelled_curator_sessions: 1 })
+  life.archiveTeam.mockResolvedValue({ cancelled_runs: 3 })
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
@@ -240,7 +239,7 @@ describe('archiving the team', () => {
     // tracked set, the members from the roster, the live work from the preview.
     expect(screen.getByText('2 repositories stop being watched')).toBeInTheDocument()
     expect(screen.getByText('2 members lose access')).toBeInTheDocument()
-    expect(screen.getByText('3 delegations and 1 curator session stop now')).toBeInTheDocument()
+    expect(screen.getByText('3 delegations stop now')).toBeInTheDocument()
     expect(screen.getByText('Run history and cost records are kept')).toBeInTheDocument()
 
     // And then it arrives, through the sequence rather than instead of it.

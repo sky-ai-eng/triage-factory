@@ -33,8 +33,8 @@ import (
 //     capped by the org max tier). A prompt's own Model still overrides it.
 //
 //   - ghResolver picks the right GitHub credential (App-installation token
-//     → org PAT) per (org, target). Shared by the poller, spawner, curator,
-//     and repo profiler.
+//     → org PAT) per (org, target). Shared by the poller, spawner, and repo
+//     profiler.
 func (a *App) buildRunCredentials() error {
 	if !a.local() {
 		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
@@ -77,7 +77,7 @@ func (a *App) buildRunCredentials() error {
 // back to the org's default team.
 //
 // Falls back to the shipped default model on any error so a transient DB
-// hiccup doesn't silently clear the spawner+curator credentials.
+// hiccup doesn't silently clear the spawner's credentials.
 func resolveAIModelForTeam(ctx context.Context, stores db.Stores, orgID, teamID string) string {
 	fallback := domain.DefaultTeamSettings().DefaultModel
 	if teamID == "" {

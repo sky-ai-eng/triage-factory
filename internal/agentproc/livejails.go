@@ -12,8 +12,8 @@ import (
 // ask "what jails are live?" without holding a reference to any run. The
 // registry is process-wide rather than threaded through each caller's options
 // because newSandboxCommand is the single choke point every sandboxed launch
-// passes through (delegated runs, curator turns, the toolless system jobs), so
-// registering there covers every surface at once and can't drift as surfaces
+// passes through (delegated runs, the toolless system jobs), so registering
+// there covers every surface at once and can't drift as surfaces
 // are added. A per-surface callback would have to be wired identically at each
 // call site to say the same thing.
 //

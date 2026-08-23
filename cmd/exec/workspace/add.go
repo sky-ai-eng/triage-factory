@@ -245,9 +245,9 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// A bare add (no --ref/--pr) resolves HERE — before the ref/path
 	// derivation — to the branch the repository row names: the
 	// admin-configured base branch, else the profiled default. It is the same
-	// BaseBranch || DefaultBranch resolution the curator's pinned worktrees
-	// use, so every surface that materializes "the repo's branch" answers
-	// from the one stored source, and the reservation, the directory name,
+	// BaseBranch || DefaultBranch resolution every surface that materializes
+	// "the repo's branch" uses, so each one answers from the one stored
+	// source, and the reservation, the directory name,
 	// and the fetch all carry the real branch (slug "ref-<branch>") instead
 	// of a placeholder. It also makes a bare add and an explicit `--ref` of
 	// the same branch converge on one checkout. A row naming no branch at all

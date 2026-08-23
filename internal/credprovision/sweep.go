@@ -3,8 +3,6 @@ package credprovision
 import (
 	"context"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // minRefreshSweepInterval floors the derived sweep cadence so a
@@ -62,9 +60,7 @@ func RunAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration)
 
 // sweepAwaiting drives ONE scan for every surface: parking a claim in
 // phase='awaiting_credentials' is a property of the engagement, not of the
-// conversation type, so both a delegated conversation's sidecar bring-up and a
-// curator turn's land in the same list. Only the resolution differs, and the
-// conversation type on each row is what selects it.
+// conversation type, so every parked engagement lands in the same list.
 func sweepAwaiting(ctx context.Context, mgr *Manager) {
 	parked, err := mgr.stores.ConversationQueue.ListAwaitingCredentials(ctx)
 	if err != nil {
@@ -72,13 +68,7 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 		return
 	}
 	for _, p := range parked {
-		var perr error
-		if p.ConversationType == domain.ConversationTypeCurator {
-			perr = mgr.ProvisionForCuratorTurn(ctx, p.OrgID, p.ConversationID)
-		} else {
-			perr = mgr.ProvisionForConversation(ctx, p.OrgID, p.ConversationID)
-		}
-		if perr != nil {
+		if perr := mgr.ProvisionForConversation(ctx, p.OrgID, p.ConversationID); perr != nil {
 			log.Warn("backstop-sweep provision failed",
 				"conversation", p.ConversationID, "type", p.ConversationType, "error", perr)
 		}

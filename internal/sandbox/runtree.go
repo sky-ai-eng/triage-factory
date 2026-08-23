@@ -33,7 +33,7 @@ const (
 // is the ONLY legitimate shape for a delegated task run's Config.Worktree;
 // launchspec_linux.go's mount-source validation rejects any Worktree that
 // is neither this exact path nor under the org-scoped state-root tree
-// (Curator sessions' shape — see worktreeScope).
+// (see worktreeScope).
 //
 // rootKey is the tree's key, not a conversation id: a delegated run's tree is
 // keyed by its memory namespace (the blueprint run id), so a blueprint's steps

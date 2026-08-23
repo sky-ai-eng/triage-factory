@@ -166,21 +166,6 @@ func (a *App) handleCtlMessage(msg ctlbus.Message) {
 				}
 			}()
 		}
-	case "curator_cred_request":
-		// The curator-turn analog of cred_request: a home executor
-		// standing a turn's credential sidecar up nudges the brain to seal that
-		// turn's bundle. msg.ConversationID carries the curator conversation id. Same
-		// holder-gated, bounded-context, backstop-swept shape as cred_request
-		// above; nil at TF_ROLE=executor / local (never the brain holder).
-		if a.credProvisioner != nil {
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), credRequestProvisionTimeout)
-				defer cancel()
-				if err := a.credProvisioner.ProvisionForCuratorTurn(ctx, msg.OrgID, msg.ConversationID); err != nil {
-					appLog.Warn("tf_ctl: curator_cred_request provision failed", "request", msg.ConversationID, "error", err)
-				}
-			}()
-		}
 	default:
 		appLog.Warn("tf_ctl: unknown relay message kind", "kind", msg.Kind)
 	}

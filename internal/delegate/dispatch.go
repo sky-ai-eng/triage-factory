@@ -231,15 +231,9 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		s.claimCount.Add(1)
 		// conv is a fresh per-iteration `:=` binding (not a loop variable), so each
 		// goroutine captures its own; the deferred receive hands the slot back on
-		// terminal. The conversation's type is what selects the execution
-		// arm — one loop claims every surface, and the claim is already
-		// minted by the time we get here.
+		// terminal.
 		go func() {
 			defer func() { <-sem }()
-			if conv.Type == domain.ConversationTypeCurator {
-				s.driveClaimedCuratorTurn(conv)
-				return
-			}
 			s.dispatchClaimedConversation(ctx, conv)
 		}()
 	}
@@ -1590,61 +1584,5 @@ func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversatio
 	}
 	if err != nil {
 		dispatchLog.Warn("mark orphaned conversation failed", "conversation", conv.ID, "error", err)
-	}
-}
-
-// CuratorTurnDriver runs one already-claimed curator turn to completion,
-// returning false when it could not be handed to a session at all (curator
-// shut down, or the per-project queue momentarily full) — the caller then
-// releases the claim and the turn waits for the next scan. Satisfied by
-// curator.Curator.DriveClaimedTurn; declared as a local func type because
-// the curator package must not gain a delegate import.
-type CuratorTurnDriver func(orgID, projectID, conversationID, claimID string, messageID int64, creatorUserID string) bool
-
-// SetCuratorTurnDriver wires the curator runtime's turn driver — the
-// execution arm the claim loop hands a claimed curator conversation to. Set
-// once at startup on every pod that can run a turn; left nil where no
-// curator is built, in which case a claimed curator conversation is released
-// straight back so a pod that CAN run it does.
-func (s *Spawner) SetCuratorTurnDriver(fn CuratorTurnDriver) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.curatorTurnDriver = fn
-}
-
-// driveClaimedCuratorTurn is the claim loop's curator arm. The claim is
-// already minted and stamped with the queued turn it was minted to drive
-// (ClaimMessageID), so this only routes: hand the turn to the curator
-// runtime and block until it finishes, holding the dispatcher's concurrency
-// slot for exactly the turn's lifetime the way a delegated run does. That
-// is also what replaced the curator's own admission gate — the slot is the
-// gate.
-//
-// A refused handoff releases the claim without a terminal, which leaves the
-// turn queued and the conversation claimable again — the same "nothing but
-// the claim release" recovery every other surface uses.
-func (s *Spawner) driveClaimedCuratorTurn(conv *domain.Conversation) {
-	s.mu.Lock()
-	drive := s.curatorTurnDriver
-	s.mu.Unlock()
-	if drive == nil {
-		dispatchLog.Warn("claimed a curator turn with no curator runtime wired; releasing it for a pod that has one",
-			"conversation", conv.ID, "org_id", conv.OrgID)
-		s.releaseCuratorClaim(conv, "no curator runtime on this instance")
-		return
-	}
-	if !drive(conv.OrgID, conv.ProjectID, conv.ID, conv.ClaimID, conv.ClaimMessageID, conv.CreatorUserID) {
-		dispatchLog.Warn("curator turn handoff refused; releasing the claim so the next scan re-drives it",
-			"conversation", conv.ID, "org_id", conv.OrgID)
-		s.releaseCuratorClaim(conv, "curator turn handoff refused")
-	}
-}
-
-// releaseCuratorClaim hands a claimed-but-undriven curator turn back:
-// releasing the claim is the whole requeue, since the conversation is
-// mid-flight and still holds its undelivered turn.
-func (s *Spawner) releaseCuratorClaim(conv *domain.Conversation, reason string) {
-	if _, err := s.conversationQueue.RequeueConversation(context.Background(), conv.OrgID, conv.ID, reason); err != nil {
-		dispatchLog.Warn("release curator claim failed", "conversation", conv.ID, "error", err)
 	}
 }

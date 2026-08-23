@@ -109,8 +109,6 @@ const (
 	// ConversationTypeDelegation is a task-driven conversation — every
 	// blueprint step today.
 	ConversationTypeDelegation = "delegation"
-	// ConversationTypeCurator is a per-(project, creator) chat.
-	ConversationTypeCurator = "curator"
 	// ConversationTypeInteractive is reserved: the taskless "pick repos and
 	// type" surface. The claim predicate already admits it; nothing mints
 	// one yet.
@@ -167,34 +165,29 @@ const (
 )
 
 // Conversation is the durable agent-context row: one row per transcript,
-// regardless of surface (a delegated task conversation, a curator chat, a future
-// interactive session or subagent). Per-engagement execution state lives on
-// Claim. The status/summary projection is served through a handler-side map;
-// the transcript rows cross the wire as the snake_case MessageDTO.
+// regardless of surface (a delegated task conversation, a future interactive
+// session or subagent). Per-engagement execution state lives on Claim. The
+// status/summary projection is served through a handler-side map; the
+// transcript rows cross the wire as the snake_case MessageDTO.
 type Conversation struct {
-	// Type names the owning surface: "delegation" | "curator" |
-	// "interactive" (reserved) | namespaced "subagent:<kind>" (reserved).
-	// Empty on legacy hydration paths that don't select it.
+	// Type names the owning surface: "delegation" | "interactive" (reserved)
+	// | namespaced "subagent:<kind>" (reserved). Empty on legacy hydration
+	// paths that don't select it.
 	Type string `json:"type,omitempty"`
 	// Runtime is the executing engine: ConversationRuntimeSDK |
 	// ConversationRuntimeNative — a one-way ratchet per conversation (the
 	// SDK can never continue a transcript that ran native).
 	Runtime string `json:"runtime,omitempty"`
 	// Visibility mirrors conversations.visibility ("private" | "team" |
-	// "org"). Curator conversations mint "private" — creator-scoped by the
-	// same RLS arms delegation already used.
+	// "org").
 	Visibility string `json:"visibility,omitempty"`
-	// ProjectID anchors a curator conversation to its project; empty for
-	// every other type.
-	ProjectID string `json:"project_id,omitempty"`
 	// ParentConversationID links a subagent conversation to its spawner;
 	// empty otherwise.
 	ParentConversationID string `json:"parent_conversation_id,omitempty"`
-	// ArchivedAt retires the conversation from its surface's current view
-	// (the curator reset mechanism). KV-cache warmth is deliberately NOT a
-	// conversation field: it derives from the newest assistant message row
-	// (warmth drives elision, elision changes assembly, and assembly must
-	// be a pure function of rows).
+	// ArchivedAt retires the conversation from its surface's current view.
+	// KV-cache warmth is deliberately NOT a conversation field: it derives
+	// from the newest assistant message row (warmth drives elision, elision
+	// changes assembly, and assembly must be a pure function of rows).
 	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 
 	ID       string
@@ -348,8 +341,8 @@ type Conversation struct {
 	// the claim's mint intent, so a pickup that fails before attaching any
 	// message stays attributable to its exact turn. Populated by
 	// ConversationQueueStore.ClaimNextConversation for surfaces whose work unit is one queued
-	// message (curator today); 0 for a delegation conversation, whose work
-	// unit is the conversation itself.
+	// message (interactive, reserved); 0 for a delegation conversation, whose
+	// work unit is the conversation itself.
 	ClaimMessageID int64 `json:"-"`
 
 	// ClaimID is the claims row minted for this engagement, populated only by
@@ -437,8 +430,8 @@ type Message struct {
 	// Subtype discriminates a row that deviates from ordinary role
 	// behavior. Blank is normal — an assistant turn, a tool result, a
 	// person's message — and every discriminating value is named: the
-	// InjectionSubtype constants, MessageSubtypeStopNote, the curator's
-	// context_change, the artifact system_note.
+	// InjectionSubtype constants, MessageSubtypeStopNote, the artifact
+	// system_note.
 	Subtype             string
 	ToolCalls           []ToolCall
 	ToolCallID          string
@@ -519,12 +512,11 @@ type Message struct {
 	Seq *float64
 }
 
-// MessageDTO is the single snake_case wire shape for one transcript row,
-// shared by every surface: the delegated conversation's message read/stream and the
-// curator chat both marshal this. It is the display projection of a Message
-// row — the assembly-only columns (delivered / window_state / seq) never
-// cross the wire. ConversationID links the row to its owning conversation;
-// curator groups these into turns client-side over the same field.
+// MessageDTO is the single snake_case wire shape for one transcript row: the
+// delegated conversation's message read/stream marshals this. It is the
+// display projection of a Message row — the assembly-only columns
+// (delivered / window_state / seq) never cross the wire. ConversationID
+// links the row to its owning conversation.
 type MessageDTO struct {
 	ID                  int            `json:"id"`
 	ConversationID      string         `json:"conversation_id"`
@@ -712,10 +704,10 @@ type Claim struct {
 // measured sandbox cost, and the driven conversation's terminal state.
 //
 // A separate projection rather than fields on Claim, deliberately. Claim is a
-// wire type an org-scoped surface already serializes (the curator's claim
-// list); the measured cost is operator-only until a pricing model exists, and
-// hanging it off Claim would publish raw compute numbers to customers as a
-// side effect of a fleet feature.
+// wire type an org-scoped surface can serialize directly to a customer; the
+// measured cost is operator-only until a pricing model exists, and hanging it
+// off Claim would publish raw compute numbers to customers as a side effect of
+// a fleet feature.
 //
 // Every measurement is a pointer because NULL means "not measured", never
 // "measured zero" — a local-mode claim never had a sandbox, a pre-5.19 kernel

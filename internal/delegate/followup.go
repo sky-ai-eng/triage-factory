@@ -207,8 +207,8 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv
 // non-zero. The two must agree — a claim the dispatcher then refuses to drive
 // is a run that ping-pongs between the queue and a park.
 //
-// A nil blueprint is drivable: a conversation with no blueprint parent (curator
-// today, interactive tomorrow) is not this gate's business, matching the SQL's
+// A nil blueprint is drivable: a conversation with no blueprint parent
+// (interactive, reserved) is not this gate's business, matching the SQL's
 // LEFT JOIN.
 func blueprintDrivableForClaim(br *domain.BlueprintRun, stepIndex *int) bool {
 	if br == nil {
@@ -433,7 +433,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 // ConversationPendingInputStore's `role='user' AND subtype=” AND delivered=false`
 // predicate, and no DB constraint backs it (a partial unique index on
 // undelivered user rows cannot exist on the shared messages table, because
-// curator conversations legitimately queue several).
+// a conversation can legitimately queue several).
 //
 // Both producers build the row here — a user's follow-up (queueFollowUp) and a
 // delegation's opening turn (mintOpeningTurn) — so the queue cannot end up with

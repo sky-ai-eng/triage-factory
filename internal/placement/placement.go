@@ -1,7 +1,7 @@
 // Package placement is the horizontal-scaling affinity layer (spec §6): a
 // capacity-weighted rendezvous hash that maps a per-org cache key —
-// (org, repo) for delegation, (org, project) for curator — onto the live
-// executor fleet, so a repeatedly-hit repo tends to execute on the same
+// (org, repo) for delegation — onto the live executor fleet, so a
+// repeatedly-hit repo tends to execute on the same
 // executor and keeps its bare/worktree cache warm (the per-(org, repo) cache
 // economics preserved at N>1).
 //

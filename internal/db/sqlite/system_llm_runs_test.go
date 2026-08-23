@@ -16,8 +16,7 @@ import (
 
 // TestSystemLLMRunStore_SQLite_RoundTrip pins that Record inserts a row
 // whose every field reads back intact, that an empty id is server-
-// generated, and that an empty metadata_json lands as SQL NULL. Mirrors
-// the curator store round-trip test. TFAC-451.
+// generated, and that an empty metadata_json lands as SQL NULL.
 func TestSystemLLMRunStore_SQLite_RoundTrip(t *testing.T) {
 	conn := newSQLiteForSystemLLMTest(t)
 	stores := sqlitestore.New(conn)

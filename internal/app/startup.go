@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -55,35 +54,15 @@ func (a *App) runStartupTasks(ctx context.Context) {
 	}
 }
 
-// startWorkers starts the knowledge-base file watcher and the long-lived
-// background workers. The workers take the app context so they shut down
-// cleanly on SIGINT/SIGTERM — previously these used a never-cancelled
-// background context ("the binary has no top-level cancel today").
+// startWorkers starts the long-lived background workers. They take the app
+// context so they shut down cleanly on SIGINT/SIGTERM — previously these
+// used a never-cancelled background context ("the binary has no top-level
+// cancel today").
 //
 // The classifier is no longer Start()-ed here: it is now a per-org Manager
 // that lazy-starts a runner on first Trigger, matching the
 // scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
-	// Knowledge-base file observer (curator KB). Which observer runs depends
-	// on where the KB lives for this pod:
-	//
-	//   - local (role=all): the pure-broadcaster KnowledgeWatcher, exactly as
-	//     before — the on-disk KB is the truth, there is no blob store in the
-	//     path, and each pod watches its own projects root.
-	//   - multi + executor: the KBSyncer — executors run curator turns on
-	//     their own disk, so agent KB writes must be mirrored into the blob
-	//     store (the multi-mode source of truth) and broadcast to browsers on
-	//     control pods over the WS backplane.
-	//   - multi + control: nothing. A capless control pod forwards turns to
-	//     executors and hosts no KB on disk, so it has nothing to observe.
-	//
-	// Not gated on the background-brain lease: this tracks a pod's own disk,
-	// which is correct on holder and standby alike (unlike the single-writer
-	// drain worker/poller below, which move with the lease).
-	if a.knowledgeSyncEnabled() {
-		a.startKnowledgeWatcher()
-	}
-
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded
 	// conversations on boot), the workspace-snapshot retention reaper (bounds
@@ -184,8 +163,8 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// Bounded bare+worktree cache reaper (TFAC-60). Every role keeps a
 	// per-pod worktree cache under its own TF_STATE_ROOT — run worktrees on
-	// an executor, curator worktrees on control — so the reaper runs
-	// everywhere. One mechanism, policy per mode: started in both modes so
+	// an executor — so the reaper runs everywhere. One mechanism, policy
+	// per mode: started in both modes so
 	// the eviction path is exercised in local dev daily, but DefaultPolicy
 	// hands local an unbounded budget so every sweep is a cheap no-op (no
 	// silent eviction of the user's own repos). Multi gets a real per-pod
@@ -318,55 +297,6 @@ func (a *App) wireCloneStatusCallback() {
 		}
 		publish(row)
 	})
-}
-
-// knowledgeSyncEnabled reports whether this pod runs a KB observer, and if so
-// startKnowledgeWatcher picks which one. Local (role=all) watches as before;
-// in multi mode only the pods that run curator turns on their own disk —
-// executors — sync, never a capless control pod.
-func (a *App) knowledgeSyncEnabled() bool {
-	if runmode.Current() == runmode.ModeLocal {
-		return a.plan.brain
-	}
-	return a.curator != nil && a.plan.role == runmode.RoleExecutor
-}
-
-// startKnowledgeWatcher starts the KB observer for this pod. In local mode it
-// is the pure-broadcaster KnowledgeWatcher — `project_knowledge_updated` fires
-// whenever a file under <projectsRoot>/<id>/knowledge-base/ changes, so the
-// panel refetches as the agent writes files. In multi mode it is the KBSyncer,
-// which additionally mirrors those writes into the blob store. Failure is
-// non-fatal — chat still works, just without live KB sync.
-func (a *App) startKnowledgeWatcher() {
-	// resolveOrgForProject stamps each broadcast with the project's owning
-	// org so the hub's per-connection filter keeps it scoped. Returning ""
-	// drops the broadcast rather than fanning out cross-tenancy.
-	resolveOrgForProject := func(projectID string) string {
-		orgID, err := a.stores.Projects.ResolveOrgSystem(context.Background(), projectID)
-		if err != nil {
-			kbwatcherLog.Warn("resolve org for project failed; dropping live update", "project", projectID, "error", err)
-			return ""
-		}
-		if orgID == "" {
-			kbwatcherLog.Warn("no org for project; stale dir or unresolved row, dropping live update", "project", projectID)
-			return ""
-		}
-		return orgID
-	}
-	root, err := curator.ProjectsWatchRoot()
-	if err != nil {
-		kbwatcherLog.Warn("resolve projects root failed; live kb updates disabled", "error", err)
-		return
-	}
-	if runmode.Current() == runmode.ModeMulti {
-		if _, err := curator.NewKBSyncer(a.kbStore, a.wsHub, root, resolveOrgForProject); err != nil {
-			kbwatcherLog.Warn("start kb syncer failed; live kb sync disabled", "error", err)
-		}
-		return
-	}
-	if _, err := curator.NewKnowledgeWatcher(a.wsHub, root, resolveOrgForProject); err != nil {
-		kbwatcherLog.Warn("start failed; live kb updates disabled", "error", err)
-	}
 }
 
 // bootstrapBareClones reads the configured repos and asks the worktree

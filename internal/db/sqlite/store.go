@@ -99,12 +99,7 @@ func New(conn *sql.DB) db.Stores {
 		// the one connection. ReplaceForTeam's repositories reconcile
 		// runs in the same tx as the team-row write here.
 		TeamGitHubRepos: newTeamGitHubReposStore(conn, conn),
-		// Curator: the session goroutine wraps each turn's message writes in
-		// Stores.Tx.SyntheticClaimsWithTx (the tx-bound variant composed in
-		// tx.go); the non-tx variant wired here carries the `...System`
-		// claim writes and sweeps, which collapse onto the one connection.
-		Curator:    newCuratorStore(conn),
-		GitHubApps: newGitHubAppsStore(conn, secrets),
+		GitHubApps:      newGitHubAppsStore(conn, secrets),
 		// ReachableRepos: the reachable-repo cache. Admin-pool-only in
 		// Postgres; one connection here. Wired in local mode too — the refresh
 		// that maintains it is by-pull in both modes, which is the only shape
@@ -193,10 +188,6 @@ func New(conn *sql.DB) db.Stores {
 		// local mode — the placement hash always returns self — but present
 		// for store-interface + conformance symmetry. See TFAC-587.
 		PlacementOverrides: newPlacementOverrideStore(conn),
-		// CuratorHomes collapses to the one connection (N=1). Inert in local
-		// mode — the one process is always its own home — but present for
-		// store-interface + conformance symmetry. See spec §6.3.
-		CuratorHomes: newCuratorHomeStore(conn),
 		// ClaimCredentials is admin-pool only in Postgres; SQLite collapses
 		// to the one connection. Never populated in local mode (forced
 		// role=all, the bundle path is executor-role-only) — exists for

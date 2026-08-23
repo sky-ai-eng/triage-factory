@@ -56,23 +56,22 @@ if [ -f ~/.triagefactory/config.yaml ]; then
   echo "  removed legacy config.yaml"
 fi
 
-# Project knowledge dirs — the Curator materializes per-project repo
-# worktrees at ~/.triagefactory/projects/<id>/repos/<owner>/<repo>/
-# (and writes knowledge/summary files alongside). Project rows just
-# got wiped with the database, so the disk state is orphaned. Worse:
-# each repo subdir is a registered worktree of the bare clone in
-# ~/.triagefactory/repos/, holding its branch as "checked out." A
-# subsequent run that tries to `git fetch` that branch (e.g. the
+# Project knowledge dirs — a project's per-project repo worktrees live at
+# ~/.triagefactory/projects/<id>/repos/<owner>/<repo>/ (and knowledge/summary
+# files alongside). Project rows just got wiped with the database, so the
+# disk state is orphaned. Worse: each repo subdir is a registered worktree of
+# the bare clone in ~/.triagefactory/repos/, holding its branch as "checked
+# out." A subsequent run that tries to `git fetch` that branch (e.g. the
 # delegate path's `workspace add`) fails with "refusing to fetch into
 # branch ... checked out at <stale path>" until the registrations
 # get pruned. Wiping projects/ now and re-pruning each bare's
 # worktrees/ tracker below closes that loop.
 if [ -d ~/.triagefactory/projects ]; then
-  # The Curator runs Claude Code with cwd =
-  # ~/.triagefactory/projects/<id>/, which makes Claude Code create
+  # A pre-existing Claude Code session that once ran with cwd =
+  # ~/.triagefactory/projects/<id>/ leaves behind
   # ~/.claude/projects/<encoded(<cwd>)>/<sessionID>.jsonl. Walk each
   # project ID dir and delete its encoded session entry BEFORE removing
-  # the projects tree (mirrors removeClaudeProjectsForCurator in
+  # the projects tree (mirrors removeClaudeProjectSessions in
   # cmd/uninstall/uninstall.go — keep the two in sync).
   for dir in ~/.triagefactory/projects/*; do
     [ -d "$dir" ] || continue
@@ -81,7 +80,7 @@ if [ -d ~/.triagefactory/projects ]; then
     rm -rf ~/.claude/projects/"$encoded"
   done
   rm -rf ~/.triagefactory/projects
-  echo "  removed projects dir and any curator session JSONLs"
+  echo "  removed projects dir and any stale Claude Code session JSONLs"
 fi
 
 # Prune stale worktree registrations from every preserved bare. The

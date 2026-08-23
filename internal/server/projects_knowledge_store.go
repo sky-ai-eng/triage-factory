@@ -15,23 +15,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// kbChanged broadcasts the panel-refresh event and rings the cross-pod
-// doorbell after a multi-mode KB mutation. op is "" for an upload/delete (the
-// home executor materializes the write into a live session) and
-// "project_deleted" for project teardown (the home executor drops its stale
-// materialized dir). Both halves are best-effort: the broadcast reaches every
-// browser via the WS backplane, the doorbell only optimizes executor-side
-// latency, so a nil hub / unwired doorbell degrades gracefully.
-func (s *Server) kbChanged(op, orgID, projectID string) {
+// kbChanged broadcasts the panel-refresh event after a KB mutation.
+// Best-effort: a nil hub degrades gracefully.
+func (s *Server) kbChanged(orgID, projectID string) {
 	if s.ws != nil {
 		s.ws.Broadcast(websocket.Event{
 			Type:      "project_knowledge_updated",
 			OrgID:     orgID,
 			ProjectID: projectID,
 		})
-	}
-	if s.kbChangedDoorbell != nil {
-		s.kbChangedDoorbell(op, orgID, projectID)
 	}
 }
 

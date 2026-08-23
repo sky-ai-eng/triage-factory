@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
-	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
@@ -56,8 +54,8 @@ func (a *App) buildAI() {
 	// Shared system-job sandbox cap: one limiter injected into all
 	// three background Managers so their per-org runners can't fan out an
 	// unbounded number of gVisor sandboxes across tenants in multi-mode. It
-	// deliberately does NOT gate the curator, interactive sessions, or
-	// delegated runs (delegated has its own cap). Threaded the same way
+	// deliberately does NOT gate interactive sessions or delegated runs
+	// (delegated has its own cap). Threaded the same way
 	// a.llmRecorder is.
 	//
 	// Applied in both modes (a real cap, not nil): in multi it bounds gVisor
@@ -223,11 +221,11 @@ func (a *App) buildAI() {
 	reachLog.Info("reachable-repo cache manager ready (per-org runners)", "ttl", reachcache.TTL)
 }
 
-// buildExecution constructs the delegation spawner and the curator runtime,
-// wiring each to the run-credential seam. Runs after buildAI (the spawner
-// blocks on the classifier before KB injection) and before buildRouting
-// (the router takes the spawner as its delegator). The spawner↔router
-// back-edge is closed later in wire.
+// buildExecution constructs the delegation spawner, wiring it to the
+// run-credential seam. Runs after buildAI (the spawner blocks on the
+// classifier before KB injection) and before buildRouting (the router
+// takes the spawner as its delegator). The spawner↔router back-edge is
+// closed later in wire.
 func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
@@ -412,176 +410,15 @@ func (a *App) buildExecution() error {
 		projectclassify.WaitFor(ctx, a.stores.Entities, a.triggerClassifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
 	})
 
-	// Curator runtime — per-project chat sessions. Built on serveHTTP roles
-	// (control/all: SendMessage forwards or runs in-process) and, in multi mode,
-	// on executors (the home executor executes homed turns off the claim loop,
-	// spec §6.3). buildCuratorRuntime no-ops on pods that run no curator.
-	if err := a.buildCuratorRuntime(); err != nil {
-		return err
-	}
-
-	// The server handle below only exists on serveHTTP roles. An executor has
-	// no server to hand the spawner/curator to — its curator (if built) runs
-	// headless off the claim loop.
+	// The server handle below only exists on serveHTTP roles.
 	if !a.plan.serveHTTP {
 		return nil
 	}
 	a.srv.SetSpawner(a.spawner)
-	if a.curator != nil {
-		a.srv.SetCurator(a.curator)
-	}
 	// KB blob seam for the Knowledge panel handlers. The handlers branch on
-	// runmode, so this is inert in local mode; the doorbell that nudges the
-	// home executor to materialize a panel upload mid-session only exists in
-	// multi mode (tf_ctl NOTIFY has no local analogue).
+	// runmode, so this is inert in local mode.
 	a.srv.SetKBStore(a.kbStore)
-	if runmode.Current() == runmode.ModeMulti {
-		a.srv.SetKBChangedDoorbell(a.publishKBDoorbell)
-	}
 	return nil
-}
-
-// buildCuratorRuntime constructs the per-project curator (chat sessions) and
-// wires the homing role each pod plays (curator homing, spec §6.3):
-//
-//   - serveHTTP roles (control/all) always build it — that is where a chat POST
-//     lands. A control pod additionally gets the Homer + doorbell in
-//     buildPlacement (which runs after the placement resolver exists), so its
-//     SendMessage forwards to the home executor. role=all keeps the unchanged
-//     in-process path (no Homer wired).
-//   - multi-mode executors build it too and run the claim loop, so a homed turn
-//     executes on the executor that owns the project's warm cache. Executors
-//     serve no HTTP, so their curator runs headless.
-//
-// Any other pod (there is none today) no-ops.
-func (a *App) buildCuratorRuntime() error {
-	multi := runmode.Current() == runmode.ModeMulti
-	executorRuntime := multi && a.plan.dispatcher && a.plan.role == runmode.RoleExecutor
-	if !a.plan.serveHTTP && !executorRuntime {
-		return nil
-	}
-
-	// Boot recovery: cancel curator turns stranded by this pod's previous boot
-	// (a restart killed every session goroutine + subprocess, so a non-terminal
-	// row is stranded — cancelling lets the user re-send rather than wait for a
-	// mystery reply). local / role=all owned every row, so it sweeps globally;
-	// the multi-mode split roles sweep only turns homed to THEMSELVES, so a
-	// control restart never cancels an executor's live turns (the leader reaper
-	// covers turns homed to a *dead* executor).
-	a.sweepStrandedCuratorTurns(multi)
-
-	a.curator = curator.New(a.stores, a.wsHub, "")
-	a.curator.SetRunCredentialResolvers(a.ghResolver, a.runSecrets, a.modelFor)
-	// Dead-letter cap for poisoned turns, resolved the same way the reaper's
-	// TF_MAX_CLAIM_ATTEMPTS is: parsed once at wiring, a malformed value fails
-	// boot rather than silently running with a default.
-	turnMaxAttempts, err := curator.ParseTurnMaxAttempts(os.Getenv("TF_CURATOR_TURN_MAX_ATTEMPTS"))
-	if err != nil {
-		return fmt.Errorf("curator turn max attempts: %w", err)
-	}
-	a.curator.SetTurnMaxAttempts(turnMaxAttempts)
-	// Persistent instance-registry identity, stamped onto every claims row a
-	// dispatch mints — the same identity the delegation spawner stamps, so
-	// the ownership-scoped boot sweep finds this pod's own strays.
-	a.curator.SetExecutorIdentity(a.identity.ID, a.bootEpoch)
-	// KB blob seam: in multi mode the executor materializes the
-	// project KB from the store at turn start and reconciles disk→store at
-	// turn end, so the curator holds the same *kbstore.Store the handlers use.
-	// Inert in local mode (the session brackets branch on runmode).
-	a.curator.SetKBStore(a.kbStore)
-	if a.llmResolver != nil {
-		a.curator.SetLLMResolver(llmcred.SystemEnvResolver(a.llmResolver, "tf-curator"))
-	}
-
-	// One claim loop drives both surfaces: the dispatcher claims a curator
-	// conversation exactly as it claims a delegated conversation, then hands
-	// it here. Capacity comes with that — the loop holds its concurrency
-	// slot for the whole turn, so a curator turn passes the same memory
-	// guardrail and occupies the same semaphore (and the same heartbeat
-	// occupancy snapshot) a delegated run does, with no separate admission
-	// gate.
-	a.spawner.SetCuratorTurnDriver(a.curator.DriveClaimedTurn)
-	// And the local doorbell: an enqueued turn nudges this pod's claim loop
-	// instead of waiting out its backstop tick.
-	a.curator.SetWake(a.spawner.WakeDispatcher)
-
-	if executorRuntime {
-		// Curator turns on an executor participate in the sealed-bundle
-		// credential path: the spawner stands each turn's network +
-		// credential sidecar up so the turn resolves LLM/GitHub/Jira through the
-		// sidecar's proxies over the sealed bundle, never the disabled secret
-		// store. The adapter converts the spawner's *runSidecar to the
-		// curator.TurnSidecar interface, mapping a nil return to a nil interface
-		// (avoiding a non-nil interface wrapping a nil pointer). Wired only here,
-		// so control/all/local keep the in-process path.
-		a.curator.SetTurnSidecar(func(ctx context.Context, orgID, conversationID, userID, teamID string, pinnedRepos []string) (curator.TurnSidecar, error) {
-			sb, err := a.spawner.BringUpCuratorSidecar(ctx, orgID, conversationID, userID, teamID, pinnedRepos)
-			if err != nil {
-				return nil, err
-			}
-			if sb == nil {
-				return nil, nil
-			}
-			return sb, nil
-		})
-	}
-	return nil
-}
-
-// sweepStrandedCuratorTurns runs the boot recovery sweep over active curator
-// CLAIMS: ownership-scoped in multi mode (always a split role —
-// control/executor — so this pod releases only its own prior boots'
-// engagements), global in local, where the single process owned every
-// engagement. Queued turns are untouched either way: they are unowned
-// undelivered messages now and survive to be re-claimed. See
-// buildCuratorRuntime for the rationale.
-func (a *App) sweepStrandedCuratorTurns(multi bool) {
-	if multi {
-		if n, err := a.stores.Curator.CancelStrandedTurnsForHomeSystem(context.Background(), a.identity.ID, a.bootEpoch, "process restarted"); err != nil {
-			curatorLog.Error("sweep stranded homed turns failed", "error", err)
-		} else if n > 0 {
-			curatorLog.Info("cancelled stranded turns homed to this pod's prior boot", "count", n)
-		}
-		return
-	}
-	if n, err := a.stores.Curator.CancelOrphanedTurnsSystem(context.Background()); err != nil {
-		curatorLog.Error("sweep stranded turns failed", "error", err)
-	} else if n > 0 {
-		curatorLog.Info("cancelled stranded turns from prior process", "count", n)
-	}
-}
-
-// publishCuratorDoorbell publishes a curator homing tf_ctl notification
-// (spec §6.3): "curator_new" nudges the home executor's claim loop, and
-// "curator_cancel" routes a cross-pod cancel to whichever executor holds the
-// project's live session. Best-effort — a publish error only costs the home
-// executor's backstop-poll latency (curator_new) or the DB-level cancel flip's
-// eventual convergence (curator_cancel). Wired onto the control-pod curator's
-// doorbell seam in buildPlacement.
-func (a *App) publishCuratorDoorbell(kind, orgID, projectID string) {
-	if a.database == nil {
-		return
-	}
-	msg := ctlbus.Message{Kind: kind, OrgID: orgID, ProjectID: projectID}
-	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {
-		appLog.Warn("curator doorbell publish failed", "kind", kind, "project", projectID, "error", err)
-	}
-}
-
-// publishKBDoorbell publishes a "kb_changed" tf_ctl notification:
-// the KB upload/delete handlers ring it so the home executor materializes the
-// panel write into a live session's dir, and op="project_deleted" tells the
-// home executor to drop its materialized project dir. Best-effort — a publish
-// error only costs the executor its turn-start materialize latency. Wired onto
-// the server's kbChangedDoorbell seam in buildExecution (multi mode only).
-func (a *App) publishKBDoorbell(op, orgID, projectID string) {
-	if a.database == nil {
-		return
-	}
-	msg := ctlbus.Message{Kind: "kb_changed", OrgID: orgID, ProjectID: projectID, Op: op}
-	if err := ctlbus.Publish(context.Background(), a.database, msg); err != nil {
-		appLog.Warn("kb doorbell publish failed", "op", op, "project", projectID, "error", err)
-	}
 }
 
 // buildRouting wires the durable ingest seam, the poller manager, and the

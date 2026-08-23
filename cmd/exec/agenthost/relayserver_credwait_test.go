@@ -77,9 +77,9 @@ func credWaitServer(t *testing.T, rows []domain.ConversationWorktree, sealedAt f
 }
 
 // TestAwaitCredentialsForRepo_UnwiredIsNoOp pins that the wait is inert
-// wherever it isn't wired: local mode (no sealed bundles at all) and the
-// curator's own RelayServer (which never serves a `workspace add`) must reach
-// materialization exactly as they did before, with no store read and no delay.
+// wherever it isn't wired: local mode has no sealed bundles at all, so it
+// must reach materialization exactly as it did before, with no store read
+// and no delay.
 func TestAwaitCredentialsForRepo_UnwiredIsNoOp(t *testing.T) {
 	// Nil ConversationWorktrees would panic if the wait ever read the ledger.
 	srv := NewRelayServer(db.Stores{}, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)

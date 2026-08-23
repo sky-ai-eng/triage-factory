@@ -2,13 +2,11 @@ package domain
 
 import "time"
 
-// Placement override key kinds — the namespace of a rendezvous key. "repo"
-// is a delegation key ((org, "owner/repo")); "project" is a curator key
-// ((org, project-id)). These string values are the placement_overrides.
+// PlacementKindRepo is the namespace of a rendezvous key for a delegation
+// key ((org, "owner/repo")). This string value is the placement_overrides.
 // key_kind column and the GET /api/fleet/placement `kind` param.
 const (
-	PlacementKindRepo    = "repo"
-	PlacementKindProject = "project"
+	PlacementKindRepo = "repo"
 )
 
 // PlacementOverride is one row in placement_overrides — human intent that
@@ -30,8 +28,8 @@ const (
 // A pin takes precedence over a replica count when both are somehow set.
 type PlacementOverride struct {
 	OrgID    string
-	KeyKind  string // PlacementKindRepo | PlacementKindProject
-	KeyValue string // "owner/repo" for repo keys; a project id for project keys
+	KeyKind  string // PlacementKindRepo
+	KeyValue string // "owner/repo" for repo keys
 
 	// PinnedInstanceID names the instance this key is pinned to, or "" for
 	// no pin. Not validated against the live registry at write time — a pin

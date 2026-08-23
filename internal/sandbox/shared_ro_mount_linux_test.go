@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// TestIntegration_SharedRORepoMount drives the Curator's multi-mode mount
+// TestIntegration_SharedRORepoMount drives the shared read-only repo mount
 // model through a real runsc jail and asserts the three security-critical
 // runtime properties:
 //
@@ -58,7 +58,7 @@ func TestIntegration_SharedRORepoMount(t *testing.T) {
 		cfg := minimalConfig(t) // chowns cwd to UID 10000; skips if not root
 		cfg.ConversationID = "itest-tfac61-" + tag
 		// Empty mount point under the cwd (the /work mount), exactly as
-		// agentproc.ensureRepoMountPoints creates it; the ro bind overlays the
+		// a caller would create it; the ro bind overlays the
 		// shared worktree here.
 		mp := filepath.Join(cfg.Worktree, "repos", "o", "r")
 		if err := os.MkdirAll(mp, 0o755); err != nil {

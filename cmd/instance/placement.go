@@ -73,22 +73,18 @@ func openPlacementStores() (instances db.InstanceStore, overrides db.PlacementOv
 	return instances, overrides, resolver, conn.Close
 }
 
-// placementKeyFlags binds the shared --org / --repo / --project / --kind flags
-// and resolves a (kind, value) key. --repo implies kind=repo, --project
-// implies kind=project; --kind overrides. Exactly one of a repo/project value
-// must be present.
+// placementKeyFlags binds the shared --org / --repo / --kind flags and
+// resolves a (kind, value) key. --repo implies kind=repo; --kind overrides.
 type placementKeyFlags struct {
-	org     string
-	repo    string
-	project string
-	kind    string
+	org  string
+	repo string
+	kind string
 }
 
 func (f *placementKeyFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.org, "org", "", "org id (defaults to the local sentinel org in local mode)")
 	fs.StringVar(&f.repo, "repo", "", "repo key, owner/repo (delegation)")
-	fs.StringVar(&f.project, "project", "", "project key (curator)")
-	fs.StringVar(&f.kind, "kind", "", "key kind: repo|project (inferred from --repo/--project)")
+	fs.StringVar(&f.kind, "kind", "", "key kind: repo (inferred from --repo)")
 }
 
 func (f *placementKeyFlags) resolve() (orgID, kind, value string) {
@@ -99,16 +95,14 @@ func (f *placementKeyFlags) resolve() (orgID, kind, value string) {
 	switch {
 	case f.repo != "":
 		kind, value = domain.PlacementKindRepo, f.repo
-	case f.project != "":
-		kind, value = domain.PlacementKindProject, f.project
 	default:
-		fail("a --repo or --project key is required")
+		fail("a --repo key is required")
 	}
 	if f.kind != "" {
 		kind = f.kind
 	}
-	if kind != domain.PlacementKindRepo && kind != domain.PlacementKindProject {
-		fail("--kind must be 'repo' or 'project'")
+	if kind != domain.PlacementKindRepo {
+		fail("--kind must be 'repo'")
 	}
 	return orgID, kind, value
 }
@@ -285,8 +279,8 @@ NOTES
 
   pin / replicas / clear manage human-intent overrides. A pin forces one
   owner; replicas=K spreads a hot key's runs across its top-K candidates.
-  Overrides take effect on the next enqueue, not retroactively. --project
-  swaps in a curator key; --kind overrides the inferred kind.
+  Overrides take effect on the next enqueue, not retroactively. --kind
+  overrides the inferred kind.
 
   Local mode: single-process N=1, so placement is a no-op (the hash always
   returns self) — these verbs still work for inspection.`)

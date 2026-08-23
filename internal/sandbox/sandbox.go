@@ -128,7 +128,7 @@ type Config struct {
 	//
 	// nil keeps the self-contained path: Wrap allocates the subnet, builds
 	// the network, runs ConfigureProxies, and owns the teardown — the
-	// all/local, curator, and one-shot system-job callers.
+	// all/local and one-shot system-job callers.
 	Network *RunNetwork
 }
 

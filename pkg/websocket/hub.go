@@ -16,9 +16,9 @@ import (
 // ConversationID and ProjectID are optional discriminators frontend
 // listeners filter on. ConversationID identifies events from a single
 // conversation (message / conversation_update); ProjectID identifies
-// events from a project's Curator session (message /
-// conversation_update / conversation_reset). Events that broadcast to
-// the whole UI (tasks_updated, scoring_*) leave both empty.
+// events scoped to a project's knowledge base (project_knowledge_updated).
+// Events that broadcast to the whole UI (tasks_updated, scoring_*) leave
+// both empty.
 //
 // OrgID and UserID are server-side routing fields used by the hub's
 // per-connection scoping. They are intentionally NOT serialised on the

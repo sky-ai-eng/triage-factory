@@ -9,7 +9,7 @@ fleet; no k8s, no service mesh, no pod-to-pod RPC, no shared filesystem.
 Status: **accepted design** (this is the "dedicated design session" the
 epic called for). Tracked as **TFAC-71**. Builds on the conversation-queue /
 live-run / steering line (TFAC-13 → TFAC-305 → TFAC-309), the memory
-guardrail (TFAC-552), the curator storage design (TFAC-60/61), and the
+guardrail (TFAC-552), the worktree cache design (TFAC-60), and the
 sandbox-fleet profiles spec (`docs/for-agents/specs/sandbox-fleet/`).
 
 Scope note: multi-mode only. Local mode (Tier 4, one user, SQLite) is
@@ -93,7 +93,7 @@ of what this design **reuses rather than builds**:
 | Advisory-lock precedents | `auth_provision.go`, `team_github_repos.go`, ee/slack | Built for single-operation correctness (not leadership). |
 | Poll cursors + conditional-request state in DB | `poller_state`, repo pulls-poll-state (ETags) | Built. Poll position survives a process swap; a cold handoff re-lists as free 304s. |
 | Cost/usage accounting + quotas | `llm_spend` view, the `…/usage` reads under `/api/me`, `/api/orgs/{org_id}` and `/api/teams/{team_id}`, daily + per-team caps, `system_llm_runs` | Built (TFAC-449). The **spend** layer of the dashboard exists; the **infrastructure** layer (this spec §8) does not. |
-| Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60); shared-RO curator worktrees (TFAC-61) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
+| Re-seedable per-org disk state | `internal/paths` under `TF_STATE_ROOT`; bounded evictable bare/worktree cache (TFAC-60) | Built per-pod. Durable copies live in Postgres + S3; everything on executor disk is cache. |
 | Readiness probe | `GET /readyz` (`internal/server/readyz_handler.go`, TFAC-573) | Built. Hard-fails DB/migrations/poller-alive → 503 for LB rotation; soft-reports poll staleness, GitHub rate budget, active runs. The split makes the poller hard-check **lease-conditional** (§8.3) — as shipped it would 503 every standby control pod. |
 | Budgeted, resumable poll cycles | TFAC-571 (GitHub) | Built, with an **in-process** resume point. A cycle cut short by `ErrRateLimited` saves a round-robin repo cursor on the poller (`Manager.ghCursor`, `internal/poller/manager.go`), so the next cycle **on that same process** resumes at the first unrefreshed repo instead of starving the tail of a large tracked set. The cursor is in-memory by TFAC-571's explicit v1 allowance: a leader handoff (or a restart) loses it and the successor starts at the head. What makes that benign is the row above, not this one — the durable per-repo ETag state means a cold re-list is mostly free 304s (§3). |
 
@@ -165,8 +165,8 @@ TF_ROLE = control | executor        (multi-mode-only input)
   itself).
 - **`control`** — serves HTTP/API/WS and *competes for leadership* of
   the background brain (§3). Spawns no sandboxes at all: its system
-  jobs are toolless direct LLM calls and curator turns execute on
-  executors (§7), so it carries no privileged container caps.
+  jobs are toolless direct LLM calls (§7), so it carries no privileged
+  container caps.
 - **`executor`** — runs the dispatcher, sandboxes, agenthost daemons,
   per-run proxies, and its own disk reapers against its own
   `TF_STATE_ROOT`. Serves no user HTTP (a local health endpoint only).
@@ -222,7 +222,6 @@ filesystem, and coordinate only through Postgres rows.
 | Drain sweeper, snapshot reaper (S3), announce/poll-ready gates | **leader** | singletons today, stay singletons |
 | Run dispatcher, sandboxes, agenthost, per-run proxies, worktree/sandbox reapers | every executor | the thing being scaled |
 | Delegation enqueue (`Delegate`), run control endpoints | any control pod | enqueue is a DB write; control ops route via signals (§5) |
-| Curator turn execution | the session's **home executor** (§6.3) | shared-RO worktree + cwd cache locality |
 | Migrations (`goose.Up`) | control pods only, under an advisory lock | executors assert schema version and wait |
 
 ### 2.4 Recommended shapes
@@ -1028,13 +1027,12 @@ or absent placement map cannot break anything — which means the map
 should be the cheapest self-healing thing available:
 
 - **Default map = capacity-weighted rendezvous hashing** over live
-  registry members, keyed `(org, repo)` for delegation and
-  `(org, project)` for curator. No state to maintain, any pod computes
-  it identically, joins/leaves reshuffle only the affected keys, and
-  weights come from `instances.max_runs`. Top-K candidates fall out for
-  free (hot-repo bounded replication: the first K candidates all count
-  as "preferred", bounding a hot monorepo's cache to K pods on a cost
-  dial — no hard ceiling).
+  registry members, keyed `(org, repo)` for delegation. No state to
+  maintain, any pod computes it identically, joins/leaves reshuffle
+  only the affected keys, and weights come from `instances.max_runs`.
+  Top-K candidates fall out for free (hot-repo bounded replication: the
+  first K candidates all count as "preferred", bounding a hot
+  monorepo's cache to K pods on a cost dial — no hard ceiling).
 - **`placement_overrides` table only for human intent**: manual pins,
   hot-key `replicas=K`, and nothing else (drain lives on the executor
   row). Checked before the hash; expected to stay nearly empty.
@@ -1069,19 +1067,24 @@ should be the cheapest self-healing thing available:
   flows to headroom, exactly the TFAC-552 doctrine extended fleet-wide.
 - At N=1 the hash always returns self; tier 1 always hits. No-op.
 
-### 6.3 Curator homing
+### 6.3 Curator homing — removed (TFAC-894)
 
-Curator sessions are the one *stateful* placement client (sticky cwd +
-shared-RO worktrees per `(org, project)`). A `curator_homes` row maps
+Curator sessions were, at this design's writing, the one *stateful*
+placement client: sticky cwd + shared-RO worktrees per
+`(org, project)`, with a `curator_homes` row mapping
 `(org, project) → executor`, minted on first turn from the same
-rendezvous; turns execute on the home via the ordinary queue with a
-hard preference; if the home dies (heartbeat-stale), the next turn
-re-homes the row and the new executor re-materializes worktrees through
-TFAC-60's seed-on-demand. Re-homing costs a cold blobless clone —
-acceptable, rare, and self-healing. The TFAC-60/61 economics (one
-shared-RO worktree per (org,repo), bounded per-pod disk budget) are
-exactly what affinity preserves at N>1: without it, N pods re-multiply
-storage; with it, each key's cache lives on ~1 (or K) pods.
+rendezvous hash and held sticky — via a hard preference in the ordinary
+queue — until the home executor died, at which point the next turn
+re-homed the row and the new executor re-materialized worktrees through
+TFAC-60's seed-on-demand.
+
+The curator feature has since been removed entirely (TFAC-894): no
+more curator sessions, no `curator_homes` table, no homing logic. This
+section stays only as the record that the mechanism existed and why it
+leaves nothing behind — it was scoped to curator's own sticky-cwd
+requirement alone, never a dependency of delegation's placement.
+Delegation's `(org, repo)` rendezvous hash and `preferred_executor_id`
+stamping (§6.2) are unaffected; they never routed through this.
 
 ### 6.4 Heterogeneous sandboxes (the TFAC-408 interplay)
 
@@ -1223,28 +1226,20 @@ is the deliberate forward-compat room in the meantime, per the
 Everything in this section shares one inversion that is easy to miss and
 load-bearing everywhere: **locality is manufactured, never observed.** No
 component anywhere inventories which repos, bares, or worktrees sit on
-which executor's disk. Routing consults exactly three things: the pure
-rendezvous hash (stateless), the per-run `preferred_executor_id` stamp
-(lives one queue dwell, cleared on requeue), and the `curator_homes` pin
-(cleared on executor death or project delete). The warm cache is the
-*consequence* of always routing a key to the same winner — never an
+which executor's disk. Routing consults exactly two things: the pure
+rendezvous hash (stateless) and the per-run `preferred_executor_id`
+stamp (lives one queue dwell, cleared on requeue). The warm cache is
+the *consequence* of always routing a key to the same winner — never an
 *input* to the routing decision.
 
-Three corollaries, each of which looks like a bug or a missing feature
+Two corollaries, each of which looks like a bug or a missing feature
 until you see the doctrine:
 
-- **The delegation `(org, repo)` and curator `(org, project)` key
-  namespaces are independent.** A project's curator home and its pinned
-  repos' run-placement winners coincide only by chance. Deliberate:
-  aligning them would couple two different lifecycles (a
-  sticky-until-death pin vs a per-dwell stamp) to save at most one
-  duplicated bare per repo — and TFAC-60's per-pod budget already bounds
-  the duplication.
 - **Cache eviction changes no routing state.** When the TFAC-60 reaper
-  evicts a cold bare, nothing is "unmarked" anywhere — the next run or
-  turn for that key routes to the same winner and pays one blobless
-  clone to re-seed. Eviction is a cache concern, routing is a hashing
-  concern; coupling them would require fleet-visible disk inventory.
+  evicts a cold bare, nothing is "unmarked" anywhere — the next run for
+  that key routes to the same winner and pays one blobless clone to
+  re-seed. Eviction is a cache concern, routing is a hashing concern;
+  coupling them would require fleet-visible disk inventory.
 - **Feeding observed cache/disk state back into placement is a
   correctness bug, not an optimization.** Determinism is the whole
   contract: every pod computes the same winner for a key with zero
@@ -1253,10 +1248,9 @@ until you see the doctrine:
 
 Capacity, by contrast, *is* observed — but only through the registry
 heartbeat (weights, liveness, the memory gate), never per-key. And the
-capacity envelope is per-host and work-source-agnostic: a curator turn
-executing on its home is admitted through the same memory guardrail and
-concurrency semaphore as a dispatched run
-(`Spawner.AcquireTurnSlot`), so heartbeat occupancy reports the host's
+capacity envelope is per-host and work-source-agnostic: every
+dispatched run is admitted through the same memory guardrail and
+dispatch concurrency limit, so heartbeat occupancy reports the host's
 true sandbox load, not just the conversation queue's share of it.
 
 ---
@@ -1286,10 +1280,12 @@ not by subsystem:
   subprocess entirely — which also removes the one
   untrusted-model-output parser that isn't memory-safe Go from the
   control plane.
-- **Agentic** — curator turns (full tool allowlist, real worktrees,
-  agenthost `exec` surface) genuinely need the jail. Curator is the
-  *only* such brain job, and it homes to executors anyway (§6.3, P2
-  item 12) — placement machinery this epic builds regardless.
+- **Agentic — none remain.** Curator turns (full tool allowlist, real
+  worktrees, agenthost `exec` surface) were the one brain job that
+  genuinely needed the jail. Curator no longer exists (TFAC-894), so
+  every brain job left is a pure toolless completion — the
+  unprivileged-control-plane argument this section makes isn't a
+  target to reach anymore, it's already true.
 - **Classifier stage 2 is removed, not migrated.** The agentic
   KB-reading disambiguation pass was the one job both brain-resident
   and genuinely agentic; rather than home it to executors, delete it.
@@ -1510,7 +1506,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
     placement`). Feature-flagged via `TF_PLACEMENT` (on by default in multi,
     forced off in local N=1); a disabled config makes the claim byte-identical
     to global-oldest, so the whole layer drops with all tests green.
-12. Curator homes + re-home on death. (M)
+12. Curator homes + re-home on death. (M) ✅ shipped, then removed with
+    curator (TFAC-894).
 
 **P3 — Fleet operations**
 13. `instance_stats` sampler + retention + `/api/fleet` + Fleet UI +
@@ -1525,9 +1522,8 @@ standby takes over inside ~30 s with only free-304 catch-up cost.*
 18. Scorer / classifier / profiler become direct toolless LLM calls
     from Go — no SDK subprocess, no sandbox, no Node; spend
     accounting + `syslimit` semantics preserved. (M)
-19. Control pods drop the sandbox caps — prerequisite: curator homing
-    (P2 item 12). Shipped as an interim override file, then superseded
-    by item 19b. (S)
+19. Control pods drop the sandbox caps. Shipped as an interim override
+    file, then superseded by item 19b. (S)
 19b. Retire `TF_ROLE=all` in multi (TFAC-637): multi always boots as
     control or executor; the default compose is the co-located split
     with control capless and only the executor referencing the
@@ -1581,9 +1577,8 @@ pass (2026-07-08). Reopening conditions noted per entry.
    requires an unprivileged control tier. Revised: control ships
    unprivileged in the release via §7's de-sandbox plan — toolless
    system jobs become direct LLM calls (no Node), classifier stage 2
-   is removed (exact ties → unassigned), curator homes to executors —
-   retiring the job-class endgame entirely rather than pulling it
-   forward.
+   is removed (exact ties → unassigned) — retiring the job-class
+   endgame entirely rather than pulling it forward.
 4. **Executor-loss retry** — `TF_MAX_CLAIM_ATTEMPTS` default 2, counted
    in *consecutive loss episodes* rather than lifetime claims (the
    dispatcher's episode doctrine: any claim that recorded a real

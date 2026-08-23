@@ -556,7 +556,7 @@ func TestConversationQueueStore_Postgres_EnqueueStampsActorAgent(t *testing.T) {
 // that makes the SDK engine unreachable for a delegation in this mode: the
 // mint names the engine, so no row is ever written that a claimant would have
 // to be taught to refuse. There is no caller-passed knob and no reliance on
-// the column DEFAULT, which still reads 'sdk' for the curator's sake.
+// the column DEFAULT, which still reads 'sdk'.
 //
 // Both arms, because they are separate statements: a stamp added to one and
 // forgotten in the other is exactly the drift this catches, and the arm that

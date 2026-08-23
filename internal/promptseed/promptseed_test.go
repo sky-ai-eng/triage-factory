@@ -4,8 +4,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestShippedPromptsParse ensures every shipped prompt has a unique,
@@ -68,15 +66,13 @@ func TestShippedPromptsAreLiteral(t *testing.T) {
 // just pin the prompt slugs so a rename is a visible, reviewed diff.
 func TestShippedPromptSlugsStable(t *testing.T) {
 	want := map[string]bool{
-		"system-pr-review-security":         true,
-		"system-pr-review-correctness":      true,
-		"system-pr-review-aggregate":        true,
-		"system-conflict-resolution":        true,
-		"system-ci-fix":                     true,
-		"system-jira-implement":             true,
-		"system-fix-review-feedback":        true,
-		domain.SystemTicketSpecPromptID:     true,
-		domain.SystemJiraFormattingPromptID: true,
+		"system-pr-review-security":    true,
+		"system-pr-review-correctness": true,
+		"system-pr-review-aggregate":   true,
+		"system-conflict-resolution":   true,
+		"system-ci-fix":                true,
+		"system-jira-implement":        true,
+		"system-fix-review-feedback":   true,
 	}
 	for _, p := range Prompts() {
 		delete(want, p.SystemSlug)

@@ -76,46 +76,21 @@ const needsDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
 
-// curatorNeedsTurnSQL is the curator type-conditional gate: a curator
-// conversation's only unit of work is a user turn, so "mid-flight with
-// nothing queued" is a finished transcript waiting for its next message.
-const curatorNeedsTurnSQL = `(r.type <> 'curator' OR ` + undeliveredInputExistsSQL + `)`
-
-// curatorHomedHereSQL is the second half of the curator gate: homing owns
-// which executor runs a project's turns. A project with no home row is
-// claimable by anyone, which is the local/role=all shape — one process,
-// nothing to home to, so curator_homes is never populated and this arm is
-// vacuously true. It exists for dialect parity: both backends run the same
-// conformance suite over the same predicate.
-const curatorHomedHereSQL = `(r.type <> 'curator'
-		OR NOT EXISTS (SELECT 1 FROM curator_homes h
-		               WHERE h.org_id = r.org_id AND h.project_id = r.project_id)
-		OR EXISTS (SELECT 1 FROM curator_homes h
-		           WHERE h.org_id = r.org_id AND h.project_id = r.project_id
-		             AND h.home_instance_id = ?))`
-
 // eligibleForDrivingSQL is the surface-agnostic "waiting to be driven" —
 // what the queue-depth counters and the display projection's derived
 // `queued` rung read.
-const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
+const eligibleForDrivingSQL = needsDrivingSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied over a LEFT
-// JOIN so a conversation with no blueprint parent (curator today,
-// interactive tomorrow) is not filtered out by the join itself. The rest —
-// why a called-off blueprint drives nothing and is checked on both of its
-// columns, and why a blueprint drives only the one conversation its
-// `current_step_index` names, whatever its status — is the Postgres twin's;
-// this is the same predicate in the other dialect.
+// JOIN so a conversation with no blueprint parent (interactive, tomorrow)
+// is not filtered out by the join itself. The rest — why a called-off
+// blueprint drives nothing and is checked on both of its columns, and why
+// a blueprint drives only the one conversation its `current_step_index`
+// names, whatever its status — is the Postgres twin's; this is the same
+// predicate in the other dialect.
 const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = 0 AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))`
-
-// curatorTurnMessageSQL is the queued turn a curator claim is minted to
-// drive — the conversation's oldest undelivered plain user row, stamped as
-// the claim's mint intent. NULL for every other type.
-const curatorTurnMessageSQL = `(SELECT MIN(m_t.id) FROM messages m_t
-		WHERE m_t.conversation_id = r.id AND m_t.delivered = 0
-		  AND m_t.role = 'user' AND m_t.subtype = '' AND m_t.window_state = 'active')`
 
 // handedBackOutcomesSQL / episodeAttemptsSQL count the claim being minted
 // within the conversation's CURRENT queue episode — the run of consecutive
@@ -144,9 +119,8 @@ const episodeAttemptsSQL = `
 const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
 	COALESCE(r.worktree_path, ''), COALESCE(r.sdk_session_id, ''), r.trigger_type, COALESCE(r.trigger_id, ''),
-	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''), COALESCE(r.project_id, ''),
-	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index,
-	` + curatorTurnMessageSQL
+	COALESCE(r.creator_user_id, ''), COALESCE(r.team_id, ''),
+	COALESCE(r.blueprint_run_id, ''), r.blueprint_step_index`
 
 // EnqueueConversation mints a delegation conversation with NO status — the absence of
 // an outcome is what makes it claimable, so the mint writes nothing to the
@@ -187,7 +161,7 @@ func (s *conversationQueueStore) EnqueueConversation(ctx context.Context, orgID 
 
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, _ db.ClaimPlacement) (*domain.Conversation, error) {
 	// One scan, every surface: pick the oldest conversation matching the
-	// needs-driving predicate (plus the type-conditional blueprint gate — a
+	// needs-driving predicate (plus the blueprint gate — a
 	// sequence-cancelled blueprint's step is never claimed) and mint the
 	// claims row that records this engagement's ownership, inside one short
 	// transaction. Nothing on the conversation row changes: the claim IS the
@@ -216,9 +190,8 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			WHERE `+eligibleForDrivingSQL+`
 			  AND `+blueprintDrivableSQL+`
-			  AND `+curatorHomedHereSQL+`
 			ORDER BY r.started_at, r.id
-			LIMIT 1`, executorID)
+			LIMIT 1`)
 		claimed, err := scanSqliteClaimedConversation(row)
 		if err != nil || claimed == nil {
 			return err
@@ -245,14 +218,10 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			return err
 		}
 		claimID := uuid.New().String()
-		var msgID any
-		if claimed.ClaimMessageID != 0 {
-			msgID = claimed.ClaimMessageID
-		}
 		if _, err := q.ExecContext(ctx, `
-			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, message_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt, msgID); err != nil {
+			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, claimID, claimed.OrgID, claimed.ID, executorID, bootEpoch, claimedAt); err != nil {
 			return err
 		}
 		claimed.ClaimID = claimID
@@ -994,13 +963,12 @@ func scanSqliteConversationTimings(rows *sql.Rows) ([]domain.ConversationTiming,
 // dispatcher branches on Type and Runtime, never on it.
 func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	var (
-		r         domain.Conversation
-		stepIdx   sql.NullInt64
-		turnMsgID sql.NullInt64
+		r       domain.Conversation
+		stepIdx sql.NullInt64
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.ProjectID, &r.BlueprintRunID, &stepIdx, &turnMsgID)
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1011,6 +979,5 @@ func scanSqliteClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		v := int(stepIdx.Int64)
 		r.BlueprintStepIndex = &v
 	}
-	r.ClaimMessageID = turnMsgID.Int64
 	return &r, nil
 }

@@ -29,11 +29,10 @@ import (
 
 // Channel is the Postgres NOTIFY/LISTEN channel name every relay message
 // rides. The same channel carries TFAC-584's session kicks, TFAC-585's
-// conversation-signal doorbells, TFAC-614's cred_request doorbell, the
-// curator_cred_request doorbell, and the curator homing doorbells (spec §6.3) —
+// conversation-signal doorbells, and TFAC-614's cred_request doorbell —
 // payloads are discriminated by their JSON "kind" field (see
 // internal/app/ctl.go), so Message kinds must stay disjoint from theirs
-// ("kick", "new", "ack", "cred_request", "curator_cred_request").
+// ("kick", "new", "ack", "cred_request").
 const Channel = "tf_ctl"
 
 // Message is the relay payload. Kind selects which field group applies:
@@ -42,27 +41,11 @@ const Channel = "tf_ctl"
 // poller.Manager.PollSoon call); "cred_request" uses OrgID/ConversationID (TFAC-614:
 // an executor whose claim is parked in phase='awaiting_credentials' nudging the brain's
 // credential provisioner — see internal/credprovision and
-// internal/app/ctl.go's dispatch case); "curator_cred_request" uses OrgID/ConversationID
-// too (a home executor standing a curator turn's credential sidecar up nudging
-// the same provisioner — ConversationID carries the curator conversation id, the
-// claim-credentials channel's key);
-// "curator_new" / "curator_cancel" use
-// OrgID/ProjectID (curator homing, spec §6.3): a control pod nudging the home
-// executor's claim loop for a fresh turn, or routing a cross-pod cancel to
-// whichever executor holds the project's live session. Both curator kinds are
-// broadcast + self-filtered (the claim loop scans its own homed queue; only the
-// pod holding the session has something to cancel), so no target field is
-// needed. "sources_changed" uses OrgID/Source (an org admin paused or resumed
+// internal/app/ctl.go's dispatch case). "sources_changed" uses OrgID/Source (an org admin paused or resumed
 // one event source): a control pod's PATCH nudging the brain to drop its cached
 // event-source policy for the org and re-due that source's poll. Lossy like the
 // rest, and bounded by the router gate's own short TTL — a dropped message
 // costs at most one TTL of events still routing for a paused source.
-// "kb_changed" uses OrgID/ProjectID/Op (project knowledge base): a
-// control pod's KB upload/delete nudging the home executor to materialize the
-// panel write into a live session's dir; Op="project_deleted" tells the home
-// executor to best-effort drop its materialized project dir. Broadcast +
-// self-filtered like the curator kinds — only the pod holding (or homing) the
-// project reacts.
 type Message struct {
 	Kind           string `json:"kind"`
 	Manager        string `json:"manager,omitempty"`
@@ -70,8 +53,6 @@ type Message struct {
 	Source         string `json:"source,omitempty"`
 	Force          bool   `json:"force,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
-	Op             string `json:"op,omitempty"`
 }
 
 // execer is the minimal *sql.DB surface Publish needs — a pooled

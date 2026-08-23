@@ -156,7 +156,7 @@ func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, c
 func settleCompletionCostAndClaim(ctx context.Context, q queryer, orgID, conversationID, status string, costUSD float64, durationMs, numTurns int) error {
 	// The active claim this terminal write releases identifies the
 	// engagement's own message rows (they insert claim-stamped), so the
-	// lump settles claim-keyed — the curator turn release's shape. Read
+	// lump settles claim-keyed — every claim release's shape. Read
 	// before the release below: a released claim is no longer findable.
 	var claimID string
 	err := q.QueryRowContext(ctx, `
@@ -1406,9 +1406,9 @@ func (s *conversationStore) LastAgentActivityAtSystem(ctx context.Context, orgID
 }
 
 // insertConversationMessage attributes the row to an engagement: an explicit
-// non-empty msg.ClaimID always wins (the curator sink names its own
-// claim), otherwise claim_id resolves server-side to the conversation's
-// active claim. Rows written during an engagement belong to it; rows
+// non-empty msg.ClaimID always wins (a caller that already knows its own
+// claim id names it), otherwise claim_id resolves server-side to the
+// conversation's active claim. Rows written during an engagement belong to it; rows
 // written outside one (pending inputs, queued turns, injections)
 // correctly resolve NULL. A message racing its claim's release lands
 // NULL — harmless, the terminal settle's newest-row fallback still

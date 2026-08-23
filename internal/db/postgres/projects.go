@@ -32,7 +32,7 @@ func translateVisibilityErr(err error) error {
 // pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
-//     consumer (projects handler, curator, backfill, project_entities)
+//     consumer (projects handler, backfill, project_entities)
 //     hits this side. RLS policies projects_{select,insert,update,delete}
 //     gate every statement; org_id defense-in-depth fires alongside.
 //
@@ -153,20 +153,6 @@ func (s *projectStore) Get(ctx context.Context, orgID, id string) (*domain.Proje
 		WHERE org_id = $1 AND id = $2
 	`, orgID, id)
 	return getProjectWithPins(ctx, s.q, row)
-}
-
-// GetSystem is the admin-pool (BYPASSRLS) variant of Get — a JWT-less
-// background job resolving one project by id under an explicit orgID. See the
-// interface doc.
-func (s *projectStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error) {
-	row := s.admin.QueryRowContext(ctx, `
-		SELECT id, name, description,
-		       jira_project_key, linear_project_key, spec_authorship_blueprint_id,
-		       team_id, visibility, creator_user_id, created_at, updated_at
-		FROM projects
-		WHERE org_id = $1 AND id = $2
-	`, orgID, id)
-	return getProjectWithPins(ctx, s.admin, row)
 }
 
 func (s *projectStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Project, int, error) {

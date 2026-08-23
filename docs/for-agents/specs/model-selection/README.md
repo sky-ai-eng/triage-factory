@@ -57,8 +57,7 @@ position, and a fifth arriving between two existing ones breaks it again.
   default is the only thing every unset step falls back to — so it must be
   a **concrete, human-chosen model**, the setup flow must require the
   choice, and **TF ships no product-wide fallback model anywhere**.
-- **R3.** Curator conversations and taskless run sessions choose a model at
-  conversation start.
+- **R3.** Taskless run sessions choose a model at conversation start.
 - **R4. Resolved: shipped blueprint seeds select no model at all.** Every
   seed provisions with `Model: ""` (inherit the team default). They cannot
   name a concrete id — the seed goes to every org, whatever its providers —
@@ -551,7 +550,7 @@ multi mode, SDK subprocess in local. Only the multi-mode half changes.
   independent requests. TF's cacheable prefix is per-conversation and
   varies per run (mission, task context), which is exactly the shape
   implicit caching serves — so explicit caching is **not wanted now**. It
-  would become interesting only if something like the curator's knowledge
+  would become interesting only if something like a project's knowledge
   base were ever held in-context wholesale across many turns; if that day
   comes, it is new cost machinery, not a config flag.
 
@@ -917,11 +916,6 @@ delegations `native`, SQLite mints them `sdk`. Reading the ratchet itself is
 not an option, since it lives on a `conversations` row and a probe has no
 conversation.
 
-The curator is the open exception: its conversations still mint under the
-column default of `sdk` in both dialects (cutover tracked in TFAC-769), so a
-multi curator turn uses the subprocess while the probe goes direct. Both reach
-the same provider with the same org credential, which is all a verdict claims.
-
 The one thing that genuinely differs between the modes is what an org's
 credential source can be: only local can run on the host's, and that source
 is what makes every provider reachable rather than only the bound ones.
@@ -941,9 +935,9 @@ mode:
   was already running when the cap was crossed.
 - In-flight SDK estimates are display-only (R18's `~`), enforcing nothing.
 
-This is runtime-shaped on purpose: multi's SDK-driven surfaces (curator
-turns today) inherit the correct behavior — enforce at turn boundaries —
-with no special case, matching the `conversations.runtime` vocabulary the
+This is runtime-shaped on purpose: any multi SDK-driven surface inherits the
+correct behavior — enforce at turn boundaries — with no special case,
+matching the `conversations.runtime` vocabulary the
 schema already speaks. And Q3.3's mid-flight blueprint halt works
 identically in both runtimes, because a step is a run and step boundaries
 are settle points in both.

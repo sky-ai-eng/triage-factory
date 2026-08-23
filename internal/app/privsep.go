@@ -59,7 +59,7 @@ var startCapBrokerFn = startCapBroker
 // a no-op there — the sandbox is never reached, and no broker is needed.
 //
 // The control role is excluded even in multi mode on Linux: a control pod
-// never launches a sandbox — curator turns home to executors and the
+// never launches a sandbox — sandboxed work homes to executors and the
 // brain's own LLM work is toolless direct API calls — so it needs no
 // broker and holds no privileged ops. Leaving the broker unstarted is
 // deliberately fail-closed: SetPrivilegedOps stays uninstalled, so a stray

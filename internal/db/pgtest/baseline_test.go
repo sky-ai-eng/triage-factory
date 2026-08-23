@@ -613,92 +613,6 @@ func TestRLS_CrossOrgIsolation(t *testing.T) {
 	}
 }
 
-// TestRLS_CuratorChatPerUserIsolation — two users in the same org +
-// same project can't see each other's curator chats, but both can read
-// the shared project_knowledge.
-func TestRLS_CuratorChatPerUserIsolation(t *testing.T) {
-	h := Shared(t)
-	h.Reset(t)
-
-	org, alice, _ := SeedOrgWithUser(t, h, "alice")
-	bob := SeedUser(t, h, "bob")
-	// Add bob to the same team (org member + team member).
-	teamID := getOrgTeam(t, h, org)
-	AddOrgMember(t, h, bob, org, teamID, "member", "member")
-
-	projectID := seedProject(t, h, org, alice, "demo")
-	aliceReq := seedCuratorConversation(t, h, org, alice, projectID)
-	bobReq := seedCuratorConversation(t, h, org, bob, projectID)
-
-	// Shared KB row.
-	MustExec(t, h.AdminDB,
-		`INSERT INTO project_knowledge (org_id, project_id, key, content) VALUES ($1, $2, 'overview', 'shared notes')`,
-		org, projectID)
-
-	// Alice sees her request only.
-	err := h.WithUser(t, alice, org, func(tx *sql.Tx) error {
-		var ids []string
-		rows, err := tx.Query(`SELECT id::text FROM conversations WHERE type = 'curator'`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if len(ids) != 1 || ids[0] != aliceReq {
-			t.Errorf("alice saw curator conversations %v, want [%s]", ids, aliceReq)
-		}
-
-		// But she CAN see the shared project_knowledge.
-		var kbCount int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM project_knowledge`).Scan(&kbCount); err != nil {
-			return err
-		}
-		if kbCount != 1 {
-			t.Errorf("alice saw %d project_knowledge rows, want 1", kbCount)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("alice: %v", err)
-	}
-
-	// Bob sees his request only.
-	err = h.WithUser(t, bob, org, func(tx *sql.Tx) error {
-		var ids []string
-		rows, err := tx.Query(`SELECT id::text FROM conversations WHERE type = 'curator'`)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		if len(ids) != 1 || ids[0] != bobReq {
-			t.Errorf("bob saw curator conversations %v, want [%s]", ids, bobReq)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("bob: %v", err)
-	}
-}
-
 // TestRLS_UsersIsolation — public.users is org-scoped via the
 // "shares at least one org with caller" policy. Alice in orgA cannot
 // see bob in orgB; both can see themselves; co-workers in the same
@@ -2180,20 +2094,6 @@ func seedTask(t *testing.T, h *Harness, orgID, creatorID, entityID, eventType st
 		VALUES ($1, $2, (SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1), $3, $4, $5) RETURNING id
 	`, orgID, creatorID, entityID, eventType, evtID).Scan(&id); err != nil {
 		t.Fatalf("seed task: %v", err)
-	}
-	return id
-}
-
-// seedCuratorConversation mints the creator-private curator conversation for
-// (project, creator) — the per-user chat scope the RLS isolation test reads.
-func seedCuratorConversation(t *testing.T, h *Harness, orgID, creatorID, projectID string) string {
-	t.Helper()
-	var id string
-	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, type, creator_user_id, visibility, trigger_type, origin, status, project_id)
-		VALUES ($1, 'curator', $2, 'private', 'manual', 'curator', NULL, $3) RETURNING id
-	`, orgID, creatorID, projectID).Scan(&id); err != nil {
-		t.Fatalf("seed curator conversation: %v", err)
 	}
 	return id
 }

@@ -651,8 +651,8 @@ type orgSettingsResponse struct {
 }
 
 // handleOrgSettingsGet serves the org's configuration. Any org member — the
-// base URLs and poll cadence are read by member-facing surfaces (the curator's
-// Jira host, the repo page's GitHub host), and nothing here is a secret.
+// base URLs and poll cadence are read by member-facing surfaces (the repo
+// page's GitHub host), and nothing here is a secret.
 //
 // GET /api/orgs/{org_id}/settings
 func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {

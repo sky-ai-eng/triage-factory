@@ -56,7 +56,7 @@ primary_region = "iad"
 # docker/Dockerfile, inherited by this deploy), so it always ships in the
 # image layer — no volume required. The sandbox rootfs cache
 # (/opt/triagefactory/sandbox) and the tenant-data caches (StateRoot = /data:
-# per-org worktree + curator clones) are re-derived on demand and run
+# the per-org/repo worktree cache) are re-derived on demand and run
 # ephemeral here (no [[mounts]]); add a [[mounts]] for either path to keep it
 # warm across machine restarts.
 

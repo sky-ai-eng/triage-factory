@@ -11,7 +11,7 @@ import rule, { CONVERSATION_STATUS_VOCABULARY } from './no-ghost-conversation-st
 // The guard's own fixtures. The invalid cases are the reintroduced ghosts —
 // each one is a line that shipped in this codebase and survived a mirror test
 // that could only see the arrays in types.ts. The valid cases are the two
-// look-alike vocabularies (a curator turn, a blueprint run) that legitimately
+// look-alike vocabularies (a task, a blueprint run) that legitimately
 // terminate `cancelled`; a guard that fails on those is worse than none,
 // because the fix would be to weaken it.
 //
@@ -64,9 +64,8 @@ describe('no-ghost-conversation-status', () => {
         // A status one hop from the property, named through the alias.
         "function tone(status: ConversationStatusValue) { return status === 'running' ? 'hot' : 'cold' }",
         "function tone({ status }: { status: ConversationStatusValue }) { switch (status) { case 'open': return 1 } }",
-        // A curator TURN status — its own vocabulary, still terminates cancelled.
-        "if (request.status === 'cancelled') show()",
-        "function tone(status: CuratorRequestStatus) { return status === 'cancelled' }",
+        // A TASK status — its own vocabulary, still terminates cancelled.
+        "if (task.status === 'cancelled') archive()",
         // A blueprint RUN status — likewise, and the layer cancellation belongs to.
         "switch (blueprintRun.status) { case 'cancelled': return 'grey' }",
         // An unannotated local holding something status-shaped: out of scope by

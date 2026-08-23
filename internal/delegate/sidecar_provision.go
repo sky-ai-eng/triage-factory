@@ -40,9 +40,8 @@ type runSidecar struct {
 	res  *sidecarproto.StartProxiesResult
 
 	// conversationID is the key every per-run file under the socket root is named
-	// after — the conversation id, for a delegated run and a curator turn
-	// alike. Held so teardown can clear this cell's files by the same
-	// derivation bring-up cleared them by.
+	// after — the conversation id. Held so teardown can clear this cell's files
+	// by the same derivation bring-up cleared them by.
 	conversationID string
 
 	// stopRelay stops the credential-refresh relay goroutine; closed once by
@@ -196,31 +195,10 @@ func (rs *runSidecar) ghChannel(conversationID string) *agentproc.GHChannelParam
 	}
 }
 
-// GHChannel is the exported accessor the curator seam consumes (parallel to
-// Network / JailEnv), so a homed curator turn wires the same gh channel.
-func (rs *runSidecar) GHChannel(conversationID string) *agentproc.GHChannelParams {
-	return rs.ghChannel(conversationID)
-}
-
-// Network / JailEnv / GitCloneAuth are the exported accessors the curator seam
-// (internal/curator's TurnSidecar) consumes — a homed curator turn runs under
-// this same run sidecar, but curator can't import the unexported delegate
-// type, so it depends on an interface these satisfy. Kept thin wrappers over
-// the run-path accessors so both paths read the same coordinates.
-
-// Network is the prebuilt run network for a curator turn (PrebuiltNetwork).
-func (rs *runSidecar) Network() *sandbox.RunNetwork { return rs.runNetwork() }
-
-// JailEnv is the env a curator turn's jail is launched with
-// (PrebuiltProxyEnv).
-func (rs *runSidecar) JailEnv() []string { return rs.jailEnv() }
-
 // GitCloneAuth builds the CloneAuth that routes a host-side fetch of cloneURL
-// through this turn's sidecar git proxy — the curator materialize's equivalent
-// of the delegated clone's CloneAuthViaGitProxy (internal/delegate/delegate.go),
-// so the orchestrator holds no token and the real credential is injected
-// host-side on the sidecar's upstream hop. Empty (a no-op CloneAuth) when the
-// sidecar exposes no git proxy.
+// through this run's sidecar git proxy, so the orchestrator holds no token
+// and the real credential is injected host-side on the sidecar's upstream
+// hop. Empty (a no-op CloneAuth) when the sidecar exposes no git proxy.
 func (rs *runSidecar) GitCloneAuth(cloneURL string) worktree.CloneAuth {
 	if rs == nil || rs.res == nil {
 		return worktree.CloneAuth{}
@@ -455,26 +433,25 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 // expiry), so the sidecar never serves a stale credential in practice.
 const credRefreshRelayInterval = 30 * time.Second
 
-// credBundleGetter reads the current sealed bundle for a run or a curator turn:
-// its boot_epoch, the ciphertext, whether a row exists, and any read error. The
-// run variant keys claimCredentials.Get by run id, the curator variant by
-// conversation id. relayCredentialRefreshes never unseals the bytes.
+// credBundleGetter reads the current sealed bundle for a run: its boot_epoch,
+// the ciphertext, whether a row exists, and any read error. It keys
+// claimCredentials.Get by run id. relayCredentialRefreshes never unseals the
+// bytes.
 type credBundleGetter func(ctx context.Context) (bootEpoch int64, sealed []byte, ok bool, err error)
 
 // credRelayStepTimeout bounds one read-and-push through the sealed-bundle
 // channel — the DB read plus the supervision-channel Call.
 const credRelayStepTimeout = 20 * time.Second
 
-// relayCredentialRefreshes polls the sealed-bundle channel for one run/turn and
+// relayCredentialRefreshes polls the sealed-bundle channel for one run and
 // relays any NEW sealed bundle down to the sidecar over the supervision channel
 // — the push half of mid-run credential refresh (the sidecar can't reach the
 // DB). It relays only when the sealed bytes actually change (the brain re-mint),
-// never unsealing them. subject is the run/turn id for logging; getter reads the
-// channel (run vs curator). nudge carries out-of-band requests from a caller
-// that can't wait out the tick (the relayed `workspace add`); nil for the
-// curator, which never widens a repo set. Runs until stop is closed
-// (runSidecar.Close) or the supervision channel dies. Never fires on
-// all/local (no run sidecar).
+// never unsealing them. subject is the run id for logging. nudge carries
+// out-of-band requests from a caller that can't wait out the tick (the relayed
+// `workspace add`); nil-safe for a caller with nothing to nudge. Runs until
+// stop is closed (runSidecar.Close) or the supervision channel dies. Never
+// fires on all/local (no run sidecar).
 func (s *Spawner) relayCredentialRefreshes(subject string, getter credBundleGetter, bootEpoch int64, conn *sidecarproto.Conn, nudge <-chan credRelayNudge, stop <-chan struct{}) {
 	if getter == nil {
 		return

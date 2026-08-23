@@ -53,7 +53,6 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 	}{
 		{"HTTP/API server", p.serveHTTP},
 		{"websocket hub (user-facing)", p.serveHTTP},
-		{"curator chat runtime", p.serveHTTP},
 		{"server extension workers", p.serveHTTP},
 		{"dashboard backfiller", p.serveHTTP},
 		{"pollers + tracker", p.brain},
@@ -65,7 +64,6 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 		{"artifact reconciler manager", p.brain},
 		{"reachable-repo cache manager", p.brain},
 		{"marketplace-stats manager", p.brain},
-		{"knowledge-base watcher", p.brain},
 		{"poll-completion bus subscribers", p.brain},
 	}
 	for _, f := range forbidden {

@@ -20,8 +20,8 @@ var ErrNoSuchPrompt = errors.New("no prompt with that id")
 //
 //   - HTTP handlers (server/prompts_handler.go, server/triggers_handler.go,
 //     server/projects.go) — full CRUD.
-//   - Delegated agents (delegate/*, curator/skill.go) — read prompt body
-//     before dispatch + bump usage_count.
+//   - Delegated agents (delegate/*) — read prompt body before dispatch +
+//     bump usage_count.
 //   - Skills importer (skills/importer.go) — Get/Create/UpdateImported/Hide
 //     to mirror local SKILL.md files into the prompts table.
 //
@@ -75,9 +75,9 @@ type PromptStore interface {
 	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
 	// stable system_slug (e.g. domain.SystemTicketSpecPromptID). Returns
 	// (nil, nil) when the team has no copy. The id moved to a random UUID
-	// per team copy, so callers that used to Get(slug) — the
-	// curator spec fallback, the project-create default — resolve through
-	// this instead. The Postgres impl filters org+team and runs on the app
+	// per team copy, so a caller that needs a shipped prompt by name — the
+	// project-create default — resolves through this instead of Get(slug).
+	// The Postgres impl filters org+team and runs on the app
 	// pool (RLS-gated); the SQLite impl filters by slug only (single team)
 	// but honors a non-empty teamID when supplied.
 	GetBySystemSlug(ctx context.Context, orgID, teamID, systemSlug string) (*domain.Prompt, error)

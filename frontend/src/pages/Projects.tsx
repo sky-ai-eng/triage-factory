@@ -11,8 +11,7 @@ import ProjectCreateModal from '../components/ProjectCreateModal'
 import ProjectBackfillModal from '../components/ProjectBackfillModal'
 
 // Projects index. List view only — the per-project view lives in
-// ProjectDetail.tsx and the Curator chat panel will graft into it.
-// We keep the visual language tight enough that a project
+// ProjectDetail.tsx. We keep the visual language tight enough that a project
 // with zero pinned repos / no tracker / no description still renders
 // as a recognizable card rather than collapsing into nothing.
 //
@@ -215,7 +214,7 @@ export default function Projects() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-ink-1">Projects</h1>
           <p className="text-body text-ink-2 mt-1">
-            Group work by concept. Pin repos and tracker projects for the Curator to reason about.
+            Group work by concept. Pin repos and tracker projects for the agent to reason about.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -309,8 +308,8 @@ function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex flex-col items-center justify-center py-24">
       <div className="text-ink-3 text-body max-w-md text-center mb-6">
-        Projects bundle pinned repos, a Jira/Linear project, and a knowledge base — the Curator
-        works inside that scope when you chat with it.
+        Projects bundle pinned repos, a Jira/Linear project, and a knowledge base so an agent has
+        everything it needs when working in that scope.
       </div>
       <button
         type="button"

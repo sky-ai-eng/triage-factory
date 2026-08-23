@@ -40,8 +40,8 @@ interface Props {
   teamValue?: string
   onTeamChange?: (teamId: string) => void
   /** Which list the picker draws from. Default 'prompts' is the leaf-prompt
-   *  picker used by the chain step editor + Curator skill selector; onSelect
-   *  yields a prompt_id and the detail pane shows the prompt body. The
+   *  picker used by the chain step editor; onSelect yields a prompt_id and
+   *  the detail pane shows the prompt body. The
    *  delegation callers pass 'blueprints' so the user picks the blueprint a
    *  manual delegate fires; onSelect yields a blueprint_id and the detail pane
    *  shows the blueprint's step composition (or its sole step's body when it is
@@ -140,9 +140,9 @@ export default function PromptPicker({
     if (!open) return
     let cancelled = false
     // Scope the list to the acting team when the caller drives one. Empty/absent
-    // teamValue → unscoped (a solo user's sole team, or the swipe / chain /
-    // curator callers that don't scope). Refetching on teamValue keeps rows
-    // matched to the header's team so a user can't preview another team's item.
+    // teamValue → unscoped (a solo user's sole team, or the swipe / chain
+    // callers that don't scope). Refetching on teamValue keeps rows matched
+    // to the header's team so a user can't preview another team's item.
     const teamFilter = teamValue ? { team_id: teamValue } : {}
     // Clear the prior failure so this attempt (first open, reopen, team switch)
     // shows the loading skeleton again rather than getting stuck on the

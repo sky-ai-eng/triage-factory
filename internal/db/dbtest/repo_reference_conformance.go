@@ -146,9 +146,9 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if len(worktrees) != 1 || worktrees[0].RepoID != untrackedSlug {
 			t.Errorf("worktree ledger = %+v, want the entry for %s intact — a ledger records what happened", worktrees, untrackedSlug)
 		}
-		proj, err := s.Projects.GetSystem(ctx, orgID, projectID)
+		proj, err := s.Projects.Get(ctx, orgID, projectID)
 		if err != nil || proj == nil {
-			t.Fatalf("Projects.GetSystem: %v, %v", proj, err)
+			t.Fatalf("Projects.Get: %v, %v", proj, err)
 		}
 		if len(proj.PinnedRepos) != 1 || proj.PinnedRepos[0] != untrackedSlug {
 			t.Errorf("pinned repos = %v, want [%s] kept", proj.PinnedRepos, untrackedSlug)

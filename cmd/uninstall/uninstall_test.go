@@ -11,7 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-func TestBuildPlan_DetectsCuratorProjects(t *testing.T) {
+func TestBuildPlan_DetectsProjects(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, ".triagefactory")
 	projectsDir := filepath.Join(dataDir, "projects")
@@ -28,7 +28,7 @@ func TestBuildPlan_DetectsCuratorProjects(t *testing.T) {
 	}
 }
 
-func TestRemoveClaudeProjectsForCurator_CountsOnlyExistingDirs(t *testing.T) {
+func TestRemoveClaudeProjectSessions_CountsOnlyExistingDirs(t *testing.T) {
 	home := t.TempDir()
 	projectsDir := filepath.Join(t.TempDir(), "projects")
 	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
@@ -50,19 +50,19 @@ func TestRemoveClaudeProjectsForCurator_CountsOnlyExistingDirs(t *testing.T) {
 		t.Fatalf("MkdirAll(%q): %v", encodedA, err)
 	}
 
-	n, err := removeClaudeProjectsForCurator(projectsDir, home)
+	n, err := removeClaudeProjectSessions(projectsDir, home)
 	if err != nil {
-		t.Fatalf("removeClaudeProjectsForCurator() error: %v", err)
+		t.Fatalf("removeClaudeProjectSessions() error: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("removeClaudeProjectsForCurator() removed %d dirs, want 1", n)
+		t.Fatalf("removeClaudeProjectSessions() removed %d dirs, want 1", n)
 	}
 	if _, err := os.Stat(encodedA); !os.IsNotExist(err) {
 		t.Fatalf("encodedA still exists or unexpected stat error: %v", err)
 	}
 }
 
-func TestRemoveClaudeProjectsForCurator_ReturnsRemoveErrors(t *testing.T) {
+func TestRemoveClaudeProjectSessions_ReturnsRemoveErrors(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("chmod-based permission test is not reliable on Windows")
 	}
@@ -93,12 +93,12 @@ func TestRemoveClaudeProjectsForCurator_ReturnsRemoveErrors(t *testing.T) {
 		_ = os.Chmod(projectsRoot, 0o755)
 	}()
 
-	n, err := removeClaudeProjectsForCurator(projectsDir, home)
+	n, err := removeClaudeProjectSessions(projectsDir, home)
 	if err == nil {
-		t.Fatalf("removeClaudeProjectsForCurator() error = nil, want non-nil")
+		t.Fatalf("removeClaudeProjectSessions() error = nil, want non-nil")
 	}
 	if n != 0 {
-		t.Fatalf("removeClaudeProjectsForCurator() removed %d dirs, want 0", n)
+		t.Fatalf("removeClaudeProjectSessions() removed %d dirs, want 0", n)
 	}
 }
 

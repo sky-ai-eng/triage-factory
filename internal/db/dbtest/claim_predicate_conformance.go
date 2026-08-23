@@ -82,13 +82,19 @@ type ClaimPredicateFactory func(t *testing.T) ClaimPredicateHarness
 // the same subtests, and every arm runs against both runtimes: the ratchet
 // decides which engine drives a claim, never whether the conversation is
 // claimable.
+// predicateExecutorID / predicateBootEpoch are the fixed claimant identity
+// every claim in this suite mints under — release's "reaped" arm reaps by
+// this exact (executor, boot) pair.
+const predicateExecutorID = "predicate-exec"
+const predicateBootEpoch = int64(1)
+
 func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	t.Helper()
 	ctx := context.Background()
 
 	claim := func(t *testing.T, h ClaimPredicateHarness) *domain.Conversation {
 		t.Helper()
-		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, "predicate-exec", 1, db.ClaimPlacement{})
+		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, predicateExecutorID, predicateBootEpoch, db.ClaimPlacement{})
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
 		}
@@ -108,14 +114,32 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Fatalf("ClaimNextConversation = %s, want nothing claimable", got.ID)
 		}
 	}
+	// release ends the conversation's active claim through the same
+	// production primitive that produces each outcome: RequeueConversation
+	// ('requeued'), ResetProcessingConversations ('reaped' — scoped to this
+	// suite's fixed claimant, so it never touches another subtest's claim),
+	// ParkOpen ('parked'), and Complete ('completed' / 'failed'). Each of
+	// these already carries the write ReleaseActiveTurnSystem used to make on
+	// the caller's behalf; every subtest that cares about the resulting
+	// conversations.status writes it explicitly afterward via
+	// SetStoredStatus, so release itself does not need to agree with it.
 	release := func(t *testing.T, h ClaimPredicateHarness, orgID, convID, outcome string) {
 		t.Helper()
-		// The curator door is the only claims-release primitive shared by
-		// both surfaces; it is keyed on the conversation's active claim and
-		// carries no curator-specific write, so it is what the suite uses to
-		// end an engagement.
-		if _, err := h.Stores.Curator.ReleaseActiveTurnSystem(ctx, orgID, convID, outcome, "", 0, 0, 0); err != nil {
-			t.Fatalf("release claim: %v", err)
+		var err error
+		switch outcome {
+		case "requeued":
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, "")
+		case "reaped":
+			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
+		case "parked":
+			_, err = h.Stores.Conversations.ParkOpen(ctx, orgID, convID, db.ParkIdle())
+		case "completed", "failed":
+			_, err = h.Stores.Conversations.Complete(ctx, orgID, convID, outcome, 0, 0, 0, "", "", "", "")
+		default:
+			t.Fatalf("release: unsupported outcome %q", outcome)
+		}
+		if err != nil {
+			t.Fatalf("release claim (%s): %v", outcome, err)
 		}
 	}
 	userRow := func(content string, delivered bool) domain.Message {

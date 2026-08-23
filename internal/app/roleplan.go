@@ -21,7 +21,7 @@ import "github.com/sky-ai-eng/triage-factory/internal/runmode"
 //   - The cap-broker + sandbox substrate is gated on agentproc.WillSandbox()
 //     (multi + Linux) AND on the role hosting sandboxes at all: an executor
 //     sandboxes delegated runs and an all-in-one box sandboxes both, but a
-//     control pod never launches a sandbox — curator turns home to
+//     control pod never launches a sandbox — sandboxed work homes to
 //     executors and the brain's own LLM work is toolless direct API calls,
 //     so nothing on control needs a jail. Control therefore starts no
 //     broker and installs no privileged ops, and a stray sandbox launch
@@ -31,24 +31,23 @@ import "github.com/sky-ai-eng/triage-factory/internal/runmode"
 //     role predicate alone can't express.
 //   - The instance registry (Register + heartbeat), the worktree cache
 //     reaper, git-hooks materialization, and orphaned-worktree cleanup run
-//     in every role: registry membership is fleet-wide, and both control
-//     (curator worktrees) and executor (run worktrees) keep a per-pod
-//     worktree cache under their own TF_STATE_ROOT.
+//     in every role: registry membership is fleet-wide, and every role
+//     keeps a per-pod worktree cache under its own TF_STATE_ROOT —
+//     control's for project-bundle imports, executor's for run worktrees.
 type subsystemPlan struct {
 	role runmode.DeployRole
 
 	// serveHTTP starts the user-facing HTTP/API/WS server on the main port,
 	// plus everything that only exists alongside it: auth wiring, the
-	// embedded SPA, server extension workers, the dashboard backfiller, the
-	// curator chat runtime, and the spawner/reconciler/curator server
-	// handles. control + all. An executor serves no user routes (its only
-	// listener is the localhost healthz).
+	// embedded SPA, server extension workers, the dashboard backfiller, and
+	// the spawner/reconciler server handles. control + all. An executor
+	// serves no user routes (its only listener is the localhost healthz).
 	serveHTTP bool
 
 	// brain marks this role as BRAIN-CAPABLE: control + all construct the
 	// leader-elected background brain's objects (pollers + tracker, the
 	// event router, the AI managers — scorer/profiler/classifier/
-	// reconciler/marketplace-stats —, the knowledge-base watcher, the
+	// reconciler/marketplace-stats —, the
 	// poll-completion bus subscribers) and participate in the
 	// background-brain lease election. An executor never does.
 	//

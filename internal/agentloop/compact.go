@@ -565,7 +565,8 @@ func parseForcedCompaction(completion *inference.Completion) (analysis, summary 
 //
 // These live with the compactor (the system-job rule: next to the consumer,
 // like wrapUpNotice) and are deliberately surface-neutral: no branches, no
-// pull requests, no blueprints — the curator adopts this compactor unchanged.
+// pull requests, no blueprints — any conversation type can adopt this
+// compactor unchanged.
 
 // compactionSections is the summary's section contract, shared verbatim by
 // both prompts so the two paths produce the same document.

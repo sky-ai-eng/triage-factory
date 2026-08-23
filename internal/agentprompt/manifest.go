@@ -16,13 +16,10 @@ const (
 	// surface
 	blockIdentityMachinist   = "identity/machinist.txt"
 	blockIdentityMachinistNv = "identity/machinist-native.txt"
-	blockIdentityCurator     = "identity/curator.txt"
-	blockIdentityCuratorTone = "identity/curator-style.txt"
 
 	// runtime
 	blockHarnessSDK           = "harness/sdk-claude-code.txt"
 	blockHarnessSDKScratch    = "harness/sdk-scratch.txt"
-	blockHarnessSDKCurator    = "harness/sdk-curator.txt"
 	blockHarnessNative        = "harness/native.txt"
 	blockHarnessNativeGH      = "harness/native-gh.txt"
 	blockHarnessNativeVerbs   = "harness/native-verbs.txt"
@@ -33,7 +30,6 @@ const (
 	blockVerbWorkspace       = "verbs/workspace.txt"
 	blockVerbProjectKnow     = "verbs/project-knowledge.txt"
 	blockVerbMemory          = "verbs/memory.txt"
-	blockVerbCuratorChanges  = "verbs/curator-context-changes.txt"
 	blockGuardrailsCommon    = "guardrails/common.txt"
 	blockCompletionSDKJSON   = "completion/sdk-json.txt"
 	blockCompletionSDKNonTrm = "completion/nonterminal-sdk.txt"
@@ -102,8 +98,6 @@ func manifest(spec Spec) ([]string, error) {
 	switch spec.Surface {
 	case SurfaceMachinist:
 		return machinistBlocks(spec)
-	case SurfaceCurator:
-		return curatorBlocks(spec)
 	default:
 		return nil, fmt.Errorf("agentprompt: unknown surface %q", spec.Surface)
 	}
@@ -169,21 +163,6 @@ func nativeMachinistBlocks(spec Spec) ([]string, error) {
 		blockHarnessNativeScratch,
 		blockVerbMemoryNv,
 		blockCompletionNative,
-	}, nil
-}
-
-// curatorBlocks composes the per-project chat assistant's framework prompt.
-// The curator has no worktree, no push, and no jail of its own, so it takes
-// neither mode arm — its text asserts nothing that mode could falsify.
-func curatorBlocks(spec Spec) ([]string, error) {
-	if spec.Runtime != RuntimeSDK {
-		return nil, fmt.Errorf("agentprompt: curator has no %q runtime block set", spec.Runtime)
-	}
-	return []string{
-		blockIdentityCurator,
-		blockHarnessSDKCurator,
-		blockVerbCuratorChanges,
-		blockIdentityCuratorTone,
 	}, nil
 }
 

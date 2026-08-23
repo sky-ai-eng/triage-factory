@@ -129,9 +129,9 @@ func (a *App) startBrain(term int64) {
 	// themselves nil-safe no-ops too, matching every other brain-unit
 	// member's defensive shape.
 	//
-	// One sweep, both surfaces: a curator turn parks its claim in the same
-	// phase a delegated run does, so the single scan finds both and the
-	// conversation type on each row selects the resolution.
+	// One sweep across every conversation type: the row's conversation type
+	// selects the resolution, so the single scan doesn't need to special-case
+	// which kind of engagement is parked.
 	go credprovision.RunAwaitingSweep(brainCtx, a.credProvisioner, credprovision.DefaultAwaitingSweepInterval)
 	// Refresh cadence goes expiry-aware for role-mode Bedrock orgs (TFAC-616):
 	// short-lived STS session creds must be re-minted before they expire, so

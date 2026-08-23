@@ -148,8 +148,8 @@ type Params struct {
 	// MissionAnchored marks a conversation whose opening turn is a
 	// control-plane-minted mission (a task/blueprint-backed delegation).
 	// Compaction pins that opening — the summary can never mutate the task,
-	// and the cacheable prefix survives. Taskless surfaces (the curator, a
-	// free-form manual run) pass false: their first message is just the
+	// and the cacheable prefix survives. Taskless surfaces (a free-form
+	// manual run) pass false: their first message is just the
 	// oldest message, and the original request is re-injected mechanically
 	// into the result row instead.
 	MissionAnchored bool

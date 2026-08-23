@@ -1,9 +1,8 @@
 // Package kbstore owns the object-store key convention for the project
 // knowledge base (KB) and is the ONLY place those keys are built. It wraps a
-// storage.Storage so the multi-mode control handlers, the executor-side
-// syncer, the classifier, and project bundle import/export all address the
-// same blobs by (orgID, projectID, filename) without ever hand-assembling a
-// key.
+// storage.Storage so the multi-mode control handlers, the classifier, and
+// project bundle import/export all address the same blobs by (orgID,
+// projectID, filename) without ever hand-assembling a key.
 //
 // Key convention:
 //
@@ -11,7 +10,7 @@
 //
 // orgID is always the first segment, consistent with the existing snapshot
 // convention (<orgID>/<blueprint_run_id>/workspace.tar). The KB layout is
-// contractually FLAT — one level, matching the curator's on-disk
+// contractually FLAT — one level, matching local mode's on-disk
 // knowledge-base/ directory — so a filename with a path separator is not a
 // valid KB name and is rejected here rather than silently nesting.
 //

@@ -27,9 +27,9 @@ import (
 	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -65,7 +65,7 @@ const maxConcurrentVotes = 8
 const entityDescriptionMaxLen = 1500
 
 // kbInlineMaxBytes caps the per-project knowledge-base content sent
-// inline to the classification prompt. Curator-written KBs typically
+// inline to the classification prompt. Most project KBs typically
 // fit easily; the cap exists for the pathological case where a user
 // dumps a large reference document. Above this we truncate with a
 // sentinel — the entity may still be classified from name +
@@ -276,10 +276,10 @@ func (r *Runner) readProjectKB(ctx context.Context, projectID string) (string, b
 }
 
 func readProjectKBFromDisk(orgID, projectID string) (string, bool, error) {
-	root, err := curator.KnowledgeDir(orgID, projectID)
-	if err != nil {
-		return "", false, err
+	if _, err := paths.StateRootErr(); err != nil {
+		return "", false, fmt.Errorf("resolve state root: %w", err)
 	}
+	root := paths.ProjectKBDir(orgID, projectID)
 	kbDir := filepath.Join(root, "knowledge-base")
 	entries, err := os.ReadDir(kbDir)
 	if err != nil {

@@ -227,11 +227,9 @@ export default function TeamManagementSection() {
           teamName={archiveTarget.name}
           preview={archiveTarget.preview}
           onClose={() => setArchiveTarget(null)}
-          onDone={(runs, sessions) => {
+          onDone={(runs) => {
             toast.success(
-              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
-                sessions === 1 ? 'session' : 'sessions'
-              }.`,
+              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'}.`,
             )
             setArchiveTarget(null)
             // Force a refetch next time the archived list is revealed (or right

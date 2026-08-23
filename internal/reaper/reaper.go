@@ -100,16 +100,6 @@ func RunReaper(ctx context.Context, store Store, interval time.Duration, staleTh
 				reaperLog.Info("reaped dead-executor conversations",
 					"requeued", counts.Requeued, "failed_executor_lost", counts.Failed, "cancelled", counts.Cancelled)
 			}
-			// Curator homing (spec §6.3): retire turns stranded on a dead home so
-			// they stop showing in-flight — the user's next turn re-homes.
-			// Separate from ReapDeadExecutors: a stranded curator turn re-homes
-			// on the user's next message, so the recovery is retire-only (no
-			// requeue).
-			if n, cerr := store.CancelStrandedCuratorTurns(ctx, staleThreshold); cerr != nil {
-				reaperLog.Warn("curator stranded-home sweep failed; retrying next tick", "error", cerr)
-			} else if n > 0 {
-				reaperLog.Info("cancelled curator turns stranded on a dead home", "count", n)
-			}
 			// Claim-desync janitor: heal the shape the app-pool terminal
 			// writes can strand (see Store.HealClaimDesyncs). Periodic here so
 			// a desync's lifetime is bounded by a tick, not the next restart.
