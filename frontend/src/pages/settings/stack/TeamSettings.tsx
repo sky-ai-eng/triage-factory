@@ -1,3 +1,6 @@
+// TODO(TFAC-892): the new /team surface supersedes this stack; delete it once
+// every group here is covered there, including the local-mode mount below.
+//
 // The team-scoped config sections — repos, GitHub teams, Jira projects, team
 // defaults/model/auto-delegate, and unattended prompts. Relocated from the
 // global Settings page into the /team page's Settings tab (TFAC-445): this

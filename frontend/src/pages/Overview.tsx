@@ -6,6 +6,9 @@
 //
 // It states what it will be rather than showing an empty frame, because an
 // empty frame reads as a page that failed to load.
+//
+// TODO(TFAC-893): build the page this route promises; the stub and its
+// self-description go with it.
 export default function Overview() {
   return (
     <div className="max-w-measure">
