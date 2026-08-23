@@ -487,9 +487,9 @@ CREATE TABLE public.agents (
 -- Name: system_llm_runs; Type: TABLE; Schema: public; Owner: -
 --
 
--- One row per agentproc.Run made by a headless system job (the scorer,
--- repo-profiler, and project-classifier each run a Haiku call every poll
--- cycle). Captures the cost + token breakdown the subprocess already
+-- One row per agentproc.Run made by a headless system job (the scorer and
+-- repo-profiler each run a Haiku call every poll cycle). Captures the
+-- cost + token breakdown the subprocess already
 -- computed so org spend reconciles with the Anthropic bill and a "system
 -- overhead" line exists alongside conversation / claim spend rows.
 -- Org-level, no team_id by design: scorer batches mix teams, and
@@ -835,8 +835,8 @@ CREATE TABLE public.team_github_groups (
 -- The direction of the two lifetimes is the reason for the ON DELETE below.
 -- A tracking row is a statement ABOUT a repository, so it cannot outlive the
 -- registry row (CASCADE). The converse does not hold: untracking deletes a row
--- HERE and leaves the registry row standing, because a worktree ledger entry,
--- a pinned project or a task may still name that repository. Tracking is
+-- HERE and leaves the registry row standing, because a worktree ledger entry
+-- or a task may still name that repository. Tracking is
 -- forward-only in both directions.
 --
 -- org_id is denormalized from the team so both references can be COMPOSITE
@@ -942,10 +942,10 @@ CREATE TABLE public.org_settings (
     -- future families be added with zero DDL; a richer provider/model split stays
     -- additive (new columns). Column not renamed; app layer unchanged.
     max_llm_model_tier text,
-    -- The model the three headless system jobs — scorer, project classifier,
-    -- repo profiler — run on. One knob for all three: they are the same kind of
+    -- The model the two headless system jobs — scorer, repo profiler —
+    -- run on. One knob for both: they are the same kind of
     -- work (short, toolless, no transcript) bought from the same budget, so a
-    -- per-job column would be three ways to answer one question.
+    -- per-job column would be two ways to answer one question.
     --
     -- A modelcatalog key, validated app-side against the catalog and against the
     -- providers the org has connected — not CHECK-constrained, the
@@ -1168,7 +1168,7 @@ CREATE TABLE public.prompts (
 --
 -- The row is durable. It is created when a repository is first tracked and it
 -- is NOT deleted when the last team untracks it, because a worktree ledger
--- entry, a pinned project or a task may still name the repository. "Which
+-- entry or a task may still name the repository. "Which
 -- repositories does TF poll and profile" is a question about tracking, and
 -- team_github_repos is what answers it.
 --

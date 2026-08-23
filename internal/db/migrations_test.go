@@ -59,8 +59,7 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		}
 	}
 
-	// The conversations refactor dissolved these; a fresh install must not
-	// resurrect them. The projects removal (TFAC-895) dropped the last two.
+	// A fresh install must not resurrect any dissolved table.
 	for _, table := range []string{
 		"runs", "run_messages", "curator_requests", "curator_messages",
 		"curator_pending_context", "run_pending_input",

@@ -484,7 +484,7 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		// (a lease demotion or RestartAll closes stop) — otherwise a demoted
 		// holder keeps polling the rest of the fleet, double-spending the API
 		// budget and emitting poll-complete sentinels that would kick a fresh
-		// scoring/classify cycle on a pod that no longer holds the brain.
+		// scoring cycle on a pod that no longer holds the brain.
 		select {
 		case <-stop:
 			// Torn down mid-sweep. Without this the span is just a cycle

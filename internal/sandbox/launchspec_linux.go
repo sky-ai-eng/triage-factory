@@ -706,7 +706,7 @@ func realPath(p string) (string, error) {
 //     not. These runs are org-blind by construction (the tree doesn't outlive
 //     the run), so hasScope is false and no OTHER mount may claim an org scope
 //     either — there is nothing for it to be consistent with.
-//   - The org-scoped state-root tree: paths.ProjectKBDir(orgID, projectID),
+//   - The org-scoped state-root tree: paths.BareCacheDir(orgID, owner, repo),
 //     i.e. <StateRoot>/orgs/<orgID>/… in multi mode. orgPrefix is
 //     <StateRoot>/orgs/<orgID>; every other mount under this run must live
 //     under this same prefix.

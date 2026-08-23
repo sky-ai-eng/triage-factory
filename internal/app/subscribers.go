@@ -99,7 +99,7 @@ func (a *App) registerSubscribers() {
 // process lifetime (control/all), but a demoted control standby must not kick
 // a per-org AI manager off a stray sentinel — e.g. one emitted by a poll
 // cycle that was still in flight at demotion — since the new leader is
-// already running that scoring/classify/profile/reconcile work. At
+// already running that scoring/profile/reconcile work. At
 // TF_ROLE=all and local, isBrainHolder is always true, so this is a no-op
 // there. Applied only to the sentinel-driven brain-manager kickers, not to
 // ws-broadcast or the poll-readiness tracker, which any control pod may serve.

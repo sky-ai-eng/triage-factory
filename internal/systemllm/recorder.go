@@ -38,7 +38,7 @@ const (
 	JobRepoProfiler = "repo_profiler"
 	// JobProbe is a model-availability probe: one minimal request TF spends to
 	// learn whether an org's credentials can invoke a given model. It is not a
-	// background job like the three above — a person pressed a button — but it
+	// background job like the two above — a person pressed a button — but it
 	// is TF-initiated spend against the org's account, so it belongs in the
 	// same ledger and rolls up under system_overhead like every other call TF
 	// makes for itself. A probe that stayed off the ledger would be the one

@@ -143,7 +143,7 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 }
 
 // trackingTeams filters an identity-derived team set — the owner ladder's
-// tier-4 result (a PR author's / Jira assignee's member teams) — down to the
+// tier-3 result (a PR author's / Jira assignee's member teams) — down to the
 // teams that actually track the event's entity. It applies the same team↔repo
 // (GitHub) / team↔project (Jira) gate matchHandlers applies to handlers, closing
 // the one path that reached the visibility/owner set ungated: a team the author

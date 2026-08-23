@@ -343,7 +343,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// completion sentinel deliberately does NOT fire on this path (see
 		// EmitPollComplete's call sites below, both unreached from here) —
 		// TFAC-571's decision to only announce "poll complete" on a full wrap
-		// so downstream scoring/classifier/profiler triggers don't churn on
+		// so downstream scoring/profiler triggers don't churn on
 		// a cold-start cycle that's still partway through the repo list.
 		return 0, resumeFrom, rateLimited
 	}

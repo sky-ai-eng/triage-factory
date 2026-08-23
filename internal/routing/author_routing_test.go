@@ -152,7 +152,7 @@ func TestAuthorCentric_AuthorOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 
 	teamA := seedTeam(t, database, "team-a")
 	teamB := seedTeam(t, database, "team-b")
-	// One login bound to two TF users, one per team — the tier-4 union > 1.
+	// One login bound to two TF users, one per team — the tier-3 union > 1.
 	seedUserOnTeam(t, database, teamA, "aidan")
 	seedUserOnTeam(t, database, teamB, "aidan")
 	seedSystemCIRule(t, database, teamA)
@@ -209,7 +209,7 @@ func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 	}
 }
 
-// TestAuthorCentric_PriorTaskAnchorsOwner (tier 3): once an entity has an
+// TestAuthorCentric_PriorTaskAnchorsOwner (tier 2): once an entity has an
 // owned author-centric task, a later author-centric event anchors to that same
 // team even when the second event's author maps elsewhere.
 func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
@@ -232,7 +232,7 @@ func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
 	// First: a CI failure from aidan (team A) establishes A as the owner.
 	emitCI(router, entityID, "aidan")
 
-	// Then: a conflicts event from bob (team B). Tier 3 (prior owned
+	// Then: a conflicts event from bob (team B). Tier 2 (prior owned
 	// author-centric task) anchors it to A, not bob's team B.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "bob", Repo: "owner/repo"})
 	router.HandleEvent(context.Background(), domain.Event{
@@ -253,7 +253,7 @@ func TestAuthorCentric_PriorTaskAnchorsOwner(t *testing.T) {
 
 // TestAuthorCentric_ReviewFirstTrap_CIFallsToAuthor is the review-first
 // regression guard: a review_requested task on the reviewer's team must NOT
-// anchor a later CI failure (tier 3 excludes review tasks), which then falls to
+// anchor a later CI failure (tier 2 excludes review tasks), which then falls to
 // the author tier.
 func TestAuthorCentric_ReviewFirstTrap_CIFallsToAuthor(t *testing.T) {
 	database := newTestDB(t)
@@ -446,10 +446,10 @@ func TestAuthorCentric_TwoTeams_FiresDeterministically(t *testing.T) {
 	}
 }
 
-// TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent pins that tier-3 anchoring
+// TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent pins that tier-2 anchoring
 // still works after the TFAC-514 deterministic fire: a multi-team author's first
 // event consolidates the owner onto the firing team, and a second author-centric
-// event on the same entity resolves to that same team via tier 3 (the prior
+// event on the same entity resolves to that same team via tier 2 (the prior
 // owned author-centric task), not back to the ambiguous author tier.
 func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 	database := newTestDB(t)
@@ -484,7 +484,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 		t.Fatalf("owner not consolidated after fire")
 	}
 
-	// Second author-centric event (conflicts): tier 3 anchors it to the
+	// Second author-centric event (conflicts): tier 2 anchors it to the
 	// consolidated owner, even though the author still maps to both teams.
 	conflictMeta, _ := json.Marshal(events.GitHubPRConflictsMetadata{Author: "aidan", Repo: "owner/repo"})
 	router.HandleEvent(context.Background(), domain.Event{
@@ -498,7 +498,7 @@ func TestAuthorCentric_ConsolidatedOwnerAnchorsNextEvent(t *testing.T) {
 		t.Fatalf("expected 1 conflicts task, got %d (err=%v)", len(conflicts), err)
 	}
 	if teamIDValue(&conflicts[0]) != winner {
-		t.Errorf("conflicts owner = %q, want the consolidated team %q (tier-3 anchor)", teamIDValue(&conflicts[0]), winner)
+		t.Errorf("conflicts owner = %q, want the consolidated team %q (tier-2 anchor)", teamIDValue(&conflicts[0]), winner)
 	}
 }
 

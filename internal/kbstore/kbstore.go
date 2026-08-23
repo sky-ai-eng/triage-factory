@@ -58,9 +58,9 @@ type Store struct {
 	blobs storage.Storage
 }
 
-// New wraps a storage.Storage as a KB store. The same *Store is shared by
-// every KB consumer in the process (handlers, syncer, classifier, bundle) —
-// build one storage.Storage at boot and hand it here once.
+// New wraps a storage.Storage as a KB store. Currently unused — see the
+// package doc — but a future re-key would build one storage.Storage at boot
+// and hand it here once, shared by every KB consumer in the process.
 func New(blobs storage.Storage) *Store {
 	return &Store{blobs: blobs}
 }

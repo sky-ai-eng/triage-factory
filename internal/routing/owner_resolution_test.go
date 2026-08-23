@@ -222,10 +222,10 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			wantErr: "resolve owner: structural owner for entity",
 		},
 		{
-			// Tier 3: the entity already has an owned CI task on team A. A
+			// Tier 2: the entity already has an owned CI task on team A. A
 			// failed prior-task read used to demote to the author tier, so the
 			// second event routed to the SECOND author's team.
-			name:      "tier 3 prior-task owner",
+			name:      "tier 2 prior-task owner",
 			eventType: domain.EventGitHubPRConflicts,
 			seed: func(t *testing.T, database *sql.DB, r *Router) (string, string) {
 				setReviewHost(t, database)
@@ -248,7 +248,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			wantErr: "resolve owner: prior-task owner for entity",
 		},
 		{
-			// Tier 4, first read: without the host the reverse lookup can't
+			// Tier 3, first read: without the host the reverse lookup can't
 			// run, and an empty owner set is indistinguishable from dependabot.
 			name:      "author path org-settings host",
 			eventType: domain.EventGitHubPRCICheckFailed,
@@ -358,9 +358,9 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			wantErr: "resolve owner: structural owner for entity",
 		},
 		{
-			// The Jira tier-3 anchor reads the entity's ACTIVE tasks; a failed
+			// The Jira tier-2 anchor reads the entity's ACTIVE tasks; a failed
 			// read demoted the ladder to the new assignee's team.
-			name:      "jira tier 3 prior-task owner",
+			name:      "jira tier 2 prior-task owner",
 			eventType: domain.EventJiraIssueStatusChanged,
 			seed: func(t *testing.T, database *sql.DB, r *Router) (string, string) {
 				setJiraHost(t, database)
@@ -466,7 +466,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 	}
 }
 
-// seedAuthorCIScenario is the tier-4 GitHub fixture the three author-identity
+// seedAuthorCIScenario is the tier-3 GitHub fixture the three author-identity
 // rows share: one member team, one system rule gating creation, a CI failure
 // authored by that member. With the identity reads healthy the task is owned by
 // the member's team; with any of them broken the author looks external.
@@ -512,10 +512,10 @@ func seedJiraAssignedScenario(t *testing.T, database *sql.DB, _ *Router) (string
 // TestOwnerResolution_TransientIdentityFailure_WatcherDoesNotCaptureOwnership
 // is the worst outcome the ticket names, and the reason a degraded read is not
 // merely a lost task. Team C only WATCHES: an applies_to_unowned trigger, no
-// membership claim on the PR. A blip in the tier-4 identity read made the
+// membership claim on the PR. A blip in the tier-3 identity read made the
 // author look external, which is precisely the state that hands the orphan
 // branch to the opted-in watcher — C fires, the fire consolidates ownership
-// onto C, and tier 3 then anchors every future event on the entity to C. One
+// onto C, and tier 2 then anchors every future event on the entity to C. One
 // transient failure, permanent capture.
 //
 // The contract now: the blip requeues the event with nothing fired, and the

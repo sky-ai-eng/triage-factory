@@ -352,7 +352,7 @@ func enrollOnTeam(t *testing.T, database *sql.DB, userID, teamID string) {
 // teams: A (tracks the repo) and B (unconfigured, tracks nothing). The event is
 // on A's repo. The task must be owned by and visible to A ONLY.
 //
-// Before the owner ladder's tier-4 identity resolution was tracking-gated, the
+// Before the owner ladder's tier-3 identity resolution was tracking-gated, the
 // author's membership alone pulled B into the set: ownership resolved ambiguous
 // (NULL owner) and task_teams became {A, B}, so filtering the board to B still
 // surfaced A's queued work — the card was visible to a team that could never

@@ -18,9 +18,9 @@ import (
 // entityStore is the Postgres impl of db.EntityStore. Holds two pools:
 //
 //   - q: app pool (tf_app, RLS-active). Every request-equivalent
-//     consumer (server panels, delegate context loaders, the classifier
-//     once it runs inside a user-scoped goroutine) hits this side. RLS
-//     policy entities_all gates every read/write on
+//     consumer (the Jira stock deck, the factory handler, task-creation
+//     handlers) hits this side. RLS policy entities_all gates every
+//     read/write on
 //     (org_id = tf.current_org_id() AND tf.user_has_org_access(org_id)).
 //
 //   - admin: admin pool (supabase_admin, BYPASSRLS). System services
