@@ -178,11 +178,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		Entities:       newEntityStore(tx, tx),
 		Repos:          newRepositoryStore(tx, tx),
 		PendingFirings: newPendingFiringsStore(tx),
-		// Projects: ListSystem routes around RLS the same way
-		// Conversations' event-triggered Create does. Keeping the admin
-		// half pinned to s.admin lets the classifier read each org's
-		// project set even when composed inside a claims-set tx.
-		Projects: newProjectStore(tx, s.admin),
 		// Events: app-side write routes through the tx; admin half
 		// stays pinned to the real admin pool so RecordSystem /
 		// GetMetadataSystem inside WithTx routes outside the tx —

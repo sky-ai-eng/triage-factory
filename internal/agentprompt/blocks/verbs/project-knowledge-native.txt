@@ -1,5 +1,0 @@
-<project_knowledge>
-If `/work/_tfac/project-knowledge/` holds markdown files, they are reference documentation curated by the human team:
-architecture notes, conventions, gotchas. Skim the filenames and read what looks relevant.
-Treat it as orienting context rather than ground truth — it may have drifted, and where it disagrees with the code you just read, the code wins.
-</project_knowledge>

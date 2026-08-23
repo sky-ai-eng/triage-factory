@@ -200,7 +200,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Entities wires both pools: app for request-
 		// equivalent consumers (server panels, delegate context
 		// loaders) and admin for the `...System` variants the tracker
-		// + project classifier use. RLS policy entities_all gates
+		// uses. RLS policy entities_all gates
 		// reads + writes on (org_id = tf.current_org_id() AND
 		// tf.user_has_org_access) on the app side; admin bypasses
 		// RLS, and org_id stays in every WHERE clause as defense
@@ -222,12 +222,6 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// via an EXISTS subquery against tasks; org_id defense-in-
 		// depth fires in every WHERE/INSERT clause regardless.
 		PendingFirings: newPendingFiringsStore(admin),
-		// Projects wires both pools: app for request-equivalent
-		// consumers and admin for ListSystem, the project classifier's
-		// cross-org read. projects_* RLS policies gate the app side
-		// by visibility + team membership; admin bypasses RLS, and
-		// org_id stays in every WHERE clause as defense in depth.
-		Projects: newProjectStore(app, admin),
 		// Events wires both pools: app for request-handler
 		// equivalents (stock carry-over, factory drag-to-delegate) and
 		// admin for background goroutines without JWT-claims context
@@ -326,7 +320,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// membership. Same pool-split pattern as TeamsStore.
 		Invites: newInvitesStore(app, admin),
 		// SystemLLMRuns is admin-pool only: the writers (scorer,
-		// repo-profiler, project-classifier) are boot-launched system
+		// repo-profiler) are boot-launched system
 		// goroutines with no JWT-claims context, so an app-pool INSERT
 		// under system_llm_runs_all RLS would be rejected. Same admin-only
 		// shape as PendingFirings / EventQueue.
@@ -488,7 +482,6 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		Entities:              newEntityStore(tx, tx),
 		Repos:                 newRepositoryStore(tx, tx),
 		PendingFirings:        newPendingFiringsStore(tx),
-		Projects:              newProjectStore(tx, tx),
 		Events:                newEventStore(tx, tx),
 		TaskMemory:            newTaskMemoryStore(tx, tx),
 		ConversationWorktrees: newConversationWorktreeStore(tx, tx),

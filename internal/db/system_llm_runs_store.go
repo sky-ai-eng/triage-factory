@@ -8,7 +8,7 @@ import (
 
 // SystemLLMRunStore owns the system_llm_runs table — the per-call cost +
 // token accounting for headless LLM invocations made by background system
-// jobs (scorer, repo-profiler, project-classifier). The table is
+// jobs (scorer, repo-profiler). The table is
 // system-written and org-scoped, the same shape as repositories: every
 // write routes through the admin pool in Postgres (the writers are
 // boot-launched goroutines with no JWT-claims context), and the

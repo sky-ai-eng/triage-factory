@@ -46,7 +46,7 @@ type subsystemPlan struct {
 
 	// brain marks this role as BRAIN-CAPABLE: control + all construct the
 	// leader-elected background brain's objects (pollers + tracker, the
-	// event router, the AI managers — scorer/profiler/classifier/
+	// event router, the AI managers — scorer/profiler/
 	// reconciler/marketplace-stats —, the
 	// poll-completion bus subscribers) and participate in the
 	// background-brain lease election. An executor never does.
@@ -59,9 +59,9 @@ type subsystemPlan struct {
 	// in multi mode, the brain starts only while this pod actually holds
 	// the "background-brain" lease, and stops on demotion. A standby
 	// control pod still builds every brain object (buildAI/buildRouting) —
-	// config-save handlers and the delegation spawner's classifier wait
-	// need them to relay Trigger/PollSoon calls to whichever pod IS the
-	// holder — it just never starts their background loops.
+	// config-save handlers need them to relay Trigger/PollSoon calls to
+	// whichever pod IS the holder — it just never starts their background
+	// loops.
 	brain bool
 
 	// dispatcher starts the delegated-run dispatcher (claims + executes

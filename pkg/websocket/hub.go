@@ -13,16 +13,14 @@ import (
 
 // Event is a message sent to connected clients over the websocket.
 //
-// ConversationID and ProjectID are optional discriminators frontend
-// listeners filter on. ConversationID identifies events from a single
-// conversation (message / conversation_update); ProjectID identifies
-// events scoped to a project's knowledge base (project_knowledge_updated).
-// Events that broadcast to the whole UI (tasks_updated, scoring_*) leave
-// both empty.
+// ConversationID is an optional discriminator frontend listeners filter on:
+// it identifies events from a single conversation (message /
+// conversation_update). Events that broadcast to the whole UI
+// (tasks_updated, scoring_*) leave it empty.
 //
 // OrgID and UserID are server-side routing fields used by the hub's
 // per-connection scoping. They are intentionally NOT serialised on the
-// wire (json:"-"): the frontend filters by ConversationID/ProjectID, and
+// wire (json:"-"): the frontend filters by ConversationID, and
 // coupling it to server-side identity would leak who-owns-what to
 // other tabs/extensions parsing the WS stream. Empty OrgID means
 // "system event, deliver to every connection"; empty UserID means
@@ -31,7 +29,6 @@ import (
 type Event struct {
 	Type           string `json:"type"`
 	ConversationID string `json:"conversation_id,omitempty"`
-	ProjectID      string `json:"project_id,omitempty"`
 	OrgID          string `json:"-"`
 	UserID         string `json:"-"`
 	Data           any    `json:"data"`

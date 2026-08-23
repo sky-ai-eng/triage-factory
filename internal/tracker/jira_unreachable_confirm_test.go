@@ -150,7 +150,7 @@ func TestRefreshJira_MovedIssueIsRekeyedInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE entities SET last_polled_at=?, classification_rationale='old context', classified_at=? WHERE id=?`, time.Now().Add(-2*jiraUnreachableGrace), time.Now(), old.ID); err != nil {
+	if _, err := database.Exec(`UPDATE entities SET last_polled_at=? WHERE id=?`, time.Now().Add(-2*jiraUnreachableGrace), old.ID); err != nil {
 		t.Fatalf("prepare entity: %v", err)
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
@@ -172,13 +172,6 @@ func TestRefreshJira_MovedIssueIsRekeyedInPlace(t *testing.T) {
 	}
 	if got.ID != old.ID || got.Title != "History stays here" {
 		t.Errorf("rekey lost identity/history: got id=%q title=%q", got.ID, got.Title)
-	}
-	if got.ProjectID != nil {
-		t.Errorf("project_id = %v, want cleared for reclassification", *got.ProjectID)
-	}
-	var classifiedAt any
-	if err := database.QueryRow(`SELECT classified_at FROM entities WHERE id=?`, got.ID).Scan(&classifiedAt); err != nil || classifiedAt != nil {
-		t.Errorf("classified_at = %v, err=%v; want NULL for reclassification", classifiedAt, err)
 	}
 	if evts := tr.pub.(*recordingPublisher).nonSystemEvents(); len(evts) != 0 {
 		t.Fatalf("move emitted events: %v", eventTypes(evts))

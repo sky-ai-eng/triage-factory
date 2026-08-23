@@ -119,17 +119,16 @@ type Stores struct {
 
 	// Entities owns the entities table — the long-lived source
 	// objects (PR, Jira issue) every event/task/conversation hangs off. App
-	// pool in Postgres; consumers are the tracker, projectclassify,
-	// delegate context loaders, the scorer, and the server panels.
+	// pool in Postgres; consumers are the tracker, delegate context
+	// loaders, the scorer, and the server panels.
 	Entities EntityStore
 
 	// Repos owns repositories — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
-	// projects handler, the poller manager, the
-	// profiler, and the workspace CLI tests. Every method accepts
-	// repoID as "owner/repo" — Postgres splits to (owner, repo) and
-	// queries by the natural key UNIQUE(org_id, owner, repo).
+	// poller manager, the profiler, and the workspace CLI tests. Every
+	// method accepts repoID as "owner/repo" — Postgres splits to
+	// (owner, repo) and queries by the natural key UNIQUE(org_id, owner, repo).
 	Repos RepositoryStore
 
 	// PendingFirings owns the pending_firings table — the FIFO queue
@@ -137,13 +136,6 @@ type Stores struct {
 	// entity already has an active auto conversation. Admin pool in Postgres
 	// (the router has no per-user identity; system service).
 	PendingFirings PendingFiringsStore
-
-	// Projects owns the projects table — user-curated work groupings
-	// (Linear/Jira project mirrors with pinned repos and a knowledge
-	// dir). App pool in Postgres; consumers are the projects handler,
-	// backfill, project_entities, projectclassify runner, and the
-	// projectbundle import/export paths.
-	Projects ProjectStore
 
 	// Events owns the events audit log — append-only event rows the
 	// router records and the task-creation paths read. Holds both
@@ -190,7 +182,7 @@ type Stores struct {
 	ConversationWorktrees ConversationWorktreeStore
 
 	// Orgs owns the orgs table — the tenancy root. Background
-	// services (poller, tracker, projectclassify, repoprofile)
+	// services (poller, tracker, repoprofile)
 	// iterate active orgs through this store at the top of each
 	// cycle instead of hardcoding the runmode sentinel. Admin pool
 	// in Postgres — every caller is a boot-launched goroutine
@@ -298,8 +290,8 @@ type Stores struct {
 	ShippedDefaults ShippedDefaultsStore
 
 	// SystemLLMRuns owns the system_llm_runs table — per-call cost +
-	// token accounting for the headless LLM jobs (scorer, repo-profiler,
-	// project-classifier). Admin pool in Postgres: every writer is a
+	// token accounting for the headless LLM jobs (scorer, repo-profiler).
+	// Admin pool in Postgres: every writer is a
 	// boot-launched background goroutine with no JWT-claims context
 	// (system-written, org-scoped — same shape as PendingFirings). The
 	// org-scoped RLS policy gates the app-pool reads the llm_spend view
@@ -502,7 +494,6 @@ type TxStores struct {
 	Entities                 EntityStore
 	Repos                    RepositoryStore
 	PendingFirings           PendingFiringsStore
-	Projects                 ProjectStore
 	Events                   EventStore
 	TaskMemory               TaskMemoryStore
 	ConversationWorktrees    ConversationWorktreeStore

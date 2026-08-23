@@ -6,10 +6,6 @@
 //
 // What it removes:
 //   - ~/.triagefactory/ in full (db, config, bare repo clones, workspace snapshot blobs)
-//   - the corresponding ~/.claude/projects/<encoded> session JSONL dirs
-//     for any per-project working directories (enumerated
-//     BEFORE ~/.triagefactory/ is deleted, so we can still resolve
-//     their absolute paths to compute the encoded name Claude Code uses)
 //   - all keychain entries under the "triagefactory" service
 //   - the symlink left by `triagefactory install` at its default
 //     destination, when present
@@ -28,7 +24,6 @@ package uninstall
 import (
 	"bufio"
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -40,7 +35,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // Handle dispatches the uninstall subcommand.
@@ -56,23 +50,13 @@ func Handle(args []string) {
 	if err != nil {
 		fail("resolve state dir: %v", err)
 	}
-	// home is still needed for the ~/.claude/projects session-JSONL
-	// cleanup below — that's Claude Code SDK state keyed to the real
-	// HOME, not TF state, so it does not live under the (possibly
-	// relocated) state root. Resolved via ExpandHome so os.UserHomeDir
-	// stays confined to internal/paths.
-	home, err := paths.ExpandHome("~")
-	if err != nil {
-		fail("resolve home dir: %v", err)
-	}
 	// Resolve every subpath through internal/paths here, at the single
 	// boundary, then thread them into the (pure) plan helpers. Safe to use
 	// the error-free resolvers now that the StateRootErr pre-flight above
 	// succeeded.
-	projectsDir := paths.ProjectsRoot(runmode.LocalDefaultOrgID)
 	linkPath := defaultInstallLink()
 
-	plan := buildPlan(dataDir, projectsDir, linkPath)
+	plan := buildPlan(dataDir, linkPath)
 	if plan.empty() {
 		fmt.Println("triagefactory: no on-disk local state found.")
 		fmt.Println("Stored keychain credentials may still be present and can be removed.")
@@ -123,25 +107,6 @@ func Handle(args []string) {
 		appKeys, err = gitHubAppKeychainKeys(paths.DBPath())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  warn: enumerate GitHub App keychain keys: %v\n", err)
-			failed = true
-		}
-	}
-
-	// Order: enumerate the per-project working dirs and clear their Claude
-	// project entries BEFORE removing the trees, otherwise we lose the
-	// inputs needed to compute the encoded names.
-	//
-	// Each per-project working dir at ~/.triagefactory/projects/<id>/ may
-	// have a corresponding ~/.claude/projects/<encoded> entry where Claude
-	// Code stores session JSONL. Walk and clear those before
-	// RemoveAll(dataDir) takes the projects dir with it.
-	if plan.hasProjects {
-		n, err := removeClaudeProjectSessions(plan.projectsDir, home)
-		if n > 0 {
-			fmt.Printf("  removed %d Claude Code session entr%s for project working dirs\n", n, plural(n, "y", "ies"))
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: remove Claude Code session entries for project working dirs: %v\n", err)
 			failed = true
 		}
 	}
@@ -221,10 +186,8 @@ func Handle(args []string) {
 // were never there in the first place.
 type uninstallPlan struct {
 	dataDir        string
-	projectsDir    string
 	linkPath       string
 	hasDataDir     bool
-	hasProjects    bool
 	hasInstallLink bool
 }
 
@@ -234,16 +197,13 @@ func (p uninstallPlan) empty() bool {
 	// read each item. Probing here would prompt 6 times before the
 	// user even said yes. The Clear() call later is no-op for missing
 	// keys, so it's safe to always run.
-	return !p.hasDataDir && !p.hasProjects && !p.hasInstallLink
+	return !p.hasDataDir && !p.hasInstallLink
 }
 
 func (p uninstallPlan) summary() []string {
 	var lines []string
 	if p.hasDataDir {
 		lines = append(lines, fmt.Sprintf("%s/ (database, config, bare repo clones, workspace snapshot blobs)", p.dataDir))
-	}
-	if p.hasProjects {
-		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any project working directories")
 	}
 	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) on headless")
 	if p.hasInstallLink {
@@ -252,14 +212,11 @@ func (p uninstallPlan) summary() []string {
 	return lines
 }
 
-func buildPlan(dataDir, projectsDir, linkPath string) uninstallPlan {
-	p := uninstallPlan{dataDir: dataDir, projectsDir: projectsDir, linkPath: linkPath}
+func buildPlan(dataDir, linkPath string) uninstallPlan {
+	p := uninstallPlan{dataDir: dataDir, linkPath: linkPath}
 
 	if info, err := os.Stat(dataDir); err == nil && info.IsDir() {
 		p.hasDataDir = true
-	}
-	if info, err := os.Stat(projectsDir); err == nil && info.IsDir() {
-		p.hasProjects = true
 	}
 	// Lstat — we want the symlink itself, not its target. A broken
 	// symlink (target removed) still counts as something to clean up.
@@ -269,52 +226,6 @@ func buildPlan(dataDir, projectsDir, linkPath string) uninstallPlan {
 		}
 	}
 	return p
-}
-
-// claudeProjectReplacer encodes an absolute path to the directory name
-// Claude Code uses under ~/.claude/projects/. Every '/' and '.' becomes '-'.
-// Mirrors encodeClaudeProjectDir in internal/worktree; kept local to avoid
-// pulling in that package just for path encoding.
-var claudeProjectReplacer = strings.NewReplacer("/", "-", ".", "-")
-
-// removeClaudeProjectSessions walks ~/.triagefactory/projects/<id>/
-// working directories and deletes the matching ~/.claude/projects/<encoded>
-// dir for each. Without this, session JSONLs orphan in
-// ~/.claude/projects/ after uninstall.
-func removeClaudeProjectSessions(projectsDir, home string) (int, error) {
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	var joinedErr error
-	for _, entry := range entries {
-		// Every immediate subdir of projects/ is a project ID. Skip
-		// non-dirs defensively.
-		if !entry.IsDir() {
-			continue
-		}
-		full := filepath.Join(projectsDir, entry.Name())
-		resolved, err := filepath.EvalSymlinks(full)
-		if err != nil {
-			resolved = full
-		}
-		encoded := claudeProjectReplacer.Replace(resolved)
-		projectDir := filepath.Join(home, ".claude", "projects", encoded)
-		if _, err := os.Stat(projectDir); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			joinedErr = errors.Join(joinedErr, fmt.Errorf("inspect %s: %w", projectDir, err))
-			continue
-		}
-		if err := os.RemoveAll(projectDir); err != nil {
-			joinedErr = errors.Join(joinedErr, fmt.Errorf("remove %s: %w", projectDir, err))
-			continue
-		}
-		count++
-	}
-	return count, joinedErr
 }
 
 // defaultInstallLink mirrors the destination logic in cmd/install. We
@@ -344,13 +255,6 @@ func confirm(prompt string) bool {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes"
-}
-
-func plural(n int, singular, plural string) string {
-	if n == 1 {
-		return singular
-	}
-	return plural
 }
 
 // clearAllSecrets removes every static keychain key a full local wipe touches

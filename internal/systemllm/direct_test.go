@@ -137,7 +137,7 @@ func anthropicStreamFrames(text string) []string {
 func completeOpts(orgID string, secrets agentproc.SecretsReader) CompleteOptions {
 	return CompleteOptions{
 		OrgID:        orgID,
-		Job:          JobClassifier,
+		Job:          JobRepoProfiler,
 		Message:      "combined local prompt",
 		SystemPrompt: "system instructions",
 		UserMessage:  "user data",
@@ -303,7 +303,7 @@ func TestComplete_Direct_RecordsSuccessRow(t *testing.T) {
 		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
 	}
 	got := fs.rows[0]
-	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != domain.ModelHaiku {
+	if got.OrgID != "org-1" || got.Job != JobRepoProfiler || got.Model != domain.ModelHaiku {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 	// The fixture reports 10 input + 3 cache-read + 2 cache-write; the neutral
@@ -368,7 +368,7 @@ func TestComplete_Direct_RecordsErrorRow(t *testing.T) {
 	if got.TraceID != "" {
 		t.Errorf("TraceID = %q, want empty — no response, no idempotency key", got.TraceID)
 	}
-	if got.Model != domain.ModelHaiku || got.Job != JobClassifier {
+	if got.Model != domain.ModelHaiku || got.Job != JobRepoProfiler {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 }

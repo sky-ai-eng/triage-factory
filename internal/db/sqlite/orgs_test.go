@@ -30,7 +30,7 @@ func TestOrgsStore_SQLite_ReturnedRowConformance(t *testing.T) {
 // local-mode behavior: the only active org is the
 // runmode.LocalDefaultOrgID sentinel seeded by the baseline
 // migration. Background-service callers (poller, tracker,
-// projectclassify, repoprofile) collapse their per-org loop to N=1
+// repoprofile) collapse their per-org loop to N=1
 // against this row.
 func TestOrgsStore_SQLite_ListActiveSystem_ReturnsSentinel(t *testing.T) {
 	conn := openSQLiteForTest(t)

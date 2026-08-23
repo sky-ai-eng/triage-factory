@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -105,18 +104,6 @@ func newSQLiteForEntityTest(t *testing.T) *sql.DB {
 
 func newSQLiteEntitySeeder(conn *sql.DB) dbtest.EntitySeeder {
 	return dbtest.EntitySeeder{
-		Project: func(t *testing.T, name string) string {
-			t.Helper()
-			created, err := sqlitestore.New(conn).Projects.Create(
-				t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
-				domain.Project{Name: name},
-			)
-			if err != nil {
-				t.Fatalf("seed project %s: %v", name, err)
-			}
-			pid := created.ID
-			return pid
-		},
 		Team: func(t *testing.T, name string) string {
 			t.Helper()
 			// Raw insert rather than the Teams store: local mode is N=1 and

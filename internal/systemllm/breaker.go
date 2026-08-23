@@ -60,7 +60,7 @@ func IsProviderBackoff(err error) bool {
 }
 
 // providerBreaker tracks a transient-failure cooldown per upstream provider
-// (see providerKey), so scorer/profiler/classifier batches racing at boot —
+// (see providerKey), so scorer/profiler batches racing at boot —
 // or any time several land together — share one signal instead of each
 // independently rediscovering an overloaded endpoint. One instance lives on
 // the shared *Recorder (see NewRecorder), which is itself a single

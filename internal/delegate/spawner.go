@@ -307,10 +307,9 @@ type Spawner struct {
 	// like cancels beside it.
 	engagements map[string]*engagement
 
-	dispatchWake          chan struct{}                                     // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
-	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
-	eventPublisher        EventPublisher                                    // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
-	waitForClassification func(ctx context.Context, orgID, entityID string) // hook that blocks until the project classifier has decided this entity, or a timeout/ctx-cancel elapses. orgID scopes the classification read to the run's tenant — the read goes through the org-scoped admin-pool store, not a raw query. Nil-safe (test setups skip it). Wired in main.go via SetWaitForClassification — keeps internal/delegate from importing internal/projectclassify.
+	dispatchWake   chan struct{}  // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
+	drainer        QueueDrainer   // nil-safe; set post-construction via SetQueueDrainer
+	eventPublisher EventPublisher // nil-safe; set post-construction via SetEventPublisher — mirrors run status/activity onto the bus (TFAC-592)
 
 	// procs holds the live agent process handle for each run currently
 	// executing as a LiveRun, keyed by run id. It survives across HTTP
@@ -669,31 +668,6 @@ func (s *Spawner) publishEvent(orgID, eventType string, metadata any) {
 		MetadataJSON: string(raw),
 		OccurredAt:   time.Now().UTC(),
 	})
-}
-
-// SetWaitForClassification wires the hook that blocks the
-// spawner until the project classifier has decided the entity (or
-// the timeout / ctx fires). main.go provides the implementation so
-// this package doesn't import projectclassify. Nil-safe — tests and
-// any configuration without a classifier skip the wait entirely.
-func (s *Spawner) SetWaitForClassification(fn func(ctx context.Context, orgID, entityID string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.waitForClassification = fn
-}
-
-// awaitClassification calls the wait hook if one is configured. ctx
-// is forwarded so the spawner's run cancellation / shutdown path
-// breaks out of the wait early instead of blocking the full
-// classifier timeout. orgID scopes the classification read to the
-// run's tenant.
-func (s *Spawner) awaitClassification(ctx context.Context, orgID, entityID string) {
-	s.mu.Lock()
-	fn := s.waitForClassification
-	s.mu.Unlock()
-	if fn != nil {
-		fn(ctx, orgID, entityID)
-	}
 }
 
 // SetPublicURL wires the deployment's externally-visible base URL, used by

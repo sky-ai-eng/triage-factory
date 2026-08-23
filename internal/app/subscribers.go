@@ -18,8 +18,8 @@ import (
 // cycle, a scorer run, and a UI push all stay decoupled.
 func (a *App) registerSubscribers() {
 	// Brain-only: every subscriber below either forwards to the websocket
-	// hub (control/all) or kicks a brain manager (scorer/classifier/
-	// profiler/reconciler/marketplace) that an executor never builds. An
+	// hub (control/all) or kicks a brain manager (scorer/profiler/
+	// reconciler/marketplace) that an executor never builds. An
 	// executor publishes run sentinels onto the bus for the cross-pod relay
 	// (TFAC-584) but subscribes to nothing locally.
 	if !a.plan.brain {
@@ -35,14 +35,6 @@ func (a *App) registerSubscribers() {
 		Name:   "scorer",
 		Filter: []string{"system:poll:"},
 		Handle: a.brainHolderOnly(func(evt domain.Event) { a.scorer.Trigger(evt.OrgID) }),
-	})
-	// Kick the per-org project classifier on poll-complete sentinels.
-	// evt.OrgID scopes the per-org Runner (like the scorer above); an empty
-	// value is dropped by Manager.Trigger.
-	a.bus.Subscribe(eventbus.Subscriber{
-		Name:   "classifier",
-		Filter: []string{"system:poll:"},
-		Handle: a.brainHolderOnly(func(evt domain.Event) { a.classifier.Trigger(evt.OrgID) }),
 	})
 	// Kick the per-org repo profiler on GitHub poll-complete sentinels. The
 	// cycle is TTL-gated, so steady state is ~one staleness check per repo

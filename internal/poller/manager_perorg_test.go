@@ -91,9 +91,8 @@ func TestManager_RunJiraCycle_OrgsStoreError(t *testing.T) {
 
 // TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle pins: if the
 // orgs lookup fails, the cycle ends rather than falling back to the
-// hardcoded sentinel. Same rationale as the projectclassify variant
-// — silent fallback would mask multi-mode failures as local-mode
-// behavior.
+// hardcoded sentinel — silent fallback would mask multi-mode failures
+// as local-mode behavior.
 func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	repos := &recordingRepositoryStore{}
@@ -362,5 +361,4 @@ var (
 	_ db.OrgsStore       = (*fakeOrgsStore)(nil)
 	_ db.RepositoryStore = (*recordingRepositoryStore)(nil)
 	_ db.UsersStore      = emptyUsersStore{}
-	_ domain.Project     // keep domain import live for parity with sibling per-org tests
 )

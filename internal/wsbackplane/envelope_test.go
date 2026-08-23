@@ -17,7 +17,6 @@ func TestWireEvent_RoundTripPreservesOrgAndUser(t *testing.T) {
 	orig := websocket.Event{
 		Type:           "message",
 		ConversationID: "run-1",
-		ProjectID:      "",
 		OrgID:          "org-1",
 		UserID:         "user-1",
 		Data:           map[string]any{"text": "hello"},

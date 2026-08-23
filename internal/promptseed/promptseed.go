@@ -10,8 +10,7 @@
 //
 // That is what separates it from internal/agentprompt, which owns the
 // agent-framework text no user edits, and from the system-job prompts that
-// live next to their consumers (internal/ai, internal/repoprofile,
-// internal/projectclassify).
+// live next to their consumers (internal/ai, internal/repoprofile).
 package promptseed
 
 import (

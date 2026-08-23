@@ -33,7 +33,6 @@ import { ChromeProvider } from './contexts/ChromeContext'
 const PATHS: Record<string, string> = {
   overview: '/overview',
   board: '/board',
-  projects: '/projects',
   factory: '/',
   repos: '/repos',
   pulls: '/prs',
@@ -48,7 +47,7 @@ const PATHS: Record<string, string> = {
   settings: '/settings',
 }
 
-/** Longest path first, so /projects/:id resolves to projects and not to /. */
+/** Longest path first, so a nested path resolves to its own id and not to /. */
 const BY_PATH: Array<[string, string]> = Object.entries(PATHS)
   .filter(([id]) => id !== 'prompts.bindings')
   .map(([id, path]) => [path, id] as [string, string])
@@ -69,7 +68,6 @@ function routeIdFor(pathname: string): string {
 const TITLES: Record<string, string> = {
   overview: 'Overview',
   board: 'Board',
-  projects: 'Projects',
   factory: 'Factory',
   repos: 'Repositories',
   pulls: 'Pull requests',

@@ -144,7 +144,7 @@ func TestEnsureSandboxMemoryLink_NeverReplacesRepoContent(t *testing.T) {
 
 // TestEnsureSandboxMemoryLink_LeavesTheScratchDirUsable pins that planting the
 // link does not claim the whole scratch dir: the agent's own memory.md sits
-// beside it at the fixed write path, and the project knowledge base beside that.
+// beside it at the fixed write path.
 func TestEnsureSandboxMemoryLink_LeavesTheScratchDirUsable(t *testing.T) {
 	sandboxingMode(t)
 	dir := t.TempDir()

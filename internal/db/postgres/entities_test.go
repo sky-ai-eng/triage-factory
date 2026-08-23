@@ -45,17 +45,13 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	orgA, userA := seedPgEntityOrg(t, h)
+	orgA, _ := seedPgEntityOrg(t, h)
 	orgB, _ := seedPgEntityOrg(t, h)
-	pidA := seedPgEntityProject(t, h, orgA, userA, "A-proj")
 
 	ctx := context.Background()
 	ent, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "owner/repo#cross", "pr", "T", "")
 	if err != nil {
 		t.Fatalf("seed entity in orgA: %v", err)
-	}
-	if _, err := stores.Entities.AssignProject(ctx, orgA, ent.ID, &pidA, "rationale"); err != nil {
-		t.Fatalf("assign in orgA: %v", err)
 	}
 	if _, err := stores.Entities.UpdateDescription(ctx, orgA, ent.ID, "describes A"); err != nil {
 		t.Fatalf("describe in orgA: %v", err)
@@ -100,11 +96,11 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		}
 	}
 
-	// AssignProject cross-org returns sql.ErrNoRows (entity exists in
-	// orgA but not orgB; the WHERE filter rejects the UPDATE, then
-	// the existence probe also misses on org_id=$orgB).
-	if _, err := stores.Entities.AssignProject(ctx, orgB, ent.ID, &pidA, "r"); err != sql.ErrNoRows {
-		t.Errorf("cross-org AssignProject err = %v, want sql.ErrNoRows", err)
+	// UpdateTitle cross-org returns sql.ErrNoRows (entity exists in orgA
+	// but not orgB; the WHERE filter rejects the UPDATE, then the
+	// existence probe also misses on org_id=$orgB).
+	if _, err := stores.Entities.UpdateTitle(ctx, orgB, ent.ID, "renamed"); err != sql.ErrNoRows {
+		t.Errorf("cross-org UpdateTitle err = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -353,74 +349,6 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	}
 }
 
-// TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims pins the
-// fix end-to-end against Postgres. The classification WaitFor
-// runs in the background spawner with NO request.jwt.claims, so its read
-// must route through the admin pool (the System variant) — the app pool
-// (tf_app) would RLS-deny it (current_org_id() is NULL). This drives
-// ClassificationStatusSystem with no WithUser wrap (the claims-free
-// background-caller condition) and asserts:
-//
-//   - the read reaches the row at all (the original bug's `?` placeholder
-//     would raise 42601 here, and a "fix" that re-routed onto the app
-//     pool would be RLS-filtered into a phantom miss);
-//   - it keys on classified_at, so a below-threshold entity (classified,
-//     no project) reports classified;
-//   - org_id defense-in-depth: a different org never observes the row.
-//
-// The SQLite-only wait_test.go cannot catch either failure mode — `?` is
-// valid there and local mode has no RLS.
-func TestEntityStore_Postgres_ClassificationStatusSystem_NoClaims(t *testing.T) {
-	h := pgtest.Shared(t)
-	h.Reset(t)
-	orgID, _ := seedPgEntityOrg(t, h)
-	ctx := context.Background()
-
-	// q = admin pool, app = app pool — exactly the production spawner
-	// wiring (System reads hit admin). No WithUser wrap anywhere below =
-	// the claims-free background caller the bug report describes.
-	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
-
-	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cs", "pr", "T", "")
-	if err != nil {
-		t.Fatalf("seed entity: %v", err)
-	}
-
-	// Fresh: classified_at NULL → not classified, exists. A `?`-placeholder
-	// regression would error here instead of returning cleanly.
-	classified, exists, err := stores.Entities.ClassificationStatusSystem(ctx, orgID, ent.ID)
-	if err != nil {
-		t.Fatalf("ClassificationStatusSystem(fresh, no claims): %v", err)
-	}
-	if classified || !exists {
-		t.Errorf("fresh entity: classified=%v exists=%v, want false/true", classified, exists)
-	}
-
-	// Below-threshold classify: project_id stays NULL, classified_at set.
-	if _, err := stores.Entities.AssignProjectSystem(ctx, orgID, ent.ID, nil, ""); err != nil {
-		t.Fatalf("AssignProjectSystem(nil): %v", err)
-	}
-	classified, exists, err = stores.Entities.ClassificationStatusSystem(ctx, orgID, ent.ID)
-	if err != nil {
-		t.Fatalf("ClassificationStatusSystem(classified, no claims): %v", err)
-	}
-	if !classified || !exists {
-		t.Errorf("classified entity: classified=%v exists=%v, want true/true (keys on classified_at, not project_id)", classified, exists)
-	}
-
-	// Cross-org isolation: a different org must not observe this row, even
-	// through the BYPASSRLS admin pool — the org_id WHERE filter is the
-	// defense-in-depth backstop.
-	otherOrg, _ := seedPgEntityOrg(t, h)
-	classified, exists, err = stores.Entities.ClassificationStatusSystem(ctx, otherOrg, ent.ID)
-	if err != nil {
-		t.Fatalf("ClassificationStatusSystem(cross-org): %v", err)
-	}
-	if classified || exists {
-		t.Errorf("cross-org read: classified=%v exists=%v, want false/false", classified, exists)
-	}
-}
-
 // TestEntityStore_Postgres_UpdateSnapshotCASSystem_StaleMissIsNoOp pins the
 // TFAC-579 CAS contract directly: a write against a stale (already-bumped)
 // poll_seq reports ok=false and leaves the row untouched — the straggler
@@ -574,42 +502,8 @@ func seedPgEntityOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	return orgID, userID
 }
 
-func seedPgEntityProject(t *testing.T, h *pgtest.Harness, orgID, userID, name string) string {
-	t.Helper()
-	id := uuid.New().String()
-	teamID := firstTeamForOrg(t, h, orgID)
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, now(), now())
-	`, id, orgID, userID, teamID, name); err != nil {
-		t.Fatalf("seed project %s: %v", name, err)
-	}
-	return id
-}
-
 func newPgEntitySeeder(conn *sql.DB, orgID, userID string) dbtest.EntitySeeder {
 	return dbtest.EntitySeeder{
-		Project: func(t *testing.T, name string) string {
-			t.Helper()
-			id := uuid.New().String()
-			// team_id must satisfy the projects_team_visibility_requires_team
-			// CHECK — default visibility is 'team' so we need a real team
-			// row. Use the org's default team seeded by seedPgEntityOrg.
-			var teamID string
-			if err := conn.QueryRow(
-				`SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1`,
-				orgID,
-			).Scan(&teamID); err != nil {
-				t.Fatalf("lookup default team for org %s: %v", orgID, err)
-			}
-			if _, err := conn.Exec(`
-				INSERT INTO projects (id, org_id, creator_user_id, team_id, name, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, now(), now())
-			`, id, orgID, userID, teamID, name); err != nil {
-				t.Fatalf("seed project %s: %v", name, err)
-			}
-			return id
-		},
 		Team: func(t *testing.T, name string) string {
 			t.Helper()
 			id := uuid.New().String()

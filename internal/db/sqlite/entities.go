@@ -38,8 +38,8 @@ var _ db.EntityStore = (*entityStore)(nil)
 const entityIDInChunkSize = 500
 
 const entitySelectCols = `id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-       COALESCE(snapshot_json, ''), COALESCE(description, ''), state, project_id,
-       COALESCE(classification_rationale, ''), created_at, last_polled_at, closed_at, poll_seq`
+       COALESCE(snapshot_json, ''), COALESCE(description, ''), state,
+       created_at, last_polled_at, closed_at, poll_seq`
 
 // --- Lookup ---
 
@@ -120,92 +120,6 @@ func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []stri
 	return out, nil
 }
 
-func (s *entityStore) ListUnclassified(ctx context.Context, orgID string) ([]domain.Entity, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+entitySelectCols+`
-		FROM entities
-		WHERE project_id IS NULL AND classified_at IS NULL AND state = 'active'
-		ORDER BY created_at ASC
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []domain.Entity{}
-	for rows.Next() {
-		e, err := scanEntityFromRows(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, *e)
-	}
-	return out, rows.Err()
-}
-
-// ListBackfillCandidates — see the interface doc, and the Postgres impl for
-// why the slug/key matches are escaped LIKE patterns.
-func (s *entityStore) ListBackfillCandidates(ctx context.Context, orgID string, f db.BackfillCandidateFilter, opts db.ListOpts) ([]domain.Entity, int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, 0, err
-	}
-	args := []any{}
-	where := ` WHERE state = 'active'`
-	if f.ExcludeProjectID != "" {
-		args = append(args, f.ExcludeProjectID)
-		where += " AND (project_id IS NULL OR project_id <> ?)"
-	}
-
-	githubArm := "source = 'github'"
-	if len(f.GitHubRepos) > 0 {
-		var arms []string
-		for _, repo := range f.GitHubRepos {
-			args = append(args, repo, db.LikeEscape(repo)+"#%")
-			arms = append(arms, `source_id = ? OR source_id LIKE ? ESCAPE '\'`)
-		}
-		githubArm = "source = 'github' AND (" + strings.Join(arms, " OR ") + ")"
-	}
-	jiraArm := "source = 'jira'"
-	if f.JiraProjectKey != "" {
-		args = append(args, f.JiraProjectKey, db.LikeEscape(f.JiraProjectKey)+"-%")
-		jiraArm = `source = 'jira' AND (source_id = ? OR source_id LIKE ? ESCAPE '\')`
-	}
-	where += " AND ((" + githubArm + ") OR (" + jiraArm + "))"
-
-	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM entities`+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.Entity{}, total, nil
-	}
-
-	query := `SELECT ` + entitySelectCols + ` FROM entities` + where +
-		` ORDER BY source ASC, last_polled_at ASC NULLS LAST, id`
-	pageArgs := args
-	if opts.Limit > 0 {
-		query += ` LIMIT ? OFFSET ?`
-		pageArgs = append(append([]any{}, args...), opts.Limit, opts.Offset)
-	}
-	rows, err := s.q.QueryContext(ctx, query, pageArgs...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	out := []domain.Entity{}
-	for rows.Next() {
-		e, err := scanEntityFromRows(rows)
-		if err != nil {
-			return nil, 0, err
-		}
-		out = append(out, *e)
-	}
-	return out, total, rows.Err()
-}
-
 func (s *entityStore) ListActive(ctx context.Context, orgID, source string) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
@@ -242,48 +156,6 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, _ str
 	// filter has nothing to narrow (the frontend never renders it below
 	// 2 teams). Mirrors the FactoryReadStore.Entities asymmetry.
 	return s.ListActive(ctx, orgID, "jira")
-}
-
-func (s *entityStore) ListProjectPanel(ctx context.Context, orgID, projectID string, opts db.ListOpts) ([]domain.ProjectPanelEntity, int, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, 0, err
-	}
-	var total int
-	if err := s.q.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM entities WHERE project_id = ? AND state = 'active'
-	`, projectID).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	if opts.CountOnly {
-		return []domain.ProjectPanelEntity{}, total, nil
-	}
-	query := `
-		SELECT id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
-		       state, COALESCE(classification_rationale, ''), created_at, last_polled_at
-		FROM entities
-		WHERE project_id = ? AND state = 'active'
-		ORDER BY last_polled_at DESC NULLS LAST, id`
-	args := []any{projectID}
-	if opts.Limit > 0 {
-		query += ` LIMIT ? OFFSET ?`
-		args = append(args, opts.Limit, opts.Offset)
-	}
-	rows, err := s.q.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-
-	out := []domain.ProjectPanelEntity{}
-	for rows.Next() {
-		var e domain.ProjectPanelEntity
-		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-			&e.State, &e.ClassificationRationale, &e.CreatedAt, &e.LastPolledAt); err != nil {
-			return nil, 0, err
-		}
-		out = append(out, e)
-	}
-	return out, total, rows.Err()
 }
 
 // --- Mutation ---
@@ -378,31 +250,6 @@ func (s *entityStore) UpdateDescription(ctx context.Context, orgID, id, descript
 	}
 	return scanWrittenEntity(s.q.QueryRowContext(ctx,
 		`UPDATE entities SET description = ? WHERE id = ? RETURNING `+entitySelectCols, description, id))
-}
-
-func (s *entityStore) AssignProject(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return domain.Entity{}, err
-	}
-	var projectArg any
-	if projectID != nil && *projectID != "" {
-		projectArg = *projectID
-	}
-	var rationaleArg any
-	if rationale != "" {
-		rationaleArg = rationale
-	}
-	// RETURNING answers "did this land" and "what does the row say now" in one
-	// statement, which retires the rows-affected probe and the existence
-	// SELECT that used to follow it.
-	return scanWrittenEntity(s.q.QueryRowContext(ctx, `
-		UPDATE entities
-		SET project_id = ?,
-		    classification_rationale = ?,
-		    classified_at = CURRENT_TIMESTAMP
-		WHERE id = ?
-		RETURNING `+entitySelectCols,
-		projectArg, rationaleArg, id))
 }
 
 func (s *entityStore) MarkClosed(ctx context.Context, orgID, id string) (domain.Entity, error) {
@@ -528,10 +375,6 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 	return out, rows.Err()
 }
 
-func (s *entityStore) ListUnclassifiedSystem(ctx context.Context, orgID string) ([]domain.Entity, error) {
-	return s.ListUnclassified(ctx, orgID)
-}
-
 func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
 	return s.FindOrCreate(ctx, orgID, source, sourceID, kind, title, url)
 }
@@ -593,7 +436,7 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id = ?, project_id = NULL, classification_rationale = NULL, classified_at = NULL, last_polled_at = ? WHERE id = ?`, newSourceID, time.Now().UTC(), id)
+			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id = ?, last_polled_at = ? WHERE id = ?`, newSourceID, time.Now().UTC(), id)
 			if err != nil {
 				return err
 			}
@@ -666,10 +509,6 @@ func (s *entityStore) UpdateURLSystem(ctx context.Context, orgID, id, url string
 		`UPDATE entities SET url = ? WHERE id = ? RETURNING `+entitySelectCols, url, id))
 }
 
-func (s *entityStore) AssignProjectSystem(ctx context.Context, orgID, id string, projectID *string, rationale string) (domain.Entity, error) {
-	return s.AssignProject(ctx, orgID, id, projectID, rationale)
-}
-
 func (s *entityStore) MarkClosedSystem(ctx context.Context, orgID, id string) (domain.Entity, error) {
 	return s.MarkClosed(ctx, orgID, id)
 }
@@ -689,47 +528,17 @@ func (s *entityStore) DescriptionsSystem(ctx context.Context, orgID string, ids 
 	return s.Descriptions(ctx, orgID, ids)
 }
 
-// ClassificationStatusSystem reads classified_at for one entity. There is
-// no non-System counterpart (the only caller, projectclassify.WaitFor, is
-// a claims-free background job), so the read is inlined here rather than
-// delegating. SQLite has one connection and no auth concept, so the
-// assertLocalOrg gate is the whole "scope to the right tenant" story. A
-// missing row is (false, false, nil) — definitive, not an error — so the
-// wait can stop polling a deleted entity.
-func (s *entityStore) ClassificationStatusSystem(ctx context.Context, orgID, id string) (classified, exists bool, err error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return false, false, err
-	}
-	var ts sql.NullTime
-	err = s.q.QueryRowContext(ctx, `SELECT classified_at FROM entities WHERE id = ?`, id).Scan(&ts)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, false, nil
-	}
-	if err != nil {
-		return false, false, err
-	}
-	return ts.Valid, true, nil
-}
-
 func (s *entityStore) OwningTeamForEntitySystem(ctx context.Context, orgID, entityID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
 	}
-	// Tier 1 (owning_team_id override) takes precedence; tier 2 falls back to
-	// the team that owns the entity's project, but only for a team-visibility
-	// project (a private/org project has no single owning team). COALESCE
-	// returns NULL when neither resolves; the NullString scans that to "".
+	// The owning_team_id override, or "" when unset — the NullString scans
+	// that case to "" so the router falls through to its later tiers.
 	var team sql.NullString
 	err := s.q.QueryRowContext(ctx, `
-		SELECT COALESCE(
-			e.owning_team_id,
-			(SELECT p.team_id FROM projects p
-			   WHERE p.id = e.project_id
-			     AND p.visibility = 'team'
-			     AND p.team_id IS NOT NULL)
-		)
-		FROM entities e
-		WHERE e.id = ?
+		SELECT owning_team_id
+		FROM entities
+		WHERE id = ?
 	`, entityID).Scan(&team)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -778,9 +587,8 @@ func (s *entityStore) StampOwningTeamIfUnsetSystem(ctx context.Context, orgID, e
 // interface in the standard library.
 func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
-	var projectID sql.NullString
 	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
+		&e.SnapshotJSON, &e.Description, &e.State,
 		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -788,22 +596,15 @@ func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	if err != nil {
 		return nil, err
 	}
-	if projectID.Valid {
-		e.ProjectID = &projectID.String
-	}
 	return &e, nil
 }
 
 func scanEntityFromRows(rows *sql.Rows) (*domain.Entity, error) {
 	var e domain.Entity
-	var projectID sql.NullString
 	if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
-		&e.SnapshotJSON, &e.Description, &e.State, &projectID, &e.ClassificationRationale,
+		&e.SnapshotJSON, &e.Description, &e.State,
 		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
 		return nil, err
-	}
-	if projectID.Valid {
-		e.ProjectID = &projectID.String
 	}
 	return &e, nil
 }

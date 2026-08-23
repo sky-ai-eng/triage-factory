@@ -73,10 +73,10 @@ type PromptStore interface {
 	Get(ctx context.Context, orgID string, id string) (*domain.Prompt, error)
 
 	// GetBySystemSlug resolves a team's copy of a shipped prompt by its
-	// stable system_slug (e.g. domain.SystemTicketSpecPromptID). Returns
-	// (nil, nil) when the team has no copy. The id moved to a random UUID
-	// per team copy, so a caller that needs a shipped prompt by name — the
-	// project-create default — resolves through this instead of Get(slug).
+	// stable system_slug (e.g. "system-ci-fix"). Returns (nil, nil) when the
+	// team has no copy. The id moved to a random UUID per team copy, so a
+	// caller that needs a shipped prompt by name resolves through this
+	// instead of Get(slug).
 	// The Postgres impl filters org+team and runs on the app
 	// pool (RLS-gated); the SQLite impl filters by slug only (single team)
 	// but honors a non-empty teamID when supplied.

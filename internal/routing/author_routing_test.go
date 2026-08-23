@@ -112,7 +112,7 @@ func TestAuthorCentric_LocalUserPR_OneTeam(t *testing.T) {
 }
 
 // TestAuthorCentric_AuthorOnOneTeam_OwnedByThatTeam: in a two-team org the
-// author belongs to team A only (no project/override/prior task), so a CI
+// author belongs to team A only (no override/prior task), so a CI
 // failure is owned by A and never surfaces to team B. A system rule on B does
 // not pull B in.
 func TestAuthorCentric_AuthorOnOneTeam_OwnedByThatTeam(t *testing.T) {
@@ -174,50 +174,8 @@ func TestAuthorCentric_AuthorOnTwoTeams_NullOwnerVisibleBoth(t *testing.T) {
 	}
 }
 
-// TestAuthorCentric_ProjectOwned_OwnerIsProjectTeam: an entity attached to a
-// team-visibility project routes to the project's team regardless of who
-// authored the PR (tier 2 beats the author tier).
-func TestAuthorCentric_ProjectOwned_OwnerIsProjectTeam(t *testing.T) {
-	database := newTestDB(t)
-	seedHandlerFKTargets(t, database)
-	setReviewHost(t, database)
-
-	teamProject := seedTeam(t, database, "project-team")
-	teamAuthor := seedTeam(t, database, "author-team")
-	seedUserOnTeam(t, database, teamAuthor, "aidan")
-	seedSystemCIRule(t, database, teamProject)
-	seedSystemCIRule(t, database, teamAuthor)
-
-	// A team-visibility project owned by teamProject, with an entity attached.
-	// Raw insert (not Projects.Create) because the SQLite store pins every
-	// project to the local team — we need a distinct team here to prove tier 2
-	// beats the author tier.
-	st := sqlitestore.New(database)
-	projectID := "proj-" + teamProject[:8]
-	if _, err := database.Exec(`
-		INSERT INTO projects (id, name, org_id, team_id, creator_user_id, visibility, created_at, updated_at)
-		VALUES (?, 'Proj', ?, ?, ?, 'team', datetime('now'), datetime('now'))
-	`, projectID, runmode.LocalDefaultOrgID, teamProject, runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("create project: %v", err)
-	}
-	entityID := reviewEntity(t, database, "owner/repo#proj")
-	if _, err := st.Entities.AssignProject(context.Background(), runmode.LocalDefaultOrgID, entityID, &projectID, "test"); err != nil {
-		t.Fatalf("assign project: %v", err)
-	}
-
-	emitCI(reviewRouter(database), entityID, "aidan") // author on teamAuthor
-
-	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil || len(active) != 1 {
-		t.Fatalf("expected 1 task, got %d (err=%v)", len(active), err)
-	}
-	if teamIDValue(&active[0]) != teamProject {
-		t.Errorf("owner = %q, want the project's team %q (not the author's %q)", teamIDValue(&active[0]), teamProject, teamAuthor)
-	}
-}
-
 // TestAuthorCentric_OverrideOwningTeam: entities.owning_team_id pins the owner
-// (tier 1) ahead of project, prior-task, and author tiers.
+// (tier 1) ahead of the prior-task and author tiers.
 func TestAuthorCentric_OverrideOwningTeam(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)

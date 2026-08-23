@@ -17,8 +17,8 @@ import (
 // RunEntityStoreConformance. Returns:
 //   - the wired EntityStore impl,
 //   - the orgID to pass to every call,
-//   - an EntitySeeder for the project rows the assign-project subtests
-//     need (entities themselves come from FindOrCreate).
+//   - an EntitySeeder for the team rows the owning-team subtests need
+//     (entities themselves come from FindOrCreate).
 type EntityStoreFactory func(t *testing.T) (
 	store db.EntityStore,
 	orgID string,
@@ -28,10 +28,6 @@ type EntityStoreFactory func(t *testing.T) (
 // EntitySeeder is a bag of callbacks the conformance suite uses to
 // stage non-entity fixture rows.
 type EntitySeeder struct {
-	// Project inserts a project row and returns its id. The
-	// AssignProject subtests need a real FK target.
-	Project func(t *testing.T, name string) string
-
 	// Team inserts a team row and returns its id. The owning-team stamp
 	// subtests need two DISTINCT ids that both satisfy the owning_team_id
 	// FK — one to stamp, one to prove a second writer cannot displace it.
@@ -50,18 +46,12 @@ type EntitySeeder struct {
 //     leaving it alone.
 //   - MarkClosed is unconditional; Close only fires when state='active';
 //     Reactivate only fires when state='closed'.
-//   - AssignProject stores both the FK and the rationale, and surfaces
-//     sql.ErrNoRows when the entity id doesn't exist.
-//   - ListUnclassified / ListActive / ListProjectPanel filter on the
-//     documented predicates.
+//   - ListActive filters on the documented predicates.
 //   - ListActiveTerminalCandidatesSystem surfaces active entities whose
 //     stored snapshot reads terminal (github exactly, jira against the
 //     caller's done-status union) and nothing else.
 //   - Descriptions dedupes the input id list and only returns ids
 //     whose description is non-empty.
-//   - ClassificationStatusSystem reports (classified, exists) keyed on
-//     classified_at (not project_id), with a missing row as (false,
-//     false, nil).
 //   - MarkPolledSystem advances last_polled_at without touching the
 //     snapshot or poll_seq.
 
@@ -91,7 +81,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// read finds — and AssertWriteReturnedStoredRow's doc covers what that
 		// stands in for (RETURNING semantics, RLS visibility on the update arm,
 		// column-list drift).
-		s, orgID, seed := mk(t)
+		s, orgID, _ := mk(t)
 		created, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#900", "pr", "Returned", "https://example.com/900")
 		if err != nil {
 			t.Fatalf("FindOrCreate: %v", err)
@@ -133,16 +123,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		AssertWriteReturnedStoredRow(t, "UpdateURLSystem", urled, read)
 
-		projectID := seed.Project(t, "returned-row-project")
-		assigned, err := s.AssignProject(ctx, orgID, created.ID, &projectID, "because")
-		if err != nil {
-			t.Fatalf("AssignProject: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "AssignProject", assigned, read)
-		if assigned.ProjectID == nil || *assigned.ProjectID != projectID {
-			t.Errorf("AssignProject returned project %v, want %q", assigned.ProjectID, projectID)
-		}
-
 		// The guarded close: it fires once and declines the second time, and
 		// nil is how the caller tells those apart.
 		closed, err := s.Close(ctx, orgID, created.ID)
@@ -176,7 +156,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{"UpdateTitle", func() error { _, e := s.UpdateTitle(ctx, orgID, missing, "x"); return e }},
 			{"UpdateDescription", func() error { _, e := s.UpdateDescription(ctx, orgID, missing, "x"); return e }},
 			{"UpdateURLSystem", func() error { _, e := s.UpdateURLSystem(ctx, orgID, missing, "x"); return e }},
-			{"AssignProject", func() error { _, e := s.AssignProject(ctx, orgID, missing, nil, ""); return e }},
 			{"MarkClosed", func() error { _, e := s.MarkClosed(ctx, orgID, missing); return e }},
 		} {
 			if err := tc.run(); !errors.Is(err, sql.ErrNoRows) {
@@ -638,59 +617,15 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 	})
 
-	t.Run("AssignProject_round_trips_and_returns_no_rows_on_missing", func(t *testing.T) {
+	// OwningTeamForEntitySystem resolves the structural owner: the
+	// owning_team_id override, or empty when unset. The writer half is
+	// covered by the stamp subtest below; here we cover the plain read and
+	// the empty fall-through across both dialects.
+	t.Run("OwningTeamForEntity_resolves_override_else_empty", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#ap", "pr", "T", "")
-		if err != nil {
-			t.Fatalf("seed entity: %v", err)
-		}
-
-		pid := seed.Project(t, "Roundtrip")
-		if _, err := s.AssignProject(ctx, orgID, ent.ID, &pid, "winner because X"); err != nil {
-			t.Fatalf("AssignProject: %v", err)
-		}
-
-		got, _ := s.Get(ctx, orgID, ent.ID)
-		if got.ProjectID == nil || *got.ProjectID != pid {
-			gotPID := "<nil>"
-			if got.ProjectID != nil {
-				gotPID = *got.ProjectID
-			}
-			t.Errorf("project_id = %s, want %s", gotPID, pid)
-		}
-		if got.ClassificationRationale != "winner because X" {
-			t.Errorf("rationale = %q, want %q", got.ClassificationRationale, "winner because X")
-		}
-
-		// nil projectID stamps classified_at but clears the FK.
-		if _, err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
-			t.Fatalf("AssignProject(nil): %v", err)
-		}
-		got, _ = s.Get(ctx, orgID, ent.ID)
-		if got.ProjectID != nil {
-			t.Errorf("project_id should be nil after AssignProject(nil), got %q", *got.ProjectID)
-		}
-
-		// Unknown id surfaces sql.ErrNoRows so the backfill handler can
-		// report per-row failures. UUID-shape id so Postgres's uuid
-		// column can bind.
-		if _, err := s.AssignProject(ctx, orgID, uuid.New().String(), &pid, ""); !errors.Is(err, sql.ErrNoRows) {
-			t.Errorf("AssignProject on missing entity: err = %v, want sql.ErrNoRows", err)
-		}
-	})
-
-	// OwningTeamForEntitySystem resolves the structural owner (tiers
-	// 1+2). A plain entity has no override and no project → empty; an entity
-	// attached to a team-visibility project resolves to that project's team.
-	// The override tier's writer is covered by the stamp subtest below; here
-	// we cover the project tier and the empty fall-through across both
-	// dialects.
-	t.Run("OwningTeamForEntity_resolves_project_team_else_empty", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-
-		// No project, no override → empty (the router then falls to its
-		// prior-task / author-identity tiers).
+		// No override → empty (the router then falls to its prior-task /
+		// author-identity tiers).
 		plain, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-plain", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed plain entity: %v", err)
@@ -699,21 +634,21 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("plain entity: got (%q, %v), want (\"\", nil)", team, err)
 		}
 
-		// Attached to a team-visibility project → the project's team.
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-proj", "pr", "T", "")
+		// An explicit override resolves to that team.
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-stamped", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
-		pid := seed.Project(t, "Owned")
-		if _, err := s.AssignProject(ctx, orgID, ent.ID, &pid, ""); err != nil {
-			t.Fatalf("AssignProject: %v", err)
+		teamID := seed.Team(t, "Owner")
+		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, ent.ID, teamID); err != nil || !stamped {
+			t.Fatalf("StampOwningTeamIfUnsetSystem: stamped=%v err=%v", stamped, err)
 		}
 		team, err := s.OwningTeamForEntitySystem(ctx, orgID, ent.ID)
 		if err != nil {
 			t.Fatalf("OwningTeamForEntitySystem: %v", err)
 		}
-		if team == "" {
-			t.Error("project-attached entity resolved no owning team; want the project's team")
+		if team != teamID {
+			t.Errorf("stamped entity resolved team %q, want %q", team, teamID)
 		}
 
 		// Missing entity → empty, not an error.
@@ -774,118 +709,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// has nothing to do about a row that isn't there.
 		if stamped, err := s.StampOwningTeamIfUnsetSystem(ctx, orgID, uuid.New().String(), teamA); err != nil || stamped {
 			t.Errorf("missing entity: got (%v, %v), want (false, nil)", stamped, err)
-		}
-	})
-
-	t.Run("ClassificationStatusSystem_keys_on_classified_at", func(t *testing.T) {
-		// The delegation wait reads classification state through
-		// this dialect-aware store method (not a raw `?`-placeholder
-		// query). Pins both the (classified, exists) contract and the
-		// load-bearing detail that it keys on classified_at, NOT
-		// project_id — so a below-threshold entity (stamped, but no
-		// project) still reports classified and the wait can release.
-		s, orgID, seed := mk(t)
-
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cs", "pr", "T", "")
-		if err != nil {
-			t.Fatalf("seed entity: %v", err)
-		}
-
-		// Freshly discovered: classified_at IS NULL → not classified, but
-		// the row exists.
-		classified, exists, err := s.ClassificationStatusSystem(ctx, orgID, ent.ID)
-		if err != nil {
-			t.Fatalf("ClassificationStatusSystem(fresh): %v", err)
-		}
-		if classified {
-			t.Errorf("fresh entity reported classified; classified_at should be NULL")
-		}
-		if !exists {
-			t.Errorf("fresh entity reported missing; the row exists")
-		}
-
-		// Below-threshold classification: AssignProject(nil) stamps
-		// classified_at while leaving project_id NULL. The wait keys on
-		// classified_at, so this MUST report classified.
-		if _, err := s.AssignProject(ctx, orgID, ent.ID, nil, ""); err != nil {
-			t.Fatalf("AssignProject(nil): %v", err)
-		}
-		classified, exists, err = s.ClassificationStatusSystem(ctx, orgID, ent.ID)
-		if err != nil {
-			t.Fatalf("ClassificationStatusSystem(below-threshold): %v", err)
-		}
-		if !classified {
-			t.Errorf("entity with classified_at set but project_id NULL reported unclassified; the wait keys on classified_at, not project_id")
-		}
-		if !exists {
-			t.Errorf("classified entity reported missing")
-		}
-
-		// Above-threshold classification (real project FK) also reports
-		// classified — sanity that the project_id path isn't special.
-		pid := seed.Project(t, "CS")
-		other, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cs2", "pr", "T2", "")
-		if err != nil {
-			t.Fatalf("seed entity 2: %v", err)
-		}
-		if _, err := s.AssignProject(ctx, orgID, other.ID, &pid, "winner"); err != nil {
-			t.Fatalf("AssignProject(pid): %v", err)
-		}
-		classified, _, err = s.ClassificationStatusSystem(ctx, orgID, other.ID)
-		if err != nil {
-			t.Fatalf("ClassificationStatusSystem(assigned): %v", err)
-		}
-		if !classified {
-			t.Errorf("project-assigned entity reported unclassified")
-		}
-
-		// Unknown id is definitively (false, false, nil) — not an error —
-		// so WaitFor stops polling a deleted/never-seen entity instead of
-		// burning the full timeout. UUID-shape id so Postgres's uuid
-		// column can bind.
-		classified, exists, err = s.ClassificationStatusSystem(ctx, orgID, uuid.New().String())
-		if err != nil {
-			t.Fatalf("ClassificationStatusSystem(missing): %v", err)
-		}
-		if classified || exists {
-			t.Errorf("missing entity: classified=%v exists=%v, want false/false", classified, exists)
-		}
-	})
-
-	t.Run("ListUnclassified_excludes_assigned_and_closed", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-
-		unassigned, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#u", "pr", "U", "")
-		if err != nil {
-			t.Fatalf("seed unassigned: %v", err)
-		}
-		assigned, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#a", "pr", "A", "")
-		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#c", "pr", "C", "")
-
-		pid := seed.Project(t, "P")
-		if _, err := s.AssignProject(ctx, orgID, assigned.ID, &pid, ""); err != nil {
-			t.Fatalf("assign: %v", err)
-		}
-		if _, err := s.MarkClosed(ctx, orgID, closed.ID); err != nil {
-			t.Fatalf("MarkClosed: %v", err)
-		}
-
-		got, err := s.ListUnclassified(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListUnclassified: %v", err)
-		}
-		ids := map[string]bool{}
-		for _, e := range got {
-			ids[e.ID] = true
-		}
-		if !ids[unassigned.ID] {
-			t.Errorf("unassigned entity %s missing from result", unassigned.ID)
-		}
-		if ids[assigned.ID] {
-			t.Errorf("assigned entity %s should be excluded", assigned.ID)
-		}
-		if ids[closed.ID] {
-			t.Errorf("closed entity %s should be excluded", closed.ID)
 		}
 	})
 
@@ -1077,46 +900,6 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 		if len(got) != 1 {
 			t.Errorf("limit 1 returned %d rows, want 1", len(got))
-		}
-	})
-
-	t.Run("ListProjectPanel_filters_by_project_and_active", func(t *testing.T) {
-		s, orgID, seed := mk(t)
-
-		pid := seed.Project(t, "Panel")
-		assignedActive, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#pa", "pr", "Active", "")
-		if _, err := s.AssignProject(ctx, orgID, assignedActive.ID, &pid, "r"); err != nil {
-			t.Fatalf("assign active: %v", err)
-		}
-		assignedClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#pc", "pr", "Closed", "")
-		if _, err := s.AssignProject(ctx, orgID, assignedClosed.ID, &pid, ""); err != nil {
-			t.Fatalf("assign closed: %v", err)
-		}
-		if _, err := s.MarkClosed(ctx, orgID, assignedClosed.ID); err != nil {
-			t.Fatalf("close: %v", err)
-		}
-		other, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#po", "pr", "Other", "")
-		otherPid := seed.Project(t, "Other")
-		if _, err := s.AssignProject(ctx, orgID, other.ID, &otherPid, ""); err != nil {
-			t.Fatalf("assign other: %v", err)
-		}
-
-		got, _, err := s.ListProjectPanel(ctx, orgID, pid, db.ListOpts{Limit: 200})
-		if err != nil {
-			t.Fatalf("ListProjectPanel: %v", err)
-		}
-		ids := map[string]bool{}
-		for _, e := range got {
-			ids[e.ID] = true
-		}
-		if !ids[assignedActive.ID] {
-			t.Errorf("active panel entity %s missing", assignedActive.ID)
-		}
-		if ids[assignedClosed.ID] {
-			t.Errorf("closed entity %s leaked into panel", assignedClosed.ID)
-		}
-		if ids[other.ID] {
-			t.Errorf("other-project entity %s leaked into panel", other.ID)
 		}
 	})
 

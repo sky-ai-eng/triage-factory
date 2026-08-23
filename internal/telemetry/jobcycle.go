@@ -13,9 +13,9 @@ import (
 var jobTracer = otel.Tracer("internal/telemetry/jobcycle")
 
 // StartJobCycle opens the root span for one per-org background job cycle —
-// scorer, repo profiler, or project classifier. All three are the same
+// scorer or repo profiler. Both are the same
 // shape (a per-org Runner with a single-flight guard, woken by a trigger
-// channel), so one helper beats three span setups that would drift.
+// channel), so one helper beats two span setups that would drift.
 //
 // A fresh root, never a child: Manager.Trigger(orgID) coalesces N poll
 // completions into one signal, so there is no single caller to descend

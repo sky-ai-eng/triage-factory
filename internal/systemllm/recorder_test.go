@@ -84,7 +84,7 @@ func TestRecorder_NilOutcomeSkips(t *testing.T) {
 // is_error with zero cost.
 func TestRecorder_NilResultRecordsAsError(t *testing.T) {
 	fs := &fakeStore{}
-	NewRecorder(fs).Record(context.Background(), Call{OrgID: "o", Job: JobClassifier, Model: "haiku"},
+	NewRecorder(fs).Record(context.Background(), Call{OrgID: "o", Job: JobRepoProfiler, Model: "haiku"},
 		&agentproc.Outcome{Result: nil},
 		&agentproc.UsageSink{InputTokens: 3},
 	)
@@ -132,7 +132,7 @@ func TestRecorder_RecordDirect_BuildsRow(t *testing.T) {
 
 	r.RecordDirect(context.Background(), Call{
 		OrgID:     "org-1",
-		Job:       JobClassifier,
+		Job:       JobRepoProfiler,
 		Model:     "claude-haiku-4-5-20251001",
 		StartedAt: started,
 		Metadata:  map[string]any{"repo_count": 3},
@@ -142,7 +142,7 @@ func TestRecorder_RecordDirect_BuildsRow(t *testing.T) {
 		t.Fatalf("recorded %d rows, want 1", len(fs.rows))
 	}
 	got := fs.rows[0]
-	if got.OrgID != "org-1" || got.Job != JobClassifier || got.Model != "claude-haiku-4-5-20251001" {
+	if got.OrgID != "org-1" || got.Job != JobRepoProfiler || got.Model != "claude-haiku-4-5-20251001" {
 		t.Errorf("context fields wrong: %+v", got)
 	}
 	if got.TraceID != "msg_abc123" {

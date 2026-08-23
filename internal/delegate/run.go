@@ -361,10 +361,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// mounts read-only when the agent is jailed. This is the blueprint handoff, so
 	// a step that cannot get it starts from nothing.
 	//
-	// It plus the project knowledge base below is a DB read and a tree copy
-	// that can run large, and the last thing between a rehydrated workspace and
-	// the agent starting — so one span covers both halves of the on-disk
-	// context the agent will read.
+	// It is a DB read and a tree copy that can run large, and the last thing
+	// between a rehydrated workspace and the agent starting — so one span
+	// covers the on-disk context the agent will read.
 	_, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
 	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
 	materializePriorMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, cfg.blueprintRunID, memoryOwned)
@@ -386,19 +385,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		priorMemory = fingerprintAgentMemoryFile(claudeCwd)
 	}
 
-	// The entity's project knowledge-base, copied into ./_tfac/project-knowledge/
-	// when the entity is assigned to a project, so the agent has curated project
-	// context alongside prior memories. Still an in-tree write, so a warm step
-	// keeps whatever the first step's copy left there: a knowledge base edited
-	// mid-blueprint does not reach later steps. Pre-existing, and sandbox-only —
-	// local never hands the tree off. The fix is the one the memory tree just got,
-	// a read-only mount off an orchestrator-owned dir; it changes how the agent
-	// reaches the KB, so it belongs in its own change rather than here.
-	if handedOff {
-		delegateLog.Debug("run tree already handed to the sandbox identity; project knowledge-base not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
-	} else {
-		materializeProjectKnowledge(orgID, claudeCwd, cfg.projectID, owned)
-	}
 	stagingSpan.End()
 
 	selfBin, err := os.Executable()

@@ -60,7 +60,6 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 		{"event router + drain workers", p.brain},
 		{"AI scorer manager", p.brain},
 		{"repo-profiler manager", p.brain},
-		{"project classifier manager", p.brain},
 		{"artifact reconciler manager", p.brain},
 		{"reachable-repo cache manager", p.brain},
 		{"marketplace-stats manager", p.brain},

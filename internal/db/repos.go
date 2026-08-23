@@ -65,7 +65,7 @@ var (
 //
 // The registry is not the tracked set. A row is created when a repository is
 // first tracked and survives the last team untracking it, because
-// team_github_repos, conversation_worktrees and project_pinned_repos all
+// team_github_repos and conversation_worktrees both
 // reference this row by id and a reference must not outlive what it names.
 // ListTrackedNamesSystem is the read that means "what does TF poll".
 //

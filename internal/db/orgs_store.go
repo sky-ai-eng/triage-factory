@@ -16,7 +16,7 @@ var ErrOrgSettingsVersion = errors.New("org settings version conflict")
 
 // OrgsStore owns the orgs + org_settings tables — the tenancy root
 // every other resource hangs off via FK plus its sibling settings row.
-// Background services (poller, tracker, projectclassify, repoprofile)
+// Background services (poller, tracker, repoprofile)
 // iterate active orgs at the top of each cycle through ListActiveSystem;
 // request handlers and system services read per-org settings via
 // GetSettings / GetSettingsSystem.

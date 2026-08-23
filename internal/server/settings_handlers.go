@@ -577,7 +577,7 @@ type orgSettingsResponse struct {
 	// a promise Settings can't keep. Local mode only.
 	JiraCredentialEnvProvided bool   `json:"jira_credential_env_provided,omitempty"`
 	MaxLLMModelTier           string `json:"max_llm_model_tier,omitempty"`
-	// BackgroundJobsModel is the model the scorer, project classifier and repo
+	// BackgroundJobsModel is the model the scorer and repo
 	// profiler run on — a catalog key. Always emitted (not omitempty): "" is
 	// the org's "not picked yet", which is the state the settings form has to
 	// render, and an omitted field would read to a client as "unchanged".

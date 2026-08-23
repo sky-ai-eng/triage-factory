@@ -8,10 +8,9 @@
 // the distinction is what keeps tenant isolation and the shared sandbox
 // rootfs both correct:
 //
-//   - Class 1, org-scoped persistent — the bare clone cache and the
-//     project working dirs. These gain an /orgs/<orgID>/
-//     segment in multi mode so each tenant's clones and knowledge bases
-//     live under their own subtree. Resolved through OrgRoot.
+//   - Class 1, org-scoped persistent — the bare clone cache. This gains an
+//     /orgs/<orgID>/ segment in multi mode so each tenant's clones live
+//     under their own subtree. Resolved through OrgRoot.
 //   - Class 2, host-global persistent — the sandbox rootfs cache and the
 //     Agent SDK install. Shared read-only across every tenant by design;
 //     org-scoping them would re-multiply identical toolchains per org
@@ -24,10 +23,11 @@
 // os.UserHomeDir and the ".triagefactory" path literal live ONLY in
 // this package; a forbidigo rule (.golangci.yml) plus a lint.sh grep
 // guard keep every other package routing through these resolvers. The
-// one documented exception is ~/.claude state — Claude Code SDK session
-// dirs, which follow the HOME of the process that RAN the agent. For
-// direct runs (local mode, or multi on non-Linux) that is this
-// process's real HOME; for sandboxed runs (multi + Linux) the agent
+// one documented exception is ~/.claude/projects — the Claude Code SDK's
+// own session-cache directory (an SDK implementation detail, unrelated to
+// TF's own vocabulary), which follows the HOME of the process that RAN
+// the agent. For direct runs (local mode, or multi on non-Linux) that is
+// this process's real HOME; for sandboxed runs (multi + Linux) the agent
 // executes with HOME=/work and its session state lands INSIDE the
 // run's own org-scoped directory — never the orchestrator's home.
 // worktree.ClaudeProjectDir owns that branch (TFAC-109); the nolint'd
@@ -105,7 +105,7 @@ func StateRoot() string {
 // errors in local mode when os.UserHomeDir fails (i.e. $HOME unset) —
 // the SetForTest / TF_STATE_ROOT overrides and multi mode's defaults
 // never touch the home dir. Error-returning callers (db.Open, the
-// sandbox/SDK caches, the worktree bare cache, projectbundle, …) route
+// sandbox/SDK caches, the worktree bare cache, …) route
 // through here so a missing home is reported the way it was before the
 // internal/paths sweep, rather than panicking.
 func StateRootErr() (string, error) {
@@ -159,18 +159,6 @@ func BareCacheRoot(orgID string) string {
 // a real orgID through the bounded, evictable worktree cache.
 func BareCacheDir(orgID, owner, repo string) string {
 	return filepath.Join(BareCacheRoot(orgID), owner, repo+".git")
-}
-
-// ProjectsRoot is the parent of every project's working dir for an org:
-// <OrgRoot>/projects.
-func ProjectsRoot(orgID string) string {
-	return filepath.Join(OrgRoot(orgID), "projects")
-}
-
-// ProjectKBDir is one project's working directory — the knowledge base
-// plus its pinned worktrees: <OrgRoot>/projects/<id>.
-func ProjectKBDir(orgID, projectID string) string {
-	return filepath.Join(ProjectsRoot(orgID), projectID)
 }
 
 // --- Class 2: host-global persistent (NEVER org-scoped) ------------------

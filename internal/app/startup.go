@@ -58,10 +58,6 @@ func (a *App) runStartupTasks(ctx context.Context) {
 // context so they shut down cleanly on SIGINT/SIGTERM — previously these
 // used a never-cancelled background context ("the binary has no top-level
 // cancel today").
-//
-// The classifier is no longer Start()-ed here: it is now a per-org Manager
-// that lazy-starts a runner on first Trigger, matching the
-// scorer/profiler which are likewise never explicitly started.
 func (a *App) startWorkers(ctx context.Context) {
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded

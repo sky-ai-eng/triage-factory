@@ -1,8 +1,8 @@
 // Package memory implements the `triagefactory exec memory` CLI surface — the
 // agent-facing verb for pulling ANOTHER entity's prior run memory on demand.
 //
-// The primary entity's memory (and the project knowledge base) is still
-// materialized as files at spawn time; this verb covers the other half of the
+// The primary entity's memory is still materialized as files at spawn time;
+// this verb covers the other half of the
 // hybrid delivery: when a run starts working with a DIFFERENT entity mid-run —
 // a PR it opened from a ticket, a ticket referenced in a thread — it pulls what
 // past runs learned about that entity as the tool result rather than having the

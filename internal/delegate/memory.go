@@ -1,8 +1,7 @@
-// Run-memory file reading at termination, the cross-run task-memory +
-// project-knowledge materializers a fresh agent invocation reads as ambient
-// context, and the entity → project lookup that decides whether project
-// knowledge applies. (The completion envelope's bounded re-prompt-to-fix lives
-// on the live driver — see live.go.)
+// Run-memory file reading at termination, and the cross-run task-memory
+// materializer a fresh agent invocation reads as ambient context. (The
+// completion envelope's bounded re-prompt-to-fix lives on the live driver —
+// see live.go.)
 
 package delegate
 
@@ -20,7 +19,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
@@ -87,14 +85,13 @@ const (
 // who owns the run tree: local mode writes them in it, a sandboxed launch stages
 // them outside and mounts them there read-only (entityMemoryTarget).
 const (
-	scratchDirName          = worktree.ScratchDir
-	agentMemoryFileName     = "memory.md"
-	entityMemoryDirName     = worktree.EntityMemoryDir
-	projectKnowledgeDirName = "project-knowledge"
-	currentRunDirName       = "this-run"
-	priorRunsDirName        = "history"
-	memorySlugMaxLen        = 32
-	historyDateLayoutUTC    = "2006-01-02"
+	scratchDirName       = worktree.ScratchDir
+	agentMemoryFileName  = "memory.md"
+	entityMemoryDirName  = worktree.EntityMemoryDir
+	currentRunDirName    = "this-run"
+	priorRunsDirName     = "history"
+	memorySlugMaxLen     = 32
+	historyDateLayoutUTC = "2006-01-02"
 )
 
 // readAgentMemoryFile returns the agent-written ./_tfac/memory.md content
@@ -493,22 +490,6 @@ func isSlugChar(r rune) bool {
 	return (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')
 }
 
-// lookupEntityProjectID returns the entity's project_id (or nil if the
-// entity is unassigned, missing, or the lookup fails). Failure is
-// logged and treated as "not assigned" — the spawner degrades gracefully
-// rather than blocking the run on a non-essential context lookup.
-func lookupEntityProjectID(entities db.EntityStore, orgID, entityID string) *string {
-	entity, err := entities.GetSystem(context.Background(), orgID, entityID)
-	if err != nil {
-		delegateLog.Warn("load entity for project lookup failed", "entity", entityID, "error", err)
-		return nil
-	}
-	if entity == nil {
-		return nil
-	}
-	return entity.ProjectID
-}
-
 // attachConversationMemoryEntities makes a terminated run's memory reachable from every
 // entity the run materially engaged: the primary (task) entity, plus every
 // entity it produced (derived from the run's artifacts). Touched entities are
@@ -562,101 +543,5 @@ func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, c
 		if err := s.taskMemory.RecordEntityTouchSystem(ctx, orgID, conversationID, ent.ID, domain.MemoryRoleProduced); err != nil {
 			delegateLog.Warn("attach produced entity to conversation memory failed", "conversation", conversationID, "entity", ent.ID, "error", err)
 		}
-	}
-}
-
-// projectKnowledgeWarnBytes is the soft cap on per-project knowledge-base
-// total size. We log when crossed but still copy — curated KB content is
-// the user's intent, and silently dropping it would be more surprising
-// than a noisy log line.
-const projectKnowledgeWarnBytes = 500 * 1024
-
-// streamCopyFile copies src to dst via io.Copy so large knowledge-base
-// files don't get buffered fully in the spawner's heap. Returns bytes
-// written. Uses 0644 to mirror the previous os.WriteFile behavior.
-func streamCopyFile(src, dst string) (int64, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return 0, err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return 0, err
-	}
-	n, copyErr := io.Copy(out, in)
-	closeErr := out.Close()
-	if copyErr != nil {
-		return n, copyErr
-	}
-	return n, closeErr
-}
-
-// materializeProjectKnowledge stages the entity's project knowledge-base
-// into <cwd>/_tfac/project-knowledge/ so the agent can read it as
-// ambient context. Mirrors materializePriorMemories' "create the dir
-// unconditionally" pattern so the agent's pre-flight `ls` doesn't fail
-// noisily on ENOENT when no project is assigned.
-//
-// Reads from the project's knowledge base (resolved through internal/paths
-// under the project-owning org's subtree) and copies each .md file flat
-// into _tfac/project-knowledge/, preserving source filenames. orgID is the
-// run's owning tenant — the same org the assigned project belongs to — so
-// in multi mode this reads the org-scoped dir rather than the org-stripped
-// default.
-//
-// Degrades gracefully: a nil projectID, a missing knowledge-base dir,
-// or per-file copy failures are logged but never fail the run.
-func materializeProjectKnowledge(orgID, cwd string, projectID *string, owned repoFiles) {
-	dir := filepath.Join(cwd, scratchDirName, projectKnowledgeDirName)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		delegateLog.Warn("create project-knowledge dir failed", "path", dir, "error", err)
-		return
-	}
-
-	if projectID == nil || *projectID == "" {
-		return
-	}
-
-	if _, err := paths.StateRootErr(); err != nil {
-		delegateLog.Warn("resolve knowledge dir for project failed", "project", *projectID, "error", err)
-		return
-	}
-	kbRoot := paths.ProjectKBDir(orgID, *projectID)
-	srcDir := filepath.Join(kbRoot, "knowledge-base")
-
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			delegateLog.Warn("read project knowledge-base failed", "path", srcDir, "error", err)
-		}
-		return
-	}
-
-	written := 0
-	totalBytes := int64(0)
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
-			continue
-		}
-		if owned.owns(projectKnowledgeDirName, e.Name()) {
-			continue
-		}
-		src := filepath.Join(srcDir, e.Name())
-		dst := filepath.Join(dir, e.Name())
-		n, err := streamCopyFile(src, dst)
-		if err != nil {
-			delegateLog.Warn("copy project knowledge file failed", "src", src, "dst", dst, "error", err)
-			continue
-		}
-		written++
-		totalBytes += n
-	}
-
-	if totalBytes > projectKnowledgeWarnBytes {
-		delegateLog.Warn("project knowledge-base over the soft cap; consider trimming", "project", *projectID, "bytes", totalBytes, "soft_cap", projectKnowledgeWarnBytes)
-	}
-	if written > 0 {
-		delegateLog.Info("materialized project-knowledge files for project", "count", written, "project", *projectID)
 	}
 }

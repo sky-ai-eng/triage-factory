@@ -22,7 +22,7 @@ type Prompt struct {
 	// acting team. In SQLite (N=1) it is always the local sentinel team.
 	TeamID string `json:"team_id"`
 	// SystemSlug is the stable identifier for a shipped (source='system')
-	// prompt — e.g. "system-ci-fix" or domain.SystemTicketSpecPromptID. NULL
+	// prompt — e.g. "system-ci-fix". NULL
 	// (empty) for user/imported prompts. The id is a random UUID per team
 	// copy, so seed/idempotency and slug→id resolution key on this column
 	// instead. promptseed.Prompts() sets it; the seeder dedupes on

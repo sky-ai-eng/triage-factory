@@ -28,7 +28,6 @@ const (
 	// invariant
 	blockVerbLinkedContext   = "verbs/linked-context.txt"
 	blockVerbWorkspace       = "verbs/workspace.txt"
-	blockVerbProjectKnow     = "verbs/project-knowledge.txt"
 	blockVerbMemory          = "verbs/memory.txt"
 	blockGuardrailsCommon    = "guardrails/common.txt"
 	blockCompletionSDKJSON   = "completion/sdk-json.txt"
@@ -43,7 +42,6 @@ const (
 	// one.
 	blockVerbLinkedContextNv = "verbs/linked-context-native.txt"
 	blockVerbWorkspaceNv     = "verbs/workspace-native.txt"
-	blockVerbProjectKnowNv   = "verbs/project-knowledge-native.txt"
 	blockVerbMemoryNv        = "verbs/memory-native.txt"
 	blockGuardrailsCommonNv  = "guardrails/common-native.txt"
 	blockCompletionNative    = "completion/native-blueprint.txt"
@@ -119,7 +117,6 @@ func machinistBlocks(spec Spec) ([]string, error) {
 		blockHarnessSDK,
 		blockVerbLinkedContext,
 		blockVerbWorkspace,
-		blockVerbProjectKnow,
 		blockGuardrailsCommon,
 		gitAccessFor(spec.Mode),
 		isolationFor(spec.Mode),
@@ -156,7 +153,6 @@ func nativeMachinistBlocks(spec Spec) ([]string, error) {
 		blockHarnessNativeVerbs,
 		blockVerbLinkedContextNv,
 		blockVerbWorkspaceNv,
-		blockVerbProjectKnowNv,
 		blockGuardrailsCommonNv,
 		gitAccessFor(spec.Mode),
 		isolationFor(spec.Mode),

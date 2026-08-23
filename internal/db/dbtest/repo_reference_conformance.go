@@ -18,8 +18,8 @@ type RepoReferenceFactory func(t *testing.T) (stores db.Stores, orgID, teamID st
 
 // RunRepoReferenceConformance covers what it means for a table to reference a
 // repository by the registry row's id rather than by its slug. One case per
-// converted site — the tracked set, the worktree ledger, a project's pinned
-// repos — plus the lifetime rule that governs all three.
+// converted site — the tracked set and the worktree ledger — plus the
+// lifetime rule that governs both.
 //
 // The rule is asymmetric, and the asymmetry is the whole design:
 //
@@ -29,9 +29,8 @@ type RepoReferenceFactory func(t *testing.T) (stores db.Stores, orgID, teamID st
 //     holds no INSERT on the table at all.
 //   - Untracking deletes the tracking row and NOTHING else. A registry row
 //     outlives the tracking decision that created it, because a
-//     conversation's worktree
-//     ledger, a pinned project or a task may still name the repository —
-//     tracking is forward-only in both directions.
+//     conversation's worktree ledger or a task may still name the
+//     repository — tracking is forward-only in both directions.
 //
 // The other half of the conversion, that a rename rewrites none of these rows,
 // is RunRepoRenameConformance's "Rename_rewrites_no_row_that_references_the_
@@ -94,9 +93,8 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
-		// Give the repository about to be untracked the two durable references
-		// a real one accumulates: a worktree a run checked out, and a pin on a
-		// project somebody configured.
+		// Give the repository about to be untracked the durable reference a
+		// real one accumulates: a worktree a run checked out.
 		convID := conversation(t, "untrack")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
 			ConversationID: convID, RepoID: untrackedSlug, Ref: "pr-7",
@@ -104,15 +102,6 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}); err != nil {
 			t.Fatalf("reserve worktree: %v", err)
 		}
-		projectIDRow, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
-			Name:        "pins the dropped repo",
-			Visibility:  domain.ProjectVisibilityTeam,
-			PinnedRepos: []string{untrackedSlug},
-		})
-		if err != nil {
-			t.Fatalf("Projects.Create: %v", err)
-		}
-		projectID := projectIDRow.ID
 
 		// The untrack.
 		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
@@ -145,56 +134,6 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 		if len(worktrees) != 1 || worktrees[0].RepoID != untrackedSlug {
 			t.Errorf("worktree ledger = %+v, want the entry for %s intact — a ledger records what happened", worktrees, untrackedSlug)
-		}
-		proj, err := s.Projects.Get(ctx, orgID, projectID)
-		if err != nil || proj == nil {
-			t.Fatalf("Projects.Get: %v, %v", proj, err)
-		}
-		if len(proj.PinnedRepos) != 1 || proj.PinnedRepos[0] != untrackedSlug {
-			t.Errorf("pinned repos = %v, want [%s] kept", proj.PinnedRepos, untrackedSlug)
-		}
-	})
-
-	t.Run("Pinned_repos_round_trip_in_the_order_they_were_saved", func(t *testing.T) {
-		// The pins live in their own table now, so their order is a stored
-		// column rather than a property of a JSON array. A project round-trips
-		// through bundle export/import and renders as an ordered list, so
-		// re-deriving the order from the slug would reshuffle what somebody
-		// arranged — this is the case that would catch it.
-		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
-			{Owner: "octo", Repo: "zeta"},
-			{Owner: "octo", Repo: "alpha"},
-		}); err != nil {
-			t.Fatalf("ReplaceForTeam: %v", err)
-		}
-		pins := []string{"octo/zeta", "octo/alpha"}
-		projectIDRow, err := s.Projects.Create(ctx, orgID, teamID, domain.Project{
-			Name: "ordered pins", Visibility: domain.ProjectVisibilityTeam, PinnedRepos: pins,
-		})
-		if err != nil {
-			t.Fatalf("Projects.Create: %v", err)
-		}
-		projectID := projectIDRow.ID
-		proj, err := s.Projects.Get(ctx, orgID, projectID)
-		if err != nil || proj == nil {
-			t.Fatalf("Projects.Get: %v, %v", proj, err)
-		}
-		if !equalStringSlice(proj.PinnedRepos, pins) {
-			t.Errorf("pinned repos = %v, want %v in the order they were saved", proj.PinnedRepos, pins)
-		}
-
-		// An update replaces the set wholesale, order and all.
-		proj.PinnedRepos = []string{"octo/alpha"}
-		if _, err := s.Projects.Update(ctx, orgID, *proj); err != nil {
-			t.Fatalf("Projects.Update: %v", err)
-		}
-		updated, err := s.Projects.Get(ctx, orgID, projectID)
-		if err != nil || updated == nil {
-			t.Fatalf("Projects.Get after update: %v, %v", updated, err)
-		}
-		if !equalStringSlice(updated.PinnedRepos, []string{"octo/alpha"}) {
-			t.Errorf("pinned repos after update = %v, want [octo/alpha]", updated.PinnedRepos)
 		}
 	})
 

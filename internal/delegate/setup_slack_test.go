@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
@@ -43,22 +42,15 @@ func slackTaskFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, domain.Ta
 	return s, database, *task
 }
 
-// TestSetupSlack_WorktreeLessAndNoClassificationWait pins the shape TFAC-591
-// requires: a Slack run mirrors Jira's lazy worktree-less setup, but skips
-// the classifier wait (Slack threads aren't classifier targets) and leaves
-// projectID nil.
-func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
+// TestSetupSlack_WorktreeLessShape pins the shape TFAC-591 requires: a Slack
+// run mirrors Jira's lazy worktree-less setup.
+func TestSetupSlack_WorktreeLessShape(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "shape")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
 	conversationID := "slack-run-shape"
 	rootKey := "slack-bp-shape" // run-root is blueprint-keyed, distinct from conversationID
 	t.Cleanup(func() { worktree.RemoveRunRoot(rootKey) })
-
-	var classificationCalled atomic.Bool
-	s.SetWaitForClassification(func(context.Context, string, string) {
-		classificationCalled.Store(true)
-	})
 
 	cfg, err := s.setupSlack(ctx, org, conversationID, "", rootKey, runmode.LocalDefaultUserID, task, nil)
 	if err != nil {
@@ -82,12 +74,6 @@ func TestSetupSlack_WorktreeLessAndNoClassificationWait(t *testing.T) {
 	wantScope := "Slack thread: " + task.EntitySourceID
 	if cfg.scope != wantScope {
 		t.Errorf("scope = %q, want %q", cfg.scope, wantScope)
-	}
-	if cfg.projectID != nil {
-		t.Error("projectID must stay nil for a Slack run — not a project-classifier target")
-	}
-	if classificationCalled.Load() {
-		t.Error("setupSlack must not await classification")
 	}
 }
 

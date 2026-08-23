@@ -14,11 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
-	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
-	"github.com/sky-ai-eng/triage-factory/internal/projectclassify"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
@@ -43,16 +41,16 @@ func (a *App) buildInfra() {
 	}
 }
 
-// buildAI constructs the three background-LLM Managers — the scorer, the
-// repo-profiler, and the project classifier. All resolve per-run LLM
-// credentials through the run-credential seam wired in buildRunCredentials,
-// and all share one system-job concurrency limiter. None starts background
-// work here: each is a per-org Manager that lazy-starts a runner on the first
-// Trigger (driven by the system:poll: bus subscribers), never an explicit
-// Start in startWorkers.
+// buildAI constructs the two background-LLM Managers — the scorer and the
+// repo-profiler. Both resolve per-run LLM credentials through the
+// run-credential seam wired in buildRunCredentials, and both share one
+// system-job concurrency limiter. Neither starts background work here: each
+// is a per-org Manager that lazy-starts a runner on the first Trigger
+// (driven by the system:poll: bus subscribers), never an explicit Start in
+// startWorkers.
 func (a *App) buildAI() {
-	// Shared system-job sandbox cap: one limiter injected into all
-	// three background Managers so their per-org runners can't fan out an
+	// Shared system-job sandbox cap: one limiter injected into both
+	// background Managers so their per-org runners can't fan out an
 	// unbounded number of gVisor sandboxes across tenants in multi-mode. It
 	// deliberately does NOT gate interactive sessions or delegated runs
 	// (delegated has its own cap). Threaded the same way
@@ -65,10 +63,10 @@ func (a *App) buildAI() {
 	sysLimiter := syslimit.New(syslimit.DefaultMaxConcurrentSystemRuns)
 
 	// The org's background-jobs model, read per cycle from org_settings. One
-	// resolver shared by the scorer and the classifier; the profiler resolves
-	// from the settings row it already reads for the clone protocol. A cycle
-	// whose org has no usable model skips and says so — there is no fallback
-	// model to substitute.
+	// resolver shared by the scorer; the profiler resolves from the settings
+	// row it already reads for the clone protocol. A cycle whose org has no
+	// usable model skips and says so — there is no fallback model to
+	// substitute.
 	systemJobModel := systemllm.NewModelFunc(a.stores.Orgs)
 
 	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, ai.RunnerCallbacks{
@@ -158,18 +156,9 @@ func (a *App) buildAI() {
 	a.srv.SetProfilerTrigger(a.triggerProfiler)
 	repoprofileLog.Info("repo-profiling manager ready (per-org runners)")
 
-	// Project classifier: per-org Runners, classifying newly-
-	// discovered entities against existing projects via a per-project quorum
-	// vote off the system:poll: subscriber. Sticky — only fires on
-	// entities with classified_at IS NULL. Sibling to the scorer/profiler:
-	// per-org isolation so a large org's backlog can't head-of-line-block
-	// another tenant's classification.
-	a.classifier = projectclassify.NewManager(a.stores.Entities, a.stores.Projects, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-classifier"), a.llmRecorder, sysLimiter, systemJobModel)
-	classifyLog.Info("project classifier manager ready (per-org runners)")
-
 	// Artifact reconciler: per-org Runners mirroring artifacts against live
 	// GitHub state off the system:poll: GitHub sentinel (TFAC-464), a sibling
-	// to the scorer/profiler/classifier — same per-org isolation so a slow
+	// to the scorer/profiler — same per-org isolation so a slow
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
@@ -222,10 +211,9 @@ func (a *App) buildAI() {
 }
 
 // buildExecution constructs the delegation spawner, wiring it to the
-// run-credential seam. Runs after buildAI (the spawner blocks on the
-// classifier before KB injection) and before buildRouting (the router
-// takes the spawner as its delegator). The spawner↔router back-edge is
-// closed later in wire.
+// run-credential seam. Runs after buildAI and before buildRouting (the
+// router takes the spawner as its delegator). The spawner↔router back-edge
+// is closed later in wire.
 func (a *App) buildExecution() error {
 	// Per-run credentials resolve through the run-credential seam, not a
 	// process-global hot-swap.
@@ -357,16 +345,6 @@ func (a *App) buildExecution() error {
 	}
 	a.blobStore = blobStore
 	a.spawner.SetStorage(blobStore)
-	// One kbstore over the same blob store, shared by every KB consumer
-	// (handlers, executor syncer, classifier, project bundle). In multi mode
-	// it is the KB source of truth; local mode never reads it (the handlers
-	// stay on their byte-identical on-disk path).
-	a.kbStore = kbstore.New(blobStore)
-	// The classifier is built earlier (buildAI) than the KB store, so hand it
-	// the store now. Nil-safe: only brain-capable roles build a classifier.
-	if a.classifier != nil {
-		a.classifier.SetKBStore(a.kbStore)
-	}
 
 	// Cross-pod run control (TFAC-585): the conversation_signals outbox is Postgres-
 	// only, so this is the ONE gate that keeps local mode structurally free
@@ -395,29 +373,11 @@ func (a *App) buildExecution() error {
 		a.spawner.SetReportCapacity(false)
 	}
 
-	// Before reading entity.project_id for KB injection, the spawner blocks
-	// until classified_at is set (or the timeout elapses). Wired
-	// unconditionally on every role, including an executor (TFAC-583):
-	// WaitFor only ever needs a.stores.Entities (always present) and a
-	// trigger func — a.triggerClassifier relays the kick over tf_ctl to
-	// whichever pod currently holds the background-brain lease when this
-	// process has no local classifier Manager (an executor, or a standby
-	// control pod) to Trigger in-process. Previously this only ran on
-	// brain roles, so an executor's delegated runs proceeded without ever
-	// kicking a fresh classification — they just read whatever project_id
-	// already existed.
-	a.spawner.SetWaitForClassification(func(ctx context.Context, orgID, entityID string) {
-		projectclassify.WaitFor(ctx, a.stores.Entities, a.triggerClassifier, orgID, entityID, projectclassify.DefaultWaitTimeout)
-	})
-
 	// The server handle below only exists on serveHTTP roles.
 	if !a.plan.serveHTTP {
 		return nil
 	}
 	a.srv.SetSpawner(a.spawner)
-	// KB blob seam for the Knowledge panel handlers. The handlers branch on
-	// runmode, so this is inert in local mode.
-	a.srv.SetKBStore(a.kbStore)
 	return nil
 }
 
@@ -454,7 +414,7 @@ func (a *App) buildRouting() {
 	a.srv.SetPollerManager(a.pollerMgr.Health)
 	// The App-installation grant mirror, refreshed by pull at the head of every
 	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
-	// profiler / classifier / reconciler: those all hang off a poll COMPLETION,
+	// profiler / reconciler: those all hang off a poll COMPLETION,
 	// and a cycle that finds no installations never emits one — so a subscriber
 	// would go silent for precisely the org whose mirror needs correcting. Its
 	// leader gating is the poller's own, which is the same brain lease every

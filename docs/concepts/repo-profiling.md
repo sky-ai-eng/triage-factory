@@ -5,7 +5,7 @@ README.md, CLAUDE.md, and AGENTS.md from each repo and generates a summary used
 by the AI scorer and delegation agents.
 
 Profiling runs on the org's **background jobs model** (Settings → Background jobs
-model), the same setting the AI scorer and the project classifier use. Without
+model), the same setting the AI scorer uses. Without
 one picked, profiling does not run — nothing falls back to a model of Triage
 Factory's choosing.
 

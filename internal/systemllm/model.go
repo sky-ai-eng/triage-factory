@@ -36,9 +36,9 @@ type OrgSettingsReader interface {
 // row is a cycle that failed, not an org that has not picked.
 var ErrNoModel = errors.New("systemllm: no usable background jobs model")
 
-// ModelForSettings resolves the model this org's system jobs — the scorer, the
-// project classifier, the repo profiler — run on, from the org settings row a
-// caller already holds.
+// ModelForSettings resolves the model this org's system jobs — the scorer,
+// the repo profiler — run on, from the org settings row a caller already
+// holds.
 //
 // Four gates, all of which make the setting unusable rather than substitutable:
 // the value must be present, the catalog must offer it, the org must be able to

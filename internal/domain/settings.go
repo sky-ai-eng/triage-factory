@@ -233,8 +233,8 @@ type OrgSettings struct {
 	// ceiling has to make and the catalog declines to.
 	MaxLLMModelTier string
 
-	// BackgroundJobsModel is the model the three headless system jobs — the
-	// scorer, the project classifier and the repo profiler — run on. A catalog
+	// BackgroundJobsModel is the model the two headless system jobs — the
+	// scorer and the repo profiler — run on. A catalog
 	// key (internal/modelcatalog), validated on write against the catalog and
 	// against the providers the org has connected.
 	//
