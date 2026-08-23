@@ -4,9 +4,9 @@
 //
 // It is deliberately a small, self-contained seam: a single shared limiter is
 // injected into the three background Managers and nothing else. It does NOT
-// gate the curator, interactive sessions, or delegated runs (delegated has its
-// own cap in internal/delegate). The horizontal-scaling work will eventually
-// replace it with fleet-wide sandbox accounting without touching the call sites.
+// gate delegated runs, which have their own cap in internal/delegate. The
+// horizontal-scaling work will eventually replace it with fleet-wide sandbox
+// accounting without touching the call sites.
 package syslimit
 
 import (

@@ -14,7 +14,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/google/uuid"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -44,9 +43,8 @@ type Server struct {
 	blueprints       db.BlueprintStore       // used by event-handler + project test fixtures
 	tasks            db.TaskStore            // task lifecycle, claim, queue + factory snapshot reads
 	conversations    db.ConversationStore    // conversation lifecycle + transcript
-	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers and curator pinned-repo materialization
-	projects         db.ProjectStore         // projects CRUD for projects/curator/backfill/project_entities handlers
-	curatorStore     db.CuratorStore         // curator view of conversations/messages/claims — handler-side System writes (cancel release, pending-context producer) go through here; claims-bound reads ride tx.Curator
+	repos            db.RepositoryStore      // repositories CRUD for repos/settings/projects handlers
+	projects         db.ProjectStore         // projects CRUD for projects/backfill/project_entities handlers
 	events           db.EventStore           // events audit log Record/Latest for stock carry-over + factory drag-to-delegate
 	taskMemory       db.TaskMemoryStore      // conversation_memory writes (human verdict capture on review/PR submit, task-disposition cleanup)
 	secrets          db.SecretStore          // canonical credential read/write path — local-mode keychain, multi-mode vault
@@ -84,7 +82,6 @@ type Server struct {
 	// the local s.ws.CloseUserConnections closes anything.
 	wsBackplane WSKicker
 	spawner     *delegate.Spawner
-	curator     *curator.Curator
 	// kb is the multi-mode knowledge-base blob seam. Wired via
 	// SetKBStore after construction; nil in local mode, where the KB handlers
 	// stay on their byte-identical on-disk path and never consult it. The
@@ -175,12 +172,7 @@ type Server struct {
 	// resumed polled source is re-dued so it starts again on the next wake
 	// rather than after a full interval. Nil until SetOnSourcesChanged runs.
 	onSourcesChanged func(orgID, kind string)
-	// kbChangedDoorbell rings the tf_ctl "kb_changed" cross-pod nudge after a
-	// KB upload/delete/project-delete so the home executor materializes the
-	// panel write into a live session's dir. Wired only in multi mode; nil in
-	// local (no cross-pod plane), where the handlers skip it.
-	kbChangedDoorbell func(op, orgID, projectID string)
-	scorerTrigger     func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
+	scorerTrigger    func(orgID string) // invoked after non-poll task creation (e.g. carry-over) to kick the per-org scorer immediately
 	// profilerTrigger kicks the per-org repo-profiling manager. force=true
 	// bypasses the 3-day TTL — the explicit "Re-profile" button and a
 	// repo-set change both want an immediate re-profile rather than waiting
@@ -477,7 +469,6 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		events:           stores.Events,
 		taskMemory:       stores.TaskMemory,
 		secrets:          stores.Secrets,
-		curatorStore:     stores.Curator,
 		teams:            stores.Teams,
 		orgs:             stores.Orgs,
 		jiraRules:        stores.JiraStatusRules,
@@ -769,7 +760,6 @@ func (s *Server) routes() {
 		az:        s.az,
 		allStores: s.allStores,
 		spawner:   func() *delegate.Spawner { return s.spawner },
-		curator:   func() *curator.Curator { return s.curator },
 	}
 	s.apiMutating("POST /api/teams/list", th.handleTeamsList)
 	s.apiMutating("POST /api/teams", th.handleTeamCreate)
@@ -782,9 +772,9 @@ func (s *Server) routes() {
 	// member 403s, a cross-org team_id 404s (VerifyTeamInOrg).
 	s.apiMutating("PATCH /api/teams/{team_id}", th.handleTeamUpdate)
 	// Team archive/restore lifecycle (TFAC-448), org-admin only, multi-mode.
-	// Archive soft-deletes + force-stops the team's in-flight delegations and
-	// curator sessions and blocks further writes; restore flips it back (dead
-	// conversations stay dead). The preview + archived-list back the confirm modal and the
+	// Archive soft-deletes + force-stops the team's in-flight delegations
+	// and blocks further writes; restore flips it back (dead conversations
+	// stay dead). The preview + archived-list back the confirm modal and the
 	// org-admin restore surface.
 	// The team's settings row and its Jira project rules, under the team
 	// resource so the path segment the caller asserts is the one the
@@ -1020,9 +1010,8 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/agent/conversations/{conversationID}/artifacts/refresh", ag.handleArtifactRefresh)
 	s.apiMutating("POST /api/agent/conversations/list", ag.handleConversations)
 
-	// Projects. Pure CRUD over the projects table; the
-	// Curator runtime that populates conversations.sdk_session_id and
-	// per-project entity classification land separately.
+	// Projects. Pure CRUD over the projects table; per-project entity
+	// classification lands separately.
 	s.apiMutating("POST /api/projects", s.handleProjectCreate)
 	s.apiMutating("POST /api/projects/list", s.handleProjectList)
 	s.api("GET /api/projects/{id}", s.handleProjectGet)
@@ -1042,15 +1031,6 @@ func (s *Server) routes() {
 	// Project entities panel.
 	pe := &projectEntitiesHandler{tx: s.tx}
 	s.apiMutating("POST /api/projects/{id}/entities/list", pe.handleProjectEntities)
-
-	// Curator chat per project. The Curator package owns the
-	// long-lived CC session lifecycle; these endpoints are the API
-	// the Projects page will hit.
-	ch := &curatorHandler{tx: s.tx, curatorStore: s.curatorStore, ws: s.ws, runtime: func() *curator.Curator { return s.curator }}
-	s.apiMutating("POST /api/projects/{id}/curator/messages", ch.handleCuratorSend)
-	s.api("GET /api/projects/{id}/curator/messages", ch.handleCuratorHistory)
-	s.apiMutating("DELETE /api/projects/{id}/curator/messages/in-flight", ch.handleCuratorCancel)
-	s.apiMutating("POST /api/projects/{id}/curator/reset", ch.handleCuratorReset)
 
 	// Websocket: wrapped via s.api so the handshake sees claims in
 	// r.Context() (sentinel in local mode, real values in multi).
@@ -1524,15 +1504,6 @@ func (s *Server) SetSpawner(sp *delegate.Spawner) {
 	s.spawner = sp
 }
 
-// SetCurator wires the Curator runtime into the server so the
-// /api/projects/{id}/curator/* endpoints can dispatch messages and
-// the project-delete handler can cancel in-flight chats. Wired
-// post-construction (mirrors SetSpawner) so main.go can build the
-// Curator after the websocket hub is constructed.
-func (s *Server) SetCurator(c *curator.Curator) {
-	s.curator = c
-}
-
 // SetKBStore wires the knowledge-base blob store into the server so the
 // /api/projects/{id}/knowledge/* handlers serve the KB from the object store
 // in multi mode. Wired post-construction (mirrors SetSpawner) once the shared
@@ -1540,14 +1511,6 @@ func (s *Server) SetCurator(c *curator.Curator) {
 // runmode and never dereference it there.
 func (s *Server) SetKBStore(kb *kbstore.Store) {
 	s.kb = kb
-}
-
-// SetKBChangedDoorbell wires the cross-pod tf_ctl publisher the KB
-// upload/delete/project-delete handlers ring so the home executor materializes
-// the panel write mid-session. Multi mode only; nil elsewhere degrades to
-// the executor's turn-start materialize latency, never lost data.
-func (s *Server) SetKBChangedDoorbell(fn func(op, orgID, projectID string)) {
-	s.kbChangedDoorbell = fn
 }
 
 // SetOnGitHubChanged registers a callback for GitHub config changes (creds, URL, repos).

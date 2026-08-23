@@ -227,11 +227,11 @@ func TestBuildSpec_ExtraMountsAppended(t *testing.T) {
 // read-only repo mount nested under /work lands with the "ro" option (plus
 // the auto-prepended "rbind"), at the nested destination, so an in-jail write
 // to the shared pinned-repo tree fails. If the "ro" ever drops out, one
-// curator session could mutate the checkout another is reading.
+// session could mutate the checkout another is reading.
 func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 	cfg := canonicalConfig()
 	cfg.ExtraMounts = []Mount{
-		{Source: "/data/orgs/acme/curator-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
+		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
 	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
 	if err != nil {
@@ -243,7 +243,7 @@ func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 			continue
 		}
 		found = true
-		if m.Source != "/data/orgs/acme/curator-repos/o/r" {
+		if m.Source != "/data/orgs/acme/shared-repos/o/r" {
 			t.Errorf("repo mount source = %q, want the shared worktree path", m.Source)
 		}
 		if !hasOption(m.Options, "ro") {
@@ -269,19 +269,19 @@ func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
 	cfg.ExtraMounts = []Mount{
 		{Source: "/usr/local/bin/triagefactory", Destination: "/usr/local/bin/triagefactory", Options: []string{"ro"}},
 		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock"},
-		{Source: "/data/orgs/acme/curator-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
+		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
 	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
 	allowed := map[string]bool{
-		cfg.Worktree:                        true,
-		cfg.SDKDir:                          true,
-		hostSSLCertsDir():                   true,
-		"/usr/local/bin/triagefactory":      true,
-		"/run/tf/abc.sock":                  true,
-		"/data/orgs/acme/curator-repos/o/r": true,
+		cfg.Worktree:                       true,
+		cfg.SDKDir:                         true,
+		hostSSLCertsDir():                  true,
+		"/usr/local/bin/triagefactory":     true,
+		"/run/tf/abc.sock":                 true,
+		"/data/orgs/acme/shared-repos/o/r": true,
 	}
 	for _, m := range spec.Mounts {
 		if m.Type != "bind" {

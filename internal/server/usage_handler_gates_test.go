@@ -29,9 +29,9 @@ import (
 //   - member    : teamA member, plain org member (no admin rights anywhere).
 //
 // Spend is seeded so the 200 cases have a real breakdown: teamA carries a manual
-// run by member, an autonomous run fired by a named-blueprint trigger, and a
-// team curator by member; teamB carries a manual run by orgAdmin; plus a system
-// job. Skips without Docker via the pgtest harness.
+// run by member and an autonomous run fired by a named-blueprint trigger;
+// teamB carries a manual run by orgAdmin; plus a system job. Skips without
+// Docker via the pgtest harness.
 type usageRig struct {
 	h         *pgtest.Harness
 	uh        *usageHandler
@@ -74,8 +74,8 @@ func newUsageRig(t *testing.T) *usageRig {
 }
 
 // seedSpend stages the cross-team spend the 200-path assertions read. IDs are
-// minted in Go so the FK references (trigger→blueprint, run→trigger,
-// curator→project) line up without a RETURNING round-trip.
+// minted in Go so the FK references (trigger→blueprint, run→trigger) line up
+// without a RETURNING round-trip.
 func (r *usageRig) seedSpend(t *testing.T) {
 	t.Helper()
 	when := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
@@ -88,14 +88,10 @@ func (r *usageRig) seedSpend(t *testing.T) {
 	triggerID := uuid.New().String()
 	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO event_handlers (id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability) VALUES ($1, $2, $3, $4, 'trigger', 'github:pr:ci_check_failed', $5, 3, 0.5)`,
 		triggerID, r.orgID, r.teamA, r.owner, bpID)
-	// A teamA project backs the curator turn.
-	projID := uuid.New().String()
-	pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO projects (id, org_id, creator_user_id, team_id, name, visibility) VALUES ($1, $2, $3, $4, 'usage-proj', 'team')`,
-		projID, r.orgID, r.member, r.teamA)
 
-	// teamA: manual run by member ($1.00), autonomous run via trigger ($0.25),
-	// team curator by member ($0.50). Spend is the messages ledger, so every
-	// conversation gets one cost-stamped assistant row.
+	// teamA: manual run by member ($1.00), autonomous run via trigger ($0.25).
+	// Spend is the messages ledger, so every conversation gets one
+	// cost-stamped assistant row.
 	seedSpendConv := func(convSQL string, args []any, model string, cost float64) {
 		convID := uuid.New().String()
 		pgtest.MustExec(t, r.h.AdminDB, convSQL, append([]any{convID}, args...)...)
@@ -106,8 +102,6 @@ func (r *usageRig) seedSpend(t *testing.T) {
 		[]any{r.orgID, r.teamA, r.member, when}, "claude-opus-4-8", 1.00)
 	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'completed', $5)`,
 		[]any{r.orgID, r.teamA, triggerID, when}, "claude-haiku-4-5", 0.25)
-	seedSpendConv(`INSERT INTO conversations (id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at) VALUES ($1, $2, 'curator', $3, $4, 'private', 'manual', 'curator', NULL, $5, $6)`,
-		[]any{r.orgID, r.member, r.teamA, projID, when}, "", 0.50)
 
 	// teamB: manual run by orgAdmin ($2.00).
 	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', $5)`,
@@ -149,9 +143,9 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 		var resp usageMeResponse
 		mustDecode(t, rec, &resp)
-		// member created the teamA manual run ($1.00) + the team curator ($0.50).
-		if !floatEq(resp.TotalCostUSD, 1.50) {
-			t.Errorf("/me total = %v, want 1.50 (member's own manual + curator)", resp.TotalCostUSD)
+		// member created the teamA manual run ($1.00).
+		if !floatEq(resp.TotalCostUSD, 1.00) {
+			t.Errorf("/me total = %v, want 1.00 (member's own manual run)", resp.TotalCostUSD)
 		}
 	})
 
@@ -171,8 +165,8 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 		var resp usageTeamResponse
 		mustDecode(t, rec, &resp)
-		if !floatEq(resp.TotalCostUSD, 1.75) {
-			t.Errorf("/teams total = %v, want 1.75 (teamA manual + autonomous + curator)", resp.TotalCostUSD)
+		if !floatEq(resp.TotalCostUSD, 1.25) {
+			t.Errorf("/teams total = %v, want 1.25 (teamA manual + autonomous)", resp.TotalCostUSD)
 		}
 		// by_rule resolves the blueprint name under the team admin's OWN claims —
 		// a member can read their team's event_handlers/blueprints (no System read).
@@ -226,24 +220,24 @@ func TestUsageHandler_GatesAndScope_Postgres(t *testing.T) {
 		}
 		var resp usageOrgResponse
 		mustDecode(t, rec, &resp)
-		// teamA (1.75) + teamB (2.00) + system (0.05).
-		if !floatEq(resp.TotalCostUSD, 3.80) {
-			t.Errorf("/org total = %v, want 3.80", resp.TotalCostUSD)
+		// teamA (1.25) + teamB (2.00) + system (0.05).
+		if !floatEq(resp.TotalCostUSD, 3.30) {
+			t.Errorf("/org total = %v, want 3.30", resp.TotalCostUSD)
 		}
 		byTeam := map[string]float64{}
 		for _, b := range resp.ByTeam {
 			byTeam[b.TeamID] = b.Cost
 		}
-		if !floatEq(byTeam[r.teamA], 1.75) || !floatEq(byTeam[r.teamB], 2.00) {
-			t.Errorf("/org by_team = %+v, want teamA 1.75 + teamB 2.00", resp.ByTeam)
+		if !floatEq(byTeam[r.teamA], 1.25) || !floatEq(byTeam[r.teamB], 2.00) {
+			t.Errorf("/org by_team = %+v, want teamA 1.25 + teamB 2.00", resp.ByTeam)
 		}
-		// by_user (org-wide, manual+curator by creator): member 1.00+0.50, orgAdmin 2.00.
+		// by_user (org-wide, manual by creator): member 1.00, orgAdmin 2.00.
 		byUser := map[string]float64{}
 		for _, u := range resp.ByUser {
 			byUser[u.UserID] = u.Cost
 		}
-		if !floatEq(byUser[r.member], 1.50) || !floatEq(byUser[r.orgAdmin], 2.00) {
-			t.Errorf("/org by_user = %+v, want member 1.50 + orgAdmin 2.00", resp.ByUser)
+		if !floatEq(byUser[r.member], 1.00) || !floatEq(byUser[r.orgAdmin], 2.00) {
+			t.Errorf("/org by_user = %+v, want member 1.00 + orgAdmin 2.00", resp.ByUser)
 		}
 		// org_level: the NULL-team system row.
 		var sysCost float64

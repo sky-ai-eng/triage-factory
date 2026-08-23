@@ -185,8 +185,7 @@ type ConversationStore interface {
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the engagement's own newest message row — the newest row attributed
 	// to the claim this call releases (rows insert claim-stamped while the
-	// engagement is live, so the claim locates them; the curator turn
-	// release settles the same way). An engagement can bill while
+	// engagement is live, so the claim locates them). An engagement can bill while
 	// recording no rows of its own (system-prompt/cache overhead on an
 	// errored conversation); a nonzero lump then settles, additively, onto the
 	// conversation's newest existing message row (which may already carry
@@ -342,8 +341,8 @@ type ConversationStore interface {
 	// --- Queries ---
 
 	// Get returns a single agent conversation by ID, or nil if absent — any
-	// conversation type, not just delegation (curator/subagent rows
-	// hydrate the same shape). MemoryMissing is derived from a LEFT JOIN
+	// conversation type, not just delegation (subagent rows hydrate the
+	// same shape). MemoryMissing is derived from a LEFT JOIN
 	// to conversation_memory; ClaimedAt/Attempts/ExecutorID derive from claims per
 	// the interface doc. The accounting fields are derived too:
 	// TotalCostUSD + the four token fields are SUMs over the messages

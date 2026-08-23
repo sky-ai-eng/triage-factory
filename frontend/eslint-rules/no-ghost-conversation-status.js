@@ -16,10 +16,10 @@ import { readFileSync } from 'node:fs'
 //
 //   1. `<expr>.Status` — the Conversation projection is PascalCase (it comes
 //      through a handler-side map of the Go struct), while every other DTO in
-//      types.ts spells its own status lowercase: a curator turn's
-//      `request.status` and a blueprint run's `blueprint_run.status` both
-//      legitimately terminate `cancelled`. The case alone separates them, with
-//      no type information and no false positives.
+//      types.ts spells its own status lowercase: a blueprint run's
+//      `blueprint_run.status` legitimately terminates `cancelled` too. The
+//      case alone separates them, with no type information and no false
+//      positives.
 //   2. Anything annotated `ConversationStatusValue` — the alias exists so a
 //      status that travels one hop from that property into a helper
 //      (`isActiveStatus(status)`, a tone switch) stays visible. Without it the
@@ -30,7 +30,7 @@ import { readFileSync } from 'node:fs'
 // -typed expression — buys nothing extra here: that property is typed `string`
 // on purpose (an unrecognized wire value must reach the closed-world predicates
 // in lib/conversationStatus, not blow up at the boundary), so the checker would answer
-// "string" for the curator and blueprint statuses too, and the rule would have
+// "string" for the blueprint status too, and the rule would have
 // to fall back on names anyway. This way the check costs no type-aware lint
 // pass.
 //

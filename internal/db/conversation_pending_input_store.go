@@ -16,8 +16,8 @@ import "context"
 // rows. A second writer spelling the same INSERT is how the two runtimes drifted
 // apart the first time. The predicate below is the whole definition of the
 // shape; no DB constraint backs it, because a partial unique index on
-// undelivered user rows cannot exist on the shared messages table (curator
-// conversations legitimately queue several).
+// undelivered user rows cannot exist on the shared messages table (a
+// conversation legitimately queues several follow-ups while busy).
 //
 // Both dialects (unlike ConversationSignalStore): local mode's dispatcher claims its
 // own resumed conversations through the identical queue path — resume-by-enqueue

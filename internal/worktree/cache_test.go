@@ -152,9 +152,9 @@ func TestEnforceBudget_TTLEviction(t *testing.T) {
 }
 
 // TestEnforceBudget_SkipsInUseBare is the safe-eviction guard: a bare with
-// a live worktree (here a curator worktree with an on-disk checkout) is
-// never reclaimed, even when it's the coldest and over budget. Once the
-// checkout is gone, the same sweep reclaims it.
+// a live worktree (a registered checkout still on disk) is never reclaimed,
+// even when it's the coldest and over budget. Once the checkout is gone,
+// the same sweep reclaims it.
 func TestEnforceBudget_SkipsInUseBare(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
@@ -163,11 +163,8 @@ func TestEnforceBudget_SkipsInUseBare(t *testing.T) {
 	}
 	bareDir, _ := repoDir("o", "live")
 
-	projectDir := filepath.Join(t.TempDir(), "proj")
-	wt, err := EnsureCuratorWorktree(context.Background(), "o", "live", "main", projectDir)
-	if err != nil {
-		t.Fatalf("curator worktree: %v", err)
-	}
+	wt := t.TempDir()
+	registerWorktree(t, bareDir, "live-run", wt)
 	// Make it the coldest by far so only the in-use guard can save it.
 	setBareLastUsed(bareDir, time.Now().Add(-365*24*time.Hour))
 

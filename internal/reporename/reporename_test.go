@@ -160,9 +160,8 @@ func TestApply_ReclaimsTheOldSlugsDirectories(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	org := runmode.LocalDefaultOrgID
 	oldBare := paths.BareCacheDir(org, "octo", "api")
-	oldCurator := paths.CuratorSharedRepoDir(org, "octo", "api")
 	siblingBare := paths.BareCacheDir(org, "octo", "web")
-	for _, dir := range []string{oldBare, oldCurator, siblingBare} {
+	for _, dir := range []string{oldBare, siblingBare} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("seed %s: %v", dir, err)
 		}
@@ -181,9 +180,6 @@ func TestApply_ReclaimsTheOldSlugsDirectories(t *testing.T) {
 
 	if _, err := os.Stat(oldBare); !os.IsNotExist(err) {
 		t.Errorf("old bare still on disk after the rename: %v", err)
-	}
-	if _, err := os.Stat(oldCurator); !os.IsNotExist(err) {
-		t.Errorf("old curator checkout still on disk after the rename: %v", err)
 	}
 	if _, err := os.Stat(siblingBare); err != nil {
 		t.Errorf("sibling repository's bare was touched: %v", err)

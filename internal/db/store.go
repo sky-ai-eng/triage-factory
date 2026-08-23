@@ -126,7 +126,7 @@ type Stores struct {
 	// Repos owns repositories — the user-configured GitHub repos
 	// plus their cached AI profile and clone-attempt state. App pool
 	// in Postgres; consumers are the repos handler, settings, the
-	// curator, the projects handler, the poller manager, the
+	// projects handler, the poller manager, the
 	// profiler, and the workspace CLI tests. Every method accepts
 	// repoID as "owner/repo" — Postgres splits to (owner, repo) and
 	// queries by the natural key UNIQUE(org_id, owner, repo).
@@ -139,9 +139,8 @@ type Stores struct {
 	PendingFirings PendingFiringsStore
 
 	// Projects owns the projects table — user-curated work groupings
-	// (Linear/Jira project mirrors with pinned repos and the curator
-	// session that maintains the project's knowledge dir). App pool
-	// in Postgres; consumers are the projects handler, curator,
+	// (Linear/Jira project mirrors with pinned repos and a knowledge
+	// dir). App pool in Postgres; consumers are the projects handler,
 	// backfill, project_entities, projectclassify runner, and the
 	// projectbundle import/export paths.
 	Projects ProjectStore
@@ -246,16 +245,6 @@ type Stores struct {
 	// team admin); admin pool for the `...System` router-gate reads.
 	TeamGitHubRepos TeamGitHubReposStore
 
-	// Curator owns the curator's view of the shared conversations /
-	// messages / claims tables — one private conversation per (project,
-	// creator), queued turns as undelivered user messages, one claim per
-	// executed turn. Holds both pools in Postgres: app for the claims-bound
-	// send/history/dispatch message writes (the per-project goroutine wraps
-	// each turn in Tx.SyntheticClaimsWithTx under the requesting user's
-	// identity), admin for the `...System` claim writes, claim-loop scan,
-	// boot sweeps, pending-context producer, and provisioning reads.
-	Curator CuratorStore
-
 	// GitHubApps owns the org_github_apps table — per-org GitHub
 	// App registrations created through the manifest flow. App pool
 	// in Postgres (RLS gates reads by org membership, writes by org
@@ -339,11 +328,11 @@ type Stores struct {
 	ExternalActions ExternalActionStore
 
 	// Spend is the read-only aggregation over the llm_spend view — the unified
-	// shape that UNION-ALLs delegation conversations + curator claims +
-	// system_llm_runs onto the category axis (TFAC-472). App pool in Postgres: the view is
+	// shape that UNION-ALLs delegation conversations + system_llm_runs onto
+	// the category axis (TFAC-472). App pool in Postgres: the view is
 	// security_invoker, so the base tables' RLS scopes the read under the
 	// querying user (a team member sees their team's runs, not another team's;
-	// system/curator at org scope). Owns no table; the spine the dashboards +
+	// system at org scope). Owns no table; the spine the dashboards +
 	// safety cap (TFAC-449) read from.
 	Spend SpendStore
 
@@ -454,12 +443,6 @@ type Stores struct {
 	// not a browsable RLS surface, read for an already-authorized orgID.
 	PlacementOverrides PlacementOverrideStore
 
-	// CuratorHomes owns the curator_homes table — the durable
-	// (org, project) -> home executor mapping that homes a curator session to
-	// one executor (spec §6.3). Admin-pool-only, same shape as Instances /
-	// PlacementOverrides: placement coordination, not a browsable RLS surface.
-	CuratorHomes CuratorHomeStore
-
 	// ClaimCredentials owns the claim_credentials table — the sealed
 	// per-claim credential bundle channel (TFAC-614), keyed by the run's
 	// active claim. Admin-pool-only, same shape as
@@ -529,7 +512,6 @@ type TxStores struct {
 	JiraStatusRules          JiraStatusRulesStore
 	TeamGitHubGroups         TeamGitHubGroupsStore
 	TeamGitHubRepos          TeamGitHubReposStore
-	Curator                  CuratorStore
 	GitHubApps               GitHubAppsStore
 	JiraApps                 JiraAppsStore
 	ShippedDefaults          ShippedDefaultsStore
@@ -579,8 +561,8 @@ func (t TxStores) Extension(key string) any { return t.Ext[key] }
 //
 // SyntheticClaimsWithTx mirrors WithTx for callers that have an
 // authoritative (orgID, userID) identity but no request context —
-// delegate-spawner goroutines, curator-message processing, post-
-// terminal handler cleanup, agent CLI subcommands. The only
+// delegate-spawner goroutines, post-terminal handler cleanup, agent CLI
+// subcommands. The only
 // structural difference from WithTx is the source of the claims
 // values: request context vs caller-supplied. The Postgres impl
 // shares its body with WithTx via a private helper; the SQLite

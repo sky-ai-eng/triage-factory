@@ -91,11 +91,10 @@ type Candidate struct {
 	Weight     int
 	Score      float64
 
-	// BootEpoch is the instance's registration epoch, carried through from the
-	// registry row so a consumer that persists a placement decision (curator
-	// homing snapshots it into curator_homes.home_boot_epoch, spec §6.3) can
-	// record which boot it chose without a second registry read. 0 for a pin to
-	// an instance that isn't a live registry row.
+	// BootEpoch is the instance's registration epoch, carried through from
+	// the registry row so a consumer that persists a placement decision can
+	// record which boot it chose without a second registry read. 0 for a
+	// pin to an instance that isn't a live registry row.
 	BootEpoch int64
 
 	// Eligible is true when this instance was a ranking candidate (live,
@@ -332,8 +331,8 @@ func containsCandidate(cs []Candidate, id string) bool {
 
 // keyFor builds the rendezvous key string. orgID is folded in so two orgs
 // that share a repo name never rendezvous onto the same owner, and the kind
-// separates the repo and project namespaces. The 0x1f unit separator keeps
-// the three fields unambiguous.
+// separates the key's namespace from any future one. The 0x1f unit
+// separator keeps the three fields unambiguous.
 func keyFor(orgID, keyKind, keyValue string) string {
 	return orgID + "\x1f" + keyKind + "\x1f" + keyValue
 }

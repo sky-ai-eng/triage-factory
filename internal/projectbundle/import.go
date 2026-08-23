@@ -3,7 +3,6 @@ package projectbundle
 import (
 	"archive/zip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,8 +30,6 @@ type GitHubProbe interface {
 }
 
 const (
-	maxImportJSONLEntryBytes    int64 = 64 << 20  // 64 MiB per curator JSONL payload.
-	maxImportJSONLRows                = 200_000   // Upper bound per curator JSONL file.
 	maxImportExtractEntryBytes  int64 = 512 << 20 // 512 MiB per extracted file.
 	maxImportExtractBundleBytes int64 = 2 << 30   // 2 GiB aggregate extracted payload.
 )
@@ -91,15 +88,10 @@ func (r *countingReader) Read(p []byte) (int, error) {
 // rollbackTracker removes them on any failure), then the project + repo
 // writes run inside ONE claims-bound WithTx — so Postgres RLS gates the
 // inserts under the importing user's identity, and the tx never holds
-// a claims-bound pool connection through multi-GiB zip extraction. The
-// curator conversation state (conversation + claims + messages) restores
-// AFTER that tx through the admin-pool curatorStore door — claims have no
-// app-pool write — with a best-effort project delete unwinding the commit
-// if the restore fails.
+// a claims-bound pool connection through multi-GiB zip extraction.
 func Import(
 	ctx context.Context,
 	txr db.TxRunner,
-	curatorStore db.CuratorStore,
 	kb *kbstore.Store,
 	orgID, teamID, userID string,
 	readerAt io.ReaderAt,
@@ -142,28 +134,7 @@ func Import(
 		return nil, nil, err
 	}
 
-	sessionEntries, err := listEntriesWithPrefix(entries, sessionPrefix)
-	if err != nil {
-		return nil, nil, err
-	}
-	hasSession := len(sessionEntries) > 0
-	if hasSession {
-		if _, ok := entries[sessionTranscriptPath]; !ok {
-			return nil, nil, fmt.Errorf("bundle session is missing %s: %w", sessionTranscriptPath, ErrBadBundle)
-		}
-		if manifest.Session == nil {
-			return nil, nil, fmt.Errorf("bundle session exists but manifest.session is missing: %w", ErrBadBundle)
-		}
-		if strings.TrimSpace(manifest.Session.CuratorSessionID) == "" || strings.TrimSpace(manifest.Session.ResolvedCwd) == "" {
-			return nil, nil, fmt.Errorf("manifest.session requires curator_session_id and resolved_cwd: %w", ErrBadBundle)
-		}
-	}
-
 	newProjectID := uuid.New().String()
-	newSessionID := ""
-	if hasSession {
-		newSessionID = uuid.New().String()
-	}
 	if _, err := paths.StateRootErr(); err != nil {
 		return nil, nil, fmt.Errorf("resolve project root: %w", err)
 	}
@@ -205,18 +176,6 @@ func Import(
 	} else if err := materializeKnowledge(entries, kbRoot, extractionBudget); err != nil {
 		return nil, nil, err
 	}
-	if hasSession {
-		if err := materializeSession(entries, manifest.Session, projectRoot, newSessionID, extractionBudget, cleanup); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	// Decode the curator conversation state up front (cheap, bounded) so a
-	// malformed bundle fails before any DB write.
-	bundleConv, bundleClaims, bundleMsgs, err := decodeCuratorState(entries, newProjectID, newSessionID, userID)
-	if err != nil {
-		return nil, nil, err
-	}
 
 	var project *domain.Project
 	if err := txr.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -249,22 +208,6 @@ func Import(
 		return nil
 	}); err != nil {
 		return nil, nil, err
-	}
-
-	// Restore the curator conversation after the project committed: claims
-	// have no app-pool write door, so this rides the admin-pool System
-	// method. A failure unwinds the just-committed project (cascade removes
-	// any partial conversation state) so the import stays all-or-nothing
-	// from the caller's perspective.
-	if bundleConv != nil {
-		if _, err := curatorStore.ImportConversationStateSystem(ctx, orgID, *bundleConv, bundleClaims, bundleMsgs); err != nil {
-			if delErr := txr.WithTx(context.WithoutCancel(ctx), orgID, userID, func(tx db.TxStores) error {
-				return tx.Projects.Delete(ctx, orgID, newProjectID)
-			}); delErr != nil {
-				bundleLog.Warn("rollback: delete imported project after curator restore failure failed", "project", newProjectID, "error", delErr)
-			}
-			return nil, nil, fmt.Errorf("restore curator conversation: %w", err)
-		}
 	}
 	committed = true
 
@@ -381,78 +324,6 @@ func preflightPinnedRepos(ctx context.Context, pinned []string, probe GitHubProb
 		return nil, &MissingReposError{Missing: missing}
 	}
 	return cloneURLs, nil
-}
-
-// decodeCuratorState reads the bundle's curator payload — the exported
-// conversation (curator/conversation.json), its claims, and its messages —
-// re-keyed for the destination install: fresh conversation + claim ids,
-// creator/user stamped to the importing user (the original creator is not a
-// user here), the sdk_session_id swapped for the freshly-materialized
-// session, and message claim references remapped (an unknown reference
-// drops to unattributed rather than tripping the FK). Returns a nil
-// conversation when the bundle carries no curator payload.
-func decodeCuratorState(entries map[string]*zip.File, projectID, newSessionID, userID string) (*domain.Conversation, []domain.Claim, []domain.Message, error) {
-	convFile, ok := entries[curatorConversationPath]
-	if !ok {
-		return nil, nil, nil, nil
-	}
-	body, err := readZipFileLimited(convFile, maxImportJSONLEntryBytes)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	var conv domain.Conversation
-	if err := json.Unmarshal(body, &conv); err != nil {
-		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorConversationPath, err)
-	}
-	conv.ID = uuid.New().String()
-	conv.ProjectID = projectID
-	conv.CreatorUserID = userID
-	conv.SessionID = newSessionID
-
-	claimIDMap := make(map[string]string)
-	var claims []domain.Claim
-	if err := decodeZipJSONLines(
-		entries[curatorClaimsPath],
-		maxImportJSONLEntryBytes,
-		maxImportJSONLRows,
-		func(row domain.Claim) error {
-			oldID := strings.TrimSpace(row.ID)
-			if oldID == "" {
-				return nil
-			}
-			newID := claimIDMap[oldID]
-			if newID == "" {
-				newID = uuid.New().String()
-				claimIDMap[oldID] = newID
-			}
-			row.ID = newID
-			row.ConversationID = conv.ID
-			claims = append(claims, row)
-			return nil
-		},
-	); err != nil {
-		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorClaimsPath, err)
-	}
-
-	var msgs []domain.Message
-	if err := decodeZipJSONLines(
-		entries[curatorMessagesPath],
-		maxImportJSONLEntryBytes,
-		maxImportJSONLRows,
-		func(row domain.Message) error {
-			row.ID = 0 // let the destination DB assign the message id
-			row.ConversationID = conv.ID
-			if row.UserID != "" {
-				row.UserID = userID
-			}
-			row.ClaimID = claimIDMap[row.ClaimID]
-			msgs = append(msgs, row)
-			return nil
-		},
-	); err != nil {
-		return nil, nil, nil, fmt.Errorf("decode %s: %w", curatorMessagesPath, err)
-	}
-	return &conv, claims, msgs, nil
 }
 
 // trackImportedRepos materializes the imported project's pinned repos —
@@ -605,101 +476,12 @@ func uploadKnowledgeToStore(ctx context.Context, kb *kbstore.Store, orgID, proje
 	return nil
 }
 
-func materializeSession(
-	entries map[string]*zip.File,
-	manifestSession *ManifestSession,
-	projectRoot string,
-	newSessionID string,
-	extractionBudget *zipExtractionBudget,
-	cleanup *rollbackTracker,
-) error {
-	newResolvedCwd := worktree.ResolveClaudeProjectCwd(projectRoot)
-	// The session tree goes where the curator that later RESUMES this
-	// session will look for it: home-relative for direct (local) runs,
-	// inside the org-scoped project root for sandboxed (multi) runs —
-	// worktree.ClaudeProjectDir owns that branch. Writing to the
-	// orchestrator's $HOME in multi mode would be both a tenant-scoping
-	// violation and functionally dead (the sandboxed curator runs with
-	// HOME=/work and could never see it).
-	encodedRoot, err := worktree.ClaudeProjectDir(newResolvedCwd)
-	if err != nil {
-		return fmt.Errorf("resolve claude session dir for import: %w", err)
-	}
-	if err := os.MkdirAll(encodedRoot, 0o700); err != nil {
-		return fmt.Errorf("mkdir claude project root: %w", err)
-	}
-
-	sessionTreeRoot := filepath.Join(encodedRoot, newSessionID)
-	transcriptDest := filepath.Join(encodedRoot, newSessionID+".jsonl")
-	cleanup.Add(sessionTreeRoot)
-	cleanup.Add(transcriptDest)
-
-	// Rewrite the transcript's embedded cwd strings to the path the
-	// resuming agent will actually observe — the host path for direct
-	// runs, "/work" for sandboxed runs (AgentVisibleRoot). The
-	// manifest's ResolvedCwd is likewise the exporting agent's OBSERVED
-	// cwd, so local↔multi round-trips rewrite correctly in both
-	// directions.
-	reps := buildSessionReplacements(
-		manifestSession.CuratorSessionID,
-		newSessionID,
-		manifestSession.ResolvedCwd,
-		agentproc.AgentVisibleRoot(newResolvedCwd),
-	)
-
-	transcript, ok := entries[sessionTranscriptPath]
-	if !ok {
-		return fmt.Errorf("session is missing %s", sessionTranscriptPath)
-	}
-	if err := copyZipEntryRewritten(transcript, transcriptDest, reps, 0o600, extractionBudget); err != nil {
-		return err
-	}
-
-	subagentEntries, err := listEntriesWithPrefix(entries, sessionSubagentsPrefix)
-	if err != nil {
-		return err
-	}
-	for _, e := range subagentEntries {
-		rel, err := safeBundleRel(e.Name, sessionSubagentsPrefix)
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(sessionTreeRoot, "subagents", filepath.FromSlash(rel))
-		if err := ensureUnderRoot(filepath.Join(sessionTreeRoot, "subagents"), dest); err != nil {
-			return err
-		}
-		if err := copyZipEntryRewritten(e.File, dest, reps, 0o600, extractionBudget); err != nil {
-			return err
-		}
-	}
-
-	toolEntries, err := listEntriesWithPrefix(entries, sessionToolResultsPrefix)
-	if err != nil {
-		return err
-	}
-	for _, e := range toolEntries {
-		rel, err := safeBundleRel(e.Name, sessionToolResultsPrefix)
-		if err != nil {
-			return err
-		}
-		dest := filepath.Join(sessionTreeRoot, "tool-results", filepath.FromSlash(rel))
-		if err := ensureUnderRoot(filepath.Join(sessionTreeRoot, "tool-results"), dest); err != nil {
-			return err
-		}
-		if err := copyZipEntryRewritten(e.File, dest, reps, 0o600, extractionBudget); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func clonePinnedRepos(ctx context.Context, pinned []string, cloneURLs map[string]string) []ImportWarning {
 	warnings := make([]ImportWarning, 0)
-	// Sandboxed (multi) deployments seed bare clones on demand with
-	// per-org auth (worktree.EnsureSharedCuratorWorktree passes the
-	// org's App token via WithCloneAuth); an eager ambient-credential
-	// clone here would just fail and emit a warning per repo. The eager
-	// warm-cache clone is a local-mode convenience.
+	// Sandboxed (multi) deployments skip the eager clone here: there is no
+	// org-scoped credential available at import time, so an ambient-credential
+	// clone would just fail and emit a warning per repo. The eager warm-cache
+	// clone below is a local-mode convenience.
 	if agentproc.WillSandbox() {
 		return warnings
 	}
@@ -822,82 +604,6 @@ func copyZipEntryRaw(zf *zip.File, dest string, mode os.FileMode, extractionBudg
 		return err
 	}
 	return nil
-}
-
-func copyZipEntryRewritten(
-	zf *zip.File,
-	dest string,
-	reps []byteReplacement,
-	mode os.FileMode,
-	extractionBudget *zipExtractionBudget,
-) error {
-	declared, err := extractionBudget.reserve(zf)
-	if err != nil {
-		return err
-	}
-	rc, err := zf.Open()
-	if err != nil {
-		return fmt.Errorf("open bundle entry %s: %w", zf.Name, err)
-	}
-	defer rc.Close()
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		return fmt.Errorf("mkdir parent for %s: %w", dest, err)
-	}
-	out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dest, err)
-	}
-	defer out.Close()
-	reader := &countingReader{r: io.LimitReader(rc, declared+1)}
-	if err := rewriteToFile(out, reader, reps); err != nil {
-		return fmt.Errorf("rewrite %s to %s: %w", zf.Name, dest, err)
-	}
-	if err := verifyZipEntryBytes(zf.Name, reader.n, declared); err != nil {
-		return err
-	}
-	return nil
-}
-
-func decodeZipJSONLines[T any](
-	zf *zip.File,
-	maxBytes int64,
-	maxRows int,
-	onRow func(T) error,
-) error {
-	if zf == nil {
-		return nil
-	}
-	declared, err := zipEntryDeclaredSize(zf, maxBytes)
-	if err != nil {
-		return err
-	}
-	rc, err := zf.Open()
-	if err != nil {
-		return err
-	}
-	defer rc.Close()
-	reader := &countingReader{r: io.LimitReader(rc, declared+1)}
-	dec := json.NewDecoder(reader)
-	rows := 0
-	for {
-		var item T
-		if err := dec.Decode(&item); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return err
-		}
-		rows++
-		if maxRows > 0 && rows > maxRows {
-			return fmt.Errorf("%s exceeds %d-row limit: %w", zf.Name, maxRows, ErrBadBundle)
-		}
-		if onRow != nil {
-			if err := onRow(item); err != nil {
-				return err
-			}
-		}
-	}
-	return verifyZipEntryBytes(zf.Name, reader.n, declared)
 }
 
 func zipEntryDeclaredSize(zf *zip.File, maxBytes int64) (int64, error) {

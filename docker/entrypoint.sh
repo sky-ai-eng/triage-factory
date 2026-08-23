@@ -170,9 +170,9 @@ multi_mode() {
 # TF_MODE, so the two normalizers differ on purpose. The trim is the POSIX
 # ${var#...}/${var%...} idiom run inside a command substitution so its
 # scratch variable never leaks into the parent shell (like multi_mode, this
-# stays side-effect-free). A control pod never launches a sandbox — curator
-# turns home to executors, and the brain's own LLM work is toolless direct
-# API calls — so it needs no cap-broker: below, it skips the broker spawn +
+# stays side-effect-free). A control pod never launches a sandbox — every
+# delegated run executes on an executor, and the brain's own LLM work is
+# toolless direct API calls — so it needs no cap-broker: below, it skips the broker spawn +
 # socket wait while keeping the identical uid/capability drop (running with
 # root + Docker's default caps would be strictly worse).
 control_role() {

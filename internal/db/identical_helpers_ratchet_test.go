@@ -57,8 +57,6 @@ var identicalHelperRatchet = []string{
 	"scanArtifactRows",
 	"scanAuthEvent",
 	"scanAuthEventRows",
-	"scanCuratorConversation",
-	"scanCuratorHome",
 	"scanEntityRow",
 	"scanExternalAction",
 	"scanExternalActionRows",

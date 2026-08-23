@@ -58,17 +58,16 @@ type RelayServer struct {
 
 	// credRefresh is the sealed-bundle freshness gate the workspace
 	// materialization waits on. Optional: only the delegated executor path
-	// wires it (SetCredentialRefresh) — local mode has no sealed bundle at all
-	// and the curator's own RelayServer never serves a `workspace add`, so both
-	// leave it nil and the wait no-ops.
+	// wires it (SetCredentialRefresh) — local mode has no sealed bundle at all,
+	// so it leaves credRefresh nil and the wait no-ops.
 	credRefresh *CredentialRefresh
 
 	// engagement is the trace context of the engagement that built this
 	// server, captured once at bring-up (SetEngagementSpanContext). It is how
 	// a relayed op — which arrives long after the setup span ended, over a
 	// wire that deliberately carries no trace context — still names the run it
-	// belongs to. The zero value (local mode, the curator, an untraced
-	// process) simply produces unlinked spans.
+	// belongs to. The zero value (local mode, an untraced process) simply
+	// produces unlinked spans.
 	engagement trace.SpanContext
 }
 
@@ -501,7 +500,7 @@ const workspaceCredRelayTimeout = 10 * time.Second
 // re-seal, so "sealed after the row exists" implies "covers the row's repo" by
 // construction. That keeps the orchestrator's zero-unseal posture intact.
 //
-// No-ops when unwired (local mode, curator) or when the run has no reservation
+// No-ops when unwired (local mode) or when the run has no reservation
 // for this repo — nothing widened, so there is nothing to wait for. A repeat
 // `workspace add` finds its original row, whose reservation any seal since then
 // already postdates, and returns on the first poll.

@@ -91,15 +91,6 @@ type Spawner struct {
 	// (TFAC-614) — the executor's awaiting-credentials wait reads it;
 	// nil-safe (local resolves credentials directly and never gates on it).
 	claimCredentials db.ClaimCredentialsStore
-	// curatorStore is the curator-turn half of the credential handshake:
-	// BringUpCuratorSidecar publishes the turn's sidecar pubkey onto the
-	// conversation's active claim via
-	// curatorStore.PublishTurnCredPubKeySystem and polls claimCredentials
-	// (keyed by the conversation id — the shared claim_credentials channel)
-	// for the sealed bundle the brain wrote. nil-safe (local never brings a
-	// curator sidecar up); a nil store makes BringUpCuratorSidecar degrade
-	// like every other nil-store seam here.
-	curatorStore db.CuratorStore
 	// awaitingCredentialsTimeout overrides awaitingCredentialsTimeout (the
 	// package default) when > 0 — tests inject a short value via
 	// SetAwaitingCredentialsTimeout, mirroring idleHibernateTimeout.
@@ -315,9 +306,6 @@ type Spawner struct {
 	// ordinary untraced case, and every reader is nil-safe. Guarded by mu
 	// like cancels beside it.
 	engagements map[string]*engagement
-	// curatorTurnDriver is the claim loop's curator execution arm (see
-	// SetCuratorTurnDriver). nil where no curator runtime is built.
-	curatorTurnDriver CuratorTurnDriver
 
 	dispatchWake          chan struct{}                                     // best-effort latency nudge for the conversation-queue dispatcher; non-blocking send on enqueue, buffered depth 1 so a missed wake only defers to the next scan tick
 	drainer               QueueDrainer                                      // nil-safe; set post-construction via SetQueueDrainer
@@ -387,11 +375,6 @@ type Spawner struct {
 	// before the dispatcher starts. Each drain acquires a slot before
 	// claiming and the run goroutine releases it on terminal.
 	runSem chan struct{}
-	// turnGateRecheck is how often AcquireTurnSlot re-probes the memory
-	// guardrail while an off-queue turn waits it out. Zero means use
-	// defaultTurnGateRecheck; tests set a short value directly (same-package,
-	// like memAvailMB). Read through turnGateRecheckInterval().
-	turnGateRecheck time.Duration
 	// idleHibernateTimeout is how long a live run may go quiet (no stream
 	// activity) before it hibernates to a durable resume. Zero means use
 	// DefaultIdleHibernateTimeout; tests inject a short value via
@@ -543,7 +526,6 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		blueprints:            stores.Blueprints,
 		conversationQueue:     stores.ConversationQueue,
 		claimCredentials:      stores.ClaimCredentials,
-		curatorStore:          stores.Curator,
 		tasks:                 stores.Tasks,
 		conversations:         stores.Conversations,
 		entities:              stores.Entities,
@@ -1024,19 +1006,6 @@ func gitDenyNotMaterialized(repoID string) gitproxy.Decision {
 		Allowed:     false,
 		DenyReason:  "repo-not-materialized",
 		DenyMessage: fmt.Sprintf("gitproxy: repo %s is tracked by this team but not yet materialized in this run; run 'workspace add %s' to persist it, then retry", repoID, repoID),
-	}
-}
-
-// gitDenyNotAttached is the curator-turn analog: a curator turn's authorized
-// set is the fixed pinned set of the project, so a repo outside it cannot be
-// reached and — unlike a delegated run — `workspace add` is not the fix (a
-// curator turn materializes nothing). Point the agent at the project's own
-// repos instead.
-func gitDenyNotAttached(repoID string) gitproxy.Decision {
-	return gitproxy.Decision{
-		Allowed:     false,
-		DenyReason:  "repo-not-attached",
-		DenyMessage: fmt.Sprintf("gitproxy: repo %s is not attached to this project, so it cannot be accessed here; use a repo attached to this project instead", repoID),
 	}
 }
 

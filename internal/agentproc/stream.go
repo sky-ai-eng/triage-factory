@@ -3,7 +3,7 @@
 // It is the storage-neutral half of the runtime: it knows how to talk
 // to Claude Code and parse what comes back, but not where to put the
 // results. Callers wire it up with a Sink that decides persistence
-// (delegate and the curator runtime alike write to conversations / messages).
+// (delegate writes to conversations / messages).
 package agentproc
 
 import (
@@ -166,8 +166,7 @@ func (s *StreamState) flush() *domain.Message {
 // Returns messages ready to store and an optional terminal Result.
 //
 // traceID is stamped onto every emitted message's ConversationID field — the
-// caller's choice of identifier (delegate uses the conversation id;
-// the curator wires its own message-group ID through). Storage
+// caller's choice of identifier (delegate uses the conversation id). Storage
 // decisions live in the Sink, not here.
 func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message, *Result) {
 	var raw map[string]any

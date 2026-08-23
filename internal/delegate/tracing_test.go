@@ -344,8 +344,8 @@ func TestPunctualSpansLinkToTheEngagementRoot(t *testing.T) {
 }
 
 // TestPunctualSpanWithoutAnEngagementIsUnlinked: tracing is optional and the
-// absence of an engagement is never an error — a local-mode park, a curator
-// turn, a test fixture. The span still exists and still names its run.
+// absence of an engagement is never an error — a local-mode park, a test
+// fixture. The span still exists and still names its run.
 func TestPunctualSpanWithoutAnEngagementIsUnlinked(t *testing.T) {
 	read := recordSpans(t)
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")

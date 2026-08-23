@@ -26,10 +26,10 @@
 *.db-shm
 
 # Docs and scripts that aren't build inputs. Top-level *.md only —
-# do NOT use a recursive `*.md` exclude here because the Go binary
-# embeds prompt files under internal/**/prompts/*.md via go:embed
-# (e.g. internal/curator/skill.go). A recursive *.md drop would make
-# the go-builder stage fail with `pattern ...: no matching files`.
+# do NOT use a recursive `*.md` exclude here: the Go binary embeds prompt
+# files under internal/**/prompts/*.txt via go:embed, and a future prompt
+# shipped as .md would make a recursive drop fail the go-builder stage with
+# `pattern ...: no matching files`.
 /docs
 /scripts
 /README.md

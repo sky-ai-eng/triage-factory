@@ -69,7 +69,7 @@ func Args(spec Spec, host Host) ([]string, error) {
 	//                          identity, credentials and remotes all arrive
 	//                          through env-scoped config and a loopback proxy
 	//   the TF state root      the SQLite database, the bare clone cache, the
-	//                          curator projects, every OTHER conversation's
+	//                          project working dirs, every OTHER conversation's
 	//                          gh-channel dir
 	//   the temp dir           every concurrent run's worktree — the thing
 	//                          this package exists for, since before it two

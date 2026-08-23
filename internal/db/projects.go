@@ -21,7 +21,7 @@ var ErrVisibilityForbidden = errors.New("db: insufficient privilege for that pro
 
 // ProjectStore owns the projects table — user-curated work groupings
 // (a Linear/Jira "project" mirrored locally, with pinned repos and
-// the curator session that maintains the project's knowledge dir).
+// a knowledge base users maintain per project).
 //
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
 // Create additionally takes teamID — projects are user-driven writes
@@ -33,7 +33,7 @@ var ErrVisibilityForbidden = errors.New("db: insufficient privilege for that pro
 // sticky default) is tracked separately.
 //
 // Postgres wires against the app pool — every consumer is request-
-// equivalent (projects handler, curator, backfill, project_entities)
+// equivalent (projects handler, backfill, project_entities)
 // or runs in a startup goroutine that already operates within the
 // org's identity scope (projectclassify runner). RLS policies
 // projects_select / projects_insert / projects_update / projects_delete
@@ -70,15 +70,6 @@ type ProjectStore interface {
 
 	// Get returns a project by id, or (nil, nil) if not found.
 	Get(ctx context.Context, orgID, id string) (*domain.Project, error)
-
-	// GetSystem is the admin-pool (BYPASSRLS) variant of Get for
-	// JWT-less background jobs that resolve a project by id under an
-	// explicit orgID — the curator-turn credential provisioner reading a
-	// homed turn's pinned repos + owning team to build the sealed bundle's
-	// authorized GitHub set. org_id is bound by argument; a
-	// targeted single-project read, the same posture as Tasks.GetSystem.
-	// SQLite is N=1 and unscoped — it collapses to Get.
-	GetSystem(ctx context.Context, orgID, id string) (*domain.Project, error)
 
 	// List returns one page of the org's projects plus the unpaged total,
 	// ordered by name (case-insensitive) with an id tiebreaker so two

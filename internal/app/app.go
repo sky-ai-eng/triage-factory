@@ -26,7 +26,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -150,7 +149,6 @@ type App struct {
 	eventWake        chan struct{}
 	pollerMgr        *poller.Manager
 	spawner          *delegate.Spawner
-	curator          *curator.Curator
 	router           *routing.Router
 	srv              *server.Server
 
@@ -353,7 +351,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if a.plan.brain {
 		a.buildAI() // scorer + project classifier + profiler + reconciler
 	}
-	if err = a.buildExecution(); err != nil { // delegation spawner (+ curator on serveHTTP roles)
+	if err = a.buildExecution(); err != nil { // delegation spawner
 		return nil, err
 	}
 	// Fleet reaper knobs + (brain roles, multi mode) the reaper Store

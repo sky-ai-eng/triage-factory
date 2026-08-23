@@ -67,19 +67,6 @@ type Store interface {
 	// a fresh boot_epoch 1.
 	DeleteStaleInstances(ctx context.Context, staleAfter time.Duration) (int, error)
 
-	// CancelStrandedCuratorTurns releases the active claims of running
-	// curator turns whose executor's heartbeat is missing or stale (curator
-	// homing, spec §6.3). A permanently-dead home never runs its own
-	// ownership-scoped boot sweep, so without this a turn stranded on it
-	// would show as in-flight forever. Recovery here is retire-only, not
-	// requeue: the user's NEXT turn re-homes the project to a live executor
-	// (the Homer's sticky-until-death mint). A queued turn needs no reaping
-	// at all anymore — it is an unowned undelivered message with no claim,
-	// and simply waits for the re-home. Own DB time (now() -
-	// make_interval), same discipline as ReapDeadExecutors. Returns the
-	// count released.
-	CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error)
-
 	// HealClaimDesyncs runs the janitor arm for the one state the app-pool
 	// terminal writes can still strand a conversation in (their conversation
 	// flip and claim release commit independently): a terminal conversation
@@ -361,36 +348,6 @@ func (s *pgStore) FailBlueprintRunsOrphanedAtMint(ctx context.Context, grace tim
 		      SELECT 1 FROM conversations c WHERE c.blueprint_run_id = blueprint_runs.id
 		  )
 	`, grace.Seconds(), domain.BlueprintAbortOrphanedAtMint)
-	if err != nil {
-		return 0, err
-	}
-	n, err := res.RowsAffected()
-	return int(n), err
-}
-
-func (s *pgStore) CancelStrandedCuratorTurns(ctx context.Context, staleThreshold time.Duration) (int, error) {
-	// A home is dead when its instances row is missing (GC'd or never
-	// registered) or its heartbeat is older than the threshold — the same
-	// missing-or-stale predicate ReapDeadExecutors uses for a conversation's
-	// executor. An outcome/error release only: the messages ledger already
-	// holds whatever the stranded turn streamed, and a turn whose home died
-	// never reported a cost lump to settle.
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE claims
-		SET released_at = now(),
-		    outcome = 'cancelled',
-		    error = COALESCE(error, 'Cancelled: curator home executor lost (reaper) — re-send to re-home')
-		WHERE released_at IS NULL
-		  AND EXISTS (
-		      SELECT 1 FROM conversations c
-		      WHERE c.id = claims.conversation_id AND c.type = 'curator'
-		  )
-		  AND NOT EXISTS (
-		      SELECT 1 FROM instances i
-		      WHERE i.id = claims.executor_id
-		        AND i.last_heartbeat_at >= now() - make_interval(secs => $1)
-		  )
-	`, staleThreshold.Seconds())
 	if err != nil {
 		return 0, err
 	}

@@ -88,13 +88,6 @@ type ConversationInfo struct {
 	ConversationID   string `json:"conversation_id"`
 	TeamID           string `json:"team_id"`
 	IsEventTriggered bool   `json:"is_event_triggered"`
-
-	// PinnedRepos is the curator turn's authorized GitHub set ("owner/repo"
-	// strings) — non-secret. A curator turn creates no conversation_worktrees
-	// rows, so authorizeRepo (cmd/exec/agenthost/local.go) authorizes its exec-gh
-	// verbs against this set instead. Empty on a delegated run, whose gate rides
-	// the conversation_worktrees ledger unchanged.
-	PinnedRepos []string `json:"pinned_repos,omitempty"`
 }
 
 // ErrDaemonUnreachable is returned by DialSandbox when /run/tf.sock

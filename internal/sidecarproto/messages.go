@@ -101,12 +101,6 @@ type AgentHostInfo struct {
 	TeamID         string `json:"team_id"`
 	ConversationID string `json:"conversation_id"`
 	EventTriggered bool   `json:"event_triggered,omitempty"`
-
-	// PinnedRepos carries a curator turn's authorized GitHub set ("owner/repo")
-	// to the sidecar-hosted agenthost so its exec-gh gate authorizes against the
-	// pinned set — a curator turn has no conversation_worktrees ledger. Empty
-	// on a delegated run. Non-secret, like the rest of this struct.
-	PinnedRepos []string `json:"pinned_repos,omitempty"`
 }
 
 // StartProxiesResult is KindStartProxies' response payload: the non-secret

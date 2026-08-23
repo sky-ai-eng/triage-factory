@@ -26,36 +26,14 @@ func TestSpendStore_SQLite(t *testing.T) {
 		conn := openSQLiteSpendConn(t)
 		stores := sqlitestore.New(conn)
 
-		// One org agent (UNIQUE per org) for the actor_agent_id passthrough, and
-		// two projects (team-scoped + null-team) so the curator conversations'
-		// project_id FK (set on curator rows, NULL for every other type) has both
-		// a team and a null-team source for the curator team_id snapshot. The
-		// local tenant sentinels (org/team/user)
-		// already exist via BootstrapSchemaForTest → SeedLocalTenantRows.
+		// One org agent (UNIQUE per org) for the actor_agent_id passthrough.
+		// The local tenant sentinels (org/team/user) already exist via
+		// BootstrapSchemaForTest → SeedLocalTenantRows.
 		agentID := uuid.New().String()
 		if _, err := conn.Exec(
 			`INSERT INTO agents (id, org_id) VALUES (?, ?)`, agentID, runmode.LocalDefaultOrgID,
 		); err != nil {
 			t.Fatalf("seed agent: %v", err)
-		}
-		// A team-scoped project (curator team-attribution case) and a null-team,
-		// org-visibility project (the null-team case). The CHECK only forces a
-		// team_id for visibility='team', so 'org' + NULL team_id is valid. The
-		// Curator seeder snapshots team_id from whichever project the fixture's
-		// TeamID selects (TFAC-476).
-		teamProjectID := uuid.New().String()
-		if _, err := conn.Exec(
-			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES (?, 'spend-test', ?, ?, ?, 'team')`,
-			teamProjectID, runmode.LocalDefaultTeamID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
-		); err != nil {
-			t.Fatalf("seed team project: %v", err)
-		}
-		nullTeamProjectID := uuid.New().String()
-		if _, err := conn.Exec(
-			`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES (?, 'spend-test-org', NULL, ?, ?, 'org')`,
-			nullTeamProjectID, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
-		); err != nil {
-			t.Fatalf("seed null-team project: %v", err)
 		}
 
 		// A blueprint + trigger event_handler so an autonomous run can carry a
@@ -87,7 +65,7 @@ func TestSpendStore_SQLite(t *testing.T) {
 			UserID:    runmode.LocalDefaultUserID,
 			AgentID:   agentID,
 			TriggerID: triggerID,
-			Seeder:    newSQLiteSpendSeeder(conn, teamProjectID, nullTeamProjectID),
+			Seeder:    newSQLiteSpendSeeder(conn),
 		}
 	})
 }
@@ -117,9 +95,9 @@ func openSQLiteSpendConn(t *testing.T) *sql.DB {
 // 'manual' so the conversations_origin_requires_parents CHECK (which only
 // constrains origin='blueprint') is satisfied without a
 // blueprint/task/prompt graph. Empty CreatorUserID / ActorAgentID and a nil
-// Cost serialize to SQL NULL. The two agent arms plant one assistant ledger
-// row each and return ITS id — the view's source_id.
-func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string) dbtest.SpendSeeder {
+// Cost serialize to SQL NULL. The conversation arm plants one assistant
+// ledger row and returns ITS id — the view's source_id.
+func newSQLiteSpendSeeder(conn *sql.DB) dbtest.SpendSeeder {
 	seedLedgerRow := func(t *testing.T, convID, model string, cost any, tok dbtest.SpendTokens, at time.Time) string {
 		t.Helper()
 		res, err := conn.Exec(`
@@ -154,37 +132,6 @@ func newSQLiteSpendSeeder(conn *sql.DB, teamProjectID, nullTeamProjectID string)
 				t.Fatalf("seed conversation: %v", err)
 			}
 			return seedLedgerRow(t, id, f.Model, costArg(f.Cost), f.Tokens, f.StartedAt)
-		},
-		Curator: func(t *testing.T, f dbtest.CuratorSpendFixture) string {
-			t.Helper()
-			// One curator conversation carrying the (team, creator)
-			// attribution snapshot, one cost-stamped ledger row. Non-empty
-			// TeamID → the team-scoped project (snapshot carries its team);
-			// empty → the null-team project (snapshot is NULL), captured via
-			// the same (SELECT team_id FROM projects WHERE id = ?) subquery
-			// production uses, so this proves project team → conversation
-			// team → view.
-			projID := nullTeamProjectID
-			if f.TeamID != "" {
-				projID = teamProjectID
-			}
-			creator := f.CreatorUserID
-			if creator == "" {
-				creator = runmode.LocalDefaultUserID
-			}
-			convID := uuid.New().String()
-			if _, err := conn.Exec(`
-				INSERT INTO conversations
-					(id, org_id, type, creator_user_id, team_id, visibility,
-					 trigger_type, origin, runtime, status, project_id, started_at)
-				VALUES (?, ?, 'curator', ?, (SELECT team_id FROM projects WHERE id = ?),
-				        'private', 'manual', 'curator', 'sdk', NULL, ?, ?)
-			`, convID, runmode.LocalDefaultOrgID, creator, projID, projID, f.CreatedAt); err != nil {
-				t.Fatalf("seed curator conversation: %v", err)
-			}
-			// The curator arm's model deliberately stays NULL — the wire
-			// contract never exposed a curator model.
-			return seedLedgerRow(t, convID, "", f.Cost, f.Tokens, f.CreatedAt)
 		},
 		System: func(t *testing.T, f dbtest.SystemSpendFixture) string {
 			t.Helper()

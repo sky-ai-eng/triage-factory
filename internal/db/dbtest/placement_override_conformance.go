@@ -111,7 +111,10 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		store, orgID := mk(t)
 		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "b/two", Replicas: 2})
 		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "a/one", PinnedInstanceID: "x"})
-		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindProject, KeyValue: "PROJ", Replicas: 1})
+		// key_kind is a free-text column (no FK/CHECK) — an arbitrary second
+		// kind here proves the ORDER BY (key_kind, key_value) sorts across
+		// kinds, not just within the one the app mints today.
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: "hostgroup", KeyValue: "HG", Replicas: 1})
 
 		list, err := store.List(ctx, orgID)
 		if err != nil {
@@ -120,10 +123,10 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		if len(list) != 3 {
 			t.Fatalf("expected 3 overrides, got %d: %+v", len(list), list)
 		}
-		// Ordered (key_kind, key_value): "project" sorts before "repo"
+		// Ordered (key_kind, key_value): "hostgroup" sorts before "repo"
 		// alphabetically, then key_value within a kind.
-		if list[0].KeyKind != domain.PlacementKindProject || list[0].KeyValue != "PROJ" {
-			t.Fatalf("first should be project/PROJ: %+v", list)
+		if list[0].KeyKind != "hostgroup" || list[0].KeyValue != "HG" {
+			t.Fatalf("first should be hostgroup/HG: %+v", list)
 		}
 		if list[1].KeyValue != "a/one" || list[2].KeyValue != "b/two" {
 			t.Fatalf("repo keys out of order: %+v", list)

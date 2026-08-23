@@ -104,8 +104,8 @@ func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, si
 
 // SpendByCategorySystemForTeam mirrors the Postgres admin-pool variant the
 // TFAC-482 per-team cap reads — SpendByCategorySystem narrowed to one team. The
-// team_id filter excludes the org's NULL-team rows (system overhead + non-team
-// curator). SQLite is N=1 / no RLS, so it's the same single-connection read with
+// team_id filter excludes the org's NULL-team rows (system overhead).
+// SQLite is N=1 / no RLS, so it's the same single-connection read with
 // the team predicate applied.
 func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	return s.spendByCategory(ctx, orgID, teamID, since, until)

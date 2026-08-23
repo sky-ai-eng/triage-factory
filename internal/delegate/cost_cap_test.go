@@ -444,8 +444,8 @@ func TestCheckTeamDailyCostCap_EntitlementOff_Dormant(t *testing.T) {
 }
 
 func TestCheckTeamDailyCostCap_OnlyTeamRowsCount(t *testing.T) {
-	// A team cap sums team_id rows only — system overhead + non-team curator
-	// (NULL team_id) never count. seedSpendAt writes a team row; seedSystemSpendAt
+	// A team cap sums team_id rows only — system overhead
+	// (NULL team_id) never counts. seedSpendAt writes a team row; seedSystemSpendAt
 	// writes a NULL-team system row that must be ignored.
 	database := newCostCapTestDB(t)
 	licenseGovernance(t)

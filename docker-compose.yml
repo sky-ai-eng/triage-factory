@@ -38,7 +38,7 @@
 # permissive enough for the in-container gVisor sandbox (netns + iptables
 # + runsc) — a tailored allowlist as of TFAC-608, not `unconfined`; see
 # docs/security/seccomp-profile.md. The control pod launches no sandbox —
-# curator chats home to executors and the brain's own LLM work is
+# every delegated run executes on an executor and the brain's own LLM work is
 # toolless direct calls — so it runs as an ordinary capless web service,
 # hostable even on platforms (managed Kubernetes / Railway / Render) that
 # block privileged primitives. Those platforms still can't host
@@ -559,9 +559,9 @@ services:
     # runs like any ordinary web service. Only the executor service below
     # references the hardening anchor.
     volumes:
-      # Tenant-data caches under StateRoot (/data in multi): per-org curator
-      # project state + control-side caches. (The sandbox rootfs cache lives
-      # on executors — control never extracts one.)
+      # Tenant-data caches under StateRoot (/data in multi): per-org project
+      # knowledge-base state + control-side caches. (The sandbox rootfs cache
+      # lives on executors — control never extracts one.)
       - tf-data:/data
     ports:
       - "3000:3000"

@@ -5,7 +5,7 @@ package runmode
 // input naming which half of the split this process runs:
 //
 //   - control  the API + brain half: HTTP/API/WS, migrations, the
-//              leader-elected background brain, curator forwarding.
+//              leader-elected background brain.
 //              Does NOT run the delegated-run dispatcher.
 //   - executor a shared-nothing sandbox worker: the run dispatcher,
 //              sandboxes, per-run credential sidecars, and the
@@ -66,8 +66,8 @@ const (
 	RoleAll DeployRole = "all"
 
 	// RoleControl is the API + background-brain role. Serves user HTTP/WS,
-	// runs migrations, hosts the leader-elected brain, forwards curator
-	// turns — but never claims or executes delegated runs.
+	// runs migrations, hosts the leader-elected brain — but never claims or
+	// executes delegated runs.
 	RoleControl DeployRole = "control"
 
 	// RoleExecutor is the shared-nothing sandbox-worker role: it drains the

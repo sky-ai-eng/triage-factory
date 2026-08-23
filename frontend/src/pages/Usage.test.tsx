@@ -83,7 +83,7 @@ const cat = (category: string, cost: number): UsageCategoryBucket => ({
 
 const ME: UsageMeResponse = {
   total_cost_usd: 12.5,
-  by_category: [cat('manual', 8), cat('curator', 4.5)],
+  by_category: [cat('manual', 8)],
   by_model: [{ model: 'claude-opus-4-8', cost: 8 }],
   by_day: [{ date: '2026-06-01', cost: 12.5 }],
 }
@@ -137,7 +137,7 @@ const ORG: UsageOrgResponse = {
   ],
   by_user: [{ user_id: 'u1', display_name: 'Alice', cost: 40 }],
   org_level: [{ category: 'system_overhead', cost: 10 }],
-  by_category: [cat('autonomous', 50), cat('curator', 40), cat('system_overhead', 10)],
+  by_category: [cat('autonomous', 50), cat('system_overhead', 10)],
   by_model: [{ model: 'claude-opus-4-8', cost: 90 }],
   by_day: [{ date: '2026-06-03', cost: 100 }],
   // by_rule is folded into /org in local mode only (multi-tenant orgs omit it).

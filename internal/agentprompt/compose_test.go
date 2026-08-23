@@ -30,7 +30,6 @@ func allSpecs() []Spec {
 			}
 			out = append(out, Spec{Surface: SurfaceMachinist, Runtime: rt, Family: FamilyClaude, Mode: mode})
 		}
-		out = append(out, Spec{Surface: SurfaceCurator, Runtime: RuntimeSDK, Family: FamilyClaude, Mode: mode})
 	}
 	return out
 }

@@ -77,7 +77,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, conversationID, outcome 
 func completeConversationReturning(ctx context.Context, q queryer, conversationID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	// The active claim this terminal write releases identifies the
 	// engagement's own message rows (they insert claim-stamped), so
-	// the lump settles claim-keyed — the curator turn release's shape.
+	// the lump settles claim-keyed — every claim release's shape.
 	// Read before the release below: a released claim is no longer
 	// findable.
 	var claimID string
@@ -1289,9 +1289,9 @@ func (s *conversationStore) EntitiesWithOpenConversations(ctx context.Context, o
 // --- Transcript / messages ---
 
 // InsertMessage attributes the row to an engagement: an explicit
-// non-empty msg.ClaimID always wins (the curator sink names its own
-// claim), otherwise claim_id resolves server-side to the conversation's
-// active claim. Rows written during an engagement belong to it; rows
+// non-empty msg.ClaimID always wins (a caller that already knows its own
+// claim id names it), otherwise claim_id resolves server-side to the
+// conversation's active claim. Rows written during an engagement belong to it; rows
 // written outside one (pending inputs, queued turns, injections)
 // correctly resolve NULL. A message racing its claim's release lands
 // NULL — harmless, the terminal settle's newest-row fallback still

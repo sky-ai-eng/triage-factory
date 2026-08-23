@@ -277,38 +277,6 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.Li
 	return s.List(ctx, orgID, opts)
 }
 
-func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	if err := assertLocalOrg(orgID); err != nil {
-		return nil, err
-	}
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch
-		FROM repositories
-		WHERE profile_text IS NOT NULL AND profile_text != ''
-		ORDER BY owner, repo
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []domain.Repository{}
-	for rows.Next() {
-		var p domain.Repository
-		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
-			return nil, err
-		}
-		p.Description = description.String
-		p.ProfileText = profileText.String
-		p.CloneURL = cloneURL.String
-		p.DefaultBranch = defaultBranch.String
-		p.BaseBranch = baseBranch.String
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
 func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames []string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
@@ -664,8 +632,7 @@ type rowScanner interface {
 const repoProfileFullColumns = `id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
 
 // scanRepositoryFull reads the repositories row shape shared by Get, List,
-// and the ref lookup. Distinct from ListWithContent's narrower projection —
-// that one skips the identity and clone_* columns.
+// and the ref lookup.
 func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString

@@ -1,3 +1,0 @@
-<harness>
-External actions — GitHub, Jira — go through the Triage Factory CLI, invoked as `triagefactory exec <verb>`. The verb reference is the <tools> block of this conversation.
-</harness>

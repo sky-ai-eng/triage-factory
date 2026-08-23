@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -19,8 +18,8 @@ import (
 // teamArchiveRig is the multi-mode fixture for the archive/restore lifecycle:
 // a real Postgres-backed teamsHandler (so the deleted_at filter + teams_update
 // RLS are live) plus an org with a founder (org owner) and a plain member who
-// is NOT an org admin. spawner + curator are nil getters — the no-active-work
-// path doesn't need them, and the cascade enumeration is pinned in the db tests.
+// is NOT an org admin. spawner is a nil getter — the no-active-work
+// path doesn't need it, and the cascade enumeration is pinned in the db tests.
 type teamArchiveRig struct {
 	h      *pgtest.Harness
 	s      *Server
@@ -50,7 +49,6 @@ func newTeamArchiveRig(t *testing.T) *teamArchiveRig {
 		az:        s.az,
 		allStores: stores,
 		spawner:   func() *delegate.Spawner { return nil },
-		curator:   func() *curator.Curator { return nil },
 	}
 	return &teamArchiveRig{h: h, s: s, th: th, orgID: orgID, teamID: teamID, owner: owner, member: member}
 }
@@ -78,7 +76,7 @@ func (r *teamArchiveRig) deletedAt(t *testing.T, teamID string) (set bool) {
 }
 
 // TestTeamArchive_OrgAdminArchivesAndCounts: the org owner archives the team —
-// 200, deleted_at set, zero-work counts returned (no runs / curator sessions),
+// 200, deleted_at set, a zero-work count returned (no runs seeded),
 // and the team disappears from the archived-list before / appears after.
 func TestTeamArchive_OrgAdminArchivesAndCounts(t *testing.T) {
 	r := newTeamArchiveRig(t)
@@ -92,7 +90,7 @@ func TestTeamArchive_OrgAdminArchivesAndCounts(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.CancelledRuns != 0 || resp.CancelledCuratorSessions != 0 {
+	if resp.CancelledRuns != 0 {
 		t.Errorf("counts = %+v; want zero (no active work seeded)", resp)
 	}
 	if !r.deletedAt(t, r.teamID) {

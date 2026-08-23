@@ -10,21 +10,12 @@ import (
 )
 
 const (
-	// FormatVersion is the manifest format version. v2 re-keyed the curator
-	// payload onto conversation + claims + messages (the shared-tables data
-	// model); v1 bundles (curator/requests.jsonl et al.) are rejected with
-	// UnsupportedFormatError.
+	// FormatVersion is the manifest format version. Bundles reporting a
+	// different version are rejected with UnsupportedFormatError.
 	FormatVersion = 2
 
 	manifestPath                      = "manifest.yaml"
 	knowledgePrefix                   = "knowledge-base/"
-	sessionPrefix                     = "session/"
-	sessionTranscriptPath             = "session/transcript.jsonl"
-	sessionSubagentsPrefix            = "session/subagents/"
-	sessionToolResultsPrefix          = "session/tool-results/"
-	curatorConversationPath           = "curator/conversation.json"
-	curatorClaimsPath                 = "curator/claims.jsonl"
-	curatorMessagesPath               = "curator/messages.jsonl"
 	defaultExportFilenameSuffix       = ".tfproject"
 	maxManifestBytes            int64 = 4 << 20 // 4MB is ample for the metadata.
 )
@@ -80,12 +71,11 @@ func (e *MissingReposError) Error() string {
 
 // Manifest is the top-level bundle metadata contract.
 type Manifest struct {
-	FormatVersion int              `yaml:"format_version"`
-	ExportedAt    time.Time        `yaml:"exported_at"`
-	Project       ManifestProject  `yaml:"project"`
-	Session       *ManifestSession `yaml:"session,omitempty"`
+	FormatVersion int             `yaml:"format_version"`
+	ExportedAt    time.Time       `yaml:"exported_at"`
+	Project       ManifestProject `yaml:"project"`
 	// Warnings records non-fatal gaps in the export (for example a
-	// session transcript that existed but was unreadable by the
+	// knowledge-base file that existed but was unreadable by the
 	// exporting server process) so a bundle that ships without
 	// something says so instead of silently omitting it. Informational
 	// only — import ignores it.
@@ -103,11 +93,6 @@ type ManifestProject struct {
 	// bundles that include it import without YAML errors. The value is
 	// dropped on import.
 	SummaryMD string `yaml:"summary_md,omitempty"`
-}
-
-type ManifestSession struct {
-	CuratorSessionID string `yaml:"curator_session_id"`
-	ResolvedCwd      string `yaml:"resolved_cwd"`
 }
 
 // Validate enforces v1 manifest invariants.

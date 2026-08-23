@@ -13,10 +13,9 @@ import (
 // narrows what an ACCIDENT reaches and nothing about what an allowlisted
 // command may deliberately do.
 //
-// Shared across runtimes — both delegate (per-task agents running in git
-// worktrees) and curator (per-project chat sessions running from
-// `~/.triagefactory/projects/<id>/`) feed this string to claude. The threat
-// model is identical: same keychain creds, same prompt-injection surface,
+// Shared across runtimes — delegate (per-task agents running in git
+// worktrees) feeds this string to claude. The threat model is identical
+// across every consumer: same keychain creds, same prompt-injection surface,
 // same network-exfil concerns. A future runtime that needs a meaningfully
 // different surface should still derive it from this base rather than
 // maintaining a parallel list.
@@ -94,10 +93,10 @@ func BuildAllowedToolsFor(o AllowedToolsOptions) string {
 		// local history inspection and branch manipulation, while excluding
 		// config/credential plumbing and other host-affecting surfaces.
 		//
-		// Each subcommand has a parallel `git -C * <sub>` form. The Curator
-		// runtime materializes a worktree per pinned repo at
-		// <projectDir>/repos/<owner>/<repo>/, and the agent navigates them
-		// with `git -C ./repos/<x> log` rather than `cd`-ing — that's the
+		// Each subcommand has a parallel `git -C * <sub>` form. `workspace add`
+		// materializes a worktree per repo under the run root
+		// (`<runRoot>/<owner>/<repo>/`), and the agent navigates them with
+		// `git -C ./<owner>/<repo> log` rather than `cd`-ing — that's the
 		// stateless pattern an LLM is way better at maintaining across
 		// turns. We deliberately don't add a catchall `Bash(git -C *)`:
 		// `git -C /tmp config --global ...` is equivalent to `git config
@@ -188,8 +187,8 @@ func BuildAllowedToolsFor(o AllowedToolsOptions) string {
 		"Bash(xz *)", "Bash(unxz *)",
 
 		// Filesystem ops. Write/Edit cover most cases; rm/rmdir are here
-		// because the curator legitimately deletes obsolete knowledge
-		// notes, and refusing it just forces the agent to use awkward
+		// because an agent legitimately deletes obsolete files as part of
+		// its work, and refusing it just forces the agent to use awkward
 		// workarounds (rename to .bak, move to /tmp via mv) that don't
 		// actually close any threat. The agent already has mv * and
 		// Write on absolute paths, so blanket rm doesn't open a new

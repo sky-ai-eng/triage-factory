@@ -175,8 +175,8 @@ func TestNudgeCredentialRelay_AfterStopDoesNotBlock(t *testing.T) {
 	}
 }
 
-// TestNudgeCredentialRelay_UnwiredIsNoOp pins the nil-safe shape the curator
-// and local paths rely on: no nudge channel means no relay to nudge.
+// TestNudgeCredentialRelay_UnwiredIsNoOp pins the nil-safe shape a caller
+// with no live sidecar relies on: no nudge channel means no relay to nudge.
 func TestNudgeCredentialRelay_UnwiredIsNoOp(t *testing.T) {
 	if err := (*runSidecar)(nil).nudgeCredentialRelay(context.Background()); err != nil {
 		t.Fatalf("nil sandbox nudge = %v, want nil", err)

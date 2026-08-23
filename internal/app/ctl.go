@@ -71,7 +71,7 @@ func (a *App) dispatchCtl(payload string) {
 		if a.spawner != nil {
 			a.spawner.HandleCtlNotification(payload)
 		}
-	case "trigger", "pollsoon", "cred_request", "curator_cred_request", "sources_changed":
+	case "trigger", "pollsoon", "cred_request", "sources_changed":
 		var msg ctlbus.Message
 		if err := json.Unmarshal([]byte(payload), &msg); err != nil {
 			appLog.Warn("tf_ctl: malformed relay message; dropping", "error", err)
@@ -83,51 +83,6 @@ func (a *App) dispatchCtl(payload string) {
 		// kick there anyway (local never reaches this listener at all).
 		if a.wsBackplane != nil {
 			a.wsBackplane.HandleCtlKick(payload)
-		}
-	case "curator_new":
-		// Curator homing: nudge THIS pod's claim loop to scan for freshly
-		// enqueued turns. Broadcast + self-filter — the claim's own home gate
-		// admits only turns homed here, so a pod that isn't the home simply
-		// finds nothing. The backstop scan covers a dropped notification.
-		if a.spawner != nil {
-			a.spawner.WakeDispatcher()
-		}
-	case "curator_cancel":
-		// Curator homing (spec §6.3): fire the in-process session cancel if THIS
-		// pod holds the project's live session. Broadcast + self-filter —
-		// CancelLocal is a no-op on every pod but the home. CancelLocal (not
-		// Cancel) so a delivered cancel doesn't re-broadcast onto the bus.
-		if a.curator != nil {
-			var msg ctlbus.Message
-			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
-				appLog.Warn("tf_ctl: malformed curator_cancel; dropping", "error", err)
-				return
-			}
-			a.curator.CancelLocal(msg.ProjectID)
-		}
-	case "kb_changed":
-		// Project knowledge base: a control-pod KB upload/delete
-		// nudges the home executor to materialize the panel write into a live
-		// session's dir; op="project_deleted" drops the executor's stale
-		// materialized project dir. Broadcast + self-filter — the curator's own
-		// live-session check makes this a no-op on every pod but the one running
-		// the project's session (nil curator on a plain control pod → no-op).
-		if a.curator != nil {
-			var msg ctlbus.Message
-			if err := json.Unmarshal([]byte(payload), &msg); err != nil {
-				appLog.Warn("tf_ctl: malformed kb_changed; dropping", "error", err)
-				return
-			}
-			// Materialize/drop do store + disk I/O, so run off the LISTEN read
-			// loop (which every dispatchCtl branch must not block).
-			switch msg.Op {
-			case "project_deleted":
-				go a.curator.DropMaterializedKBIfIdle(msg.OrgID, msg.ProjectID)
-			default:
-				if a.curator.HasLiveSession(msg.ProjectID) {
-					go a.curator.MaterializeKB(context.Background(), msg.OrgID, msg.ProjectID)
-				}
-			}
 		}
 	default:
 		appLog.Warn("tf_ctl: unknown message kind", "kind", probe.Kind)

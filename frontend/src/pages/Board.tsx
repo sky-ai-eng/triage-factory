@@ -601,10 +601,7 @@ export default function Board() {
   useWebSocket(
     useCallback(
       (event: WSEvent) => {
-        // conversation_update carries a conversation_id for a delegated conversation and
-        // a project_id (no conversation_id) for a curator turn — the board only
-        // tracks delegated conversations, so it ignores the curator variant.
-        if (event.type === 'conversation_update' && event.conversation_id) {
+        if (event.type === 'conversation_update') {
           const conversationID = event.conversation_id
           const status = event.data.status ?? ''
           let matched = false
@@ -712,15 +709,14 @@ export default function Board() {
               })
             })
             .catch(() => {})
-        } else if (event.type === 'message' && event.conversation_id) {
+        } else if (event.type === 'message') {
           // Live conversation-log tick. AgentCard renders from the bounded per-conversation feed
           // keyed by conversation ID; without this, new agent output only surfaces
           // after a status-change fetchTasks pass. Folding into the feed
           // (rather than appending to a full message array) keeps board state
           // bounded and the per-event work O(1). appendToFeed returns the same
           // reference for a display-no-op message (tool results, mostly) —
-          // return prev in that case so React skips the board re-render. A
-          // curator `message` (project_id, no conversation_id) is ignored here.
+          // return prev in that case so React skips the board re-render.
           const conversationID = event.conversation_id
           setConversationFeeds((prev) => {
             const cur = prev[conversationID]

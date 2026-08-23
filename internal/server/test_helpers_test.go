@@ -192,8 +192,8 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 
 // seedConfiguredRepo tracks owner/repo on the default team so tests that
 // pin repos pass the validatePinnedRepos existence check (which reads
-// team_github_repos), and upserts the matching repositories row the
-// Curator's repo-materialization eventually wants more of (clone_url,
+// team_github_repos), and upserts the matching repositories row with
+// the fields repo-materialization eventually wants more of (clone_url,
 // default_branch). The team's tracked set is the source of truth; the
 // team_github_repos insert is accumulative so multiple seed calls don't
 // clobber each other the way ReplaceForTeam would.

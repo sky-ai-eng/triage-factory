@@ -39,7 +39,6 @@ type RepositoryStoreFactory func(t *testing.T) (store db.RepositoryStore, orgID 
 //   - Upsert preserves clone_status/clone_error/clone_error_kind on
 //     a re-profile (same reason).
 //   - List returns ordered "owner/repo" entries.
-//   - ListWithContent filters out rows with empty profile_text.
 //   - SetConfigured: new entries get skeleton rows, dropped entries
 //     are deleted, existing rows are preserved (profile data,
 //     base_branch, clone state).
@@ -207,9 +206,8 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("GetByRef_returns_nil_on_miss", func(t *testing.T) {
 		// A name nobody has a row for is an answer, not a fault: it is what
-		// `workspace add` reports as "not configured", what the curator skips
-		// a pinned repo on, and what leaves the universal protected-branch set
-		// standing. So it stays a nil.
+		// `workspace add` reports as "not configured", and what leaves the
+		// universal protected-branch set standing. So it stays a nil.
 		s, orgID := mk(t)
 		got, err := s.GetByRef(ctx, orgID, repoRef("no/such-repo"))
 		if err != nil {
@@ -415,30 +413,6 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// hatch and must return everything rather than an empty page.
 		if all, _, err := s.List(ctx, orgID, db.Unwindowed); err != nil || len(all) != 3 {
 			t.Errorf("unwindowed List = %d rows, %v; want all 3", len(all), err)
-		}
-	})
-
-	t.Run("ListWithContent_filters_empty_profile_text", func(t *testing.T) {
-		s, orgID := mk(t)
-		if _, err := s.Upsert(ctx, orgID, domain.Repository{
-			Owner: "o", Repo: "with",
-			ProfileText: "real content", DefaultBranch: "main",
-		}); err != nil {
-			t.Fatalf("Upsert with: %v", err)
-		}
-		if _, err := s.Upsert(ctx, orgID, domain.Repository{
-			Owner: "o", Repo: "empty",
-			ProfileText: "", DefaultBranch: "main",
-		}); err != nil {
-			t.Fatalf("Upsert empty: %v", err)
-		}
-
-		got, err := s.ListWithContent(ctx, orgID)
-		if err != nil {
-			t.Fatalf("ListWithContent: %v", err)
-		}
-		if len(got) != 1 || got[0].Slug() != "o/with" {
-			t.Errorf("ListWithContent should only return rows with profile_text, got %v", projectIDs(got))
 		}
 	})
 
@@ -1243,14 +1217,6 @@ func setBaseBranch(ctx context.Context, s db.RepositoryStore, orgID, slug, branc
 	}
 	_, err = s.UpdateBaseBranch(ctx, orgID, row.ID, branch)
 	return err
-}
-
-func projectIDs(profiles []domain.Repository) []string {
-	out := make([]string, len(profiles))
-	for i, p := range profiles {
-		out[i] = p.Slug()
-	}
-	return out
 }
 
 func equalStringSlice(a, b []string) bool {

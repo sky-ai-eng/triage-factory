@@ -92,7 +92,6 @@ func (s *Store) runTx(ctx context.Context, orgID, userID string, fn func(db.TxSt
 		JiraStatusRules:          newJiraStatusRulesStore(tx, tx),
 		TeamGitHubGroups:         newTeamGitHubGroupsStore(tx, tx),
 		TeamGitHubRepos:          newTeamGitHubReposStore(tx, tx),
-		Curator:                  newCuratorStore(tx),
 		GitHubApps:               newGitHubAppsStore(tx, newSecretStore()),
 		JiraApps:                 newJiraAppsStore(tx),
 		ShippedDefaults:          newTxShippedDefaultsStore(tx, newEventHandlerStore(tx)),

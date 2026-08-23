@@ -143,8 +143,6 @@ func TestCheckoutOpsNeverUseUnauthWrapper(t *testing.T) {
 	files := []string{
 		"worktree_pr.go",
 		"worktree_branch.go",
-		"curator.go",
-		"curator_shared.go",
 		"snapshot.go",
 	}
 	materializingOps := []string{`"worktree", "add"`, `"reset", "--hard"`}

@@ -653,7 +653,7 @@ var allowedMountOptions = map[string]struct{}{
 // prefix/equality comparisons below operate on the actual path a bind
 // mount would read, not the caller's possibly-symlinked claim. Without
 // this, a compromised orchestrator — which legitimately owns and writes
-// its own org's tree (worktrees, curator-repos) — could plant a symlink
+// its own org's tree (repos, projects) — could plant a symlink
 // INSIDE its own org's subtree pointing at another org's data (or
 // anywhere else) and pass the lexically-in-scope symlink path as a mount
 // source or worktree; a purely lexical filepath.Rel/== check would wave
@@ -694,7 +694,7 @@ func realPath(p string) (string, error) {
 // the MIXED shape — org A's run identity paired with org B's data.
 //
 // Two shapes are legitimate, matched against the actual producers
-// (internal/worktree + internal/curator, verified — not assumed):
+// (internal/worktree, verified — not assumed):
 //
 //   - The ephemeral per-run tree: GitHub PR / Jira / Slack delegated task
 //     runs materialize (or park) their whole working tree under
@@ -706,10 +706,10 @@ func realPath(p string) (string, error) {
 //     not. These runs are org-blind by construction (the tree doesn't outlive
 //     the run), so hasScope is false and no OTHER mount may claim an org scope
 //     either — there is nothing for it to be consistent with.
-//   - The org-scoped state-root tree: Curator sessions use
-//     paths.ProjectKBDir(orgID, projectID), i.e. <StateRoot>/orgs/<orgID>/…
-//     in multi mode. orgPrefix is <StateRoot>/orgs/<orgID>; the curator's
-//     shared read-only repo mounts must live under this same prefix.
+//   - The org-scoped state-root tree: paths.ProjectKBDir(orgID, projectID),
+//     i.e. <StateRoot>/orgs/<orgID>/… in multi mode. orgPrefix is
+//     <StateRoot>/orgs/<orgID>; every other mount under this run must live
+//     under this same prefix.
 //
 // Anything else — an arbitrary host path, a worktree one level too
 // shallow to name an org, a symlink-clean but out-of-tree path — is
@@ -738,7 +738,7 @@ func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix 
 	orgsRoot, err := realPath(filepath.Join(root, "orgs"))
 	if err != nil {
 		// A missing orgs tree just means no org-scoped worktree exists yet (a
-		// fresh deploy with no curator sessions). The worktree, having matched
+		// fresh deploy with no org-scoped sessions). The worktree, having matched
 		// neither of this run's own trees, is simply not a legitimate shape —
 		// report that rather than the bare lstat of the absent orgs dir.
 		if errors.Is(err, fs.ErrNotExist) {
@@ -776,8 +776,8 @@ func worktreeScope(conversationID, memoryNamespace, worktree string) (orgPrefix 
 //     equal TrustedAgentHostSocketPath(conversationID) — the broker didn't create
 //     this file (cmd/exec/agenthost did, host-side, before the launch
 //     RPC), so it validates rather than overrides.
-//   - Everything else (today: the curator's shared read-only repo
-//     checkouts): the Source MUST be under the SAME org prefix
+//   - Everything else (e.g. a shared read-only repo checkout under the
+//     same org-scoped tree): the Source MUST be under the SAME org prefix
 //     worktreeScope derived from Worktree. If Worktree carried no org
 //     scope (the delegated-task-run shape), NO mount may fall in this
 //     bucket at all — there is no legitimate one for that shape.

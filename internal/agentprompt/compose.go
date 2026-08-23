@@ -67,7 +67,7 @@ func block(path string) string {
 // optimization, never the authority on what is representable.
 var staticPrompts = func() map[Spec]string {
 	out := map[Spec]string{}
-	for _, surface := range []Surface{SurfaceMachinist, SurfaceCurator} {
+	for _, surface := range []Surface{SurfaceMachinist} {
 		for _, runtime := range []Runtime{RuntimeSDK, RuntimeNative} {
 			for _, mode := range []Mode{ModeLocal, ModeMulti} {
 				spec := Spec{Surface: surface, Runtime: runtime, Family: FamilyClaude, Mode: mode}

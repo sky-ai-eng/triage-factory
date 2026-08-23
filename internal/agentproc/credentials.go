@@ -33,7 +33,7 @@ type SystemSecretGetter interface {
 
 // NewSystemSecretsReader adapts a store's claims-free GetSystem door to
 // the SecretsReader.Get shape so background run paths (delegation,
-// resume, scorer, classifier, profiler, curator) can resolve per-org LLM
+// resume, scorer, classifier, profiler) can resolve per-org LLM
 // credentials without a request JWT. These run claims-free, so they MUST
 // use the system door, not the RLS-checked Get — otherwise the multi-mode
 // nil-Secrets error just trades for an RLS denial.

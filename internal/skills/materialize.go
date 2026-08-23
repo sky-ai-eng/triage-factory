@@ -201,9 +201,8 @@ func synthesizeSkillFile(slug, promptName, body, brief string) string {
 
 // WipeBlueprintSkills removes the blueprint step skill directories so step
 // N+1 doesn't see step N's SKILL.md. The whole `.claude/skills/`
-// directory is wiped — blueprints don't compose with the curator skill
-// materialization (blueprints run on PRs/Jira, the curator runs on
-// projects), so collateral damage to other materialized skills is
+// directory is wiped — nothing else materializes skills into a delegated
+// run's worktree, so collateral damage to other materialized skills is
 // not a concern in this code path.
 //
 // LOCAL mode only, paired with MaterializeStepSkill. A sandboxed run's tree is

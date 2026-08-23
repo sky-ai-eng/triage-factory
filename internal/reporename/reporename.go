@@ -82,8 +82,9 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 	return applied
 }
 
-// disposeOldDirs reclaims the directories the old slug named — the bare clone
-// and the shared curator checkout — now that nothing derives their paths. After
+// disposeOldDirs reclaims the directories the old slug named — the bare
+// clone and every cold checkout it still registers — now that nothing
+// derives their paths. After
 // the commit and best-effort on purpose, like the coverage invalidation above:
 // a directory removal cannot join the transaction, and failing to reclaim disk
 // must never fail the rename. Local mode is the mode this exists for (its

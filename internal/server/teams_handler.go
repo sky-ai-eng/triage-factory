@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -26,13 +25,12 @@ type teamsHandler struct {
 	tx        db.TxRunner
 	az        *authz.Checker
 	allStores db.Stores
-	// spawner / curator are read through getters so the archive force-stop
-	// cascade (TFAC-448) always sees the current delegation spawner + curator
-	// runtime, which are wired onto the server after construction (SetSpawner /
-	// SetCurator) and hot-swapped on credential change. Either may be nil before
-	// startup finishes; the archive handler guards.
+	// spawner is read through a getter so the archive force-stop cascade
+	// (TFAC-448) always sees the current delegation spawner, which is wired
+	// onto the server after construction (SetSpawner) and hot-swapped on
+	// credential change. May be nil before startup finishes; the archive
+	// handler guards.
 	spawner func() *delegate.Spawner
-	curator func() *curator.Curator
 }
 
 // teamJSON is the one wire shape for a team: the list rows, the single read,

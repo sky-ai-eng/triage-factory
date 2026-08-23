@@ -28,10 +28,6 @@ func (s *countingStore) DeleteStaleInstances(_ context.Context, staleAfter time.
 	return 0, nil
 }
 
-func (s *countingStore) CancelStrandedCuratorTurns(context.Context, time.Duration) (int, error) {
-	panic("CancelStrandedCuratorTurns not expected from RunRegistryGC")
-}
-
 func (s *countingStore) HealClaimDesyncs(context.Context) (int, error) {
 	panic("HealClaimDesyncs not expected from RunRegistryGC")
 }

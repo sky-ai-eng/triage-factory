@@ -183,7 +183,7 @@ type Host struct {
 	ClaudeDir string
 
 	// StateRoot is <home>/.triagefactory, masked with a tmpfs so the SQLite
-	// database, the bare clone cache, the curator projects and every other
+	// database, the bare clone cache, the project working dirs and every other
 	// conversation's gh-channel dir are simply absent.
 	StateRoot string
 

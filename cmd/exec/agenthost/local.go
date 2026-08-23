@@ -1402,32 +1402,27 @@ func (c *LocalClient) legacyRepoClient(ctx context.Context, owner, repo string) 
 }
 
 // authorizeRepo is the exec-gh repo gate (multi mode): the run may only act on
-// a repo its team tracks AND that it has EITHER materialized in conversation_worktrees
-// (a delegated run's task repo — recorded at setup — or a workspace-add'd repo)
-// OR that appears in the turn's pinned set (a curator turn, which creates no
-// conversation_worktrees rows). Same team-tracks predicate as the git proxy's
-// Authorize; the second arm is the conversation_worktrees ledger or the pinned set. A
-// partial test wiring (nil stores) skips the gate. Both a hard deny and a
-// fail-closed backend error record a git_denied audit row before returning, so
-// a transient DB blip during a denied gh op still leaves an audit trail —
-// symmetric with the proxy's "authorize-error" path.
+// a repo its team tracks AND that it has materialized in conversation_worktrees
+// (a delegated run's task repo — recorded at setup — or a workspace-add'd repo).
+// Same team-tracks predicate as the git proxy's Authorize; the second arm is
+// the conversation_worktrees ledger. A partial test wiring (nil stores) skips
+// the gate. Both a hard deny and a fail-closed backend error record a
+// git_denied audit row before returning, so a transient DB blip during a
+// denied gh op still leaves an audit trail — symmetric with the proxy's
+// "authorize-error" path.
 //
-// The three hard-deny outcomes are deliberately distinct, because the agent's
+// The two hard-deny outcomes are deliberately distinct, because the agent's
 // recovery differs and a bare "not authorized" left it guessing (the common
 // case: a Slack-triggered taskless run that hasn't cloned anything yet, so no
-// repo is materialized). The git proxy's deny path mirrors these same three —
+// repo is materialized). The git proxy's deny path mirrors these same two —
 // keep the wording in sync with internal/delegate's gitDeny* builders:
 //
 //   - Untracked ("repo-not-tracked") — the repo isn't attached to this run's
 //     team, so it never appears in this run's `workspace list` and the agent
 //     cannot self-serve. Only a team admin adding it as a tracked repo helps.
-//   - Tracked, delegated run, not materialized ("repo-not-materialized") — the
-//     repo IS in this run's `workspace list` ("available"), just not persisted
-//     into the run's worktrees yet. The agent fixes it with `workspace add`.
-//   - Tracked, curator turn, not in the pinned set ("repo-not-attached") — a
-//     curator turn authorizes off its fixed pinned set and materializes
-//     nothing, so `workspace add` is NOT the fix; the repo is simply outside
-//     the project. Point the agent at a repo the project already carries.
+//   - Tracked, not materialized ("repo-not-materialized") — the repo IS in
+//     this run's `workspace list` ("available"), just not persisted into the
+//     run's worktrees yet. The agent fixes it with `workspace add`.
 func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) error {
 	if !c.gateWired {
 		return nil
@@ -1441,20 +1436,6 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 	if !tracks {
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-tracked")
 		return fmt.Errorf("repo %s is not tracked by this team; a team admin must add it as a tracked repo in Settings before it can be used", repoID)
-	}
-	// Curator turns carry their authorized set explicitly (no conversation_worktrees
-	// ledger); a delegated run passes an empty PinnedRepos so this arm is
-	// inert and the ledger check below is the sole gate, unchanged.
-	for _, p := range c.info.PinnedRepos {
-		if strings.EqualFold(p, repoID) {
-			return nil
-		}
-	}
-	// A non-empty pinned set marks a curator turn: it materializes nothing, so
-	// a tracked-but-unpinned repo is outside the project, not merely un-cloned.
-	if len(c.info.PinnedRepos) > 0 {
-		c.RecordGitDenied(ctx, owner, repo, "", "gh", "repo-not-attached")
-		return fmt.Errorf("repo %s is not attached to this project, so it cannot be accessed here; use a repo attached to this project instead", repoID)
 	}
 	rows, lerr := c.rt.ListConversationWorktrees(ctx)
 	if lerr != nil {

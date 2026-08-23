@@ -68,31 +68,28 @@ func TestParseUsageWindow(t *testing.T) {
 func usageStrPtr(s string) *string { return &s }
 
 // usageTestRows is the fixed cross-source set the aggregation assertions read:
-// two team-A runs (manual by u1, autonomous fired by trg1), a team-A curator by
-// u1, a NULL-team curator by u2, and a NULL-team system row.
+// two team-A runs (manual by u1, autonomous fired by trg1), and a NULL-team
+// system row.
 func usageTestRows() []domain.SpendRow {
 	day := func(d int) time.Time { return time.Date(2026, 6, d, 10, 0, 0, 0, time.UTC) }
 	return []domain.SpendRow{
 		{Source: "run", SourceID: "r1", Category: domain.SpendCategoryManual, CreatorUserID: usageStrPtr("u1"), Model: usageStrPtr("opus"), TeamID: usageStrPtr("tA"), TotalCostUSD: 1.00, InputTokens: 100, OutputTokens: 10, CacheReadTokens: 5, CacheCreationTokens: 1, OccurredAt: day(15)},
 		{Source: "run", SourceID: "r2", Category: domain.SpendCategoryAutonomous, TriggerID: usageStrPtr("trg1"), Model: usageStrPtr("haiku"), TeamID: usageStrPtr("tA"), TotalCostUSD: 0.25, InputTokens: 20, OutputTokens: 2, OccurredAt: day(16)},
-		{Source: "curator", SourceID: "c1", Category: domain.SpendCategoryCurator, CreatorUserID: usageStrPtr("u1"), TeamID: usageStrPtr("tA"), TotalCostUSD: 0.50, InputTokens: 11, OccurredAt: day(15)},
-		{Source: "curator", SourceID: "c2", Category: domain.SpendCategoryCurator, CreatorUserID: usageStrPtr("u2"), TotalCostUSD: 0.10, OccurredAt: day(17)},
 		{Source: "system", SourceID: "s1", Category: domain.SpendCategorySystemOverhead, Model: usageStrPtr("haiku"), TotalCostUSD: 0.05, OccurredAt: day(18)},
 	}
 }
 
 func TestSumSpendCost(t *testing.T) {
-	if got := sumSpendCost(usageTestRows()); !floatEq(got, 1.90) {
-		t.Errorf("sumSpendCost = %v, want 1.90", got)
+	if got := sumSpendCost(usageTestRows()); !floatEq(got, 1.30) {
+		t.Errorf("sumSpendCost = %v, want 1.30", got)
 	}
 }
 
 func TestSpendByCategory(t *testing.T) {
 	got := spendByCategory(usageTestRows())
-	// Sorted by category: autonomous, curator, manual, system_overhead.
+	// Sorted by category: autonomous, manual, system_overhead.
 	want := []usageCategoryBucket{
 		{Category: domain.SpendCategoryAutonomous, Cost: 0.25, InputTokens: 20, OutputTokens: 2},
-		{Category: domain.SpendCategoryCurator, Cost: 0.60, InputTokens: 11},
 		{Category: domain.SpendCategoryManual, Cost: 1.00, InputTokens: 100, OutputTokens: 10, CacheReadTokens: 5, CacheCreationTokens: 1},
 		{Category: domain.SpendCategorySystemOverhead, Cost: 0.05},
 	}
@@ -109,8 +106,11 @@ func TestSpendByCategory(t *testing.T) {
 }
 
 func TestSpendByModel_SkipsNilModel(t *testing.T) {
-	got := spendByModel(usageTestRows())
-	// curator rows (NULL model) excluded; haiku = autonomous 0.25 + system 0.05.
+	rows := append(usageTestRows(),
+		domain.SpendRow{Source: "run", SourceID: "r3", Category: domain.SpendCategoryManual, TotalCostUSD: 0.50, OccurredAt: time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)},
+	)
+	got := spendByModel(rows)
+	// r3 (NULL model) excluded; haiku = autonomous 0.25 + system 0.05.
 	// Sorted cost-desc: opus (1.00), haiku (0.30).
 	want := []usageModelBucket{{Model: "opus", Cost: 1.00}, {Model: "haiku", Cost: 0.30}}
 	if len(got) != len(want) {
@@ -125,7 +125,7 @@ func TestSpendByModel_SkipsNilModel(t *testing.T) {
 
 // TestSpendModelBreakdowns_SkipSyntheticModel covers the rows the runtime
 // composes itself (an API-error or interrupt line): they name no model, so the
-// per-model breakdowns drop them exactly like a NULL-model curator row. Their
+// per-model breakdowns drop them exactly like a NULL-model row. Their
 // dollars are real and still land in the period total and in by_day.
 func TestSpendModelBreakdowns_SkipSyntheticModel(t *testing.T) {
 	day := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
@@ -155,9 +155,8 @@ func TestSpendModelBreakdowns_SkipSyntheticModel(t *testing.T) {
 func TestSpendByDay(t *testing.T) {
 	got := spendByDay(usageTestRows())
 	want := []usageDayBucket{
-		{Date: "2026-06-15", Cost: 1.50}, // r1 + c1
+		{Date: "2026-06-15", Cost: 1.00}, // r1
 		{Date: "2026-06-16", Cost: 0.25}, // r2
-		{Date: "2026-06-17", Cost: 0.10}, // c2
 		{Date: "2026-06-18", Cost: 0.05}, // s1
 	}
 	if len(got) != len(want) {
@@ -171,8 +170,11 @@ func TestSpendByDay(t *testing.T) {
 }
 
 func TestSpendByDayModel_SkipsNilModelSortedByDateThenModel(t *testing.T) {
-	got := spendByDayModel(usageTestRows())
-	// Curator rows (NULL model) excluded — c1 (06-15) and c2 (06-17) drop out.
+	rows := append(usageTestRows(),
+		domain.SpendRow{Source: "run", SourceID: "r3", Category: domain.SpendCategoryManual, TotalCostUSD: 0.50, OccurredAt: time.Date(2026, 6, 17, 10, 0, 0, 0, time.UTC)},
+	)
+	got := spendByDayModel(rows)
+	// r3 (NULL model) excluded — 06-17 drops out.
 	// Sorted by date, then model: r1 opus (06-15), r2 haiku (06-16), s1 haiku (06-18).
 	want := []usageDayModelBucket{
 		{Date: "2026-06-15", Model: "opus", Cost: 1.00},
@@ -190,16 +192,14 @@ func TestSpendByDayModel_SkipsNilModelSortedByDateThenModel(t *testing.T) {
 	}
 }
 
-func TestSpendByUser_ManualAndCuratorOnly(t *testing.T) {
+func TestSpendByUser_ManualOnly(t *testing.T) {
 	profiles := map[string]userProfile{
 		"u1": {name: "Alice", avatar: "https://ex/a.png"},
-		"u2": {name: "Bob"}, // no avatar → AvatarURL omitted
 	}
 	got := spendByUser(usageTestRows(), profiles)
-	// Autonomous (NULL creator) + system (NULL creator) excluded. Sorted cost-desc.
+	// Autonomous (NULL creator) + system (NULL creator) excluded.
 	want := []usageUserBucket{
-		{UserID: "u1", DisplayName: "Alice", AvatarURL: "https://ex/a.png", Cost: 1.50}, // r1 + c1
-		{UserID: "u2", DisplayName: "Bob", Cost: 0.10},                                  // c2
+		{UserID: "u1", DisplayName: "Alice", AvatarURL: "https://ex/a.png", Cost: 1.00}, // r1
 	}
 	if len(got) != len(want) {
 		t.Fatalf("byUser = %+v, want %+v", got, want)
@@ -225,20 +225,19 @@ func TestSpendByRule_AutonomousOnly(t *testing.T) {
 func TestSpendByTeam_ExcludesNullTeam(t *testing.T) {
 	names := map[string]string{"tA": "Team A"}
 	got := spendByTeam(usageTestRows(), names)
-	// c2 (NULL team) + s1 (NULL team) excluded; tA = r1 + r2 + c1.
+	// s1 (NULL team) excluded; tA = r1 + r2.
 	if len(got) != 1 {
 		t.Fatalf("byTeam = %+v, want 1 bucket", got)
 	}
-	if got[0].TeamID != "tA" || got[0].TeamName != "Team A" || !floatEq(got[0].Cost, 1.75) {
-		t.Errorf("byTeam[0] = %+v, want {tA, Team A, 1.75}", got[0])
+	if got[0].TeamID != "tA" || got[0].TeamName != "Team A" || !floatEq(got[0].Cost, 1.25) {
+		t.Errorf("byTeam[0] = %+v, want {tA, Team A, 1.25}", got[0])
 	}
 }
 
 func TestSpendOrgLevel_NullTeamRowsByCategory(t *testing.T) {
 	got := spendOrgLevel(usageTestRows())
-	// NULL-team rows: c2 (curator 0.10) + s1 (system_overhead 0.05), by category.
+	// NULL-team rows: s1 (system_overhead 0.05), by category.
 	want := []usageOrgLevelBucket{
-		{Category: domain.SpendCategoryCurator, Cost: 0.10},
 		{Category: domain.SpendCategorySystemOverhead, Cost: 0.05},
 	}
 	if len(got) != len(want) {
@@ -266,19 +265,19 @@ func TestUsageEndpoints_Local(t *testing.T) {
 	t.Run("me_own_spend_only", func(t *testing.T) {
 		var resp usageMeResponse
 		doUsage(t, s, "/api/me/usage?since=2000-01-01", &resp)
-		// Only the local user's manual run (1.00) + their two curator turns
-		// (0.50 + 0.10); the autonomous run + system row carry a NULL creator.
-		if !floatEq(resp.TotalCostUSD, 1.60) {
-			t.Errorf("/me total = %v, want 1.60", resp.TotalCostUSD)
+		// Only the local user's manual run (1.00); the autonomous run + system
+		// row carry a NULL creator.
+		if !floatEq(resp.TotalCostUSD, 1.00) {
+			t.Errorf("/me total = %v, want 1.00", resp.TotalCostUSD)
 		}
 		cats := categoryCosts(resp.ByCategory)
-		if !floatEq(cats[domain.SpendCategoryManual], 1.00) || !floatEq(cats[domain.SpendCategoryCurator], 0.60) {
-			t.Errorf("/me by_category = %+v, want manual 1.00 + curator 0.60", resp.ByCategory)
+		if !floatEq(cats[domain.SpendCategoryManual], 1.00) {
+			t.Errorf("/me by_category = %+v, want manual 1.00", resp.ByCategory)
 		}
 		if _, ok := cats[domain.SpendCategoryAutonomous]; ok {
 			t.Errorf("/me by_category included autonomous (NULL creator should be excluded): %+v", resp.ByCategory)
 		}
-		// by_model: only the manual run's model (curator NULL model skipped).
+		// by_model: only the manual run's model.
 		if len(resp.ByModel) != 1 || resp.ByModel[0].Model != "claude-opus-4-8" {
 			t.Errorf("/me by_model = %+v, want only claude-opus-4-8", resp.ByModel)
 		}
@@ -291,14 +290,13 @@ func TestUsageEndpoints_Local(t *testing.T) {
 		if resp.TeamID != runmode.LocalDefaultTeamID {
 			t.Errorf("/teams team_id = %q, want %q", resp.TeamID, runmode.LocalDefaultTeamID)
 		}
-		// team rows: manual 1.00 + autonomous 0.25 + team curator 0.50 (NULL-team
-		// curator + system excluded by the team filter).
-		if !floatEq(resp.TotalCostUSD, 1.75) {
-			t.Errorf("/teams total = %v, want 1.75", resp.TotalCostUSD)
+		// team rows: manual 1.00 + autonomous 0.25 (system excluded by the team filter).
+		if !floatEq(resp.TotalCostUSD, 1.25) {
+			t.Errorf("/teams total = %v, want 1.25", resp.TotalCostUSD)
 		}
-		// by_user: the local user's manual + team curator (autonomous NULL creator excluded).
-		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.50) {
-			t.Errorf("/teams by_user = %+v, want the local user at 1.50", resp.ByUser)
+		// by_user: the local user's manual run (autonomous NULL creator excluded).
+		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.00) {
+			t.Errorf("/teams by_user = %+v, want the local user at 1.00", resp.ByUser)
 		}
 		// by_rule: the autonomous run's trigger, labeled with the blueprint name
 		// (triggers carry a NULL name, so we fall back to the blueprint).
@@ -306,7 +304,7 @@ func TestUsageEndpoints_Local(t *testing.T) {
 			t.Errorf("/teams by_rule = %+v, want one rule %q at 0.25", resp.ByRule, blueprintName)
 		}
 		cats := categoryCosts(resp.ByCategory)
-		if !floatEq(cats[domain.SpendCategoryManual], 1.00) || !floatEq(cats[domain.SpendCategoryAutonomous], 0.25) || !floatEq(cats[domain.SpendCategoryCurator], 0.50) {
+		if !floatEq(cats[domain.SpendCategoryManual], 1.00) || !floatEq(cats[domain.SpendCategoryAutonomous], 0.25) {
 			t.Errorf("/teams by_category = %+v", resp.ByCategory)
 		}
 		assertByDaySumsToTotal(t, "/teams", resp.ByDay, resp.TotalCostUSD)
@@ -315,28 +313,28 @@ func TestUsageEndpoints_Local(t *testing.T) {
 	t.Run("org_rollup", func(t *testing.T) {
 		var resp usageOrgResponse
 		doUsage(t, s, "/api/orgs/"+runmode.LocalDefaultOrgID+"/usage?since=2000-01-01", &resp)
-		if !floatEq(resp.TotalCostUSD, 1.90) {
-			t.Errorf("/org total = %v, want 1.90", resp.TotalCostUSD)
+		if !floatEq(resp.TotalCostUSD, 1.30) {
+			t.Errorf("/org total = %v, want 1.30", resp.TotalCostUSD)
 		}
-		// by_team: the one local team carries the team-attributed rows (1.75).
-		if len(resp.ByTeam) != 1 || resp.ByTeam[0].TeamID != runmode.LocalDefaultTeamID || !floatEq(resp.ByTeam[0].Cost, 1.75) {
-			t.Errorf("/org by_team = %+v, want the local team at 1.75", resp.ByTeam)
+		// by_team: the one local team carries the team-attributed rows (1.25).
+		if len(resp.ByTeam) != 1 || resp.ByTeam[0].TeamID != runmode.LocalDefaultTeamID || !floatEq(resp.ByTeam[0].Cost, 1.25) {
+			t.Errorf("/org by_team = %+v, want the local team at 1.25", resp.ByTeam)
 		}
 		if resp.ByTeam[0].TeamName == "" {
 			t.Errorf("/org by_team team_name empty; GetSystem name resolution failed: %+v", resp.ByTeam)
 		}
-		// by_user (org-wide): the local user's manual run (1.00) + both curator
-		// turns (0.50 + 0.10) = 1.60; the autonomous run + system carry no creator.
-		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.60) {
-			t.Errorf("/org by_user = %+v, want the local user at 1.60", resp.ByUser)
+		// by_user (org-wide): the local user's manual run (1.00); the
+		// autonomous run + system carry no creator.
+		if len(resp.ByUser) != 1 || resp.ByUser[0].UserID != runmode.LocalDefaultUserID || !floatEq(resp.ByUser[0].Cost, 1.00) {
+			t.Errorf("/org by_user = %+v, want the local user at 1.00", resp.ByUser)
 		}
-		// org_level: the NULL-team rows — curator 0.10 + system_overhead 0.05.
+		// org_level: the NULL-team rows — system_overhead 0.05.
 		ol := map[string]float64{}
 		for _, b := range resp.OrgLevel {
 			ol[b.Category] = b.Cost
 		}
-		if !floatEq(ol[domain.SpendCategoryCurator], 0.10) || !floatEq(ol[domain.SpendCategorySystemOverhead], 0.05) {
-			t.Errorf("/org org_level = %+v, want curator 0.10 + system_overhead 0.05", resp.OrgLevel)
+		if !floatEq(ol[domain.SpendCategorySystemOverhead], 0.05) {
+			t.Errorf("/org org_level = %+v, want system_overhead 0.05", resp.OrgLevel)
 		}
 		// by_rule: local mode (N=1) carries it on the org rollup too — the
 		// autonomous run's trigger, labeled by its blueprint (0.25).
@@ -434,8 +432,8 @@ func newUsageTestServer(t *testing.T) *Server {
 
 // seedUsageLocal seeds a cross-source spend fixture on the local sentinel
 // org/team/user: a manual run + an autonomous run (fired by a seeded trigger
-// whose blueprint is named) + a team-attributed curator turn + a NULL-team
-// curator turn + a system job. Returns the trigger id and its blueprint name.
+// whose blueprint is named) + a system job. Returns the trigger id and its
+// blueprint name.
 func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	t.Helper()
 	ctx := context.Background()
@@ -458,10 +456,6 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 			(id, org_id, team_id, creator_user_id, kind, event_type, blueprint_id, breaker_threshold, min_autonomy_suitability)
 		 VALUES (?, ?, ?, ?, 'trigger', 'github:pr:ci_check_failed', ?, 3, 0.5)`,
 		triggerID, org, team, user, bpID)
-
-	// Projects back the curator conversations (conversations.project_id FK).
-	exec(`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES ('p-team', 'team-proj', ?, ?, ?, 'team')`, team, org, user)
-	exec(`INSERT INTO projects (id, name, team_id, org_id, creator_user_id, visibility) VALUES ('p-org', 'org-proj', NULL, ?, ?, 'org')`, org, user)
 
 	// SQLite canonical datetime text ('YYYY-MM-DD HH:MM:SS') so both the view's
 	// datetime() filter and the _time_format=sqlite scan round-trip cleanly.
@@ -489,28 +483,6 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,
 			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
 		 VALUES (?, 'r-auto', 'assistant', '', 'work', 'claude-haiku-4-5', 0.25, 20, 2, 0, 0, ?)`,
-		org, t2)
-	// Curator turns: a curator conversation plus one cost-stamped ledger row
-	// (curator rows carry no model on the wire, so model stays NULL).
-	// Team-attributed curator turn by the user.
-	exec(`INSERT INTO conversations
-			(id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at)
-		 VALUES ('conv-cur-team', ?, 'curator', ?, ?, 'private', 'manual', 'curator', NULL, 'p-team', ?)`,
-		org, user, team, t1)
-	exec(`INSERT INTO messages
-			(org_id, conversation_id, role, subtype, content, cost_usd,
-			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'conv-cur-team', 'assistant', '', 'ack', 0.50, 11, 1, 0, 0, ?)`,
-		org, t1)
-	// NULL-team curator turn by the user (org-visibility project).
-	exec(`INSERT INTO conversations
-			(id, org_id, type, creator_user_id, team_id, visibility, trigger_type, origin, status, project_id, started_at)
-		 VALUES ('conv-cur-org', ?, 'curator', ?, NULL, 'private', 'manual', 'curator', NULL, 'p-org', ?)`,
-		org, user, t2)
-	exec(`INSERT INTO messages
-			(org_id, conversation_id, role, subtype, content, cost_usd,
-			 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at)
-		 VALUES (?, 'conv-cur-org', 'assistant', '', 'ack', 0.10, 1, 1, 0, 0, ?)`,
 		org, t2)
 	// System job (org-level, NULL team).
 	exec(`INSERT INTO system_llm_runs

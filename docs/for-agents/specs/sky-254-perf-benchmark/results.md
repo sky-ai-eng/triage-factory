@@ -78,7 +78,7 @@ the sandbox spawn, the percentage gets ugly:
 | Caller | Typical wall-clock | gVisor overhead (80ms cold-start only) |
 |---|---|---|
 | Delegate (5 min) | 300,000ms | **0.03%** — negligible |
-| Curator turn (10s) | 10,000ms | **0.8%** |
+| Curator turn (10s) [curator removed, TFAC-894] | 10,000ms | **0.8%** |
 | Repo profiler (Haiku, 2s) | 2,000ms | **4%** |
 | Project classifier (Haiku, 500ms) | 500ms | **16%** — over the target |
 | Scorer (Haiku, 200ms) | 200ms | **40%** — well over the target |
@@ -102,7 +102,7 @@ specified.** Options for SKY-254 to consider:
 
 **Recommendation for SKY-254's acceptance:** revise the perf target
 from a flat "10%" to:
-- **Delegate / curator / profiler**: within 10% wall-clock (achievable)
+- **Delegate / curator / profiler** [curator removed, TFAC-894]: within 10% wall-clock (achievable)
 - **Scorer / classifier**: < 100ms cold-start overhead, accepting that
   this is 20-40% in percentage terms but human-imperceptible in absolute
   terms

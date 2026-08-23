@@ -4,7 +4,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/sky-ai-eng/triage-factory/internal/curator"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -14,11 +13,11 @@ import (
 
 // Team archive/restore lifecycle (TFAC-448). Archiving a team is a soft-delete
 // that immediately force-stops all of the team's in-flight work — agent
-// delegations and curator sessions — and blocks all further writes. There is no
-// "let it finish" option by design. Org-admin only (matches the org-admin-only
-// teams_delete RLS); multi-mode only (local is N=1 and never archives its sole
-// team). Restore flips the tombstone back but deliberately does NOT resurrect
-// the conversations / curator sessions that archive force-stopped.
+// delegations — and blocks all further writes. There is no "let it finish"
+// option by design. Org-admin only (matches the org-admin-only teams_delete
+// RLS); multi-mode only (local is N=1 and never archives its sole team).
+// Restore flips the tombstone back but deliberately does NOT resurrect the
+// conversations that archive force-stopped.
 
 // teamArchivePreviewJSON is the shared count shape: the preview reports the work
 // an archive WOULD stop; the archive response reports what it DID stop. Field
@@ -29,18 +28,16 @@ import (
 // will force-stop, plus the team's current archived state so a stale client can
 // render "already archived".
 type teamArchivePreviewJSON struct {
-	TeamID                string `json:"team_id"`
-	Name                  string `json:"name"`
-	Archived              bool   `json:"archived"`
-	ActiveRuns            int    `json:"active_runs"`
-	ActiveCuratorSessions int    `json:"active_curator_sessions"`
+	TeamID     string `json:"team_id"`
+	Name       string `json:"name"`
+	Archived   bool   `json:"archived"`
+	ActiveRuns int    `json:"active_runs"`
 }
 
 // teamArchiveResultJSON is the POST /archive response: the counts of work the
 // cascade actually stopped.
 type teamArchiveResultJSON struct {
-	CancelledRuns            int `json:"cancelled_runs"`
-	CancelledCuratorSessions int `json:"cancelled_curator_sessions"`
+	CancelledRuns int `json:"cancelled_runs"`
 }
 
 // resolveTeamForLifecycle runs the shared front gate for every archive/restore
@@ -83,9 +80,9 @@ func (th *teamsHandler) resolveTeamForLifecycle(w http.ResponseWriter, r *http.R
 	return orgID, userID, teamID, true
 }
 
-// handleTeamArchivePreview returns the live-work counts the archive confirm
-// modal surfaces ("ends N delegations and M curator sessions"). Read-only — no
-// state changes. Org-admin only, multi-mode only.
+// handleTeamArchivePreview returns the live-work count the archive confirm
+// modal surfaces ("ends N delegations"). Read-only — no state changes.
+// Org-admin only, multi-mode only.
 //
 // GET /api/teams/{team_id}/archive/preview
 func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.Request) {
@@ -104,28 +101,27 @@ func (th *teamsHandler) handleTeamArchivePreview(w http.ResponseWriter, r *http.
 		return
 	}
 
-	activeRuns, curatorSessions, err := th.teamActiveWork(r, orgID, teamID)
+	activeRuns, err := th.teamActiveWork(r, orgID, teamID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, teamArchivePreviewJSON{
-		TeamID:                teamID,
-		Name:                  team.Name,
-		Archived:              team.DeletedAt != nil,
-		ActiveRuns:            activeRuns,
-		ActiveCuratorSessions: curatorSessions,
+		TeamID:     teamID,
+		Name:       team.Name,
+		Archived:   team.DeletedAt != nil,
+		ActiveRuns: activeRuns,
 	})
 }
 
 // handleTeamArchive soft-deletes the team and force-stops its in-flight work.
 // Order: stamp deleted_at FIRST (so no further team-scoped writes can land —
-// new conversations / curator turns are blocked), THEN enumerate and cancel the active
-// conversations + curator sessions. Enumerating after the tombstone keeps the cascade
-// from missing work that started in the window between the read and the stamp.
-// The cascade runs on the admin pool (spawner.Cancel with an empty userID,
-// curator.CancelProject) so the now-archived team's write RLS doesn't block the
-// teardown. Returns the counts of work stopped.
+// new conversations are blocked), THEN enumerate and cancel the active
+// conversations. Enumerating after the tombstone keeps the cascade from
+// missing work that started in the window between the read and the stamp.
+// The cascade runs on the admin pool (spawner.Cancel with an empty userID) so
+// the now-archived team's write RLS doesn't block the teardown. Returns the
+// count of work stopped.
 //
 // POST /api/teams/{team_id}/archive
 func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request) {
@@ -163,23 +159,13 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Enumerate the work to stop now that the tombstone blocks new writes. The
-	// curator in-flight count is a point-in-time read taken before CancelProject
-	// clears the in-flight marker; the conversation ids are stable (cancellation only moves
-	// them to terminal).
+	// Enumerate the work to stop now that the tombstone blocks new writes —
+	// the conversation ids are stable (cancellation only moves them to
+	// terminal).
 	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
 		internalError(w, "teams", err)
 		return
-	}
-	projectIDs, err := th.teamProjectIDs(r, orgID, teamID)
-	if err != nil {
-		internalError(w, "teams", err)
-		return
-	}
-	var curatorSessions int
-	if cur := th.curatorRuntime(); cur != nil {
-		curatorSessions = cur.InFlightProjectCount(projectIDs)
 	}
 
 	// Force-stop the conversations. StopConversationAndCancelBlueprint with an
@@ -200,26 +186,16 @@ func (th *teamsHandler) handleTeamArchive(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Force-stop the curator sessions: cancel the in-flight request + drain queued
-	// rows for every project the team owns.
-	if cur := th.curatorRuntime(); cur != nil {
-		for _, projectID := range projectIDs {
-			cur.CancelProject(orgID, projectID, "team archived")
-		}
-	}
-
 	teamsLog.Info("team archived",
-		"org", orgID, "team", teamID,
-		"cancelled_runs", cancelledRuns, "cancelled_curator_sessions", curatorSessions)
+		"org", orgID, "team", teamID, "cancelled_runs", cancelledRuns)
 	writeJSON(w, http.StatusOK, teamArchiveResultJSON{
-		CancelledRuns:            cancelledRuns,
-		CancelledCuratorSessions: curatorSessions,
+		CancelledRuns: cancelledRuns,
 	})
 }
 
 // handleTeamRestore clears the team's tombstone so it's visible + writable
-// again. Killed conversations and curator sessions are NOT resurrected — archive's
-// teardown is terminal by design. Org-admin only, multi-mode only.
+// again. Killed conversations are NOT resurrected — archive's teardown is
+// terminal by design. Org-admin only, multi-mode only.
 //
 // POST /api/teams/{team_id}/restore
 func (th *teamsHandler) handleTeamRestore(w http.ResponseWriter, r *http.Request) {
@@ -331,59 +307,25 @@ func (th *teamsHandler) handleTeamArchivedList(w http.ResponseWriter, r *http.Re
 	httpx.WriteList(w, page, out, total)
 }
 
-// teamActiveWork returns the count of active conversations + in-flight curator
-// sessions for the team — the preview's two numbers (the active_runs /
-// active_curator_sessions wire fields). Conversations are read on the admin pool
-// (ActiveIDsForTeamSystem); curator sessions are the in-flight count over the
-// team's projects.
-func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs, curatorSessions int, err error) {
+// teamActiveWork returns the count of active conversations for the team —
+// the preview's active_runs wire field. Read on the admin pool
+// (ActiveIDsForTeamSystem).
+func (th *teamsHandler) teamActiveWork(r *http.Request, orgID, teamID string) (runs int, err error) {
 	conversationIDs, err := th.allStores.Conversations.ActiveIDsForTeamSystem(r.Context(), orgID, teamID)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	projectIDs, err := th.teamProjectIDs(r, orgID, teamID)
-	if err != nil {
-		return 0, 0, err
-	}
-	if cur := th.curatorRuntime(); cur != nil {
-		curatorSessions = cur.InFlightProjectCount(projectIDs)
-	}
-	return len(conversationIDs), curatorSessions, nil
+	return len(conversationIDs), nil
 }
 
-// spawnerRuntime / curatorRuntime resolve the wired delegation spawner / curator
-// runtime, or nil. They guard the getter func ITSELF being nil (not just the
-// pointer it returns) so the archive cascade degrades to "nothing to cancel"
-// instead of panicking on a teamsHandler constructed without the getters wired
-// (early startup, a future refactor, or a test fixture that doesn't need them).
+// spawnerRuntime resolves the wired delegation spawner, or nil. It guards the
+// getter func ITSELF being nil (not just the pointer it returns) so the
+// archive cascade degrades to "nothing to cancel" instead of panicking on a
+// teamsHandler constructed without the getter wired (early startup, a future
+// refactor, or a test fixture that doesn't need it).
 func (th *teamsHandler) spawnerRuntime() *delegate.Spawner {
 	if th.spawner == nil {
 		return nil
 	}
 	return th.spawner()
-}
-
-func (th *teamsHandler) curatorRuntime() *curator.Curator {
-	if th.curator == nil {
-		return nil
-	}
-	return th.curator()
-}
-
-// teamProjectIDs returns the ids of every project owned by the team. Reads the
-// org's projects on the admin pool (ListSystem) and filters by team_id — the
-// org-admin reaper may not be a member of the team, so the app-pool projects_select
-// RLS would hide team-visibility projects.
-func (th *teamsHandler) teamProjectIDs(r *http.Request, orgID, teamID string) ([]string, error) {
-	projects, err := th.allStores.Projects.ListSystem(r.Context(), orgID)
-	if err != nil {
-		return nil, err
-	}
-	var ids []string
-	for _, p := range projects {
-		if p.TeamID == teamID {
-			ids = append(ids, p.ID)
-		}
-	}
-	return ids, nil
 }

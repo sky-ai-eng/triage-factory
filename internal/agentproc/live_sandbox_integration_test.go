@@ -72,7 +72,7 @@ func requireInteractiveSandbox(t *testing.T) (SecretsReader, string) {
 	return secrets, orgID
 }
 
-// prebuiltRunHarness stands up what the delegate/curator sidecar bring-up
+// prebuiltRunHarness stands up what the delegate sidecar bring-up
 // provides in production — the per-run network plus the LLM/git/egress
 // proxies over the resolved org credential — so these tests exercise the
 // prebuilt-network shape that is now the ONLY sandbox launch path (the
@@ -218,9 +218,8 @@ func TestIntegration_InteractiveSandbox_SteerAndTeardown(t *testing.T) {
 	<-lr.Done()
 
 	// Teardown ownership matches production: LiveRun ran its cleanup after
-	// cmd.Wait, and the caller (here the harness, in production the
-	// delegate/curator) closes the network it owns — after which no tf-
-	// netns/veth survives.
+	// cmd.Wait, and the caller (here the harness, in production delegate)
+	// closes the network it owns — after which no tf-netns/veth survives.
 	closeHarness()
 	assertNoNewNetns(t, before)
 }

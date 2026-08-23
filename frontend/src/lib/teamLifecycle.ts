@@ -1,7 +1,7 @@
 // Team archive/restore lifecycle API (TFAC-448). Archiving a team soft-deletes
-// it, force-stops every in-flight delegation + curator session, and blocks
-// further writes — no "let it finish" branch. Restore flips it back (killed runs
-// do NOT resurrect). Org-admin only, multi-mode only.
+// it, force-stops every in-flight delegation, and blocks further writes — no
+// "let it finish" branch. Restore flips it back (killed runs do NOT
+// resurrect). Org-admin only, multi-mode only.
 
 import { apiFetch, apiJSON, apiList, httpErrorMessage } from './apiClient'
 
@@ -18,14 +18,12 @@ export interface ArchivePreview {
   name: string
   archived: boolean
   active_runs: number
-  active_curator_sessions: number
 }
 
 // ArchiveResult is the POST /api/teams/{id}/archive response — the counts of
 // work the cascade actually stopped.
 export interface ArchiveResult {
   cancelled_runs: number
-  cancelled_curator_sessions: number
 }
 
 // ArchivedTeam is one row of POST /api/teams/archived/list — the org-admin restore

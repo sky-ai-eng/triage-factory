@@ -62,7 +62,7 @@ const conversationTerminalStatusesSQL = `'completed','failed'`
 // changes engines, so an engine no mint writes is an engine nothing runs.
 // That is the whole enforcement — there is no claim-side exclusion, because
 // there is no row for one to exclude. Leaving either arm to the column
-// DEFAULT (still 'sdk', for the curator's sake) would quietly undo it.
+// DEFAULT (still 'sdk') would quietly undo it.
 // Returns the minted row via writeConversationReturning, sharing
 // ConversationStore.Get's projection — a fresh mint has no claims/messages/
 // memory rows yet, so the claim/ledger laterals and the memory/agent LEFT
@@ -189,35 +189,15 @@ const needsDrivingSQL = `r.archived_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
 
-// curatorNeedsTurnSQL is the first half of the curator type-conditional
-// gate: a curator conversation has no autonomous work — its only unit of
-// work is a user turn — so "mid-flight with nothing queued" is a finished
-// transcript waiting for its next message, not work to pick up. It is also
-// what keeps curator crash recovery retire-only: a turn reaped mid-engagement has
-// its message delivered, so it is not re-driven.
-const curatorNeedsTurnSQL = `(r.type <> 'curator' OR ` + undeliveredInputExistsSQL + `)`
-
-// curatorHomedHereSQL is the second half: homing owns which executor runs a
-// project's turns. A project with no home row is claimable by anyone, which
-// is the local/role=all shape (one process, no homing). $1 is the claiming
-// executor id.
-const curatorHomedHereSQL = `(r.type <> 'curator' OR
-		NOT EXISTS (SELECT 1 FROM curator_homes h
-		            WHERE h.org_id = r.org_id::text AND h.project_id = r.project_id::text)
-		OR EXISTS (SELECT 1 FROM curator_homes h
-		           WHERE h.org_id = r.org_id::text AND h.project_id = r.project_id::text
-		             AND h.home_instance_id = $1))`
-
-// eligibleForDrivingSQL is the surface-agnostic "waiting to be driven" —
-// the needs-driving predicate plus the curator input gate, without the
-// placement/home/blueprint gates that decide WHICH executor may take it.
-// This is the queue-depth answer the fleet counters and the display
+// eligibleForDrivingSQL is the surface-agnostic "waiting to be driven",
+// without the placement/blueprint gates that decide WHICH executor may take
+// it. This is the queue-depth answer the fleet counters and the display
 // projection's derived `queued` rung read.
-const eligibleForDrivingSQL = needsDrivingSQL + ` AND ` + curatorNeedsTurnSQL
+const eligibleForDrivingSQL = needsDrivingSQL
 
 // blueprintDrivableSQL is the delegation arm's gate, applied as a LEFT JOIN
-// rather than an inner one: a conversation with no blueprint parent — curator
-// today, interactive tomorrow — must not be filtered out by the join at all.
+// rather than an inner one: a conversation with no blueprint parent —
+// interactive, tomorrow — must not be filtered out by the join at all.
 //
 // A blueprint that was CALLED OFF drives nothing, ever. That is the
 // `cancel_requested`/`cancelled` pair: the signal a cancel raises while the
@@ -249,17 +229,9 @@ const blueprintDrivableSQL = `(r.blueprint_run_id IS NULL
 	    OR (br.cancel_requested = false AND br.status <> 'cancelled'
 	        AND r.blueprint_step_index = br.current_step_index))`
 
-// curatorTurnMessageSQL is the queued turn a curator claim is minted to
-// drive — the conversation's oldest undelivered plain user row, stamped as
-// the claim's mint intent so a pickup that fails before attaching any
-// message stays attributable to its exact turn. NULL for every other type.
-const curatorTurnMessageSQL = `(SELECT MIN(m_t.id) FROM messages m_t
-		WHERE m_t.conversation_id = r.id AND m_t.delivered = false
-		  AND m_t.role = 'user' AND m_t.subtype = '' AND m_t.window_state = 'active')`
-
-// conversationQueueClaimSelect is the candidate CTE's projection — everything the
-// dispatcher needs to branch on and drive the claimed conversation,
-// including the type and (curator) the queued turn the claim is minted to.
+// conversationQueueClaimSelect is the candidate CTE's projection —
+// everything the dispatcher needs to branch on and drive the claimed
+// conversation.
 const conversationQueueClaimSelect = `r.id, r.org_id,
 	COALESCE(r.type, '')                  AS type,
 	COALESCE(r.task_id::text, '')         AS task_id,
@@ -272,10 +244,8 @@ const conversationQueueClaimSelect = `r.id, r.org_id,
 	COALESCE(r.trigger_id::text, '')      AS trigger_id,
 	COALESCE(r.creator_user_id::text, '') AS creator_user_id,
 	COALESCE(r.team_id::text, '')         AS team_id,
-	COALESCE(r.project_id::text, '')      AS project_id,
 	COALESCE(r.blueprint_run_id::text, '') AS blueprint_run_id,
-	r.blueprint_step_index,
-	` + curatorTurnMessageSQL + ` AS turn_message_id`
+	r.blueprint_step_index`
 
 // handedBackOutcomesSQL is the pair of claim outcomes that record nothing
 // about the conversation: 'requeued' (a recovery seam gave the claim back — a
@@ -350,17 +320,15 @@ func EpisodeAttemptsSQL(convAlias string) string {
 var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
 	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
-	candidate.team_id, candidate.project_id,
-	candidate.blueprint_run_id, candidate.blueprint_step_index, candidate.turn_message_id,
+	candidate.team_id,
+	candidate.blueprint_run_id, candidate.blueprint_step_index,
 	minted.id::text AS claim_id, minted.claimed_at,
 	` + EpisodeAttemptsSQL("candidate") + ` AS attempts`
 
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic
-	// and the two type-conditional gates (blueprint for delegation, queued
-	// turn + home for curator) ride alongside it, so a single claim serves
-	// the dispatcher and the curator both. An empty queue matches no row and
-	// the scan reports ErrNoRows -> (nil, nil).
+	// and the blueprint gate for delegation rides alongside it. An empty
+	// queue matches no row and the scan reports ErrNoRows -> (nil, nil).
 	//
 	// Mutual exclusion is idx_claims_one_active, the partial unique index on
 	// unreleased claims: nothing on the conversation row changes at claim
@@ -449,7 +417,6 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			LEFT JOIN org_settings os ON os.org_id = r.org_id
 			WHERE ` + eligibleForDrivingSQL + `
 			  AND ` + blueprintDrivableSQL + `
-			  AND ` + curatorHomedHereSQL + `
 			  AND (
 			    os.max_concurrent_runs IS NULL
 			    OR os.max_concurrent_runs <= 0
@@ -468,8 +435,8 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			RETURNING conversations.id
 		),
 		minted AS (
-			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at, message_id)
-			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now(), candidate.turn_message_id FROM candidate
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, claimed_at)
+			SELECT candidate.org_id, candidate.id, $1, $2::bigint, now() FROM candidate
 			RETURNING claims.id, claims.conversation_id, claims.claimed_at
 		)
 		SELECT ` + conversationQueueClaimReturning + `
@@ -1212,12 +1179,11 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	var (
 		r         domain.Conversation
 		stepIdx   sql.NullInt64
-		turnMsgID sql.NullInt64
 		claimedAt time.Time
 	)
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
-		&r.CreatorUserID, &r.TeamID, &r.ProjectID, &r.BlueprintRunID, &stepIdx, &turnMsgID,
+		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
 		&r.ClaimID, &claimedAt, &r.Attempts)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -1229,7 +1195,6 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 		v := int(stepIdx.Int64)
 		r.BlueprintStepIndex = &v
 	}
-	r.ClaimMessageID = turnMsgID.Int64
 	r.ClaimedAt = &claimedAt
 	return &r, nil
 }

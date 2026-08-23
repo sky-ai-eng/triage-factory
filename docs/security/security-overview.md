@@ -408,8 +408,8 @@ to remain out of Kubernetes clusters entirely:
   pattern used for GitHub Actions / GitLab / Buildkite runners.
 - **Control plane as ordinary, fully-unprivileged pods.** The API/websocket/polling
   tier is a normal web service that holds **no** sandbox capabilities: every
-  sandboxed workload — delegated runs and curator sessions alike — runs on
-  executors. The control plane's own background LLM work (task scoring, project
+  sandboxed workload — delegated runs — runs on executors. The control
+  plane's own background LLM work (task scoring, project
   classification, repo profiling) is deliberately toolless — prompt in, JSON out,
   no filesystem, no tool loop, no subprocess — so there is nothing to jail: those
   are direct API calls from the Go process. The control service carries no

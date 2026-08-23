@@ -177,12 +177,6 @@ type RepositoryStore interface {
 	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
 	ListTeamScoped(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
 
-	// ListWithContent returns only repos that have a non-empty
-	// profile_text — the subset the curator + delegate context
-	// loaders care about. Subset of List by predicate; safe to call
-	// before the profiler completes (returns empty slice).
-	ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error)
-
 	// SetConfigured syncs the repositories table with the given
 	// "owner/repo" list. New entries get skeleton rows (no profile
 	// text); entries no longer in the list are deleted. Single

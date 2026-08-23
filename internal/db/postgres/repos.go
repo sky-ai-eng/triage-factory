@@ -15,7 +15,7 @@ import (
 
 // repoStore is the Postgres impl of db.RepositoryStore. Wired against the
 // app pool in postgres.New: every consumer is request-equivalent
-// (repos handler, settings handler, projects handler, curator) or
+// (repos handler, settings handler, projects handler) or
 // runs in a startup/profiler goroutine that already operates within
 // the org's identity scope. RLS policy repositories_all gates every
 // statement on (org_id = current_org_id() AND user_has_org_access);
@@ -38,7 +38,7 @@ import (
 // # Pool split
 //
 // Holds two pools: q is the app pool (request-equivalent consumers —
-// repos handler, settings, projects, curator) and admin is the
+// repos handler, settings, projects) and admin is the
 // admin pool (system services — poller bootstrap reading every
 // configured repo at startup, clone-status writes from the startup
 // clone path before any JWT-claims context can exist). The
@@ -382,37 +382,6 @@ func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.Li
 		out = append(out, p)
 	}
 	return out, total, rows.Err()
-}
-
-func (s *repoStore) ListWithContent(ctx context.Context, orgID string) ([]domain.Repository, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, owner, repo, description, has_readme, has_claude_md, has_agents_md,
-		       profile_text, clone_url, default_branch, base_branch
-		FROM repositories
-		WHERE org_id = $1
-		  AND profile_text IS NOT NULL AND profile_text != ''
-		ORDER BY owner, repo
-	`, orgID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []domain.Repository{}
-	for rows.Next() {
-		var p domain.Repository
-		var description, profileText, cloneURL, defaultBranch, baseBranch sql.NullString
-		if err := rows.Scan(&p.ID, &p.Owner, &p.Repo, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch); err != nil {
-			return nil, err
-		}
-		p.Description = description.String
-		p.ProfileText = profileText.String
-		p.CloneURL = cloneURL.String
-		p.DefaultBranch = defaultBranch.String
-		p.BaseBranch = baseBranch.String
-		out = append(out, p)
-	}
-	return out, rows.Err()
 }
 
 func (s *repoStore) SetConfigured(ctx context.Context, orgID string, repoNames []string) error {

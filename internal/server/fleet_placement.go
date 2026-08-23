@@ -68,7 +68,7 @@ type placementExplainDTO struct {
 // the answer names executor instance ids for the caller's own org's work, so
 // org-admin is the right scope until then.
 //
-// GET /api/fleet/placement?org=<uuid>&repo=<owner/repo>[&kind=repo|project]
+// GET /api/fleet/placement?org=<uuid>&repo=<owner/repo>[&kind=repo]
 func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	claims := ClaimsFrom(r.Context())
 	if claims == nil {
@@ -105,34 +105,13 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = domain.PlacementKindRepo
 	}
-	if kind != domain.PlacementKindRepo && kind != domain.PlacementKindProject {
+	if kind != domain.PlacementKindRepo {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason: httpx.ReasonInvalidParam, Message: "kind must be 'repo' or 'project'", Field: "kind",
+			Reason: httpx.ReasonInvalidParam, Message: "kind must be 'repo'", Field: "kind",
 		})
 		return
 	}
-	// The key parameter is named for its kind: ?repo=owner/repo for a repo
-	// key, ?project=<id> for a project key. They used to be interchangeable
-	// regardless of kind, with repo silently winning when both appeared — so
-	// ?kind=project&repo=x explained a placement for a key the caller never
-	// asked about. Each kind now reads only its own parameter, and the other
-	// one being present is a client fault rather than a silent preference.
 	keyParam := "repo"
-	if kind == domain.PlacementKindProject {
-		keyParam = "project"
-	}
-	otherParam := "project"
-	if keyParam == "project" {
-		otherParam = "repo"
-	}
-	if r.URL.Query().Get(otherParam) != "" {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "kind=" + kind + " reads its key from " + keyParam + "; remove " + otherParam,
-			Field:   otherParam,
-		})
-		return
-	}
 	keyValue := strings.TrimSpace(r.URL.Query().Get(keyParam))
 	if keyValue == "" {
 		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{

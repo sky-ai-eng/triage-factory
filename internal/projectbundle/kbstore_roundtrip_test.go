@@ -79,7 +79,6 @@ func TestBundle_MultiMode_StoreRoundTrip(t *testing.T) {
 	imported, warnings, err := Import(
 		ctx,
 		dstStores.Tx,
-		dstStores.Curator,
 		dstKB,
 		org, team, user,
 		bytes.NewReader(bundleBytes),

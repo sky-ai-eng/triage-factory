@@ -312,10 +312,8 @@ paths are relative to `internal/server/` unless noted.
 - `POST /api/skills/import` vs `/upload` (`skills_handler.go:28/67`) —
   names don't convey the actual split (server filesystem scan vs
   request body; import 501s in multi mode).
-- `POST /api/agent/…/message` (singular) vs `GET …/messages` (plural)
-  vs curator's `POST …/curator/messages` — two chat surfaces, two
-  naming conventions, different response semantics (sync
-  `{"status":"sent"}` vs async 202 `{request_id}`).
+- `POST /api/agent/…/message` (singular) vs `GET …/messages` (plural) —
+  inconsistent naming for the same route family.
 - `POST /api/projects/import` (`server.go:1027`) — a literal carved
   from the `{id}` segment namespace; `GET /api/projects/import` falls
   into the single-get and answers "project not found".
@@ -328,9 +326,6 @@ paths are relative to `internal/server/` unless noted.
   create takes `string` (`event_handlers_handler.go:127`), PATCH takes
   `json.RawMessage` accepting string *or* bare object, promote takes
   `*string` (cannot express the clear PATCH can).
-- `DELETE /api/projects/{id}/curator/messages/in-flight`
-  (`curator.go:306-383`) — one route, two mutations selected by hidden
-  state (release a running claim vs delete a queued message row).
 - The preflight family inverts verb/side-effect pairing:
   `GET …/github/app/cutover-preflight` **mutates** the installation
   mirror while `POST …/github/access/pat-preflight` stores nothing.
@@ -377,8 +372,7 @@ fields.
   silently case-folded.
 - `POST /api/projects/import` — bypasses sibling-create validation
   wholesale: verbatim Jira key, accepts the Linear key create rejects,
-  pins not checked against the tracked set; curator claims with empty
-  ids silently skipped, unknown `claim_id`s blanked
+  pins not checked against the tracked set
   (`internal/projectbundle/import.go:226-233,414-444`).
 - `POST /api/projects/{id}/backfill` (`backfill.go:192-209`) —
   empty/duplicate entity ids vanish from the accounting
@@ -501,7 +495,7 @@ no `POST /<resource>/list`; no `by-name/` read (closest is marketplace
 - Unbounded store SQL (no LIMIT): tasks Queued/ByStatus, dashboard PRs
   (scans **all** github entities, filters by author in Go —
   `internal/db/sqlite/dashboard.go:99-118`), conversations
-  ListForTask, transcripts, curator history, projects, project
+  ListForTask, transcripts, projects, project
   entities, backfill candidates (two full org scans filtered in Go),
   invites, org members, team-caps (plus an N+1 settings read per
   team), the github repos proxy, event-handlers, prompts, blueprints,
@@ -548,8 +542,7 @@ state — `credentials.go:255-401`).
 `?org=`); `{team_id}` accepts the literal `default` on the settings
 family but 404s it on teams/roster/archive; dashboard PRs split
 identity across path (`{number}`) and query (`?repo=`); repos use a
-two-segment path id while rows carry an `id` no route accepts; curator
-turns are keyed by a decimal-string message id unlike everything else.
+two-segment path id while rows carry an `id` no route accepts.
 
 **Two read surfaces disagreeing about one object:**
 conversation-scoped artifacts serve every kind in a generic shape
@@ -709,9 +702,9 @@ first failure.
 - Verb routes that are pure field writes: the review-kind `/dismiss`
   is a CAS `state` flip with zero side effects — while the PR arm of
   the *same route* closes a PR on GitHub
-  (`reviews_artifact_handler.go:444-490`); `/curator/reset` = stamp
-  `archived_at`; invite `/revoke` = one timestamp (DELETE would do);
-  archive/restore are non-idempotent toggles that 409 on repeat.
+  (`reviews_artifact_handler.go:444-490`); invite `/revoke` = one
+  timestamp (DELETE would do); archive/restore are non-idempotent
+  toggles that 409 on repeat.
 
 **"How do I clear a field" has a different answer per route:** JSON
 `null` clears on `PATCH /api/repos` (`json.RawMessage`, the only route

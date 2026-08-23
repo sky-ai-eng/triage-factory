@@ -45,14 +45,14 @@ import type {
 // etched monospace section labels, thin glowing telemetry gauges, and a dark HMI
 // "screen" for each time-series. Three role-gated sections, each self-gating:
 //
-//   - Personal (everyone): GET /api/me/usage — your own runs + curator turns.
+//   - Personal (everyone): GET /api/me/usage — your own runs.
 //   - Team (admins of their OWN teams): GET /api/teams/{id}/usage, chosen via a
 //     TeamSwitch over the teams you admin. Team detail is team-admin-only, so the
 //     dropdown is sourced from useTeams() filtered to role==='admin' — NOT from
 //     the org rollup's by_team (drilling into a team you don't admin would 403).
 //   - Org rollup (org admins + local N=1): GET /api/orgs/{id}/usage — every team
-//     + curator + system overhead. The org rollup is the ONLY place
-//     system-overhead spend surfaces, so local mode shows it too (see Usage()).
+//     + system overhead. The org rollup is the ONLY place system-overhead
+//     spend surfaces, so local mode shows it too (see Usage()).
 //
 // Each read is addressed by the scope it reports on. Personal is the only
 // viewer-relative one, so it alone takes no id; the team and org reads name
@@ -113,7 +113,7 @@ function withWindow(path: string, since: string): string {
 
 // --- fetch hook ---
 
-// Spend settles sporadically — a run / curator turn / system job finishing every
+// Spend settles sporadically — a run / system job finishing every
 // few seconds-to-minutes — so the page POLLS rather than streams; a websocket
 // spend feed would be mostly idle chatter for a once-in-a-while update. 15s feels
 // live for a cost view without hammering the aggregation reads (the /org rollup
@@ -192,8 +192,8 @@ function useUsageFetch<T>(url: string | null): UsageFetch<T> {
 // --- formatting + category mapping ---
 
 // fmtUSD renders settled spend as real money (TFAC-449: total_cost_usd is exact,
-// not an estimate). Sub-cent-but-nonzero collapses to "<$0.01" so a tiny curator
-// turn doesn't render as a misleading "$0.00".
+// not an estimate). Sub-cent-but-nonzero collapses to "<$0.01" so a tiny run
+// doesn't render as a misleading "$0.00".
 function fmtUSD(n: number): string {
   if (!n) return '$0.00'
   if (n > 0 && n < 0.01) return '<$0.01'
@@ -206,19 +206,17 @@ function pct(value: number, total: number): string {
 }
 
 // Category axis (domain.SpendCategory*) → the labels the epic specifies for the
-// org by-category split (automated / delegated / curator / system) and a stable
-// tone per category, reusing the board's semantic color vocabulary.
+// org by-category split (automated / delegated / system) and a stable tone per
+// category, reusing the board's semantic color vocabulary.
 const CATEGORY_LABEL: Record<string, string> = {
   manual: 'Delegated',
   autonomous: 'Automated',
-  curator: 'Curator',
   system_overhead: 'System',
 }
 
 const CATEGORY_COLOR: Record<string, string> = {
   manual: 'var(--color-cool)',
   autonomous: 'var(--color-warm)',
-  curator: 'var(--color-ink-2)',
   system_overhead: 'var(--color-ink-3)',
 }
 
@@ -389,8 +387,7 @@ interface DonutSeg {
   color: string
   value: number
   /** Optional explainer — renders a "?" after the label whose hover popup shows
-   *  this text. Used by the org by-team ring's non-team slices (system jobs /
-   *  team-less curator). */
+   *  this text. Used by the org by-team ring's non-team slice (system jobs). */
   hint?: string
   title?: string
 }
@@ -706,22 +703,19 @@ const SERIES_PALETTE = [
   'var(--color-ink-4)',
 ]
 
-// Explainers for the org-level (non-team) slices. These stay distinct categories
-// — the backend's org_level is grouped by category, so team-less curator comes
-// back separate from the system jobs — and each gets a "?" rather than a shared
-// "overhead" tag.
+// Explainers for the org-level (non-team) slices — every category with no
+// team attribution, grouped by category, each getting a "?" rather than a
+// shared "overhead" tag.
 const ORG_LEVEL_HINT: Record<string, string> = {
   system_overhead:
     'Org-wide system jobs, not tied to any team — the scorer, repo-profiler, and project classifier.',
-  curator: 'Curator turns on projects that aren’t attached to a team.',
 }
 
 // TeamSpendDonut is the org hero: the WHOLE org spend as one ring, partitioned
 // across teams + the org-level (non-team) slices. This is exactly the backend's
 // partition invariant — total == sum(by_team) + sum(org_level) — so it reads as
 // "where every dollar went". Team slices take palette colors; the org-level
-// slices keep their category tone + label (System / Curator) and carry a "?"
-// explainer.
+// slices keep their category tone + label (System) and carry a "?" explainer.
 function TeamSpendDonut({
   byTeam,
   orgLevel,
@@ -889,8 +883,8 @@ function ModelKey({ series }: { series: ModelSeries[] }) {
 
 // ThroughputInstrument fuses "over time" + "by model" into one readout: a wide
 // stacked-by-model plot with the model key beside it (stacks below on narrow
-// viewports). When no spend carries a model (curator-only), it falls back to the
-// single total trace.
+// viewports). When the window has no by-model breakdown yet (an empty
+// window), it falls back to the single total trace.
 function ThroughputInstrument({
   byDay,
   byModel,
@@ -1046,8 +1040,9 @@ function PersonalSection({ since, days }: { since: string; days: number }) {
       empty={total === 0}
     >
       {/* Personal is intentionally the leanest scope: just your spend trend +
-          the models behind it. (Category — manual vs curator — added little at
-          the personal level, so it's dropped here; it still lives in Team/Org.) */}
+          the models behind it. (Category is always 'manual' at the personal
+          level — CreatorUserID is NULL for every other category — so it's
+          dropped here; it still lives in Team/Org.) */}
       <ThroughputInstrument
         byDay={data?.by_day ?? []}
         byModel={data?.by_model ?? []}

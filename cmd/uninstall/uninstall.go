@@ -7,7 +7,7 @@
 // What it removes:
 //   - ~/.triagefactory/ in full (db, config, bare repo clones, workspace snapshot blobs)
 //   - the corresponding ~/.claude/projects/<encoded> session JSONL dirs
-//     for any per-project Curator working directories (enumerated
+//     for any per-project working directories (enumerated
 //     BEFORE ~/.triagefactory/ is deleted, so we can still resolve
 //     their absolute paths to compute the encoded name Claude Code uses)
 //   - all keychain entries under the "triagefactory" service
@@ -127,21 +127,21 @@ func Handle(args []string) {
 		}
 	}
 
-	// Order: enumerate the curator dirs and clear their Claude project
-	// entries BEFORE removing the trees, otherwise we lose the inputs
-	// needed to compute the encoded names.
+	// Order: enumerate the per-project working dirs and clear their Claude
+	// project entries BEFORE removing the trees, otherwise we lose the
+	// inputs needed to compute the encoded names.
 	//
-	// Curator's per-project working dirs at ~/.triagefactory/projects/<id>/
-	// each get a corresponding ~/.claude/projects/<encoded> entry where
-	// Claude Code stores the curator session JSONL. Walk and clear those
-	// before RemoveAll(dataDir) takes the projects dir with it.
+	// Each per-project working dir at ~/.triagefactory/projects/<id>/ may
+	// have a corresponding ~/.claude/projects/<encoded> entry where Claude
+	// Code stores session JSONL. Walk and clear those before
+	// RemoveAll(dataDir) takes the projects dir with it.
 	if plan.hasProjects {
-		n, err := removeClaudeProjectsForCurator(plan.projectsDir, home)
+		n, err := removeClaudeProjectSessions(plan.projectsDir, home)
 		if n > 0 {
-			fmt.Printf("  removed %d Claude Code session entr%s for curator projects\n", n, plural(n, "y", "ies"))
+			fmt.Printf("  removed %d Claude Code session entr%s for project working dirs\n", n, plural(n, "y", "ies"))
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  warn: remove Claude Code session entries for curator projects: %v\n", err)
+			fmt.Fprintf(os.Stderr, "  warn: remove Claude Code session entries for project working dirs: %v\n", err)
 			failed = true
 		}
 	}
@@ -243,7 +243,7 @@ func (p uninstallPlan) summary() []string {
 		lines = append(lines, fmt.Sprintf("%s/ (database, config, bare repo clones, workspace snapshot blobs)", p.dataDir))
 	}
 	if p.hasProjects {
-		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any curator projects")
+		lines = append(lines, "Claude Code session entries under ~/.claude/projects/ for any project working directories")
 	}
 	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) on headless")
 	if p.hasInstallLink {
@@ -277,11 +277,11 @@ func buildPlan(dataDir, projectsDir, linkPath string) uninstallPlan {
 // pulling in that package just for path encoding.
 var claudeProjectReplacer = strings.NewReplacer("/", "-", ".", "-")
 
-// removeClaudeProjectsForCurator walks ~/.triagefactory/projects/<id>/
-// dirs (the Curator's per-project working directories) and deletes the
-// matching ~/.claude/projects/<encoded> dir for each. Without this,
-// curator session JSONLs orphan in ~/.claude/projects/ after uninstall.
-func removeClaudeProjectsForCurator(projectsDir, home string) (int, error) {
+// removeClaudeProjectSessions walks ~/.triagefactory/projects/<id>/
+// working directories and deletes the matching ~/.claude/projects/<encoded>
+// dir for each. Without this, session JSONLs orphan in
+// ~/.claude/projects/ after uninstall.
+func removeClaudeProjectSessions(projectsDir, home string) (int, error) {
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
 		return 0, err

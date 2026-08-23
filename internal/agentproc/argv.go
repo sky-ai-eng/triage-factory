@@ -57,9 +57,9 @@ func BuildArgs(opts RunOptions) []string {
 	}
 	if opts.SystemPrompt != "" {
 		// --append-system-prompt is additive: it sits after Claude
-		// Code's default system prompt rather than replacing it. The
-		// curator runtime uses this for the project-context prompt;
-		// the delegate runtime currently leaves it unset so the
+		// Code's default system prompt rather than replacing it. Delegate
+		// sets this for a non-terminal blueprint step to note the step
+		// boundary; a terminal (or single-step) run leaves it unset so the
 		// envelope (mission text) carries all role-shaping content.
 		args = append(args, "--append-system-prompt", opts.SystemPrompt)
 	}

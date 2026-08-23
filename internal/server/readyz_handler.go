@@ -252,8 +252,7 @@ func checkLabel(ok bool) string {
 // both are index-backed.
 //
 // "Being driven" is an unreleased claim (idx_claims_one_active), on any
-// surface — which is what puts an in-flight curator turn in the count too.
-// "Waiting" is the needs-driving predicate, narrowed to delegation the way
+// surface. "Waiting" is the needs-driving predicate, narrowed to delegation the way
 // this counter always was, and it must be spelled in FULL: a delegation
 // conversation parked at `open` that a follow-up message has woken is
 // claimable and displays as queued, so counting only the mid-flight (NULL)

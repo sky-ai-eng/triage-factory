@@ -23,7 +23,7 @@ var ErrDailyCostCapReached = errors.New("daily spend cap reached")
 // checkDailyCostCap is the admission gate at Delegate entry. It returns
 // ErrDailyCostCapReached (wrapped with the figures) when the org's settled LLM
 // spend for today (UTC calendar day, summed across EVERY category — autonomous
-// + manual + curator + system overhead) is at or above the org's configured
+// + manual + system overhead) is at or above the org's configured
 // cap, and nil otherwise.
 //
 // Design (all locked in TFAC-477):
@@ -90,8 +90,8 @@ func (s *Spawner) checkDailyCostCap(ctx context.Context, orgID string) error {
 //     remains the safety net — "governance works iff licensed". The entitlement
 //     check is first so an unlicensed deployment does zero extra store work.
 //   - System spend is excluded automatically. The spend read is keyed on
-//     team_id, so system overhead and non-team curator (both NULL team_id) never
-//     count toward a team cap — they're the org cap's concern only, never
+//     team_id, so system overhead (NULL team_id) never
+//     counts toward a team cap — it's the org cap's concern only, never
 //     apportioned to a team.
 //
 // The caller passes the already-resolved teamID and skips this entirely for an

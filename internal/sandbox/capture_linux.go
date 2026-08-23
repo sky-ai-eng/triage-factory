@@ -138,7 +138,7 @@ func (t *tailBuffer) String() string {
 // because a multi-mode delegated run's worktree is always a SELF-CONTAINED
 // clone: its .git is a real directory fully inside the run root, so the run
 // tree's ownership hand-off covers config, objects, and refs together. A
-// linked `git worktree` (the local-mode / curator layout) keeps its objects
+// linked `git worktree` (the local-mode layout) keeps its objects
 // + config in a separate bare cache that is never re-owned — dropping to
 // uid 10000 there would trade dubious-ownership for EACCES on the bare.
 // Multi mode never uses that layout (the sandbox can't see the shared

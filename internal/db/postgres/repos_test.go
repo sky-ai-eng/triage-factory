@@ -72,15 +72,6 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		t.Errorf("orgB List returned %d rows (total %d), want 0 / 0", len(got), total)
 	}
 
-	// ListWithContent cross-org must also return empty.
-	gotContent, err := stores.Repos.ListWithContent(ctx, orgB)
-	if err != nil {
-		t.Fatalf("ListWithContent cross-org: %v", err)
-	}
-	if len(gotContent) != 0 {
-		t.Errorf("orgB ListWithContent returned %d rows, want 0", len(gotContent))
-	}
-
 	// CountConfigured cross-org must report 0.
 	if n, _ := stores.Repos.CountConfigured(ctx, orgB); n != 0 {
 		t.Errorf("orgB CountConfigured = %d, want 0", n)

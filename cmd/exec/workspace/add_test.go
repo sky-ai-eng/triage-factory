@@ -519,8 +519,8 @@ func TestMaterializeWorkspace_BareAddResolvesStoredBranch(t *testing.T) {
 
 // TestMaterializeWorkspace_BareAddPrefersConfiguredBaseBranch pins the
 // resolution order: the admin-configured base branch wins over the profiled
-// default — the same BaseBranch || DefaultBranch precedence the curator's
-// pinned worktrees and the push policy's protected set use.
+// default — the same BaseBranch || DefaultBranch precedence the push
+// policy's protected set uses.
 func TestMaterializeWorkspace_BareAddPrefersConfiguredBaseBranch(t *testing.T) {
 	stores, database := newTestDB(t)
 	seedJiraConversation(t, database, "r1", "SKY-1")

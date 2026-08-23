@@ -37,15 +37,15 @@ func (s *Store) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxS
 
 // SyntheticClaimsWithTx mirrors WithTx for callers that have an
 // authoritative (orgID, userID) identity but no request context —
-// delegate spawner goroutines, curator-message processing, post-
-// terminal handler cleanup, agent CLI subcommands.
+// delegate spawner goroutines, post-terminal handler cleanup, agent CLI
+// subcommands.
 //
 // The Postgres body is identical to WithTx — same role elevation,
 // same JWT-claims setup, same TxStores wiring. The only difference
 // is the *intent* of the call site: WithTx callers extract the pair
 // from request context, SyntheticClaimsWithTx callers construct it
-// from a known row identity (the run's creator_user_id, the curator
-// session's user, etc.). Both run under tf_app, both honor RLS.
+// from a known row identity (the run's creator_user_id, etc.). Both
+// run under tf_app, both honor RLS.
 //
 // userID must be a real users row id. Passing
 // runmode.LocalDefaultUserID is rejected — that sentinel has no FK
@@ -237,12 +237,6 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// see sibling teams' rows past RLS) route outside the tx, the
 		// same autonomous-commit shape Events / TaskMemory use.
 		TeamGitHubRepos: newTeamGitHubReposStore(tx, s.admin),
-		// Curator: app-side message/conversation writes route through the
-		// tx so they run under the outer claims (the conversations
-		// private-visibility RLS arm); admin half stays pinned to the real
-		// admin pool so a `...System` claim write or sweep invoked inside
-		// WithTx routes outside the tx (system-side, bypasses RLS).
-		Curator: newCuratorStore(tx, s.admin),
 		// app half is the claims-set tx (GetForOrg / CreateForOrg);
 		// admin half stays the real admin pool so installation writes +
 		// GetForOrgSystem / backfill route outside the tx.

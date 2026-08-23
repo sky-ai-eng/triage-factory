@@ -53,7 +53,6 @@ func TestExecutorPlan_ExcludesEveryBrainAndHTTPSubsystem(t *testing.T) {
 	}{
 		{"HTTP/API server", p.serveHTTP},
 		{"websocket hub (user-facing)", p.serveHTTP},
-		{"curator chat runtime", p.serveHTTP},
 		{"server extension workers", p.serveHTTP},
 		{"dashboard backfiller", p.serveHTTP},
 		{"pollers + tracker", p.brain},

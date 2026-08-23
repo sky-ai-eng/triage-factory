@@ -7,8 +7,8 @@ import (
 )
 
 // flushPendingInput is THE flush primitive. Every surface's pending input —
-// a parked run's resume message, a staged system note, a curator turn — is
-// the same thing in the same table: an undelivered messages row. So there is
+// a parked run's resume message, a staged system note — is the same thing
+// in the same table: an undelivered messages row. So there is
 // one statement that consumes them, parameterized by nothing but the subtype
 // that discriminates the kind, rather than one query per producer.
 //

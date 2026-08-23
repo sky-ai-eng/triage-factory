@@ -755,8 +755,8 @@ export default function TeamSettings({
       </SettingsSection>
 
       {/* Danger zone: archive (org-admin, multi-mode only). Soft-deletes the
-          team, force-stops its in-flight delegations + curator sessions, and
-          blocks all writes — no "let it finish" branch (TFAC-448). */}
+          team, force-stops its in-flight delegations, and blocks all writes —
+          no "let it finish" branch (TFAC-448). */}
       {!isLocal && orgIsAdmin && (
         <div className="flex items-center justify-between gap-4 py-4">
           <div>
@@ -793,12 +793,10 @@ export default function TeamSettings({
           teamName={teamName || 'this team'}
           preview={archivePreview}
           onClose={() => setArchivePreview(null)}
-          onDone={(runs, sessions) => {
+          onDone={(runs) => {
             setArchivePreview(null)
             toast.success(
-              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'} and ${sessions} curator ${
-                sessions === 1 ? 'session' : 'sessions'
-              }.`,
+              `Team archived — stopped ${runs} ${runs === 1 ? 'delegation' : 'delegations'}.`,
             )
             // The team vanishes from /api/teams; refreshing drives the page to
             // the next team (or the zero-team landing).

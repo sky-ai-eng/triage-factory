@@ -29,7 +29,6 @@ import { useFocusTrap } from '../hooks/useFocusTrap'
 import { toast } from '../components/Toast/toastStore'
 import TrackerProjectPickers from '../components/TrackerProjectPickers'
 import ProjectVisibilitySelect from '../components/ProjectVisibilitySelect'
-import CuratorChat from '../components/CuratorChat'
 import ProjectEntitiesPanel from '../components/ProjectEntitiesPanel'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useOrgHref } from '../hooks/useOrgHref'
@@ -46,11 +45,6 @@ import { useDeploymentConfig, useMe } from '../hooks/useDeploymentConfig'
 //      doesn't see two surfaces showing the same data.
 //   3. Knowledge base — markdown files under the project's
 //      knowledge-base directory, rendered read-only.
-//
-// The chat panel sits in the right column at a true 50/50 split,
-// sticky and full-viewport-height-minus-12rem. CuratorChat owns its
-// own backend wiring (history fetch + websocket subscribe + send /
-// cancel) so this page just hands it the project id.
 //
 // Edits across the page are auto-saved — there's no explicit Save button.
 // The patch helper handles error toasts; on success the page resyncs from
@@ -321,29 +315,25 @@ export default function ProjectDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="space-y-6">
-          <ProjectHeader
-            project={project}
-            onPatchName={(name) => patch({ name })}
-            onPatchDescription={(description) => patch({ description })}
-            onPatchPinnedRepos={(ids) => patch({ pinned_repository_ids: ids })}
-          />
+      <div className="space-y-6">
+        <ProjectHeader
+          project={project}
+          onPatchName={(name) => patch({ name })}
+          onPatchDescription={(description) => patch({ description })}
+          onPatchPinnedRepos={(ids) => patch({ pinned_repository_ids: ids })}
+        />
 
-          <VisibilityPanel project={project} onPatch={patch} />
+        <VisibilityPanel project={project} onPatch={patch} />
 
-          {/* A teamless private/org project (TFAC-562) has no team to
-              validate a Jira/Linear key against in v1 — the header's
-              pinned-repos hint already explains that, so skip a second,
-              redundant empty card here rather than duplicating it. */}
-          {project.team_id && <IntegrationsPanel project={project} onPatch={patch} />}
+        {/* A teamless private/org project (TFAC-562) has no team to
+            validate a Jira/Linear key against in v1 — the header's
+            pinned-repos hint already explains that, so skip a second,
+            redundant empty card here rather than duplicating it. */}
+        {project.team_id && <IntegrationsPanel project={project} onPatch={patch} />}
 
-          <KnowledgePanel projectId={project.id} />
+        <KnowledgePanel projectId={project.id} />
 
-          <ProjectEntitiesPanel projectId={project.id} />
-        </div>
-
-        <CuratorChat project={project} onPatch={patch} />
+        <ProjectEntitiesPanel projectId={project.id} />
       </div>
       {exportOpen && (
         <ProjectExportModal
@@ -1110,12 +1100,12 @@ function KnowledgePanel({ projectId }: { projectId: string }) {
     }
   }, [refreshFiles])
 
-  // Live updates: the backend's kbwatcher fires
-  // `project_knowledge_updated` whenever the curator (or any other
-  // writer) touches a file under <projectsRoot>/<id>/knowledge-base/.
-  // We refetch on receipt so files appear in the panel as the agent
-  // writes them mid-turn. Filter on project_id so other projects'
-  // knowledge edits don't trigger refetches here.
+  // Live updates: the backend fires `project_knowledge_updated` whenever
+  // the agent (or any other writer) touches a file under
+  // <projectsRoot>/<id>/knowledge-base/. We refetch on receipt so files
+  // appear in the panel as the agent writes them mid-turn. Filter on
+  // project_id so other projects' knowledge edits don't trigger
+  // refetches here.
   useWebSocket((event) => {
     if (event.type !== 'project_knowledge_updated') return
     if (event.project_id !== projectId) return

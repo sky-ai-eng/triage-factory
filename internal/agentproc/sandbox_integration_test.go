@@ -168,6 +168,14 @@ func TestAgentVisibleHelpers_LocalPassthrough(t *testing.T) {
 	}
 }
 
+// TestWillSandbox_TracksGate confirms WillSandbox mirrors the internal gate
+// (false in the default local-mode test environment).
+func TestWillSandbox_TracksGate(t *testing.T) {
+	if WillSandbox() != shouldSandbox() {
+		t.Errorf("WillSandbox() = %v, want it to mirror shouldSandbox() = %v", WillSandbox(), shouldSandbox())
+	}
+}
+
 func TestTranslateAddDirsForSandbox(t *testing.T) {
 	cases := []struct {
 		name    string

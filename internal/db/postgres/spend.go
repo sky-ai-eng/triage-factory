@@ -21,7 +21,7 @@ import (
 //     WITH (security_invoker = true), so SELECTing it under tf_app evaluates the
 //     base tables' RLS (messages/conversations org+team, system_llm_runs org) as
 //     the querying user — a team member sees their team's spend but not a sibling
-//     team's, with system/curator rows visible at org scope.
+//     team's, with system rows visible at org scope.
 //   - admin: SpendByCategorySystem. The org-wide aggregate a claims-less system
 //     caller needs — the TFAC-477 safety cap reads it from a Spawner.Delegate
 //     goroutine with no tf.current_org_id(), where an app-pool read would see
@@ -122,7 +122,7 @@ func (s *spendStore) SpendByCategorySystem(ctx context.Context, orgID string, si
 // SpendByCategorySystemForTeam narrows SpendByCategorySystem to one team with an
 // `AND team_id = $teamID` predicate (TFAC-482 per-team daily spend cap). The team
 // filter automatically excludes the org's NULL-team rows (system overhead +
-// non-team curator), so a team cap counts only the team's own spend. Admin pool
+// system overhead), so a team cap counts only the team's own spend. Admin pool
 // for the same reason as SpendByCategorySystem — the cap reads it claims-less.
 func (s *spendStore) SpendByCategorySystemForTeam(ctx context.Context, orgID, teamID string, since, until time.Time) ([]domain.SpendBucket, error) {
 	return spendByCategory(ctx, s.admin, orgID, teamID, since, until)

@@ -66,6 +66,7 @@ func TestMigrate_FreshInstall(t *testing.T) {
 		"runs", "run_messages", "curator_requests", "curator_messages",
 		"curator_pending_context", "run_pending_input",
 		"staged_agent_injections", "run_credentials", "curator_turn_credentials",
+		"curator_homes",
 	} {
 		exists, err := tableExists(database, table)
 		if err != nil {
@@ -370,172 +371,6 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 	}
 }
 
-// TestMigrate_CuratorTeamIDBackfillAndView pins the TFAC-476 SQLite migration:
-// curator_requests gains a nullable team_id, existing rows backfill from their
-// project's team (team project → that team; null-team org/private project →
-// NULL), and the recreated llm_spend view surfaces team_id on the curator arm.
-// Together these are the migration's acceptance: applies on an existing DB,
-// backfills, and the view reads the project's team for team-visible projects and
-// NULL otherwise.
-func TestMigrate_CuratorTeamIDBackfillAndView(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
-	// Migrate up to the migration *before* the curator team_id one, so
-	// curator_requests does not yet have team_id and llm_spend's curator arm
-	// still hardcodes NULL.
-	const priorVersion = 202606260005
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
-
-	const teamID = "00000000-0000-0000-0000-000000000010"
-	// The conversations refactor re-parents requests under curator
-	// conversations whose creator FK must resolve; pure-goose DBs carry no
-	// tenant rows, so seed the sentinel user the DEFAULT points at.
-	if _, err := database.Exec(`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`); err != nil {
-		t.Fatalf("seed sentinel user: %v", err)
-	}
-	// A team-visible project (carries a team) and a null-team org-visible project.
-	// org_id / creator_user_id fall to their NOT NULL DEFAULT sentinels.
-	if _, err := database.Exec(`
-		INSERT INTO projects (id, name, team_id, visibility) VALUES
-			('pteam', 'team-proj', ?,    'team'),
-			('porg',  'org-proj',  NULL, 'org')
-	`, teamID); err != nil {
-		t.Fatalf("seed projects: %v", err)
-	}
-	// Two curator requests that predate the migration (no team_id column
-	// yet). Each carries a settled cost so the refactor's historical stamp
-	// gives them a ledger row the view exposes.
-	if _, err := database.Exec(`
-		INSERT INTO curator_requests (id, project_id, status, user_input, cost_usd) VALUES
-			('ct', 'pteam', 'done', 'hi', 0.5),
-			('co', 'porg',  'done', 'hi', 0.25)
-	`); err != nil {
-		t.Fatalf("seed curator_requests: %v", err)
-	}
-
-	// Apply the rest (the team_id migration: ALTER + backfill + view recreate).
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	// The backfilled team snapshot survives the conversations refactor: each
-	// request's claim attributes through its conversation's team.
-	assertCuratorTeamID(t, database,
-		`SELECT c.team_id FROM claims cl JOIN conversations c ON c.id = cl.conversation_id WHERE cl.id = 'ct'`, teamID)
-	assertCuratorTeamID(t, database,
-		`SELECT c.team_id FROM claims cl JOIN conversations c ON c.id = cl.conversation_id WHERE cl.id = 'co'`, "")
-
-	// View surfaces the same team_id on the curator arm — keyed by the
-	// turn's cost-stamped ledger row now (source_id = the message id).
-	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator'
-		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`, teamID)
-	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator'
-		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'co')`, "")
-}
-
-// TestMigrate_LLMSpendTriggerIDView pins the TFAC-478 SQLite migration: applied
-// on a DB that already carries the pre-008 view, it DROP+RECREATEs llm_spend so
-// the runs arm exposes trigger_id while the curator + system arms emit NULL —
-// and it preserves TFAC-476's curator team_id (re-emitted verbatim). The runs
-// arm's trigger_id population is covered by the SpendStore conformance suite
-// (which reads the fully-migrated view); here we assert the migration applies on
-// existing data, the new column appears, and the curator arm stays intact.
-func TestMigrate_LLMSpendTriggerIDView(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
-	// Up to the migration *before* trigger_id: the view exists (already carrying
-	// TFAC-476's curator team_id) but has no trigger_id column yet.
-	const priorVersion = 202606260007
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
-
-	const teamID = "00000000-0000-0000-0000-000000000010"
-	if _, err := database.Exec(`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`); err != nil {
-		t.Fatalf("seed sentinel user: %v", err)
-	}
-	if _, err := database.Exec(`
-		INSERT INTO projects (id, name, team_id, visibility) VALUES
-			('pteam', 'team-proj', ?,    'team'),
-			('porg',  'org-proj',  NULL, 'org')
-	`, teamID); err != nil {
-		t.Fatalf("seed projects: %v", err)
-	}
-	// curator_requests already has team_id at this version (TFAC-476), so set it
-	// directly: the team project's row carries the team, the org project's NULL.
-	// The costs give each turn a ledger row the refactored view exposes.
-	if _, err := database.Exec(`
-		INSERT INTO curator_requests (id, project_id, team_id, status, user_input, cost_usd) VALUES
-			('ct', 'pteam', ?,    'done', 'hi', 0.5),
-			('co', 'porg',  NULL, 'done', 'hi', 0.25)
-	`, teamID); err != nil {
-		t.Fatalf("seed curator_requests: %v", err)
-	}
-
-	// The pre-008 view must NOT yet expose trigger_id.
-	if rows, err := database.Query(`SELECT trigger_id FROM llm_spend LIMIT 0`); err == nil {
-		rows.Close()
-		t.Fatal("llm_spend exposed trigger_id before the 008 migration; prior view shape wrong")
-	}
-
-	// Apply the trigger_id migration (DROP + recreate).
-	if err := goose.Up(database, "migrations-sqlite"); err != nil {
-		t.Fatalf("goose Up: %v", err)
-	}
-
-	// trigger_id column now exists on the recreated view.
-	if rows, err := database.Query(`SELECT trigger_id FROM llm_spend LIMIT 0`); err != nil {
-		t.Fatalf("llm_spend missing trigger_id after the 008 migration: %v", err)
-	} else {
-		rows.Close()
-	}
-
-	// Curator arm: team_id preserved from TFAC-476; trigger_id NULL (only runs
-	// are trigger-fired). Keyed by the turn's cost-stamped ledger row.
-	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator'
-		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`, teamID)
-	assertCuratorTeamID(t, database,
-		`SELECT team_id FROM llm_spend WHERE source = 'curator'
-		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'co')`, "")
-	var triggerID sql.NullString
-	if err := database.QueryRow(
-		`SELECT trigger_id FROM llm_spend WHERE source = 'curator'
-		   AND source_id = (SELECT id FROM messages WHERE claim_id = 'ct')`,
-	).Scan(&triggerID); err != nil {
-		t.Fatalf("scan curator trigger_id: %v", err)
-	}
-	if triggerID.Valid {
-		t.Errorf("curator arm trigger_id = %q, want NULL", triggerID.String)
-	}
-}
-
 // TestMigrate_RunsTriggerIDBackfill pins the 202607060001 backfill: step conversations
 // minted while enqueueBlueprintStep dropped the firing trigger (trigger_type =
 // 'event' with a NULL trigger_id — the shape every autonomous run carried
@@ -631,25 +466,6 @@ func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
 // assertRunTriggerID runs a single-row trigger_id query and checks it against
 // want ("" means SQL NULL is expected).
 func assertRunTriggerID(t *testing.T, database *sql.DB, query, want string) {
-	t.Helper()
-	var got sql.NullString
-	if err := database.QueryRow(query).Scan(&got); err != nil {
-		t.Fatalf("query %q: %v", query, err)
-	}
-	if want == "" {
-		if got.Valid {
-			t.Errorf("%q = %q, want NULL", query, got.String)
-		}
-		return
-	}
-	if !got.Valid || got.String != want {
-		t.Errorf("%q = %v (valid=%t), want %q", query, got.String, got.Valid, want)
-	}
-}
-
-// assertCuratorTeamID runs a single-row team_id query and checks it against want
-// ("" means SQL NULL is expected).
-func assertCuratorTeamID(t *testing.T, database *sql.DB, query, want string) {
 	t.Helper()
 	var got sql.NullString
 	if err := database.QueryRow(query).Scan(&got); err != nil {
@@ -767,10 +583,9 @@ func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
 
 // TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages pins the
 // refactor's pending unification: rows that were waiting in
-// run_pending_input / staged_agent_injections / a queued curator request
-// when the upgrade ran must surface as delivered=0 message rows — the
-// exactly-once delivery contract transfers to the messages table, nothing
-// silently drops.
+// run_pending_input / staged_agent_injections when the upgrade ran must
+// surface as delivered=0 message rows — the exactly-once delivery contract
+// transfers to the messages table, nothing silently drops.
 func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
 	if err != nil {
@@ -793,13 +608,9 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 
 	seed := []string{
 		`INSERT INTO users (id) VALUES ('u1')`,
-		`INSERT INTO projects (id, name, visibility) VALUES ('proj1', 'P', 'private')`,
 		`INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status) VALUES ('r1', 't1', 'p1', 'b1', 'open')`,
 		`INSERT INTO run_pending_input (run_id, org_id, message, user_id) VALUES ('r1', '00000000-0000-0000-0000-000000000001', 'resume me', 'u1')`,
 		`INSERT INTO staged_agent_injections (id, run_id, producer, body) VALUES ('si1', 'r1', 'new_commits', 'PR gained commits')`,
-		`INSERT INTO curator_requests (id, project_id, status, user_input, creator_user_id) VALUES ('cq1', 'proj1', 'queued', 'hello curator', 'u1')`,
-		`INSERT INTO curator_pending_context (project_id, curator_session_id, change_type, baseline_value, creator_user_id)
-		 VALUES ('proj1', 'sess-legacy', 'pinned_repos', '["a/b"]', 'u1')`,
 	}
 	for _, q := range seed {
 		if _, err := database.Exec(q); err != nil {
@@ -825,16 +636,6 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND role='user' AND content='resume me' AND user_id='u1' AND delivered=0 AND subtype=''`, 1)
 	assertUndelivered("staged injection",
 		`SELECT COUNT(*) FROM messages WHERE conversation_id='r1' AND subtype='injection:system-note' AND content='PR gained commits' AND delivered=0 AND json_extract(metadata,'$.producer')='new_commits'`, 1)
-	assertUndelivered("queued curator turn",
-		`SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
-		 WHERE c.type='curator' AND c.project_id='proj1' AND c.creator_user_id='u1'
-		   AND m.role='user' AND m.content='hello curator' AND m.delivered=0`, 1)
-	assertUndelivered("unconsumed pending context",
-		`SELECT COUNT(*) FROM messages m JOIN conversations c ON c.id=m.conversation_id
-		 WHERE c.type='curator' AND c.project_id='proj1' AND c.creator_user_id='u1'
-		   AND m.subtype='injection:context' AND m.delivered=0
-		   AND json_extract(m.metadata,'$.change_type')='pinned_repos'
-		   AND json_extract(m.metadata,'$.baseline_value')='["a/b"]'`, 1)
 }
 
 // TestMigrate_CollapsesSetupTransientOntoClaimPhase covers the in-flight-run

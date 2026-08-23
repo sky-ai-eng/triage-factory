@@ -123,9 +123,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The project's pinned repos, order preserved.
-		proj, err := s.Projects.GetSystem(ctx, orgID, fx.projectID)
+		proj, err := s.Projects.Get(ctx, orgID, fx.projectID)
 		if err != nil || proj == nil {
-			t.Fatalf("Projects.GetSystem: %v, %v", proj, err)
+			t.Fatalf("Projects.Get: %v, %v", proj, err)
 		}
 		if len(proj.PinnedRepos) != 2 || proj.PinnedRepos[0] != renameNewSlug || proj.PinnedRepos[1] != renameNeighbourSlug {
 			t.Errorf("pinned repos = %v, want [%s %s]", proj.PinnedRepos, renameNewSlug, renameNeighbourSlug)
@@ -178,8 +178,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Errorf("neighbour artifact target = %q, want it untouched", neighbourArtifact.Target)
 		}
 
-		// The placement override — human intent, keyed by slug, in a column
-		// that also holds project ids.
+		// The placement override — human intent, keyed by slug.
 		if stale, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, renameOldSlug); stale != nil {
 			t.Errorf("placement override still keyed on the old slug: %+v", stale)
 		}
@@ -190,8 +189,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if ov.Replicas != 3 {
 			t.Errorf("placement replicas = %d, want 3 — the pin moves, its content does not", ov.Replicas)
 		}
-		if proj, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindProject, fx.projectID); proj == nil {
-			t.Errorf("the project-kind override moved; only key_kind='repo' rows hold a slug")
+		if other, _ := s.PlacementOverrides.Get(ctx, orgID, "hostgroup", renameOldSlug); other == nil {
+			t.Errorf("the other-kind override moved; only key_kind='repo' rows hold a slug")
 		}
 	})
 
@@ -829,10 +828,13 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}); err != nil {
 		t.Fatalf("seed placement override: %v", err)
 	}
+	// key_kind is a free-text column (no FK/CHECK), so an arbitrary other kind
+	// sharing the same key_value column proves the rename only rewrites
+	// key_kind='repo' rows.
 	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-		OrgID: orgID, KeyKind: domain.PlacementKindProject, KeyValue: projectID, Replicas: 2,
+		OrgID: orgID, KeyKind: "hostgroup", KeyValue: renameOldSlug, Replicas: 2,
 	}); err != nil {
-		t.Fatalf("seed project placement override: %v", err)
+		t.Fatalf("seed other-kind placement override: %v", err)
 	}
 
 	return renameFixture{
